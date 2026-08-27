@@ -165,7 +165,7 @@ candidate/path nodes
 规则：
 
 - 删除一个 clone 可以释放它的 private bytes；共享部分只有 release set 完成后才计入条件释放量。
-- `clone_refcnt` 大于 observed owners 时，group 不完整，不给 shared reclaim credit。
+- clone group 只有 `clone_refcnt == observed owners` 时才完整；任一方向不相等都标记 incomplete/conflict，不给 shared reclaim credit。
 - 任一 owner 不安全时，不产生 grouped cleanup recommendation；安全成员仍保留其 private reclaim。
 - hardlink 只有 observed link count 等于 `st_nlink` 时才完整。
 - snapshot 是 blocker，不自动成为清理目标。
@@ -381,6 +381,8 @@ directory child-entry churn、directory size/link-count/mtime 变化只有在 ac
 
 只有满足上述 coverage 的 action 才能使用 `Fully observed local Git work discard` waiver；否则只能 report-only。adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。
 
+point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use：通过已验证 parent descriptor 将 exact root 原子 `renameat` 到同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace，再从该绑定对象递归删除并 best-effort 清理 Git administrative state；无法完成原子 quarantine 或发现 mount crossing 时必须在 mutation 前降级为 report-only。overlay 必须显示 quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
+
 默认输出为 shell/TUI event stream。history、plan、audit、execution record 和 spill 均可选；`ENOSPC`、只读目录或日志失败不能阻止清理。
 
 ## 15. First-Version Scope
@@ -459,7 +461,7 @@ encoded retained data     768 MiB
 
 spill 使用 disposable SQLite，默认关闭，失败只降级 evidence。异常遗留应在后续 scan 中成为清理候选。
 
-启用 spill 时，`--spill-dir` 必须证明位于所有活动 scan roots 和 provider roots 之外，并从本次扫描视图中按已绑定的 device/inode root 排除；无法证明隔离时拒绝启用 spill。TUI 必须把该次运行标记为 `scan_write_mode: spill-enabled`，不得继续显示为默认 no-persistence read-only mode。history 和 saved artifacts 同样只能在扫描完成后写入隔离的 tool-owned location，写入失败不改变 scan/plan 结果。
+启用 spill 时，`--spill-dir` 必须证明位于所有活动 scan roots 和 provider roots 之外，并从本次扫描视图中按已绑定的 device/inode root 排除；无法证明隔离时拒绝启用 spill。engine 必须 no-follow 创建 owner-private task directory，持有并持续验证其 parent/directory descriptor、identity 和 access policy；每次 SQLite open/write 都必须通过 descriptor-relative custom VFS 或等价的 stable binding，不能重新信任未经绑定的 pathname。任一 ancestor replacement、symlink redirection 或 access-policy mismatch 都 fail closed；平台 SQLite 接口无法维持该保证时禁用 spill。TUI 必须把该次运行标记为 `scan_write_mode: spill-enabled`，不得继续显示为默认 no-persistence read-only mode。history 和 saved artifacts 同样只能在扫描完成后写入隔离的 tool-owned location，写入失败不改变 scan/plan 结果。
 
 ## 18. Testing And Acceptance
 
