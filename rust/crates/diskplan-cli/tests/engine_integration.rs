@@ -10,12 +10,13 @@ use diskplan::{ClientError, EngineSession, handshake_with_engine};
 use diskplan_core::framing::{FrameError, read_frame, write_frame};
 use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello};
 use diskplan_proto::diskplan::v1::{
-    BusinessEnvelope, Envelope, HelloAccepted, ProtocolVersion, RejectCode, envelope,
+    BusinessEnvelope, Envelope, HelloAccepted, HelloRejected, ProtocolVersion, RejectCode, envelope,
 };
 use prost::Message;
 use tempfile::TempDir;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+const SHUTDOWN_TERM_PATH_MINIMUM: Duration = Duration::from_millis(450);
 
 #[test]
 #[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
@@ -115,10 +116,7 @@ fn fake_engine_acceptance_is_validated_fail_closed() {
                 ClientError::InvalidAcceptance(AcceptedHandshakeError::MissingSelectedVersion),
                 ExpectedInvalid::MissingVersion,
             )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::SequenceMismatch { .. }),
-                ExpectedInvalid::Sequence,
-            )
+            | (ClientError::ResponseSequenceMismatch { .. }, ExpectedInvalid::Sequence)
             | (
                 ClientError::InvalidAcceptance(AcceptedHandshakeError::MajorMismatch { .. }),
                 ExpectedInvalid::Major,
@@ -144,6 +142,31 @@ fn fake_engine_acceptance_is_validated_fail_closed() {
             (actual, expected) => panic!("unexpected error for {expected:?}: {actual:?}"),
         }
     }
+}
+
+#[test]
+fn fake_engine_rejection_sequence_is_validated_before_the_rejection_is_accepted() {
+    let response = Envelope {
+        sequence: 99,
+        body: Some(envelope::Body::HelloRejected(HelloRejected {
+            code: RejectCode::ProtocolMajorMismatch as i32,
+            detail: "wrong sequence".into(),
+            peer_version: None,
+        })),
+    };
+    let frame = encode_frame(&response);
+    let (_root, path) = fake_engine_script(&emit_then_drain(&frame, false));
+
+    let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+        .err()
+        .expect("a rejection with the wrong sequence must fail closed");
+    assert!(matches!(
+        error,
+        ClientError::ResponseSequenceMismatch {
+            expected: 1,
+            actual: 99
+        }
+    ));
 }
 
 #[test]
@@ -217,6 +240,48 @@ fn timeout_terminates_and_reaps_the_engine_process_group() {
     assert!(
         wait_for_pid_exit(descendant_pid, Duration::from_secs(2)),
         "descendant process {descendant_pid} survived engine-session cleanup"
+    );
+}
+
+#[test]
+fn frame_flood_is_backpressured_and_sigkill_cleanup_remains_bounded() {
+    let root = tempfile::tempdir().unwrap();
+    let accepted = encode_frame(&accepted_envelope(
+        1,
+        1,
+        1,
+        &["canonical-binary-v1", "framing-v1", "plan-bootstrap"],
+    ));
+    let flood = encode_frame(&Envelope {
+        sequence: 2,
+        body: Some(envelope::Body::Business(BusinessEnvelope {
+            r#type: "flood".into(),
+            payload: vec![0xa5; 128 * 1024],
+        })),
+    });
+    let body = format!(
+        "printf '%b' '{}'\n\
+         trap '' TERM\n\
+         while :; do printf '%b' '{}'; done\n",
+        shell_bytes(&accepted),
+        shell_bytes(&flood),
+    );
+    let path = write_fake_engine(&root, &body);
+    let session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT).unwrap();
+
+    let started = Instant::now();
+    let error = session
+        .shutdown()
+        .expect_err("the queued flood frame must be reported during shutdown");
+    assert!(matches!(error, ClientError::ExtraFrameAfterShutdown));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= SHUTDOWN_TERM_PATH_MINIMUM,
+        "shutdown did not exhaust the TERM grace before reaching SIGKILL: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "shutdown exceeded its bounded TERM/KILL cleanup window"
     );
 }
 

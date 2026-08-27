@@ -31,15 +31,30 @@ struct Identity {
     inode: libc::ino_t,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AccessState {
+    mode: libc::mode_t,
+    owner: libc::uid_t,
+    group: libc::gid_t,
+    flags: u32,
+}
+
+struct FileSeal {
+    handle: File,
+    identity: Identity,
+    access: AccessState,
+    bytes: Vec<u8>,
+}
+
 struct Target {
     directory: File,
     display_path: PathBuf,
     name: CString,
     source_bytes: Vec<u8>,
     stage_name: Option<CString>,
-    staged: Option<Identity>,
-    previous: Option<Identity>,
-    published: Option<Identity>,
+    staged: Option<FileSeal>,
+    previous: Option<FileSeal>,
+    published: bool,
 }
 
 impl Target {
@@ -75,7 +90,7 @@ impl Target {
             path_component_cstring(destination.file_name().ok_or_else(|| {
                 format!("destination has no file name: {}", destination.display())
             })?)?;
-        let previous = slot_identity(directory.as_raw_fd(), &name, destination)?;
+        let previous = open_optional_sealed_slot(directory.as_raw_fd(), &name, destination)?;
 
         Ok(Self {
             directory,
@@ -85,7 +100,7 @@ impl Target {
             stage_name: None,
             staged: None,
             previous,
-            published: None,
+            published: false,
         })
     }
 
@@ -154,7 +169,14 @@ impl Target {
                 self.display_path.display()
             )
         })?;
-        self.staged = slot_identity(self.directory.as_raw_fd(), &stage_name, &self.display_path)?;
+        let seal = FileSeal::capture(stage, &self.display_path)?;
+        seal.validate_slot(
+            self.directory.as_raw_fd(),
+            &stage_name,
+            &self.display_path,
+            "staged generated source",
+        )?;
+        self.staged = Some(seal);
         Ok(())
     }
 
@@ -163,6 +185,31 @@ impl Target {
             .stage_name
             .as_ref()
             .ok_or_else(|| "internal error: target was not staged".to_owned())?;
+        let staged = self
+            .staged
+            .as_ref()
+            .ok_or_else(|| "internal error: target has no staged-file seal".to_owned())?;
+        staged.validate_slot(
+            self.directory.as_raw_fd(),
+            stage_name,
+            &self.display_path,
+            "staged generated source",
+        )?;
+        match self.previous.as_ref() {
+            Some(previous) => previous.validate_slot(
+                self.directory.as_raw_fd(),
+                &self.name,
+                &self.display_path,
+                "previous destination",
+            )?,
+            None => ensure_slot_missing(
+                self.directory.as_raw_fd(),
+                &self.name,
+                &self.display_path,
+                "new destination",
+            )?,
+        }
+
         let flags = if self.previous.is_some() {
             RENAME_SWAP
         } else {
@@ -176,34 +223,21 @@ impl Target {
                 )
             },
         )?;
-        if let Some(previous) = self.previous {
-            match slot_identity(self.directory.as_raw_fd(), stage_name, &self.display_path) {
-                Ok(Some(swapped)) if swapped == previous => {}
-                boundary_result => {
-                    let restore_result = rename_slot(
-                        self.directory.as_raw_fd(),
-                        stage_name,
-                        &self.name,
-                        RENAME_SWAP,
-                    );
-                    let boundary_detail = match boundary_result {
-                        Ok(identity) => format!(
-                            "destination pathname identity changed before publish: expected {previous:?}, found {identity:?}"
-                        ),
-                        Err(error) => error,
-                    };
-                    return match restore_result {
-                        Ok(()) => Err(format!(
-                            "{boundary_detail}; destination was restored without publishing"
-                        )),
-                        Err(error) => Err(format!(
-                            "{boundary_detail}; failed to restore swapped destination: {error}"
-                        )),
-                    };
-                }
-            }
+        self.published = true;
+        staged.validate_slot(
+            self.directory.as_raw_fd(),
+            &self.name,
+            &self.display_path,
+            "published generated source",
+        )?;
+        if let Some(previous) = self.previous.as_ref() {
+            previous.validate_slot(
+                self.directory.as_raw_fd(),
+                stage_name,
+                &self.display_path,
+                "rollback backup",
+            )?;
         }
-        self.published = self.staged;
         let post_publish = self.directory.sync_all().map_err(|error| {
             format!(
                 "failed to fsync published directory for {}: {error}",
@@ -223,18 +257,30 @@ impl Target {
     }
 
     fn rollback(&mut self) -> Result<(), String> {
-        let current = slot_identity(self.directory.as_raw_fd(), &self.name, &self.display_path)?;
-        if current != self.published {
-            return Err(format!(
-                "refusing rollback because published pathname identity changed: {}",
-                self.display_path.display()
-            ));
+        if !self.published {
+            return Err("internal error: target was not published".to_owned());
         }
-        match self.previous {
-            Some(_) => {
+        let published = self
+            .staged
+            .as_ref()
+            .ok_or_else(|| "internal error: published target has no file seal".to_owned())?;
+        published.validate_slot(
+            self.directory.as_raw_fd(),
+            &self.name,
+            &self.display_path,
+            "published generated source",
+        )?;
+        match self.previous.as_ref() {
+            Some(previous) => {
                 let stage_name = self.stage_name.as_ref().ok_or_else(|| {
                     "internal error: previous destination has no rollback slot".to_owned()
                 })?;
+                previous.validate_slot(
+                    self.directory.as_raw_fd(),
+                    stage_name,
+                    &self.display_path,
+                    "rollback backup",
+                )?;
                 rename_slot(
                     self.directory.as_raw_fd(),
                     stage_name,
@@ -244,14 +290,40 @@ impl Target {
                 .map_err(|error| {
                     format!("failed to restore {}: {error}", self.display_path.display())
                 })?;
-                unlink_slot(self.directory.as_raw_fd(), stage_name).map_err(|error| {
+                previous.validate_slot(
+                    self.directory.as_raw_fd(),
+                    &self.name,
+                    &self.display_path,
+                    "restored destination",
+                )?;
+                published.validate_slot(
+                    self.directory.as_raw_fd(),
+                    stage_name,
+                    &self.display_path,
+                    "rolled-back generated source",
+                )?;
+                unlink_sealed_slot(
+                    self.directory.as_raw_fd(),
+                    stage_name,
+                    &self.display_path,
+                    "rolled-back generated source",
+                    published,
+                )
+                .map_err(|error| {
                     format!(
                         "restored {} but failed to remove rollback stage: {error}",
                         self.display_path.display()
                     )
                 })?;
             }
-            None => unlink_slot(self.directory.as_raw_fd(), &self.name).map_err(|error| {
+            None => unlink_sealed_slot(
+                self.directory.as_raw_fd(),
+                &self.name,
+                &self.display_path,
+                "newly published destination",
+                published,
+            )
+            .map_err(|error| {
                 format!(
                     "failed to remove newly published destination {}: {error}",
                     self.display_path.display()
@@ -266,15 +338,35 @@ impl Target {
         })?;
         self.stage_name = None;
         self.staged = None;
-        self.published = None;
+        self.published = false;
         Ok(())
     }
 
     fn finish(&mut self) -> Result<(), String> {
-        if self.previous.is_some()
-            && let Some(stage_name) = self.stage_name.as_ref()
+        if !self.published {
+            return Err("internal error: target was not published".to_owned());
+        }
+        let published = self
+            .staged
+            .as_ref()
+            .ok_or_else(|| "internal error: published target has no file seal".to_owned())?;
+        published.validate_slot(
+            self.directory.as_raw_fd(),
+            &self.name,
+            &self.display_path,
+            "published generated source",
+        )?;
+        if let (Some(previous), Some(stage_name)) =
+            (self.previous.as_ref(), self.stage_name.as_ref())
         {
-            unlink_slot(self.directory.as_raw_fd(), stage_name).map_err(|error| {
+            unlink_sealed_slot(
+                self.directory.as_raw_fd(),
+                stage_name,
+                &self.display_path,
+                "rollback backup",
+                previous,
+            )
+            .map_err(|error| {
                 format!(
                     "failed to remove previous generated source backup for {}: {error}",
                     self.display_path.display()
@@ -289,17 +381,134 @@ impl Target {
         })?;
         self.stage_name = None;
         self.staged = None;
+        self.previous = None;
+        self.published = false;
         Ok(())
     }
 
-    fn discard_stage(&mut self) {
-        if self.published.is_none()
-            && let Some(stage_name) = self.stage_name.take()
+    fn discard_stage(&mut self) -> Result<(), String> {
+        if !self.published
+            && let (Some(stage_name), Some(staged)) =
+                (self.stage_name.as_ref(), self.staged.as_ref())
         {
-            let _ = unlink_slot(self.directory.as_raw_fd(), &stage_name);
-            let _ = self.directory.sync_all();
+            unlink_sealed_slot(
+                self.directory.as_raw_fd(),
+                stage_name,
+                &self.display_path,
+                "staged generated source",
+                staged,
+            )?;
+            self.directory.sync_all().map_err(|error| {
+                format!(
+                    "failed to fsync discarded stage directory for {}: {error}",
+                    self.display_path.display()
+                )
+            })?;
+            self.stage_name = None;
             self.staged = None;
         }
+        Ok(())
+    }
+}
+
+impl FileSeal {
+    fn capture(mut handle: File, display_path: &Path) -> Result<Self, String> {
+        let (identity, access) = inspect_open_regular_file(&handle, display_path)?;
+        let bytes = read_open_file(&mut handle, display_path)?;
+        let (verified_identity, verified_access) =
+            inspect_open_regular_file(&handle, display_path)?;
+        if verified_identity != identity {
+            return Err(format!(
+                "open file identity changed while sealing {}: expected {identity:?}, found {verified_identity:?}",
+                display_path.display()
+            ));
+        }
+        if verified_access != access {
+            return Err(format!(
+                "open file access state changed while sealing {}: expected {access:?}, found {verified_access:?}",
+                display_path.display()
+            ));
+        }
+        Ok(Self {
+            handle,
+            identity,
+            access,
+            bytes,
+        })
+    }
+
+    fn validate_slot(
+        &self,
+        directory_fd: RawFd,
+        name: &CString,
+        display_path: &Path,
+        role: &str,
+    ) -> Result<(), String> {
+        self.validate_handle(display_path, role)?;
+        let mut opened = open_existing_slot(directory_fd, name, display_path, role)?;
+        let (identity, access) = inspect_open_regular_file(&opened, display_path)?;
+        if identity != self.identity {
+            return Err(format!(
+                "{role} pathname identity mismatched at {}: expected {:?}, found {identity:?}",
+                display_path.display(),
+                self.identity
+            ));
+        }
+        if access != self.access {
+            return Err(format!(
+                "{role} access state mismatched at {}: expected {:?}, found {access:?}",
+                display_path.display(),
+                self.access
+            ));
+        }
+        let bytes = read_open_file(&mut opened, display_path)?;
+        if bytes != self.bytes {
+            return Err(format!(
+                "{role} content mismatched at {}",
+                display_path.display()
+            ));
+        }
+        let pathname_identity = slot_identity(directory_fd, name, display_path)?;
+        if pathname_identity != Some(self.identity) {
+            return Err(format!(
+                "{role} pathname changed during inspection at {}: expected {:?}, found {pathname_identity:?}",
+                display_path.display(),
+                self.identity
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_handle(&self, display_path: &Path, role: &str) -> Result<(), String> {
+        let (identity, access) = inspect_open_regular_file(&self.handle, display_path)?;
+        if identity != self.identity {
+            return Err(format!(
+                "{role} sealed handle identity mismatched at {}: expected {:?}, found {identity:?}",
+                display_path.display(),
+                self.identity
+            ));
+        }
+        if access != self.access {
+            return Err(format!(
+                "{role} sealed handle access state mismatched at {}: expected {:?}, found {access:?}",
+                display_path.display(),
+                self.access
+            ));
+        }
+        let mut handle = self.handle.try_clone().map_err(|error| {
+            format!(
+                "failed to duplicate sealed handle for {role} at {}: {error}",
+                display_path.display()
+            )
+        })?;
+        let bytes = read_open_file(&mut handle, display_path)?;
+        if bytes != self.bytes {
+            return Err(format!(
+                "{role} sealed content mismatched at {}",
+                display_path.display()
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -423,6 +632,136 @@ fn open_new_stage(directory_fd: RawFd, name: &CString) -> std::io::Result<File> 
     } else {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
+}
+
+fn open_optional_sealed_slot(
+    directory_fd: RawFd,
+    name: &CString,
+    display_path: &Path,
+) -> Result<Option<FileSeal>, String> {
+    let expected_identity = match slot_identity(directory_fd, name, display_path)? {
+        Some(identity) => identity,
+        None => return Ok(None),
+    };
+    let handle = open_existing_slot(directory_fd, name, display_path, "previous destination")?;
+    let seal = FileSeal::capture(handle, display_path)?;
+    if seal.identity != expected_identity {
+        return Err(format!(
+            "previous destination pathname identity changed while opening {}: expected {expected_identity:?}, found {:?}",
+            display_path.display(),
+            seal.identity
+        ));
+    }
+    seal.validate_slot(directory_fd, name, display_path, "previous destination")?;
+    Ok(Some(seal))
+}
+
+fn open_existing_slot(
+    directory_fd: RawFd,
+    name: &CString,
+    display_path: &Path,
+    role: &str,
+) -> Result<File, String> {
+    let fd = unsafe {
+        libc::openat(
+            directory_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return Err(format!("{role} is missing at {}", display_path.display()));
+        }
+        return Err(format!(
+            "{role} is unreadable or failed inspection at {}: {error}",
+            display_path.display()
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn inspect_open_regular_file(
+    file: &File,
+    display_path: &Path,
+) -> Result<(Identity, AccessState), String> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe { libc::fstat(file.as_raw_fd(), metadata.as_mut_ptr()) };
+    if result == -1 {
+        return Err(format!(
+            "failed to inspect open file {}: {}",
+            display_path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let metadata = unsafe { metadata.assume_init() };
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(format!(
+            "opened file is not regular: {}",
+            display_path.display()
+        ));
+    }
+    Ok((
+        Identity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        },
+        AccessState {
+            mode: metadata.st_mode & 0o7777,
+            owner: metadata.st_uid,
+            group: metadata.st_gid,
+            flags: metadata.st_flags,
+        },
+    ))
+}
+
+fn read_open_file(file: &mut File, display_path: &Path) -> Result<Vec<u8>, String> {
+    file.seek(SeekFrom::Start(0)).map_err(|error| {
+        format!(
+            "failed to rewind open file {}: {error}",
+            display_path.display()
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| {
+        format!(
+            "failed to read open file {}: {error}",
+            display_path.display()
+        )
+    })?;
+    Ok(bytes)
+}
+
+fn ensure_slot_missing(
+    directory_fd: RawFd,
+    name: &CString,
+    display_path: &Path,
+    role: &str,
+) -> Result<(), String> {
+    match slot_identity(directory_fd, name, display_path)? {
+        None => Ok(()),
+        Some(identity) => Err(format!(
+            "{role} pathname is occupied at {} by {identity:?}",
+            display_path.display()
+        )),
+    }
+}
+
+fn unlink_sealed_slot(
+    directory_fd: RawFd,
+    name: &CString,
+    display_path: &Path,
+    role: &str,
+    seal: &FileSeal,
+) -> Result<(), String> {
+    seal.validate_slot(directory_fd, name, display_path, role)?;
+    unlink_slot(directory_fd, name).map_err(|error| {
+        format!(
+            "failed to unlink sealed {role} at {}: {error}",
+            display_path.display()
+        )
+    })
 }
 
 fn slot_identity(
@@ -581,22 +920,38 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "publish" => {
             for target in &mut targets {
                 if let Err(error) = target.stage() {
+                    let mut cleanup_errors = Vec::new();
                     for staged in &mut targets {
-                        staged.discard_stage();
+                        if let Err(cleanup_error) = staged.discard_stage() {
+                            cleanup_errors.push(cleanup_error);
+                        }
                     }
-                    return Err(error);
+                    if cleanup_errors.is_empty() {
+                        return Err(error);
+                    }
+                    return Err(format!(
+                        "{error}; staged-file cleanup was incomplete: {}",
+                        cleanup_errors.join("; ")
+                    ));
                 }
             }
             for index in 0..targets.len() {
                 if let Err(error) = targets[index].publish() {
                     let mut rollback_errors = Vec::new();
+                    if targets[index].published
+                        && let Err(rollback_error) = targets[index].rollback()
+                    {
+                        rollback_errors.push(rollback_error);
+                    }
                     for published in targets[..index].iter_mut().rev() {
                         if let Err(rollback_error) = published.rollback() {
                             rollback_errors.push(rollback_error);
                         }
                     }
                     for staged in &mut targets[index..] {
-                        staged.discard_stage();
+                        if let Err(cleanup_error) = staged.discard_stage() {
+                            rollback_errors.push(cleanup_error);
+                        }
                     }
                     if rollback_errors.is_empty() {
                         return Err(format!(
@@ -629,6 +984,24 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stage_path(directory: &Path, target: &Target) -> PathBuf {
+        let name = target.stage_name.as_ref().expect("stage name");
+        directory.join(std::ffi::OsString::from_vec(name.as_bytes().to_vec()))
+    }
+
+    fn prepared_existing_target(root: &Path) -> (PathBuf, Target) {
+        let directory = root.join("generated");
+        fs::create_dir(&directory).expect("create directory");
+        let source = root.join("source");
+        let destination = directory.join("output");
+        fs::write(&source, b"new bytes").expect("write source");
+        fs::write(&destination, b"old bytes").expect("write destination");
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o644))
+            .expect("set destination permissions");
+        let target = Target::prepare(root, &source, &destination).expect("prepare target");
+        (directory, target)
+    }
 
     #[test]
     fn publishes_and_verifies_existing_and_missing_targets() {
@@ -742,6 +1115,130 @@ mod tests {
     }
 
     #[test]
+    fn rollback_rejects_replaced_backup_without_swapping_or_unlinking_it() {
+        let root = tempfile::tempdir().expect("create root");
+        let (directory, mut target) = prepared_existing_target(root.path());
+        let destination = directory.join("output");
+        target.stage().expect("stage target");
+        target.publish().expect("publish target");
+        let backup = stage_path(&directory, &target);
+        let parked_backup = directory.join("parked-backup");
+        fs::rename(&backup, &parked_backup).expect("park real backup");
+        fs::write(&backup, b"interloper").expect("replace backup pathname");
+
+        let error = target
+            .rollback()
+            .expect_err("reject replaced rollback backup");
+
+        assert!(error.contains("pathname identity mismatched"), "{error}");
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            b"new bytes"
+        );
+        assert_eq!(fs::read(&backup).expect("read interloper"), b"interloper");
+        assert_eq!(
+            fs::read(&parked_backup).expect("read parked backup"),
+            b"old bytes"
+        );
+    }
+
+    #[test]
+    fn rollback_rejects_in_place_backup_content_mutation() {
+        let root = tempfile::tempdir().expect("create root");
+        let (directory, mut target) = prepared_existing_target(root.path());
+        let destination = directory.join("output");
+        target.stage().expect("stage target");
+        target.publish().expect("publish target");
+        let backup = stage_path(&directory, &target);
+        fs::write(&backup, b"bad bytes").expect("mutate backup in place");
+
+        let error = target
+            .rollback()
+            .expect_err("reject mutated rollback backup");
+
+        assert!(error.contains("sealed content mismatched"), "{error}");
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            b"new bytes"
+        );
+        assert_eq!(
+            fs::read(&backup).expect("read mutated backup"),
+            b"bad bytes"
+        );
+    }
+
+    #[test]
+    fn rollback_rejects_backup_access_state_mutation() {
+        let root = tempfile::tempdir().expect("create root");
+        let (directory, mut target) = prepared_existing_target(root.path());
+        let destination = directory.join("output");
+        target.stage().expect("stage target");
+        target.publish().expect("publish target");
+        let backup = stage_path(&directory, &target);
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600))
+            .expect("change backup permissions");
+
+        let error = target
+            .rollback()
+            .expect_err("reject changed rollback backup access state");
+
+        assert!(error.contains("access state mismatched"), "{error}");
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            b"new bytes"
+        );
+        assert_eq!(fs::read(&backup).expect("read backup"), b"old bytes");
+    }
+
+    #[test]
+    fn finish_rejects_replaced_backup_without_unlinking_it() {
+        let root = tempfile::tempdir().expect("create root");
+        let (directory, mut target) = prepared_existing_target(root.path());
+        let destination = directory.join("output");
+        target.stage().expect("stage target");
+        target.publish().expect("publish target");
+        let backup = stage_path(&directory, &target);
+        let parked_backup = directory.join("parked-backup");
+        fs::rename(&backup, &parked_backup).expect("park real backup");
+        fs::write(&backup, b"interloper").expect("replace backup pathname");
+
+        let error = target.finish().expect_err("reject replaced finish backup");
+
+        assert!(error.contains("pathname identity mismatched"), "{error}");
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            b"new bytes"
+        );
+        assert_eq!(fs::read(&backup).expect("read interloper"), b"interloper");
+        assert_eq!(
+            fs::read(&parked_backup).expect("read parked backup"),
+            b"old bytes"
+        );
+    }
+
+    #[test]
+    fn discard_rejects_replaced_stage_without_unlinking_it() {
+        let root = tempfile::tempdir().expect("create root");
+        let (directory, mut target) = prepared_existing_target(root.path());
+        target.stage().expect("stage target");
+        let stage = stage_path(&directory, &target);
+        let parked_stage = directory.join("parked-stage");
+        fs::rename(&stage, &parked_stage).expect("park real stage");
+        fs::write(&stage, b"interloper").expect("replace stage pathname");
+
+        let error = target
+            .discard_stage()
+            .expect_err("reject replaced discard stage");
+
+        assert!(error.contains("pathname identity mismatched"), "{error}");
+        assert_eq!(fs::read(&stage).expect("read interloper"), b"interloper");
+        assert_eq!(
+            fs::read(&parked_stage).expect("read parked stage"),
+            b"new bytes"
+        );
+    }
+
+    #[test]
     fn later_publication_failure_rolls_back_an_earlier_target() {
         let root = tempfile::tempdir().expect("create root");
         let first_directory = root.path().join("first");
@@ -769,7 +1266,7 @@ mod tests {
             .publish()
             .expect_err("exclusive second publish must fail");
         first.rollback().expect("roll back first publish");
-        second.discard_stage();
+        second.discard_stage().expect("discard second stage");
 
         assert_eq!(
             fs::read(&first_destination).expect("read restored first"),

@@ -4,7 +4,7 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const EXIT_OBSERVATION_GRACE: Duration = Duration::from_millis(50);
 const HANDSHAKE_SEQUENCE: u64 = 1;
+const FRAME_QUEUE_CAPACITY: usize = 1;
 
 type FrameResult = Result<Option<Vec<u8>>, FrameError>;
 
@@ -53,6 +54,24 @@ pub enum ClientError {
     ExtraFrameAfterShutdown,
     #[error("engine stdout decoder disconnected without reporting clean EOF")]
     DecoderDisconnected,
+    #[error(
+        "engine cleanup is incomplete: child {child_process_id} in process group \
+         {process_group_id} did not exit after SIGKILL within {timeout:?}; reaping continues in \
+         the background"
+    )]
+    CleanupIncomplete {
+        child_process_id: u32,
+        process_group_id: u32,
+        timeout: Duration,
+    },
+    #[error(
+        "engine cleanup is incomplete: process group {process_group_id} still exists after \
+         SIGKILL and {timeout:?}"
+    )]
+    ProcessGroupCleanupIncomplete {
+        process_group_id: u32,
+        timeout: Duration,
+    },
 }
 
 pub struct EngineSession {
@@ -62,6 +81,7 @@ pub struct EngineSession {
     response_timeout: Duration,
     accepted: HelloAccepted,
     process_group_id: u32,
+    reaper: SyncSender<Child>,
 }
 
 impl EngineSession {
@@ -75,6 +95,7 @@ impl EngineSession {
     }
 
     pub fn spawn_command(command: &mut Command, timeout: Duration) -> Result<Self, ClientError> {
+        let reaper = spawn_reaper()?;
         command.process_group(0);
         let mut child = command
             .stdin(Stdio::piped())
@@ -89,7 +110,7 @@ impl EngineSession {
             .stdout
             .take()
             .expect("Stdio::piped must create an engine stdout handle");
-        let (sender, frames) = mpsc::channel();
+        let (sender, frames) = mpsc::sync_channel(FRAME_QUEUE_CAPACITY);
         let process_group_id = child.id();
         thread::spawn(move || {
             loop {
@@ -108,6 +129,7 @@ impl EngineSession {
             response_timeout: timeout,
             accepted: HelloAccepted::default(),
             process_group_id,
+            reaper,
         };
         session.perform_handshake()?;
         Ok(session)
@@ -164,6 +186,12 @@ impl EngineSession {
         };
         self.write_envelope(&request)?;
         let response = self.read_envelope("handshake response")?;
+        if response.sequence != HANDSHAKE_SEQUENCE {
+            return Err(ClientError::ResponseSequenceMismatch {
+                expected: HANDSHAKE_SEQUENCE,
+                actual: response.sequence,
+            });
+        }
         match response.body {
             Some(envelope::Body::HelloAccepted(accepted)) => {
                 validate_accepted(&hello, HANDSHAKE_SEQUENCE, response.sequence, &accepted)?;
@@ -234,7 +262,7 @@ impl EngineSession {
         })
     }
 
-    fn wait_or_terminate(&mut self) -> Result<ExitStatus, io::Error> {
+    fn wait_or_terminate(&mut self) -> Result<ExitStatus, ClientError> {
         if let Some(status) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE)? {
             terminate_remaining_process_group(self.process_group_id)?;
             return Ok(status);
@@ -247,18 +275,33 @@ impl EngineSession {
         }
 
         signal_process_group(self.process_group_id, "-KILL")?;
-        let status = self.child_mut()?.wait()?;
-        if wait_for_process_group_exit(self.process_group_id, SHUTDOWN_GRACE)? {
-            Ok(status)
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "engine process group {} remained after SIGKILL",
-                    self.process_group_id
-                ),
-            ))
+        if let Some(status) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE)? {
+            self.child.take();
+            if wait_for_process_group_exit(self.process_group_id, SHUTDOWN_GRACE)? {
+                return Ok(status);
+            }
+            return Err(ClientError::ProcessGroupCleanupIncomplete {
+                process_group_id: self.process_group_id,
+                timeout: SHUTDOWN_GRACE,
+            });
         }
+
+        let child = self
+            .child
+            .take()
+            .expect("a running engine child must still be owned by the session");
+        let child_process_id = child.id();
+        self.reaper.send(child).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "engine background reaper stopped unexpectedly",
+            )
+        })?;
+        Err(ClientError::CleanupIncomplete {
+            child_process_id,
+            process_group_id: self.process_group_id,
+            timeout: SHUTDOWN_GRACE,
+        })
     }
 
     fn drain_stdout(&mut self) -> Result<(), ClientError> {
@@ -282,6 +325,18 @@ impl Drop for EngineSession {
     }
 }
 
+fn spawn_reaper() -> io::Result<SyncSender<Child>> {
+    let (sender, receiver) = mpsc::sync_channel::<Child>(1);
+    thread::Builder::new()
+        .name("diskplan-engine-reaper".into())
+        .spawn(move || {
+            if let Ok(mut child) = receiver.recv() {
+                let _ = child.wait();
+            }
+        })?;
+    Ok(sender)
+}
+
 pub fn handshake_with_engine(engine: &Path) -> Result<Vec<String>, ClientError> {
     let session = EngineSession::connect(engine)?;
     let capabilities = session.accepted().negotiated_capabilities.clone();
@@ -302,7 +357,7 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> io::Result<Option<Exit
     }
 }
 
-fn terminate_remaining_process_group(process_group_id: u32) -> io::Result<()> {
+fn terminate_remaining_process_group(process_group_id: u32) -> Result<(), ClientError> {
     if !process_group_exists(process_group_id)? {
         return Ok(());
     }
@@ -314,10 +369,10 @@ fn terminate_remaining_process_group(process_group_id: u32) -> io::Result<()> {
     if wait_for_process_group_exit(process_group_id, SHUTDOWN_GRACE)? {
         Ok(())
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("engine process group {process_group_id} remained after SIGKILL"),
-        ))
+        Err(ClientError::ProcessGroupCleanupIncomplete {
+            process_group_id,
+            timeout: SHUTDOWN_GRACE,
+        })
     }
 }
 
