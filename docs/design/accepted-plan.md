@@ -12,7 +12,7 @@ evidence -> deterministic classification -> recommendation -> uncertainty
 
 首版是可执行产品，但严格分成两个阶段：
 
-1. `scan -> plan`：完全只读。
+1. `scan -> plan`：对扫描目标完全只读。默认模式不产生持久写入；用户显式启用的 history、artifact 或 spill 属于 tool-owned side effects，并且必须位于所有活动扫描 root 之外。
 2. 用户显式选择或编辑计划后，执行 `revalidate -> dry-run/apply`。
 
 ## 2. 结果模型
@@ -34,13 +34,13 @@ evidence -> deterministic classification -> recommendation -> uncertainty
 
 分类按以下优先级执行：
 
-1. Explicit user overrides.
+1. Explicit protection and type-hint routing.
 2. Authoritative tool adapters.
 3. Structural recognizers.
 4. Path conventions.
 5. Generic unknown fallback.
 
-同一优先级发生冲突时返回 `classification-conflict`。agent 可以提出候选类型、缺失证据和新规则建议，但其输出必须标记为 `agent-assisted`，不能覆盖 explicit/authoritative evidence，也不能单独产生 `safe-to-clean`。
+第一级是非对称的：explicit protection 只能阻止或降低建议；explicit type hint 只能选择需要运行的 recognizer 或补充语义，不能覆盖 authoritative evidence、提升最终安全等级或绕过 hard gate。所有放宽必须通过当前 plan 中明确列举的 waiver，并绑定 evidence hash。同一有效优先级发生冲突时返回 `classification-conflict`。agent 可以提出候选类型、缺失证据和新规则建议，但其输出必须标记为 `agent-assisted`，不能覆盖 explicit/authoritative evidence，也不能单独产生 `safe-to-clean`。
 
 ## 3. Recommendation Policy
 
@@ -98,14 +98,16 @@ history 是可选增强。缺失时标记 `history_unavailable`，不能伪造�
 
 ## 6. Scan Profiles And Determinism
 
-确定性契约是：相同文件系统状态、相同进程/权限可见性、相同配置和相同 policy version，产生相同分类、action、stable ID、依赖图和排序。
+确定性契约是：相同文件系统状态、相同进程/权限可见性、相同配置、相同 policy version 和相同冻结的 semantic time inputs，产生相同分类、action、stable ID、依赖图和排序。
 
 实现要求：
 
 - 按文件系统原始名称字节排序，不依赖 locale。
 - collector/adapters 的并发完成顺序不影响最终输出。
 - 外部工具先解析为 typed records，再 canonical sort。
-- 时间戳等非语义字段不进入 evidence hash。
+- scan 开始时冻结 `scan_reference_time`；age、recency 和 `inactive_duration` 只相对该值计算。影响分类、排序、action、waiver 或 agent cache 的 filesystem/history time、time bucket 和 reference time 都进入 evidence/policy binding。
+- report 生成时间、UI 刷新时间等纯展示字段不进入 evidence hash。
+- revalidation 使用新的 reference time 和新的 evidence hash；跨过 recency threshold 时，旧 waiver 和 agent cache 不能继续命中。
 - 扫描中发生真实身份、内容或 access-policy 变化的 candidate 标记 `unstable-during-scan`。
 
 Profiles：
@@ -301,6 +303,8 @@ scanner facts、classification 和 action definitions 属于 immutable plan。de
 
 overlay 不能增加 arbitrary path、argv 或 action ID。evidence hash 变化会使 waiver 失效。
 
+explicit protection/type hint 同样受这个边界约束：protection 可以直接阻止 action；type hint 只能补充 classification input。任何提升风险容忍度的用户决定必须落在下方明确允许的 waiver 集合中。
+
 不可 override：
 
 - Object identity/type/device mismatch.
@@ -331,7 +335,7 @@ dirty/untracked Git 内容必须使用专门的 `discard-local-work` action，�
 apply 是 best effort：
 
 - 整体预检后，每个 action 在执行前进行 just-in-time revalidation。
-- 某 action 失败时跳过其依赖项，继续完全独立的 action。
+- action DAG 的边固定为 `prerequisite -> dependent`。prerequisite 发生 failed、skipped、cancelled 或 partial outcome 时，所有 downstream dependents 转为 `blocked-by-prerequisite`；它所依赖的 upstream prerequisites 不受反向影响，完全独立的 action 继续。
 - 无法限定影响范围的 protocol、plan hash 或 path escape 错误才停止整个 batch。
 - 取消后不启动新 action；当前调用是否能即时中断不作强保证。
 - 不承诺 rollback；下次普通 scan 应重新发现残留。
@@ -347,6 +351,20 @@ generic remove 固定调用 `/bin/rm`，不经 shell、不展开 glob：
 | Forced directory | `/bin/rm -Rfx -- path` |
 
 `requires_force` 必须在 stage 时和 apply review 中提醒。普通失败后不能自动升级为 `-f`、提权或重试。
+
+### 14.1 Protected Properties And Path-Race Boundary
+
+revalidation 必须为每类 action 声明受保护属性（执行前后必须保持的性质）：
+
+- Object identity: no-follow `st_dev`, `st_ino`, file type，以及 filesystem 可用时的 generation/birth identity。
+- Content stability: 仅在 recoverability/action contract 依赖内容时比较 size、content digest 或其他明确内容信号；普通 `mtime` 变化只触发重新读取，不能单独宣称内容变化。
+- Access policy: owner、group、mode、ACL、immutable/restricted flags 和 mount/device boundary。
+
+directory child-entry churn、directory size/link-count/mtime 变化只有在 action contract 选择 subtree content stability 时才是阻断信号；否则它们是需要重新枚举的 generation hint。unreadable/revalidation failure、missing、identity mismatch、content mismatch 和 access-policy mismatch 必须保持不同状态。
+
+`/bin/rm` 是 pathname-based，无法原子关闭“最后一次 revalidation 到 rm 使用路径”之间的竞态。因此 generic remove 只能用于明确标记为 `path-slot-removal` 的 action：用户授权清理的是受约束 parent 下的 exact pathname slot，且 adapter 已证明该 slot 中任何允许出现的 replacement 都属于同一 disposable class。它必须固定 parent chain、mount boundary、exact basename、no-follow root semantics，并在 spawn 前最后一次 revalidate；计划和 TUI 同时显示 `path_race_residual: true`。
+
+如果 action 的安全性要求“只能删除此前验证的那个 object”或要求完整 subtree content stability，它不能使用 generic `/bin/rm` fallback；首版必须使用能够保持 descriptor/object binding 的专用 native adapter，否则降级为 report-only。新增 path、path escape、mount crossing 或不属于同一 disposable class 的 replacement 仍由 one-vote reject 阻止。
 
 默认输出为 shell/TUI event stream。history、plan、audit、execution record 和 spill 均可选；`ENOSPC`、只读目录或日志失败不能阻止清理。
 
@@ -426,6 +444,8 @@ encoded retained data     768 MiB
 
 spill 使用 disposable SQLite，默认关闭，失败只降级 evidence。异常遗留应在后续 scan 中成为清理候选。
 
+启用 spill 时，`--spill-dir` 必须证明位于所有活动 scan roots 和 provider roots 之外，并从本次扫描视图中按已绑定的 device/inode root 排除；无法证明隔离时拒绝启用 spill。TUI 必须把该次运行标记为 `scan_write_mode: spill-enabled`，不得继续显示为默认 no-persistence read-only mode。history 和 saved artifacts 同样只能在扫描完成后写入隔离的 tool-owned location，写入失败不改变 scan/plan 结果。
+
 ## 18. Testing And Acceptance
 
 ### 18.1 Test Tiers
@@ -477,7 +497,7 @@ Rust launcher 只从自己的 versioned directory 定位 engine。升级通过�
 
 ## 20. Implementation Gates And Parallel Work
 
-六个 Phase 表示依赖与验收 gate，不要求严格串行。共享 schema 稳定后，允许独立模块同步开发和验证。
+七个 Phase（Phase 0 至 Phase 6）表示依赖与验收 gate，不要求严格串行。共享 schema 稳定后，允许独立模块同步开发和验证。
 
 ### Phase 0: High-Risk Capability Slice
 

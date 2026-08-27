@@ -20,7 +20,7 @@ read-only scan
 
 核心原则：
 
-- 第一阶段 `scan -> plan` 完全只读。
+- 默认的第一阶段 `scan -> plan` 对被扫描目标完全只读；可选 history、artifact 或 spill 写入必须显式启用并位于扫描范围之外。
 - 安全决策采用 one-vote reject（任一强否决证据即可阻止清理），不把多维风险混成一个分数。
 - APFS clone、hardlink 和 snapshot 通过共享块依赖图计算立即释放量与条件释放量。
 - File Provider 扫描只读取立即可用 metadata，不主动 materialize 文件内容。
