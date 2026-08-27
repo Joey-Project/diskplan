@@ -391,7 +391,7 @@ point-in-time coverage 仍不足以授权 pathname-based forced removal。所有
 
 - Ordinary local cache/build outputs such as `.venv`, `target`, `build`, DerivedData, and `node_modules` when evidence is sufficient.
 - `/private/tmp` and project temporary products.
-- Git worktrees through `git worktree remove`.
+- Git worktrees through the dedicated `git-worktree-remove` adapter: descriptor-bound atomic quarantine removes the root; Git commands may only perform subsequent administrative metadata cleanup, whose failure is recorded as partial/expected residual.
 - `.codex-tmp`, preferring `codex-clean-tmp` when applicable.
 - Versioned CLI/app artifacts through a generic versioned-install adapter.
 - Complete APFS release sets.
