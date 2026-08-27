@@ -1,0 +1,9 @@
+.DS_Store
+.build/
+.swiftpm/
+target/
+*.profraw
+*.profdata
+.codex-local/
+.codex-tmp/
+docs/project_journal/INDEX.md
