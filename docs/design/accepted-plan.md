@@ -87,7 +87,7 @@ history 是可选增强。缺失时标记 `history_unavailable`，不能伪造�
 
 常规扫描禁止 build、install、download、大规模 hash 和无界 LFS enumeration。动态验证只用于 deep audit、高风险 action 或 adapter 开发。
 
-动态验证不属于默认 scan。用户显式启用后，它只能在所有 scan/provider roots 之外的 task-scoped disposable copy 中运行，并使用隔离的 cache、temporary directory、home/config 和 package-manager state；不允许写回扫描目标或隐式使用全局可写状态。无法证明隔离的 build、install、download 或 round-trip verification 必须作为另行确认的有副作用 action，不能参与只读 `scan -> plan`。
+动态验证不属于默认 scan。用户显式启用后，它只能在所有 scan/provider roots 之外的 task-scoped disposable copy 中运行，并使用隔离的 cache、temporary directory、home/config 和 package-manager state；不允许写回扫描目标或隐式使用全局可写状态。复制前必须以 metadata-only 方式检查整个 source coverage；任何 provider-bound、dataless 或可能因读取而 materialize 的 source 在首版拒绝动态验证，未来只能通过单独且明确确认的 materialization action 进入。无法证明隔离或 non-materialization 的 build、install、download、copy 或 round-trip verification 必须作为另行确认的有副作用 action，不能参与只读 `scan -> plan`。
 
 建议必须区分：
 
@@ -189,6 +189,8 @@ provider_hidden_footprint: unavailable-via-public-api
 ```
 
 首版不执行 provider eviction、unpin、reset 或 hidden backing cleanup。
+
+所有位于 File Provider boundary 内、带 provider ownership/capability evidence，或标记 dataless 的 path 在首版都是 non-stageable hard gate，包括已经 materialized 的普通文件。它们只能得到 `managed-by-provider`/report-only 结果；`generic-remove`、Git、release-set 和其他删除 adapter 都必须 fail closed，不能让 cache/path recognizer 绕过 provider boundary。未来任何可能传播为 cloud delete、eviction、unpin 或 materialization 的动作都需要专用 provider adapter 和独立确认。
 
 ## 10. Coverage And Permissions
 
@@ -381,7 +383,7 @@ directory child-entry churn、directory size/link-count/mtime 变化只有在 ac
 
 只有满足上述 coverage 的 action 才能使用 `Fully observed local Git work discard` waiver；否则只能 report-only。adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。
 
-point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use：通过已验证 parent descriptor 将 exact root 原子 `renameat` 到同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace，再从该绑定对象递归删除并 best-effort 清理 Git administrative state；无法完成原子 quarantine 或发现 mount crossing 时必须在 mutation 前降级为 report-only。overlay 必须显示 quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
+point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use：revalidation 时通过已验证 parent descriptor no-follow 打开 root 并固定 object identity，再用 exclusive/no-clobber `renameatx_np` 将 exact slot 原子移入同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace。quarantine 后必须从 held descriptor 与 destination descriptor 双向确认是同一 object，并在受控 namespace 中重新完成 no-follow subtree coverage；identity/content/access/coverage 任一差异都禁止删除，保留 quarantine 并在 event stream 报告可恢复 locator。只有确认后的绑定对象可递归删除，再 best-effort 清理 Git administrative state；无法完成原子 quarantine 或发现 mount crossing 时必须在 mutation 前降级为 report-only。overlay 必须显示 quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
 
 默认输出为 shell/TUI event stream。history、plan、audit、execution record 和 spill 均可选；`ENOSPC`、只读目录或日志失败不能阻止清理。
 
@@ -461,7 +463,9 @@ encoded retained data     768 MiB
 
 spill 使用 disposable SQLite，默认关闭，失败只降级 evidence。异常遗留应在后续 scan 中成为清理候选。
 
-启用 spill 时，`--spill-dir` 必须证明位于所有活动 scan roots 和 provider roots 之外，并从本次扫描视图中按已绑定的 device/inode root 排除；无法证明隔离时拒绝启用 spill。engine 必须 no-follow 创建 owner-private task directory，持有并持续验证其 parent/directory descriptor、identity 和 access policy；每次 SQLite open/write 都必须通过 descriptor-relative custom VFS 或等价的 stable binding，不能重新信任未经绑定的 pathname。任一 ancestor replacement、symlink redirection 或 access-policy mismatch 都 fail closed；平台 SQLite 接口无法维持该保证时禁用 spill。TUI 必须把该次运行标记为 `scan_write_mode: spill-enabled`，不得继续显示为默认 no-persistence read-only mode。history 和 saved artifacts 同样只能在扫描完成后写入隔离的 tool-owned location，写入失败不改变 scan/plan 结果。
+启用 spill 时，`--spill-dir` 必须证明位于所有活动 scan roots 和 provider roots 之外，并从本次扫描视图中按已绑定的 device/inode root 排除；无法证明隔离时拒绝启用 spill。engine 必须 no-follow 创建 owner-private task directory，持有并持续验证其 parent/directory descriptor、identity 和 access policy；每次 SQLite open/write 都必须通过 descriptor-relative custom VFS 或等价的 stable binding，不能重新信任未经绑定的 pathname。任一 ancestor replacement、symlink redirection 或 access-policy mismatch 都 fail closed；平台 SQLite 接口无法维持该保证时禁用 spill。TUI 必须把该次运行标记为 `scan_write_mode: spill-enabled`，不得继续显示为默认 no-persistence read-only mode。
+
+history、saved plan、audit 和 execution artifacts 使用同一安全 writer：扫描结束后在扫描范围外 no-follow 创建 owner-private task directory，以 descriptor-relative open 和 exclusive/no-clobber temporary name 写入，再原子发布且绝不覆盖已有用户文件。任何 identity、ancestor、symlink 或 access-policy mismatch 都停止该可选写入；失败不改变 scan/plan/apply 结果。若失败发生在创建 artifact 之后，event stream 尽力报告 retained recovery locator；无法安全发布或报告时允许留下后续 scan 可发现的 task-scoped artifact。
 
 ## 18. Testing And Acceptance
 
