@@ -334,6 +334,18 @@ explicit protection/type hint 同样受这个边界约束：protection 可以直
 
 dirty/untracked Git 内容必须使用专门的 `discard-local-work` action，不得伪装成普通删除。
 
+### 13.1 Canonical IDs And Bindings
+
+所有用于执行授权或 cache 命中的 ID/hash 都来自 versioned closed typed binding schema，不能由各模块临时选择字段。权威 schema 与 `.proto` 同仓维护，但摘要输入使用独立的 `canonical-binary-v1` 编码，避免依赖未保证 canonical 的普通 Protobuf serialization：
+
+- record 使用固定 field order；整数为 fixed-width big-endian；bytes/path 使用 length prefix 并保留 filesystem raw name bytes；timestamp 使用 UTC seconds+nanos；禁止 map；具有集合语义的 repeated field 按其 canonical byte key 排序；absent、unknown、unreadable、failed 和 empty 使用不同 typed variants；
+- digest 使用 SHA-256，并以 `diskplan/<binding-kind>/v1\0` 做 domain separation；不同 kind 至少包括 evidence、action、plan、waiver-semantic 和 agent-cache；
+- evidence binding 封闭纳入 root/candidate object identity、raw relative path、coverage、collector success/failure、activity、provider/dataless state、recoverability、content/access-policy facts、APFS owner/dependency evidence、profile/config/policy/schema version 和所有 policy-relevant semantic time values；
+- action ID 封闭纳入 evidence ID、adapter/action type、typed arguments、target object/path bindings、protected-property contract、expected postcondition 和有方向的 prerequisite action IDs；plan hash 纳入 canonical ordered actions、release sets、global coverage/config/schema/policy versions；
+- waiver semantic binding 封闭纳入 plan/action ID、policy version、被 waive 的 exact predicate/value bucket、其依赖 evidence subset 和 execution epoch/deadline；agent cache 另外纳入 model、prompt/schema/policy version、disclosure profile 与实际 disclosed metadata binding。
+
+schema 未知字段、缺少 required variant 或 canonical decode/round-trip 不一致时，execution fail closed，最多 report-only。任何安全相关字段增删都必须 bump binding version，并同时更新 Swift/Rust golden vectors；不能通过忽略新字段维持旧 waiver、ID 或 cache hit。
+
 ## 14. Execution Semantics
 
 apply 是 best effort：
@@ -383,7 +395,9 @@ directory child-entry churn、directory size/link-count/mtime 变化只有在 ac
 
 只有满足上述 coverage 的 action 才能使用 `Fully observed local Git work discard` waiver；否则只能 report-only。adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。
 
-point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use：revalidation 时通过已验证 parent descriptor no-follow 打开 root 并固定 object identity，再用 exclusive/no-clobber `renameatx_np` 将 exact slot 原子移入同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace。quarantine 后必须从 held descriptor 与 destination descriptor 双向确认是同一 object，并在受控 namespace 中重新完成 no-follow subtree coverage；identity/content/access/coverage 任一差异都禁止删除，保留 quarantine 并在 event stream 报告可恢复 locator。只有确认后的绑定对象可递归删除，再 best-effort 清理 Git administrative state；无法完成原子 quarantine 或发现 mount crossing 时必须在 mutation 前降级为 report-only。overlay 必须显示 quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
+point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use。mutation 前必须证明 source parent chain 是 owner-private、无 group/other writer、无 provider/mount boundary，并且 activity snapshot 没有其他 process reference；adapter 将它标记为 `trusted-exclusive-namespace`。同一用户的恶意或不可观测并发 namespace mutation不在首版可安全执行的 threat model 内；无法满足该 trust precondition 时必须 report-only，不能先移动后判断。
+
+满足 trust precondition 后，revalidation 通过已验证 parent descriptor no-follow 打开 root 并固定 object identity，再用 exclusive/no-clobber `renameatx_np` 将 exact slot 原子移入同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace。quarantine 后必须从 held descriptor 与 destination descriptor 双向确认是同一 object，并在受控 namespace 中重新完成 no-follow subtree coverage；identity/content/access/coverage 任一差异都禁止删除，尽力原子恢复原 slot，否则保留 quarantine 并在 event stream 报告可恢复 locator。只有确认后的绑定对象可递归删除，再 best-effort 清理 Git administrative state。overlay 必须显示 namespace trust、quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
 
 默认输出为 shell/TUI event stream。history、plan、audit、execution record 和 spill 均可选；`ENOSPC`、只读目录或日志失败不能阻止清理。
 
@@ -465,7 +479,7 @@ spill 使用 disposable SQLite，默认关闭，失败只降级 evidence。异�
 
 启用 spill 时，`--spill-dir` 必须证明位于所有活动 scan roots 和 provider roots 之外，并从本次扫描视图中按已绑定的 device/inode root 排除；无法证明隔离时拒绝启用 spill。engine 必须 no-follow 创建 owner-private task directory，持有并持续验证其 parent/directory descriptor、identity 和 access policy；每次 SQLite open/write 都必须通过 descriptor-relative custom VFS 或等价的 stable binding，不能重新信任未经绑定的 pathname。任一 ancestor replacement、symlink redirection 或 access-policy mismatch 都 fail closed；平台 SQLite 接口无法维持该保证时禁用 spill。TUI 必须把该次运行标记为 `scan_write_mode: spill-enabled`，不得继续显示为默认 no-persistence read-only mode。
 
-history、saved plan、audit 和 execution artifacts 使用同一安全 writer：扫描结束后在扫描范围外 no-follow 创建 owner-private task directory，以 descriptor-relative open 和 exclusive/no-clobber temporary name 写入，再原子发布且绝不覆盖已有用户文件。任何 identity、ancestor、symlink 或 access-policy mismatch 都停止该可选写入；失败不改变 scan/plan/apply 结果。若失败发生在创建 artifact 之后，event stream 尽力报告 retained recovery locator；无法安全发布或报告时允许留下后续 scan 可发现的 task-scoped artifact。
+history、saved plan、audit 和 execution artifacts 使用同一安全 writer：扫描结束后在所有 scan roots 和 provider roots 之外 no-follow 创建 owner-private task directory；destination 及完整 ancestor chain 必须没有 provider boundary、provider capability 或 dataless evidence。writer 以 descriptor-relative open 和 exclusive/no-clobber temporary name 写入，再原子发布且绝不覆盖已有用户文件。任何 identity、ancestor、symlink、provider 或 access-policy mismatch 都停止该可选写入；首版不提供 provider-write fallback。失败不改变 scan/plan/apply 结果。若失败发生在创建 artifact 之后，event stream 尽力报告 retained recovery locator；无法安全发布或报告时允许留下后续 scan 可发现的 task-scoped artifact。
 
 ## 18. Testing And Acceptance
 
