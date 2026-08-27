@@ -1,0 +1,22 @@
+{
+  "schema": "canonical-binary-v1",
+  "binding_kind": "evidence",
+  "candidate_id": "candidate-alpha",
+  "raw_path_hex": "ff7461726765742f6361636865",
+  "logical_bytes": 4294967297,
+  "observed_at": {
+    "seconds": 1700000000,
+    "nanos": 123456789
+  },
+  "activity": "unknown",
+  "coverage": "complete",
+  "labels": [
+    "swift",
+    "cache",
+    "cache",
+    "é",
+    "é",
+    "é",
+    "é"
+  ]
+}

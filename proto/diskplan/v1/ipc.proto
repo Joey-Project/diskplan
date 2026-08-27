@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package diskplan.v1;
+
+// Stable rejection codes are part of the v1 compatibility contract.
+enum RejectCode {
+  REJECT_CODE_UNSPECIFIED = 0;
+  REJECT_CODE_PROTOCOL_MAJOR_MISMATCH = 1;
+  REJECT_CODE_MISSING_REQUIRED_CAPABILITY = 2;
+  REJECT_CODE_BUSINESS_BEFORE_HANDSHAKE = 3;
+  REJECT_CODE_MALFORMED_ENVELOPE = 4;
+  // Reserved for transports that can safely report an oversized frame. The
+  // stdio transport treats oversize as fatal because the unread payload would
+  // leave the stream without a trustworthy frame boundary.
+  REJECT_CODE_FRAME_TOO_LARGE = 5;
+  REJECT_CODE_INTERNAL_ERROR = 6;
+  REJECT_CODE_BUSINESS_UNSUPPORTED = 7;
+}
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message Hello {
+  ProtocolVersion version = 1;
+  repeated string required_capabilities = 2;
+  repeated string optional_capabilities = 3;
+  string implementation = 4;
+}
+
+message HelloAccepted {
+  ProtocolVersion selected_version = 1;
+  repeated string negotiated_capabilities = 2;
+}
+
+message HelloRejected {
+  RejectCode code = 1;
+  string detail = 2;
+  ProtocolVersion peer_version = 3;
+}
+
+message BusinessEnvelope {
+  string type = 1;
+  bytes payload = 2;
+}
+
+message Envelope {
+  uint64 sequence = 1;
+  oneof body {
+    Hello hello = 10;
+    HelloAccepted hello_accepted = 11;
+    HelloRejected hello_rejected = 12;
+    BusinessEnvelope business = 20;
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "diskplan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+diskplan-core = { path = "../diskplan-core" }
+diskplan-proto = { path = "../diskplan-proto" }
+prost.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

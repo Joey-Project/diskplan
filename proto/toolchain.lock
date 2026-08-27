@@ -1,0 +1,5 @@
+protoc=35.1
+protoc-gen-swift=1.38.0
+swift-protobuf=1.38.0
+prost=0.14.4
+prost-build=0.14.4
