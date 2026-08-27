@@ -107,9 +107,9 @@ history 是可选增强。缺失时标记 `history_unavailable`，不能伪造�
 - 按文件系统原始名称字节排序，不依赖 locale。
 - collector/adapters 的并发完成顺序不影响最终输出。
 - 外部工具先解析为 typed records，再 canonical sort。
-- scan 开始时冻结 `scan_reference_time`；age、recency 和 `inactive_duration` 只相对该值计算。影响分类、排序、action 或 agent cache 的 filesystem/history time 与冻结 reference time 进入 plan provenance。waiver binding 只包含 policy version、原始证据 identity，以及实际影响该 waiver 的 derived predicate/value bucket；纯粹时钟推进但未改变这些语义值时，不使 waiver 失效。
+- scan 开始时冻结 `scan_reference_time`；age、recency 和 `inactive_duration` 只相对该值计算。影响分类、排序、action 或 agent cache 的 filesystem/history time 与冻结 reference time 进入 plan provenance。稳定的 waiver consent core 只绑定 action lineage、policy version、被 waive 的 exact predicate/value bucket、其语义 evidence subset 和用户理由；纯粹时钟推进但未改变这些语义值时，不撤销 consent core。它不是执行凭证。
 - report 生成时间、UI 刷新时间等纯展示字段不进入 evidence hash。
-- apply review 前的整体 revalidation 创建有 deadline 的 `execution_epoch`，冻结一个新的 `execution_reference_time` 并重新计算 plan/evidence/policy binding。若 policy predicate、value bucket 或其他受保护证据发生变化，用户必须基于新结果重新确认 overlay；未变化的 waiver 可按其 semantic binding 重新签发。随后同一 execution epoch 内的 JIT revalidation 复用该冻结语义时间，但仍实时检查 identity、content、access policy、activity、provider 和 dependency evidence。epoch 过期必须重新整体 revalidate，跨过相关 policy threshold 时旧 waiver 和 agent cache 不能继续命中。
+- apply review 前的整体 revalidation 创建有 deadline 的 `execution_epoch`，冻结一个新的 `execution_reference_time` 并重新计算 plan/evidence/policy binding。engine 只有在 action lineage、waived predicate/value bucket、其 semantic evidence subset 均相同，全部 non-waived gates 通过、受保护属性未变化且用户未撤销时，才可从 consent core 为当前 epoch 签发新的 execution credential；否则用户必须基于新结果重新确认。随后同一 execution epoch 内的 JIT revalidation 复用该冻结语义时间，但仍实时检查 identity、content、access policy、activity、provider 和 dependency evidence。credential 在 epoch/deadline、plan/action/evidence ID 任一不匹配时立即拒绝，不能跨 epoch 重放；跨过相关 policy threshold 时 consent 必须重新确认，旧 agent cache 也不能继续命中。
 - 扫描中发生真实身份、内容或 access-policy 变化的 candidate 标记 `unstable-during-scan`。
 
 Profiles：
@@ -305,7 +305,7 @@ scanner facts、classification 和 action definitions 属于 immutable plan。de
 - User notes.
 - Referenced plan/evidence hash.
 
-overlay 不能增加 arbitrary path、argv 或 action ID。evidence hash 变化会使 waiver 失效。
+overlay 不能增加 arbitrary path、argv 或 action ID。overlay 保存用户 consent core；由 engine 派生的 epoch-scoped execution credential 不可编辑。evidence/plan/action hash 变化始终使旧 execution credential 失效，但只有满足 6 节完整续签条件时才允许复用 consent core，无条件 remap 或重放都 fail closed。
 
 explicit protection/type hint 同样受这个边界约束：protection 可以直接阻止 action；type hint 只能补充 classification input。任何提升风险容忍度的用户决定必须落在下方明确允许的 waiver 集合中。
 
@@ -339,10 +339,10 @@ dirty/untracked Git 内容必须使用专门的 `discard-local-work` action，�
 所有用于执行授权或 cache 命中的 ID/hash 都来自 versioned closed typed binding schema，不能由各模块临时选择字段。权威 schema 与 `.proto` 同仓维护，但摘要输入使用独立的 `canonical-binary-v1` 编码，避免依赖未保证 canonical 的普通 Protobuf serialization：
 
 - record 使用固定 field order；整数为 fixed-width big-endian；bytes/path 使用 length prefix 并保留 filesystem raw name bytes；timestamp 使用 UTC seconds+nanos；禁止 map；具有集合语义的 repeated field 按其 canonical byte key 排序；absent、unknown、unreadable、failed 和 empty 使用不同 typed variants；
-- digest 使用 SHA-256，并以 `diskplan/<binding-kind>/v1\0` 做 domain separation；不同 kind 至少包括 evidence、action、plan、waiver-semantic 和 agent-cache；
+- digest 使用 SHA-256，并以 `diskplan/<binding-kind>/v1\0` 做 domain separation；不同 kind 至少包括 evidence、action-lineage、action、plan、waiver-consent、waiver-credential 和 agent-cache；
 - evidence binding 封闭纳入 root/candidate object identity、raw relative path、coverage、collector success/failure、activity、provider/dataless state、recoverability、content/access-policy facts、APFS owner/dependency evidence、profile/config/policy/schema version 和所有 policy-relevant semantic time values；
-- action ID 封闭纳入 evidence ID、adapter/action type、typed arguments、target object/path bindings、protected-property contract、expected postcondition 和有方向的 prerequisite action IDs；plan hash 纳入 canonical ordered actions、release sets、global coverage/config/schema/policy versions；
-- waiver semantic binding 封闭纳入 plan/action ID、policy version、被 waive 的 exact predicate/value bucket、其依赖 evidence subset 和 execution epoch/deadline；agent cache 另外纳入 model、prompt/schema/policy version、disclosure profile 与实际 disclosed metadata binding。
+- action lineage ID 封闭纳入 policy/schema version、adapter/action type、typed arguments、target object identity/raw path、protected-property contract、expected postcondition 和有方向的 prerequisite lineage IDs，但排除 reference time、epoch 和可重新计算的 evidence ID；action ID 再封闭纳入当前 evidence ID 与 prerequisite action IDs；plan hash 纳入 canonical ordered actions、release sets、global coverage/config/schema/policy versions；
+- waiver consent binding 封闭纳入 action lineage ID、policy version、被 waive 的 exact predicate/value bucket、其 semantic evidence subset、用户理由和 consent event ID；waiver credential 再纳入 consent hash、当前 plan/action/evidence ID、execution epoch/reference time/deadline。agent cache 另外纳入 model、prompt/schema/policy version、disclosure profile 与实际 disclosed metadata binding。
 
 schema 未知字段、缺少 required variant 或 canonical decode/round-trip 不一致时，execution fail closed，最多 report-only。任何安全相关字段增删都必须 bump binding version，并同时更新 Swift/Rust golden vectors；不能通过忽略新字段维持旧 waiver、ID 或 cache hit。
 
