@@ -22,7 +22,7 @@ superseded_by:
 - Base commit：`0ee3ed5555fec42ffc5e9b8e718024fcbb686d71`。
 - Branch：`wip/phase0-foundation`，位于 linked worktree。
 - Toolchain preflight：Swift 6.3.3、Rust 1.95.0、Protobuf 35.1，target 为 `arm64-apple-macosx26.0`。
-- Shared foundation implementation and Tier 1 validation are complete. The first frozen-range review found four process/publisher issues; all four are fixed and the workstream is awaiting fresh review of the new head before its pull request.
+- Shared foundation implementation and Tier 1 validation are complete. The first frozen-range review found four process/publisher issues; all four are fixed in signed commit `b6a26faa5191e1c8872f63380f3a14d818be8296`, and the workstream is awaiting fresh review of the new head before its pull request.
 - The Swift engine remains the evidence authority. Rust exposes only strict canonical verification and a supervised live IPC session.
 
 ## Task List
@@ -36,7 +36,7 @@ superseded_by:
 ## Handoff
 
 - Phase：Phase 0 foundation delivery gate。
-- Next step：提交 review fixes，冻结新的 `base_sha..head_sha`，完成 fresh independent review 和 PR readiness。
+- Next step：冻结新的 `base_sha..head_sha`，完成 fresh independent review 和 PR readiness。
 - Blockers：当前没有已知 blocker。
 
 ## Evidence
