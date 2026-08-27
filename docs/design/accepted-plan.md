@@ -87,6 +87,8 @@ history 是可选增强。缺失时标记 `history_unavailable`，不能伪造�
 
 常规扫描禁止 build、install、download、大规模 hash 和无界 LFS enumeration。动态验证只用于 deep audit、高风险 action 或 adapter 开发。
 
+动态验证不属于默认 scan。用户显式启用后，它只能在所有 scan/provider roots 之外的 task-scoped disposable copy 中运行，并使用隔离的 cache、temporary directory、home/config 和 package-manager state；不允许写回扫描目标或隐式使用全局可写状态。无法证明隔离的 build、install、download 或 round-trip verification 必须作为另行确认的有副作用 action，不能参与只读 `scan -> plan`。
+
 建议必须区分：
 
 - Provider-owned reclaimable storage.
@@ -105,9 +107,9 @@ history 是可选增强。缺失时标记 `history_unavailable`，不能伪造�
 - 按文件系统原始名称字节排序，不依赖 locale。
 - collector/adapters 的并发完成顺序不影响最终输出。
 - 外部工具先解析为 typed records，再 canonical sort。
-- scan 开始时冻结 `scan_reference_time`；age、recency 和 `inactive_duration` 只相对该值计算。影响分类、排序、action、waiver 或 agent cache 的 filesystem/history time、time bucket 和 reference time 都进入 evidence/policy binding。
+- scan 开始时冻结 `scan_reference_time`；age、recency 和 `inactive_duration` 只相对该值计算。影响分类、排序、action 或 agent cache 的 filesystem/history time 与冻结 reference time 进入 plan provenance。waiver binding 只包含 policy version、原始证据 identity，以及实际影响该 waiver 的 derived predicate/value bucket；纯粹时钟推进但未改变这些语义值时，不使 waiver 失效。
 - report 生成时间、UI 刷新时间等纯展示字段不进入 evidence hash。
-- revalidation 使用新的 reference time 和新的 evidence hash；跨过 recency threshold 时，旧 waiver 和 agent cache 不能继续命中。
+- apply review 前的整体 revalidation 创建有 deadline 的 `execution_epoch`，冻结一个新的 `execution_reference_time` 并重新计算 plan/evidence/policy binding。若 policy predicate、value bucket 或其他受保护证据发生变化，用户必须基于新结果重新确认 overlay；未变化的 waiver 可按其 semantic binding 重新签发。随后同一 execution epoch 内的 JIT revalidation 复用该冻结语义时间，但仍实时检查 identity、content、access policy、activity、provider 和 dependency evidence。epoch 过期必须重新整体 revalidate，跨过相关 policy threshold 时旧 waiver 和 agent cache 不能继续命中。
 - 扫描中发生真实身份、内容或 access-policy 变化的 candidate 标记 `unstable-during-scan`。
 
 Profiles：
@@ -354,7 +356,9 @@ generic remove 固定调用 `/bin/rm`，不经 shell、不展开 glob：
 
 ### 14.1 Protected Properties And Path-Race Boundary
 
-revalidation 必须为每类 action 声明受保护属性（执行前后必须保持的性质）：
+revalidation 必须为每类 action 分别声明：从 plan 到 use 必须成立的 preconditions、调用期间需要维持的 invariants，以及成功/失败后的 postconditions。成功删除的正常 postcondition 是目标 slot absent 或 adapter 明确声明的 expected residual，而不是要求被删 object 的 identity/content 继续存在。
+
+可作为 precondition 或 invocation invariant 的受保护属性包括：
 
 - Object identity: no-follow `st_dev`, `st_ino`, file type，以及 filesystem 可用时的 generation/birth identity。
 - Content stability: 仅在 recoverability/action contract 依赖内容时比较 size、content digest 或其他明确内容信号；普通 `mtime` 变化只触发重新读取，不能单独宣称内容变化。
@@ -362,9 +366,20 @@ revalidation 必须为每类 action 声明受保护属性（执行前后必须�
 
 directory child-entry churn、directory size/link-count/mtime 变化只有在 action contract 选择 subtree content stability 时才是阻断信号；否则它们是需要重新枚举的 generation hint。unreadable/revalidation failure、missing、identity mismatch、content mismatch 和 access-policy mismatch 必须保持不同状态。
 
-`/bin/rm` 是 pathname-based，无法原子关闭“最后一次 revalidation 到 rm 使用路径”之间的竞态。因此 generic remove 只能用于明确标记为 `path-slot-removal` 的 action：用户授权清理的是受约束 parent 下的 exact pathname slot，且 adapter 已证明该 slot 中任何允许出现的 replacement 都属于同一 disposable class。它必须固定 parent chain、mount boundary、exact basename、no-follow root semantics，并在 spawn 前最后一次 revalidate；计划和 TUI 同时显示 `path_race_residual: true`。
+`/bin/rm` 是 pathname-based，无法原子关闭“最后一次 revalidation 到 rm 使用路径”之间的竞态。因此 generic remove 只能用于明确标记为 `path-slot-removal` 的 action：用户授权清理的是受约束 parent 下的 exact pathname slot，包括 revalidation 后仍可能出现的 occupant/children；adapter 还必须证明整个 parent namespace 在调用期间只由受信任主体控制，或该 slot 的每一种可能 occupant 都属于同一 disposable class。它必须在 spawn 前最后一次 revalidate 已固定的 parent chain、mount boundary、exact basename 和 no-follow root semantics；计划和 TUI 同时显示 `path_race_residual: true`，并明确它不能保证删除的是此前观察到的 object。
 
-如果 action 的安全性要求“只能删除此前验证的那个 object”或要求完整 subtree content stability，它不能使用 generic `/bin/rm` fallback；首版必须使用能够保持 descriptor/object binding 的专用 native adapter，否则降级为 report-only。新增 path、path escape、mount crossing 或不属于同一 disposable class 的 replacement 仍由 one-vote reject 阻止。
+如果 action 的安全性要求“只能删除此前验证的那个 object”、完整 subtree content stability，或 parent namespace 可能被不受信任主体并发修改，它不能使用 generic `/bin/rm` fallback；首版必须使用持有已验证 parent descriptor 并通过 `unlinkat`/descriptor-relative traversal 等方式维持 object/namespace binding 的专用 native adapter，先原子 quarantine 到同一受控 filesystem 后再删除，或者降级为 report-only。one-vote reject 只保证阻止 revalidation 时已经可见的新增 path、path escape、mount crossing 或不合格 replacement；generic path-slot action 对检查后的变化只依赖其显式 slot authorization 和 trust precondition，不能声称 engine 会再次观察并否决。
+
+### 14.2 Git Worktree Removal Completeness
+
+`git-worktree-remove` 和 `discard-local-work` 不能把普通 `git status` 视为完整观察。允许 stage 之前必须同时证明：
+
+- engine 对 worktree filesystem 做 no-follow 完整 traversal，覆盖 tracked、untracked、ignored/excluded entries，并对 unreadable、budget exhaustion、mount crossing 或 scan race fail closed；
+- Git adapter 记录 HEAD/index、staged/unstaged/unmerged state、worktree registration 和 administrative metadata，并验证 worktree root identity；
+- nested repositories、submodules、linked worktrees 和 sparse-checkout state 被显式识别；其本地内容必须分别证明 recoverable 或作为用户可见的 unique/local changes 进入同一 action；
+- action 执行前重新验证 filesystem coverage、Git state 和所有已声明 local-change entries，任何新增或未观察项目都阻止 stage/apply。
+
+只有满足上述 coverage 的 action 才能使用 `Fully observed local Git work discard` waiver；否则只能 report-only。adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。
 
 默认输出为 shell/TUI event stream。history、plan、audit、execution record 和 spill 均可选；`ENOSPC`、只读目录或日志失败不能阻止清理。
 
