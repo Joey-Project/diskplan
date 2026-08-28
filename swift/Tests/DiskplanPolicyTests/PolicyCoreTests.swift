@@ -98,7 +98,7 @@ func agentSuggestionsAreExcludedFromDeterministicResolution() {
 
 @Test
 func typedGateResultsPreserveEveryDimensionAndReason() throws {
-  let evaluation = try PolicyEvaluation(votes: baseVotes())
+  let evaluation = try testingEvaluation(votes: baseVotes())
   #expect(evaluation.votes.map(\.dimension) == GateDimension.allCases)
   for (index, vote) in evaluation.votes.enumerated() {
     guard case .satisfied(let reasons) = vote.result else {
@@ -113,10 +113,10 @@ func typedGateResultsPreserveEveryDimensionAndReason() throws {
 @Test
 func everyHardRejectAloneAndCombinedBlocksWithoutScoring() throws {
   for dimension in GateDimension.allCases {
-    let evaluation = try PolicyEvaluation(votes: votes(rejecting: [dimension]))
+    let evaluation = try testingEvaluation(votes: votes(rejecting: [dimension]))
     #expect(evaluation.stageability == .blocked)
   }
-  let combined = try PolicyEvaluation(votes: votes(rejecting: Set(GateDimension.allCases)))
+  let combined = try testingEvaluation(votes: votes(rejecting: Set(GateDimension.allCases)))
   #expect(combined.stageability == .blocked)
   #expect(
     combined.votes.filter { if case .rejected = $0.result { true } else { false } }.count == 7)
@@ -132,7 +132,7 @@ func safeAfterExitIsAnUnmetConditionNotAHardRejectOrWaiver() throws {
       reasons: [reason("open-handle", 20), reason("mapped-image", 21)]
     )
   )
-  let evaluation = try PolicyEvaluation(votes: inputs)
+  let evaluation = try testingEvaluation(votes: inputs)
   #expect(evaluation.recommendation == .safeAfterExit)
   #expect(evaluation.stageability == .blocked)
   #expect(evaluation.unmetRevalidationConditions == [.activityCleared])
@@ -154,7 +154,7 @@ func exactWaiverPredicatesAreRetainedAndCannotAttachToHardDimensions() throws {
       predicates: [second, first], reasons: [reason("semantic-review", 33)]
     )
   )
-  let evaluation = try PolicyEvaluation(votes: all)
+  let evaluation = try testingEvaluation(votes: all)
   #expect(evaluation.stageability == .requiresConsents([first, second].sorted()))
 
   all[Int(GateDimension.identityAndAccess.rawValue)] = GateVote(
@@ -168,7 +168,7 @@ func exactWaiverPredicatesAreRetainedAndCannotAttachToHardDimensions() throws {
     throws: PolicyModelError.invalidWaiverDimension(
       .unknownRebuildCost, actual: .identityAndAccess
     )
-  ) { try PolicyEvaluation(votes: all) }
+  ) { try testingEvaluation(votes: all) }
 }
 
 @Test
@@ -182,7 +182,9 @@ func everyClosedWaiverKindWorksOnlyOnItsDeclaredDimension() throws {
         predicates: [predicate], reasons: [reason("waiver-\(index)", UInt8(60 + index))]
       )
     )
-    #expect(try PolicyEvaluation(votes: allowed).stageability == .requiresConsents([predicate]))
+    #expect(
+      try testingEvaluation(votes: allowed).stageability == .requiresConsents([predicate])
+    )
   }
 
   let nonWaivableDimensions: [GateDimension] = [
@@ -201,7 +203,7 @@ func everyClosedWaiverKindWorksOnlyOnItsDeclaredDimension() throws {
         reasons: [reason("forbidden", 81)]
       )
     )
-    #expect(throws: PolicyModelError.self) { try PolicyEvaluation(votes: invalid) }
+    #expect(throws: PolicyModelError.self) { try testingEvaluation(votes: invalid) }
   }
 }
 
@@ -216,6 +218,59 @@ func oneVotePolicyHasSevenNamedTypedInputs() throws {
   )
   #expect(evaluation.votes.count == 7)
   #expect(evaluation.stageability == .stageable)
+}
+
+@Test
+func evaluationAuthorityBindsFrozenEvidenceAndRejectsForgedVotesAtActionBoundary() throws {
+  let facts = globalFacts()
+  let evidence = snapshot(
+    candidateID: "protected", path: "protected", object: 1,
+    explicitProtection: .known(.protected),
+    globalFactsOverride: facts
+  )
+  let evaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(evidence: evidence, globalFacts: facts)
+  )
+  let source = evaluation.sourceBinding
+  #expect(source.captureID == evidence.captureID)
+  #expect(source.evidenceID == evidence.evidenceID)
+  #expect(source.globalFactsHash == facts.globalFactsHash)
+  #expect(source.policyVersion == evidence.policyVersion)
+  #expect(source.schemaVersion == evidence.schemaVersion)
+  #expect(source.semanticReferenceTimeSeconds == evidence.semanticReferenceTimeSeconds)
+  #expect(
+    source.classificationResolutionHash
+      == ClassificationResolver.resolve(evidence.classificationClaims).bindingHash
+  )
+  #expect(evaluation.stageability == .blocked)
+
+  let forged = try PolicyEvaluation.testing(
+    votes: baseVotes(), evidence: evidence, globalFacts: facts
+  )
+  #expect(forged.sourceBinding == source)
+  #expect(forged.stageability == .stageable)
+  #expect(throws: PolicyModelError.actionEvidenceMismatch) {
+    try ActionDefinition.build(
+      prototype: ActionPrototype.build(request: .genericRemove, evidence: evidence),
+      evidence: evidence,
+      globalFacts: facts,
+      prerequisites: [],
+      evaluation: forged,
+      displayMetrics: metrics(path: "protected")
+    )
+  }
+}
+
+@Test
+func publicDisplayMetricsCannotClaimAnAuthoritativeSafeTier() {
+  let metrics = ActionDisplayMetrics(
+    immediateReclaimBytes: .known(1),
+    inactiveDurationSeconds: .known(2),
+    rebuildCost: .known(3),
+    cleanupCost: .known(4),
+    canonicalRawPath: Data("target".utf8)
+  )
+  #expect(metrics.tier == .blocked)
 }
 
 @Test
@@ -355,7 +410,9 @@ func typedFactAndGatePayloadPermutationsCanonicalizeBeforeHashing() throws {
       reasons: [reason("first", 56), reason("second", 57)]
     )
   )
-  #expect(try PolicyEvaluation(votes: forward) == PolicyEvaluation(votes: reverse))
+  #expect(
+    try testingEvaluation(votes: forward) == testingEvaluation(votes: reverse)
+  )
 }
 
 @Test
@@ -2527,7 +2584,7 @@ func displayTierIsDerivedFromFinalSafetyAndRejectsForgedPlanMetrics() throws {
       == [safe.id, force.id, provider.id]
   )
 
-  let forgedTier = ActionDisplayMetrics(
+  let forgedTier = ActionDisplayMetrics.testing(
     tier: .safe,
     immediateReclaimBytes: blocked.displayMetrics.immediateReclaimBytes,
     inactiveDurationSeconds: blocked.displayMetrics.inactiveDurationSeconds,
@@ -2561,7 +2618,7 @@ func sourceBoundVotesAuthoritativelyDeriveRecommendationAndRejectTransplants() t
     ]
   )
   let rebuildable = try makeAction(evidence: rebuildableEvidence)
-  #expect(rebuildable.evaluation.sourceBinding != nil)
+  #expect(rebuildable.evaluation.sourceBinding.evidenceID == rebuildableEvidence.evidenceID)
   #expect(rebuildable.evaluation.recommendation == .likelyRebuildable)
   #expect(rebuildable.evaluation.stageability != .stageable)
   #expect(rebuildable.displayMetrics.tier == .rebuildable)
@@ -2575,7 +2632,7 @@ func sourceBoundVotesAuthoritativelyDeriveRecommendationAndRejectTransplants() t
     ]
   )
   let review = try makeAction(evidence: reviewEvidence)
-  #expect(review.evaluation.sourceBinding != nil)
+  #expect(review.evaluation.sourceBinding.evidenceID == reviewEvidence.evidenceID)
   #expect(review.evaluation.recommendation == .needsSemanticReview)
   #expect(review.displayMetrics.tier == .review)
 
@@ -2677,7 +2734,30 @@ private func votes(rejecting rejected: Set<GateDimension>) -> [GateVote] {
 }
 
 private func allowEvaluation() throws -> PolicyEvaluation {
-  try PolicyEvaluation(votes: baseVotes())
+  try testingEvaluation(votes: baseVotes())
+}
+
+private func testingEvaluation(votes: [GateVote]) throws -> PolicyEvaluation {
+  let facts = globalFacts()
+  return try PolicyEvaluation.testing(
+    votes: votes,
+    evidence: snapshot(
+      candidateID: "test-evaluation", path: "test-evaluation", object: 1,
+      globalFactsOverride: facts
+    ),
+    globalFacts: facts
+  )
+}
+
+func publicPolicyFixture() -> (evidence: FrozenEvidenceSnapshot, facts: FrozenGlobalFacts) {
+  let facts = globalFacts()
+  return (
+    snapshot(
+      candidateID: "public-api", path: "public-api", object: 1,
+      globalFactsOverride: facts
+    ),
+    facts
+  )
 }
 
 private func gitWorktreeEvidence(
@@ -2923,11 +3003,9 @@ private func genericPrototype(_ evidence: FrozenEvidenceSnapshot) throws -> Acti
 
 private func metrics(
   path: String,
-  immediate: KnownOrUnknown<UInt64> = .known(1),
-  tier: RecommendationTier = .safe
+  immediate: KnownOrUnknown<UInt64> = .known(1)
 ) -> ActionDisplayMetrics {
   ActionDisplayMetrics(
-    tier: tier,
     immediateReclaimBytes: immediate,
     inactiveDurationSeconds: .known(10),
     rebuildCost: .known(1),

@@ -268,10 +268,10 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
       dependencyCompleteness: boundDependency,
       providerBound: providerBound,
       classificationConflict: classification.isConflict,
-      sourceBinding: Self.sourceBinding(
+      sourceBinding: try PolicyEvaluationSourceBinding.verified(
         evidence: evidence,
         globalFacts: globalFacts,
-        classificationHash: classificationHash
+        classificationResolutionHash: classificationHash
       )
     )
   }
@@ -330,21 +330,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
       : .requiresWaiver(predicates: predicates, reasons: reasons)
   }
 
-  private static func sourceBinding(
-    evidence: FrozenEvidenceSnapshot,
-    globalFacts: FrozenGlobalFacts,
-    classificationHash: PolicyDigest
-  ) -> PolicyEvaluationSourceBinding {
-    PolicyEvaluationSourceBinding(
-      captureID: evidence.captureID,
-      evidenceID: evidence.evidenceID,
-      globalFactsHash: globalFacts.globalFactsHash,
-      classificationResolutionHash: classificationHash,
-      policyVersion: evidence.policyVersion,
-      schemaVersion: evidence.schemaVersion,
-      semanticReferenceTimeSeconds: evidence.semanticReferenceTimeSeconds
-    )
-  }
 }
 
 public enum OneVotePolicy {
@@ -505,7 +490,7 @@ extension GitWorktreeEvidence {
 }
 
 extension ClassificationResolution {
-  fileprivate var bindingHash: PolicyDigest {
+  var bindingHash: PolicyDigest {
     PolicyBindings.digest(kind: "classification-resolution") { encoder in
       encoder.array(facets) { facet in
         var nested = PolicyBindingEncoder()
@@ -554,7 +539,7 @@ extension ClassificationClaim {
 }
 
 extension String {
-  fileprivate func rawUTF8Equal(_ other: String) -> Bool {
+  func rawUTF8Equal(_ other: String) -> Bool {
     Data(utf8) == Data(other.utf8)
   }
 }

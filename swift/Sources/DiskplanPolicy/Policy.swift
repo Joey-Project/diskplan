@@ -127,11 +127,6 @@ public enum GateResult: Equatable, Sendable {
 public struct GateVote: Equatable, Sendable {
   public let dimension: GateDimension
   public let result: GateResult
-
-  public init(dimension: GateDimension, result: GateResult) {
-    self.dimension = dimension
-    self.result = result
-  }
 }
 
 public enum Recommendation: String, Equatable, Sendable {
@@ -160,6 +155,50 @@ public struct PolicyEvaluationSourceBinding: Equatable, Sendable {
   public let schemaVersion: String
   public let semanticReferenceTimeSeconds: Int64
 
+  private init(
+    captureID: PolicyDigest,
+    evidenceID: PolicyDigest,
+    globalFactsHash: PolicyDigest,
+    classificationResolutionHash: PolicyDigest,
+    policyVersion: String,
+    schemaVersion: String,
+    semanticReferenceTimeSeconds: Int64
+  ) {
+    self.captureID = captureID
+    self.evidenceID = evidenceID
+    self.globalFactsHash = globalFactsHash
+    self.classificationResolutionHash = classificationResolutionHash
+    self.policyVersion = policyVersion
+    self.schemaVersion = schemaVersion
+    self.semanticReferenceTimeSeconds = semanticReferenceTimeSeconds
+  }
+
+  static func verified(
+    evidence: FrozenEvidenceSnapshot,
+    globalFacts: FrozenGlobalFacts,
+    classificationResolutionHash: PolicyDigest
+  ) throws -> Self {
+    guard evidence.captureID == globalFacts.captureID,
+      evidence.globalFactsHash == globalFacts.globalFactsHash,
+      evidence.policyVersion.rawUTF8Equal(globalFacts.policyVersion),
+      evidence.schemaVersion.rawUTF8Equal(globalFacts.schemaVersion),
+      evidence.semanticReferenceTimeSeconds == globalFacts.semanticReferenceTimeSeconds,
+      globalFacts.coverage.filter({
+        $0.rawRoot == evidence.namespaceBinding.rawRoot
+      }).count == 1,
+      classificationResolutionHash
+        == ClassificationResolver.resolve(evidence.classificationClaims).bindingHash
+    else { throw PolicyModelError.actionEvidenceMismatch }
+    return Self(
+      captureID: evidence.captureID,
+      evidenceID: evidence.evidenceID,
+      globalFactsHash: globalFacts.globalFactsHash,
+      classificationResolutionHash: classificationResolutionHash,
+      policyVersion: evidence.policyVersion,
+      schemaVersion: evidence.schemaVersion,
+      semanticReferenceTimeSeconds: evidence.semanticReferenceTimeSeconds
+    )
+  }
 }
 
 public struct PolicyEvaluation: Equatable, Sendable {
@@ -167,38 +206,13 @@ public struct PolicyEvaluation: Equatable, Sendable {
   public let recommendation: Recommendation
   public let stageability: Stageability
   public let unmetRevalidationConditions: [RevalidationCondition]
-  public let sourceBinding: PolicyEvaluationSourceBinding?
-
-  public init(
-    votes: [GateVote]
-  ) throws {
-    try self.init(
-      votes: votes,
-      providerBound: false,
-      classificationConflict: false,
-      sourceBinding: nil
-    )
-  }
+  public let sourceBinding: PolicyEvaluationSourceBinding
 
   init(
     votes: [GateVote],
     providerBound: Bool,
     classificationConflict: Bool,
     sourceBinding: PolicyEvaluationSourceBinding
-  ) throws {
-    try self.init(
-      votes: votes,
-      providerBound: providerBound,
-      classificationConflict: classificationConflict,
-      sourceBinding: Optional(sourceBinding)
-    )
-  }
-
-  private init(
-    votes: [GateVote],
-    providerBound: Bool,
-    classificationConflict: Bool,
-    sourceBinding: PolicyEvaluationSourceBinding?
   ) throws {
     let dimensions = votes.map(\.dimension)
     guard dimensions.count == GateDimension.allCases.count,
@@ -300,24 +314,59 @@ public struct PolicyEvaluation: Equatable, Sendable {
     return GateVote(dimension: vote.dimension, result: result)
   }
 
-  func replacingVotesPreservingContext(_ votes: [GateVote]) throws -> Self {
+  func dischargingFullyObservedLocalGitWork(_ changeSetDigest: PolicyDigest) throws -> Self {
+    var discharged = false
+    let votes = votes.map { vote -> GateVote in
+      guard vote.dimension == .recoverability,
+        case .requiresWaiver(let predicates, let reasons) = vote.result
+      else { return vote }
+      let remaining = predicates.filter { predicate in
+        let matches =
+          predicate.kind == .fullyObservedLocalGitWorkDiscard
+          && predicate.semanticEvidenceHash == changeSetDigest
+        discharged = discharged || matches
+        return !matches
+      }
+      let result: GateResult =
+        remaining.isEmpty
+        ? .satisfied(reasons: reasons)
+        : .requiresWaiver(predicates: remaining, reasons: reasons)
+      return GateVote(dimension: vote.dimension, result: result)
+    }
+    guard discharged else { throw PolicyModelError.invalidActionContract }
     let providerBound = recommendation == .managedByProvider
     let classificationConflict = recommendation == .classificationConflict
-    if let sourceBinding {
-      return try Self.init(
-        votes: votes,
-        providerBound: providerBound,
-        classificationConflict: classificationConflict,
-        sourceBinding: sourceBinding
-      )
-    }
     return try Self.init(
       votes: votes,
       providerBound: providerBound,
       classificationConflict: classificationConflict,
-      sourceBinding: nil
+      sourceBinding: sourceBinding
     )
   }
+
+  #if DEBUG
+    /// Exercises vote normalization in `@testable` unit tests without creating a public
+    /// authority bypass. Production evaluations are created only by `OneVotePolicy`.
+    static func testing(
+      votes: [GateVote],
+      evidence: FrozenEvidenceSnapshot,
+      globalFacts: FrozenGlobalFacts
+    ) throws -> Self {
+      let binding = try PolicyEvaluationSourceBinding.verified(
+        evidence: evidence,
+        globalFacts: globalFacts,
+        classificationResolutionHash: ClassificationResolver.resolve(
+          evidence.classificationClaims
+        ).bindingHash
+      )
+      return try Self(
+        votes: votes,
+        providerBound: false,
+        classificationConflict: false,
+        sourceBinding: binding
+      )
+    }
+  #endif
 }
 
 extension GateResult {

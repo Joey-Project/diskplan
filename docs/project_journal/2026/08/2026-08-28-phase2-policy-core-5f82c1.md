@@ -96,6 +96,15 @@ superseded_by:
   Rebuildable tier requires exclusively static-only rebuild predicates; additional uncertainty
   remains review-tier, and hard rejects remain blocked. Plan recomputation rejects recommendation
   transplants.
+- Public authority is closed around that derivation: `PolicyEvaluation` has no public
+  initializer, its source binding is mandatory and privately constructed from verified frozen
+  evidence/global facts, and public callers cannot construct `GateVote`. Arbitrary-vote reducer
+  coverage uses only a debug-only `@testable` helper. Action construction still recomputes the
+  authoritative evaluation and rejects internally forged vote payloads even when they retain a
+  genuine source binding.
+- Public display-metric construction no longer accepts a recommendation tier. It starts blocked,
+  and action construction alone replaces that placeholder with the source-bound authoritative
+  tier; a debug-only helper retains negative forged-tier coverage.
 
 ## Task List
 
@@ -124,6 +133,8 @@ superseded_by:
   metadata consistency, and authoritative display tiers.
 - [x] Bind full release-graph manifests, stabilize complete-release lineage across pure
   reference-time advancement, and derive recommendations authoritatively from final votes.
+- [x] Close public evaluation and display-tier authority surfaces, require verified non-optional
+  source bindings, and retain forged-vote/tier rejection tests without a public bypass.
 
 ## Handoff
 
@@ -138,8 +149,9 @@ superseded_by:
 - Policy contract: `docs/design/policy-core.md`.
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
-  overlay consent binding; the latest focused run passed all 49 tests.
-- The final full local `swift test --package-path swift` run passed all 77 tests, including
-  all 49 focused policy tests.
+  overlay consent binding, public API construction boundaries, and forged vote/tier rejection;
+  the latest focused run passed all 52 tests.
+- The final full local `swift test --package-path swift` run passed all 80 tests, including
+  all 52 focused policy tests.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.

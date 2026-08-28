@@ -81,6 +81,17 @@ unreadable, or failed hard evidence cannot be papered over by a caller-supplied 
 vote. Explicit protection is a typed hard gate. Unknown recoverability becomes an exact
 waiver predicate rather than ready state.
 
+`PolicyEvaluation` is a read-only public projection, not a public construction surface. Its
+source binding is mandatory, and the binding constructor is private. The package creates it
+only after checking the capture, evidence, global-facts, policy/schema, reference-time,
+matching-root coverage, and classification-resolution bindings against the frozen inputs.
+`GateVote` construction and the evaluation reducer remain package-internal; only a
+debug-only `@testable` helper accepts arbitrary votes for reducer unit tests. Consequently a
+frontend or another package consumer cannot turn caller-selected votes into `safeToClean`,
+`stageable`, or any other policy result. Action construction independently recomputes the
+authoritative evaluation from the same evidence and rejects a source-binding transplant or
+vote mutation before it can enter a plan.
+
 Independent review facts are additive. Recency, task-semantic, duplicate-survivor, normal
 keep, static-rebuild, rebuild-cost, and fully observed local-Git-discard predicates are
 canonicalized and unioned; none replaces another. Each deterministically missing
@@ -154,6 +165,11 @@ gate votes. A plan rejects mixed semantic
 reference times, scan roots outside global coverage, or actions built from different global
 facts, then hashes complete global facts/evidence alongside ActionID-byte order, metrics, and
 release topology.
+
+The public display-metrics input accepts only reclaim, age, rebuild, cleanup, and raw-path
+facts. It starts at the conservative blocked tier; callers cannot submit a safe or review tier.
+Action construction replaces that placeholder with the tier derived from the final
+source-bound evaluation and the closed force-warning contract.
 
 The unified action-prototype builder has no arbitrary argv surface. Generic removal derives
 the exact target kind, prototype path slot, unavoidable path-race residual, trusted namespace,

@@ -1006,6 +1006,21 @@ public struct ActionDisplayMetrics: Equatable, Sendable {
   public let canonicalRawPath: Data
 
   public init(
+    immediateReclaimBytes: KnownOrUnknown<UInt64>,
+    inactiveDurationSeconds: KnownOrUnknown<UInt64>,
+    rebuildCost: KnownOrUnknown<UInt64>,
+    cleanupCost: KnownOrUnknown<UInt64>,
+    canonicalRawPath: Data
+  ) {
+    tier = .blocked
+    self.immediateReclaimBytes = immediateReclaimBytes
+    self.inactiveDurationSeconds = inactiveDurationSeconds
+    self.rebuildCost = rebuildCost
+    self.cleanupCost = cleanupCost
+    self.canonicalRawPath = canonicalRawPath
+  }
+
+  private init(
     tier: RecommendationTier,
     immediateReclaimBytes: KnownOrUnknown<UInt64>,
     inactiveDurationSeconds: KnownOrUnknown<UInt64>,
@@ -1031,6 +1046,26 @@ public struct ActionDisplayMetrics: Equatable, Sendable {
       canonicalRawPath: canonicalRawPath
     )
   }
+
+  #if DEBUG
+    static func testing(
+      tier: RecommendationTier,
+      immediateReclaimBytes: KnownOrUnknown<UInt64>,
+      inactiveDurationSeconds: KnownOrUnknown<UInt64>,
+      rebuildCost: KnownOrUnknown<UInt64>,
+      cleanupCost: KnownOrUnknown<UInt64>,
+      canonicalRawPath: Data
+    ) -> Self {
+      Self(
+        tier: tier,
+        immediateReclaimBytes: immediateReclaimBytes,
+        inactiveDurationSeconds: inactiveDurationSeconds,
+        rebuildCost: rebuildCost,
+        cleanupCost: cleanupCost,
+        canonicalRawPath: canonicalRawPath
+      )
+    }
+  #endif
 }
 
 public struct ActionPrototype: Equatable, Sendable {
@@ -1296,8 +1331,8 @@ public struct ActionDefinition: Equatable, Sendable {
         && evidence.captureID == globalFacts.captureID
         && evidence.globalFactsHash == globalFacts.globalFactsHash
     else { throw PolicyModelError.actionEvidenceMismatch }
-    guard let source = evaluation.sourceBinding,
-      source.captureID == evidence.captureID,
+    let source = evaluation.sourceBinding
+    guard source.captureID == evidence.captureID,
       source.evidenceID == evidence.evidenceID,
       source.globalFactsHash == globalFacts.globalFactsHash,
       rawStringEqual(source.policyVersion, evidence.policyVersion),
@@ -1421,21 +1456,7 @@ public struct ActionDefinition: Equatable, Sendable {
             == prototype.namespaceBinding.bindingBytes
       })
     else { return base }
-    let votes = base.votes.map { vote -> GateVote in
-      guard vote.dimension == .recoverability,
-        case .requiresWaiver(let predicates, let reasons) = vote.result
-      else { return vote }
-      let remaining = predicates.filter {
-        !($0.kind == .fullyObservedLocalGitWorkDiscard
-          && $0.semanticEvidenceHash == changeSetDigest)
-      }
-      let result: GateResult =
-        remaining.isEmpty
-        ? .satisfied(reasons: reasons)
-        : .requiresWaiver(predicates: remaining, reasons: reasons)
-      return GateVote(dimension: vote.dimension, result: result)
-    }
-    return try base.replacingVotesPreservingContext(votes)
+    return try base.dischargingFullyObservedLocalGitWork(changeSetDigest)
   }
 
   private static func make(
@@ -1634,18 +1655,15 @@ public struct ActionDefinition: Equatable, Sendable {
       encoder.uint8(2)
     }
     encoder.array(evaluation.unmetRevalidationConditions) { Data($0.rawValue.utf8) }
-    if let source = evaluation.sourceBinding {
-      encoder.bool(true)
-      encoder.data(source.captureID.bytes)
-      encoder.data(source.evidenceID.bytes)
-      encoder.data(source.globalFactsHash.bytes)
-      encoder.data(source.classificationResolutionHash.bytes)
-      encoder.string(source.policyVersion)
-      encoder.string(source.schemaVersion)
-      encoder.int64(source.semanticReferenceTimeSeconds)
-    } else {
-      encoder.bool(false)
-    }
+    let source = evaluation.sourceBinding
+    encoder.bool(true)
+    encoder.data(source.captureID.bytes)
+    encoder.data(source.evidenceID.bytes)
+    encoder.data(source.globalFactsHash.bytes)
+    encoder.data(source.classificationResolutionHash.bytes)
+    encoder.string(source.policyVersion)
+    encoder.string(source.schemaVersion)
+    encoder.int64(source.semanticReferenceTimeSeconds)
   }
 
   static func encodeGateResult(
