@@ -263,6 +263,31 @@ func crashAfterPreparedGateIsProvablyNondispatched() throws {
 }
 
 @Test
+func replacementRemovalGateCanRecoverAcrossPredecessorStateCrash() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 10)
+  try ordinary.markDispatched(.domainRemove, nowNanoseconds: 20)
+
+  let crashing = try fixture.journal(
+    boot: firstBoot,
+    failureInjection: .afterGateBeforeState
+  )
+  #expect(
+    throws: ExternalMutationJournalError.operationFailed(
+      "injected-after-gate",
+      errno: EIO
+    )
+  ) {
+    try crashing.beginRemovalAttempt(.domainRemove, nowNanoseconds: 30)
+  }
+
+  try ordinary.requireClear()
+  #expect(try fixture.evidenceNames().isEmpty)
+}
+
+@Test
 func crashAfterCompletionStateRetainsAuthoritativeSuccess() throws {
   let fixture = try TemporaryMutationJournal()
   defer { fixture.remove() }

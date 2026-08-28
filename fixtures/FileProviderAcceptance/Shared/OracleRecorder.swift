@@ -10,6 +10,7 @@ public enum OracleRecorderError: Error, Equatable, Sendable {
 enum OracleAppendInjectedFailure: Error, Equatable {
   case poisonStorage
   case eventStorage
+  case afterEventSyncBeforePoisonRemoval
 }
 
 public enum OracleRecorderState: Equatable, Sendable {

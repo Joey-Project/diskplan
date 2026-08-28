@@ -1,7 +1,10 @@
+import Darwin
 import Foundation
 import Testing
 
 @testable import DiskplanFileProviderFixtureSupport
+
+private let testBootGeneration = "11111111-1111-1111-1111-111111111111"
 
 @Test
 func sealedSnapshotValidatesEveryEventIdentityAndExactSequence() throws {
@@ -18,7 +21,8 @@ func sealedSnapshotValidatesEveryEventIdentityAndExactSequence() throws {
   ]
   try sealedSnapshot(events: validEvents).validate(
     runID: runID,
-    domainIdentifier: domainIdentifier
+    domainIdentifier: domainIdentifier,
+    expectedBootGeneration: testBootGeneration
   )
 
   let wrongRunID = UUID()
@@ -31,7 +35,8 @@ func sealedSnapshotValidatesEveryEventIdentityAndExactSequence() throws {
   #expect(throws: OracleAcceptanceError.identityMismatch(sequence: 1)) {
     try sealedSnapshot(events: [foreignEventOutsideWindow]).validate(
       runID: runID,
-      domainIdentifier: domainIdentifier
+      domainIdentifier: domainIdentifier,
+      expectedBootGeneration: testBootGeneration
     )
   }
 
@@ -43,7 +48,8 @@ func sealedSnapshotValidatesEveryEventIdentityAndExactSequence() throws {
   #expect(throws: OracleAcceptanceError.sequenceMismatch(expected: 1, actual: 2)) {
     try sealedSnapshot(events: [sequenceGap]).validate(
       runID: runID,
-      domainIdentifier: domainIdentifier
+      domainIdentifier: domainIdentifier,
+      expectedBootGeneration: testBootGeneration
     )
   }
 }
@@ -61,7 +67,8 @@ func sealedSnapshotRejectsMalformedEventStructure() {
   #expect(throws: OracleAcceptanceError.malformedEvent(sequence: 1)) {
     try sealedSnapshot(events: [malformed]).validate(
       runID: runID,
-      domainIdentifier: domainIdentifier
+      domainIdentifier: domainIdentifier,
+      expectedBootGeneration: testBootGeneration
     )
   }
 
@@ -74,7 +81,8 @@ func sealedSnapshotRejectsMalformedEventStructure() {
   #expect(throws: OracleAcceptanceError.malformedEvent(sequence: 1)) {
     try sealedSnapshot(events: [outsideWindow]).validate(
       runID: runID,
-      domainIdentifier: domainIdentifier
+      domainIdentifier: domainIdentifier,
+      expectedBootGeneration: testBootGeneration
     )
   }
 }
@@ -141,7 +149,10 @@ func oracleEventJSONRejectsUnknownAndDuplicateTopLevelKeys() throws {
   guard chmod(root.path, 0o700) == 0, chmod(runDirectory.path, 0o700) == 0 else {
     throw POSIXError(.EACCES)
   }
-  let log = OracleLog(runDirectory: runDirectory)
+  let log = OracleLog(
+    runDirectory: runDirectory,
+    bootGenerationProvider: { testBootGeneration }
+  )
   try log.prepare()
   let encoded = try JSONEncoder().encode(
     event(
@@ -176,14 +187,80 @@ func oracleEventJSONRejectsUnknownAndDuplicateTopLevelKeys() throws {
   }
 }
 
+@Test
+func oracleEventFramesRequireOneTerminalLFAndRejectEmptyFrames() throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  let runDirectory = root.appendingPathComponent(UUID().uuidString.lowercased())
+  try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  guard chmod(root.path, 0o700) == 0, chmod(runDirectory.path, 0o700) == 0 else {
+    throw POSIXError(.EACCES)
+  }
+  let log = OracleLog(runDirectory: runDirectory)
+  try log.prepare()
+  let encoded = try JSONEncoder().encode(
+    event(runID: UUID(), domainIdentifier: "fixture", sequence: 1)
+  )
+  let eventURL = runDirectory.appendingPathComponent("events.jsonl")
+
+  for bytes in [
+    encoded,
+    Data([0x0a]) + encoded + Data([0x0a]),
+    encoded + Data([0x0a, 0x0a]),
+  ] {
+    try bytes.write(to: eventURL)
+    guard chmod(eventURL.path, 0o600) == 0 else { throw POSIXError(.EACCES) }
+    #expect(throws: FixtureControlReadError.mismatch(.events, .malformed)) {
+      try log.events()
+    }
+  }
+}
+
+@Test
+func appendRejectsMalformedEarlierFrameBeforeSelectingNextSequence() throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  let runDirectory = root.appendingPathComponent(UUID().uuidString.lowercased())
+  try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  guard chmod(root.path, 0o700) == 0, chmod(runDirectory.path, 0o700) == 0 else {
+    throw POSIXError(.EACCES)
+  }
+  let log = OracleLog(
+    runDirectory: runDirectory,
+    bootGenerationProvider: { testBootGeneration }
+  )
+  try log.prepare()
+  let eventURL = runDirectory.appendingPathComponent("events.jsonl")
+  try Data("{}\n".utf8).write(to: eventURL)
+  guard chmod(eventURL.path, 0o600) == 0 else { throw POSIXError(.EACCES) }
+
+  #expect(throws: FixtureControlReadError.self) {
+    try log.append(
+      event(runID: UUID(), domainIdentifier: "fixture", sequence: 0)
+    )
+  }
+  #expect(try Data(contentsOf: eventURL) == Data("{}\n".utf8))
+  #expect(try log.recorderState() == .poisoned)
+}
+
 private func sealedSnapshot(events: [OracleEvent]) -> OracleSealedSnapshot {
   OracleSealedSnapshot(
     window: OracleWindow(
       beginNanoseconds: 100_000_000,
+      bootGeneration: testBootGeneration,
       endNanoseconds: 200_000_000,
       quietMilliseconds: 50,
       eventCount: events.count,
-      lastSequence: UInt64(events.count)
+      lastSequence: UInt64(events.count),
+      eventSeal: OracleEventSeal(
+        byteCount: 0,
+        frameSHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        device: 1,
+        inode: 1,
+        owner: UInt32(geteuid()),
+        group: UInt32(getegid()),
+        mode: UInt32(S_IFREG | 0o600)
+      )
     ),
     events: events
   )
@@ -201,6 +278,7 @@ private func event(
     sequence: sequence,
     runID: runID,
     domainIdentifier: domainIdentifier,
+    bootGeneration: testBootGeneration,
     itemIdentifier: itemIdentifier,
     kind: kind,
     processID: 1,

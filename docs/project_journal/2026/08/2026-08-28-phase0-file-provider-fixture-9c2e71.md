@@ -133,6 +133,11 @@ superseded_by:
 - [x] Replace same-boot absence heuristics with durable prepared/dispatched/original-completion
   states, an exact host-global pending-run gate, and a boot-session ordering barrier for late
   File Provider and PlugInKit add success.
+- [x] Bind cleanup recovery to the exact pre-rename staging generation and retain evidence on replacement.
+- [x] Make removal retry publication recover across the exact predecessor-to-successor crash edge.
+- [x] Add manifestless prepare rollback, pre-prepare shell recovery, and durable empty-event creation.
+- [x] Seal exact event bytes and held events/window identities, enforce strict JSONL framing, and bind the oracle to one boot session.
+- [x] Treat ctime/mtime as control-byte revalidation triggers and keep content, identity, and access-policy failures distinct.
 - [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
 - [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
 - [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
@@ -150,7 +155,7 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --no-parallel`: all 120 Swift tests pass. Sixteen external-mutation
+- `swift test --no-parallel`: all 133 Swift tests pass. Sixteen external-mutation
   tests cover same-boot late success, authoritative failure and success-plus-remove, injected boot
   changes, reboot-absent and reboot-present reconciliation, independent recovery instances,
   cross-run gate exclusion, extension-add parity, prepared-state nondispatch recovery, successful
@@ -168,7 +173,10 @@ superseded_by:
   abandoned-attempt recovery across recorder recreation, deterministic final-rmdir recovery,
   semantic window validation, deterministic two-second quiet-window reset after a one-second-late
   callback, idempotent teardown sealing, strict event-key decoding, and staging-rename crash
-  recovery before any deletion.
+  recovery before any deletion. Follow-up regressions also cover exact cleanup-staging replacement,
+  predecessor-to-successor mutation recovery, manifestless prepare rollback, first-event durability,
+  exact sealed-byte and canonical-entry drift, strict JSONL framing, boot-session rejection,
+  metadata-only ctime changes, distinct content/access-policy changes, and cross-boot PID reuse.
 - `python3 scripts/test-fileprovider-fixture-registration.py`: 13 parser/physical-path election,
   strict-UTF-8, malformed exact-bundle text, and exact-path removal tests pass.
 - `python3 scripts/test-fileprovider-fixture-pending-preflight.py`: 7 descriptor-pinned root,
@@ -178,14 +186,15 @@ superseded_by:
   are recorded as authoritative completion.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
   compiled successfully with signing disabled.
-- The resolved-only complete serial Swift gate passed all 120 tests on the integrated tree. The
+- The resolved-only complete serial Swift gate passed all 133 tests on the integrated tree. The
   unrelated subsecond macOS probe deadline test timed out in one concurrent run but immediately
   passed its focused rerun and the complete serial run.
   Canonical binary generation and the Swift/Rust cross-language process tests passed.
-- `scripts/test-macos-capabilities.sh`: 29 `DiskplanMacOS` tests and the live self-test passed;
+- `scripts/test-macos-capabilities.sh`: 30 `DiskplanMacOS` tests and the live self-test passed;
   the signed fixture and real-host APFS fixture remained explicitly unavailable without their
   opt-in environment variables.
-- `swift format lint`, `bash -n`, ShellCheck, plist validation, the fixture static safety test,
-  and `git diff --check` passed.
+- `swift-format lint --strict`, `bash -n`, ShellCheck, plist validation, the fixture static safety
+  test, registration (13), pending-preflight (7), PlugInKit (5), subprocess (6), lifecycle-lock
+  (5), cross-language, deployment-target, and `git diff --check` gates passed.
 - Signed India acceptance was intentionally not run in this worktree. It remains the next
   host-only gate and may return the documented provisioning-profile blocker.

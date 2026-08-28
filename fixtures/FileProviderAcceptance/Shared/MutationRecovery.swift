@@ -141,6 +141,7 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
   public let binding: ExternalMutationRunBinding
   public let kind: ExternalMutationKind
   public let operationID: UUID
+  public let predecessorOperationID: UUID?
   public let bootGeneration: String
   public let beganNanoseconds: UInt64
   public private(set) var phase: ExternalMutationPhase
@@ -151,6 +152,7 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     binding: ExternalMutationRunBinding,
     kind: ExternalMutationKind,
     operationID: UUID = UUID(),
+    predecessorOperationID: UUID? = nil,
     bootGeneration: String,
     nowNanoseconds: UInt64
   ) {
@@ -158,6 +160,7 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     self.binding = binding
     self.kind = kind
     self.operationID = operationID
+    self.predecessorOperationID = predecessorOperationID
     self.bootGeneration = bootGeneration
     beganNanoseconds = nowNanoseconds
     phase = .prepared
@@ -188,6 +191,8 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     guard version == 2, binding == expectedBinding,
       try normalizeBootGeneration(bootGeneration) == bootGeneration,
       beganNanoseconds > 0,
+      predecessorOperationID != operationID,
+      !kind.isAdd || predecessorOperationID == nil,
       (phase == .prepared) == (dispatchedNanoseconds == nil),
       (phase == .originalSucceeded || phase == .originalFailed)
         == (completionNanoseconds != nil),
@@ -198,8 +203,15 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
   }
 
   fileprivate func merging(_ other: Self) throws -> Self {
-    guard version == other.version, binding == other.binding, kind == other.kind,
-      operationID == other.operationID, bootGeneration == other.bootGeneration,
+    guard version == other.version, binding == other.binding, kind == other.kind
+    else { throw ExternalMutationJournalError.stateMismatch }
+    if operationID != other.operationID {
+      if predecessorOperationID == other.operationID { return self }
+      if other.predecessorOperationID == operationID { return other }
+      throw ExternalMutationJournalError.stateMismatch
+    }
+    guard predecessorOperationID == other.predecessorOperationID,
+      bootGeneration == other.bootGeneration,
       beganNanoseconds == other.beganNanoseconds
     else { throw ExternalMutationJournalError.stateMismatch }
     if phase.rank == 2, other.phase.rank == 2, phase != other.phase {
@@ -336,6 +348,7 @@ public struct ExternalMutationJournal: Sendable {
     let state = ExternalMutationRecoveryState(
       binding: binding,
       kind: kind,
+      predecessorOperationID: records[kind]?.operationID,
       bootGeneration: currentBootGeneration,
       nowNanoseconds: nowNanoseconds
     )

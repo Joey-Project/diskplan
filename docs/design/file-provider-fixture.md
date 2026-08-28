@@ -174,15 +174,22 @@ completion indefinitely or be mistaken for callback-zero.
 
 The final oracle snapshot is descriptor-bound to one verified run-directory object. Attempt lock,
 recorder lock, events, window, state markers, and sealed snapshot use that held descriptor and
-revalidate canonical path identity and access policy before success. The protected properties are
-object identity (`st_dev` plus `st_ino`) and owner-only access policy (uid, type, mode, and absence
-of an extended ACL); child-entry churn is deliberately not treated as replacement. The closed
-window is written and fsynced, atomically renamed, and followed by a run-directory fsync before the
-sealed marker is published.
+revalidate canonical path identity and access policy before success. The events and window leaves
+are opened and double-read while the recorder lock is held, then both held descriptors, their exact
+canonical entries, and the run-directory identity are revalidated after the read. The window
+durably seals the exact event bytes with SHA-256, byte count, file identity, and access policy, so
+equal count/last-sequence rewrites cannot pass. The protected properties are object identity
+(`st_dev` plus `st_ino`) and owner-only access policy (uid, type, mode, and absence of an extended
+ACL); child-entry churn is deliberately not treated as replacement. The closed window is written
+and fsynced, atomically renamed, and followed by a run-directory fsync before the sealed marker is
+published.
 
 Acceptance validates every sealed event rather than filtering unexpected identities: run ID,
-domain ID, exact sequence `1...N`, structure, and window membership must all match. Enumerator
-JSONL parsing also requires the exact top-level key set and rejects duplicate or unknown keys.
+domain ID, boot-session generation, exact sequence `1...N`, structure, and window membership must
+all match. The open and closed window carry the same boot-session generation. A reboot therefore
+invalidates the old window even if a producer PID is reused. Enumerator JSONL parsing requires an
+empty file or exactly one terminal LF, rejects empty frames, requires the exact top-level key set,
+and rejects duplicate or unknown keys.
 Its structural scanner enforces a small explicit nesting bound before Foundation decoding, so a
 bounded-but-deep tampered event cannot exhaust the call stack.
 acquisition is itself recorded. Acquisition, item enumeration, change enumeration, or sync-anchor
@@ -200,6 +207,9 @@ The journal and global gate use file and parent-directory durability barriers. T
 is intentionally fail closed: dispatch reaches the gate first, completion reaches the operation
 record first, and resolution first publishes a gate without the resolved entry while retaining
 the operation record until the next durable step.
+Removal retries form an explicit predecessor chain. If a crash occurs after successor state B is
+durable in the gate but before its per-kind leaf replaces predecessor A, recovery recognizes only
+that exact A-to-B relation and converges on B; unrelated operation UUIDs remain a typed mismatch.
 
 Same-boot absence polling is never terminal evidence for an unresolved add. Even an
 authoritatively completed compensating removal cannot clear an earlier add whose original
@@ -227,7 +237,14 @@ the environment capability, and verifies that the helper parent still owns the l
 detached lifecycle children therefore cannot reuse or pin the capability.
 
 The initial canonical manifest is atomically published and durably synced before any extension or
-domain mutation. Cleanup recovery preserves a deterministic sibling manifest until the staging
+domain mutation. Run-directory creation, manifest publication, and recorder initialization form a
+transaction: before manifest publication, an initialization failure removes only the known
+descriptor-inventoried recorder files and the manifestless UUID directory; after publication, the
+normal manifest recovery path owns the run. The shell installs its recovery trap before prepare
+and can explicitly recover a retained unpublished transaction. Recorder initialization precreates
+and fsyncs the empty `events.jsonl` entry and then fsyncs the run directory before any callback can
+append, so a first-event fsync cannot be separated from its durable name while poison evidence is
+cleared. Cleanup recovery preserves a deterministic sibling manifest until the staging
 directory removal and canonical-parent fsync are durable. Existing sibling evidence is freshly
 synced before reuse; restored canonical evidence is fsynced before rename-back and the parent is
 fsynced before sibling deletion. Protected directories, control leaves, mutation journals, and
@@ -256,8 +273,12 @@ signatures, both exact bundle IDs, and team `XCTTZ89923`, and only then asks tha
 securely load the manifest. The manifest build paths must equal those already trusted artifacts.
 Recovery removes only the exact domain, unregisters only that exact embedded extension, and
 then removes only the App Group UUID run directory. A sibling recovery manifest is accepted only
-when its exact lowercased UUID path, embedded manifest identity, expected App Group run path, and
-deterministic `.cleanup-<uuid>` staging path all agree. If the exact domain still exists, the
+when its exact lowercased UUID path, lifecycle provenance, operation UUID, embedded manifest bytes
+and digest, expected App Group run path, deterministic `.cleanup-<uuid>` staging path, and the
+pre-rename staging device/inode/generation/access-policy binding all agree. Recovery revalidates
+that persisted binding before inventory, after deletion, and immediately before final unlink;
+replacement retains both recovery evidence and unrelated staging content. If the exact domain
+still exists, the
 host must seal the recorder in that staging directory before removal. Teardown sealing is
 idempotent across recovery runs: an existing sealed state reuses its single durable admission
 cutoff, and a clean sealing-plus-cutoff crash intermediate can be completed without appending a
@@ -268,9 +289,13 @@ a descriptor for the trusted expected App Group `runs` parent; it never opens a 
 parent path. Symlink plus `..` aliases therefore fail before status, build-path reads, teardown,
 or cleanup can consume manifest bytes.
 
-Cleanup protects object identity and owner/group/mode access policy for every held descriptor.
-Regular files additionally protect content stability. Directories deliberately do not compare
-mtime/ctime after child deletion because child-entry churn is benign for the protected property.
+Cleanup protects object identity and owner/group/mode/ACL access policy for every held descriptor.
+Regular files additionally protect descriptor bytes with two stable SHA-256 passes before deletion,
+and regular control reads compare exact bytes when metadata triggers a revalidation. Size, mtime,
+and ctime changes are revalidation triggers, not content proof: unchanged bytes remain acceptable,
+a byte change is `contentChanged`, and owner/group/mode/ACL drift is separately `accessPolicy`. Directories
+deliberately do not compare mtime/ctime after child deletion because child-entry churn is benign for
+the protected property.
 The run root must be on the same device as its held parent, and every directory descent must
 remain on that root device. A mount point or any directory whose device cannot be proven equal
 fails closed before inventory, so cleanup never traverses or deletes a mounted volume.

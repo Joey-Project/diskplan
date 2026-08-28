@@ -36,6 +36,11 @@ enum FixtureHost {
       let extensionPath = try options.required("extension-path")
       let runID = try options.requiredUUID("run-id")
       try prepare(runID: runID, appPath: appPath, extensionPath: extensionPath)
+    case "recover-unpublished":
+      let runID = try options.requiredUUID("run-id")
+      let log = try OracleLog.appGroup(runID: runID)
+      try SecureFixtureStorage.recoverUnpublishedRun(expectedRunDirectory: log.runDirectory)
+      printJSON(["status": "unpublished-run-removed", "run_id": runID.uuidString.lowercased()])
     case "setup":
       let loaded = try loadManifest(try options.requiredURL("manifest"))
       try await setup(manifest: loaded.manifest)
@@ -45,7 +50,10 @@ enum FixtureHost {
     case "oracle-begin":
       let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
       try OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath)).writeWindow(
-        OracleWindow(beginNanoseconds: monotonicNow())
+        OracleWindow(
+          beginNanoseconds: monotonicNow(),
+          bootGeneration: try ExternalMutationBootSession.currentGeneration()
+        )
       )
       printJSON(["status": "oracle-open", "run_id": manifest.runID.uuidString.lowercased()])
     case "oracle-end":
@@ -170,7 +178,6 @@ enum FixtureHost {
 
   private static func prepare(runID: UUID, appPath: String, extensionPath: String) throws {
     let log = try OracleLog.appGroup(runID: runID)
-    try log.prepare()
     let taskRoot = log.runDirectory
     let manifestURL = taskRoot.appendingPathComponent("manifest.json")
     let manifest = FixtureManifest(
@@ -181,10 +188,25 @@ enum FixtureHost {
       appGroupRunPath: log.runDirectory.path
     )
     try manifest.validate(expectedTaskRoot: taskRoot)
-    try SecureFixtureStorage.publishInitialManifest(
-      try JSONEncoder().encode(manifest),
-      in: taskRoot
-    )
+    var manifestPublished = false
+    do {
+      try log.createInitialRunDirectory()
+      try SecureFixtureStorage.publishInitialManifest(
+        try JSONEncoder().encode(manifest),
+        in: taskRoot
+      )
+      manifestPublished = true
+      try log.initializeRecorder()
+    } catch {
+      if !manifestPublished {
+        do {
+          try SecureFixtureStorage.recoverUnpublishedRun(expectedRunDirectory: taskRoot)
+        } catch {
+          throw FixtureCleanupError.retained(taskRoot.path)
+        }
+      }
+      throw error
+    }
     printJSON(["status": "prepared", "manifest": manifestURL.path])
   }
 
@@ -280,7 +302,8 @@ enum FixtureHost {
     let snapshot = try log.sealedSnapshot()
     try snapshot.validate(
       runID: manifest.runID,
-      domainIdentifier: manifest.domainIdentifier
+      domainIdentifier: manifest.domainIdentifier,
+      expectedBootGeneration: try ExternalMutationBootSession.currentGeneration()
     )
     let window = snapshot.window
     let events = snapshot.events

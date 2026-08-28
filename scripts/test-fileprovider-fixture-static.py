@@ -76,6 +76,15 @@ def main() -> int:
     )
     accept_body = lifecycle[lifecycle.index("accept()") : lifecycle.index("command=$1")]
     require(
+        accept_body.index("trap report_recovery EXIT")
+        < accept_body.index('"$host" prepare'),
+        "prepare recovery trap must be active before the run directory can be created",
+    )
+    require(
+        "recover-unpublished" in lifecycle and 'case "recover-unpublished"' in swift,
+        "manifestless prepare artifacts must have a deterministic recovery command",
+    )
+    require(
         accept_body.index("unregister_extension")
         < accept_body.index("verify_removed_extension")
         < accept_body.index('"$host" cleanup'),

@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -268,8 +269,14 @@ public enum SecureFixtureStorage {
     let stagingName = ".cleanup-\(runName)"
     let recoveryName = ".manifest-recovery-\(runName).json"
     let recoveryURL = parentURL.appendingPathComponent(recoveryName)
-    try createExternalManifestRecovery(
-      manifestData,
+    let recoveryData = try createExternalManifestRecovery(
+      CleanupRecoveryRecord(
+        manifestData: manifestData,
+        manifest: manifest,
+        stagingName: stagingName,
+        stagingMetadata: root.metadata
+      ),
+      expectedRunDirectory: expectedRunDirectory,
       parent: parent,
       name: recoveryName,
       injectExistingFileSyncFailure: injectExistingRecoveryFileSyncFailure,
@@ -287,7 +294,7 @@ public enum SecureFixtureStorage {
       let operationError = error
       do {
         try removeExternalManifestRecovery(
-          manifestData,
+          recoveryData,
           parent: parent,
           name: recoveryName
         )
@@ -358,7 +365,7 @@ public enum SecureFixtureStorage {
         }
         _ = try readBoundControlFile(directory: root, name: "manifest.json", record: .manifest)
         try removeExternalManifestRecovery(
-          manifestData,
+          recoveryData,
           parent: parent,
           name: recoveryName
         )
@@ -369,13 +376,46 @@ public enum SecureFixtureStorage {
     }
     do {
       try removeExternalManifestRecovery(
-        manifestData,
+        recoveryData,
         parent: parent,
         name: recoveryName
       )
     } catch {
       throw FixtureCleanupError.retained(recoveryURL.path)
     }
+  }
+
+  public static func recoverUnpublishedRun(expectedRunDirectory: URL) throws {
+    let parentURL = expectedRunDirectory.deletingLastPathComponent()
+    let runName = expectedRunDirectory.lastPathComponent
+    guard expectedRunDirectory.isFileURL, let runID = UUID(uuidString: runName),
+      runID.uuidString.lowercased() == runName
+    else { throw FixtureCleanupError.unsafeTarget }
+    let parent = try openDirectory(at: parentURL, cleanupPath: parentURL.path)
+    try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
+    let root = try openChildDirectory(
+      parent: parent,
+      name: runName,
+      depth: 0,
+      expectedDevice: parent.metadata.device
+    )
+    try requireMissingPath(parent: root, name: "manifest.json", operation: "published-manifest")
+    var remainingEntries = maximumCleanupEntries
+    let tree = try inventory(
+      directory: root,
+      rootDevice: root.metadata.device,
+      depth: 0,
+      isRoot: false,
+      remainingEntries: &remainingEntries
+    )
+    try requireUnpublishedRunEntries(tree)
+    try delete(entries: tree, from: root)
+    try requireStableObject(parent: parent, name: runName, descriptor: root)
+    try unlink(parent: parent, name: runName, flags: AT_REMOVEDIR)
+    guard fsync(parent.rawValue) == 0 else {
+      throw FixtureCleanupError.retained(expectedRunDirectory.path)
+    }
+    try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
   }
 
   public static func cleanupRecoveryManifestURL(for expectedRunDirectory: URL) -> URL {
@@ -408,18 +448,14 @@ public enum SecureFixtureStorage {
       record: .manifest
     )
     try requireControlDirectoryPathIdentity(parentURL, descriptor: parent, record: .manifest)
-    let manifest: FixtureManifest
     do {
-      manifest = try JSONDecoder().decode(FixtureManifest.self, from: data)
-      try manifest.validate(expectedTaskRoot: expectedRunDirectory)
-      guard
-        URL(fileURLWithPath: manifest.appGroupRunPath).standardizedFileURL
-          == expectedRunDirectory.standardizedFileURL
-      else { throw FixtureContractError.unsafePath }
+      return try decodeCleanupRecoveryRecord(
+        data,
+        expectedRunDirectory: expectedRunDirectory
+      ).validate(expectedRunDirectory: expectedRunDirectory)
     } catch {
       throw FixtureControlReadError.mismatch(.manifest, .semantic)
     }
-    return manifest
   }
 
   public static func recoverCleanup(
@@ -437,22 +473,16 @@ public enum SecureFixtureStorage {
     let parent = try openDirectory(at: parentURL, cleanupPath: parentURL.path)
     try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
 
-    let manifestData = try readBoundControlFile(
+    let recoveryData = try readBoundControlFile(
       directory: parent,
       name: recoveryName,
       record: .manifest
     )
-    let manifest: FixtureManifest
-    do {
-      manifest = try JSONDecoder().decode(FixtureManifest.self, from: manifestData)
-      try manifest.validate(expectedTaskRoot: expectedRunDirectory)
-      guard
-        URL(fileURLWithPath: manifest.appGroupRunPath).standardizedFileURL
-          == expectedRunDirectory.standardizedFileURL
-      else { throw FixtureContractError.unsafePath }
-    } catch {
-      throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
-    }
+    let recoveryRecord = try decodeCleanupRecoveryRecord(
+      recoveryData,
+      expectedRunDirectory: expectedRunDirectory
+    )
+    _ = try recoveryRecord.validate(expectedRunDirectory: expectedRunDirectory)
 
     do {
       try requireMissingPath(parent: parent, name: runName, operation: "canonical-run-directory")
@@ -462,6 +492,12 @@ public enum SecureFixtureStorage {
         expectedDevice: parent.metadata.device
       )
       if let staging {
+        try requireCleanupStagingBinding(
+          recoveryRecord,
+          staging: staging,
+          parent: parent,
+          name: stagingName
+        )
         var remainingEntries = maximumCleanupEntries
         let tree = try inventory(
           directory: staging,
@@ -471,7 +507,12 @@ public enum SecureFixtureStorage {
           remainingEntries: &remainingEntries
         )
         try delete(entries: tree, from: staging)
-        try requireStableObject(parent: parent, name: stagingName, descriptor: staging)
+        try requireCleanupStagingBinding(
+          recoveryRecord,
+          staging: staging,
+          parent: parent,
+          name: stagingName
+        )
         try unlink(parent: parent, name: stagingName, flags: AT_REMOVEDIR)
       }
       guard fsync(parent.rawValue) == 0 else {
@@ -479,7 +520,7 @@ public enum SecureFixtureStorage {
       }
       try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
       try removeExternalManifestRecovery(
-        manifestData,
+        recoveryData,
         parent: parent,
         name: recoveryName
       )
@@ -496,6 +537,20 @@ public enum SecureFixtureStorage {
     record: FixtureControlRecord,
     maximumBytes: Int = maximumControlBytes
   ) throws -> Data {
+    try readControlFile(
+      at: url,
+      record: record,
+      maximumBytes: maximumBytes,
+      afterInitialRead: {}
+    )
+  }
+
+  static func readControlFile(
+    at url: URL,
+    record: FixtureControlRecord,
+    maximumBytes: Int = maximumControlBytes,
+    afterInitialRead: () throws -> Void
+  ) throws -> Data {
     let directoryURL = url.deletingLastPathComponent()
     let directory = try openControlDirectory(at: directoryURL, record: record)
     try requireControlDirectoryPathIdentity(directoryURL, descriptor: directory, record: record)
@@ -503,7 +558,8 @@ public enum SecureFixtureStorage {
       directory: directory,
       name: url.lastPathComponent,
       record: record,
-      maximumBytes: maximumBytes
+      maximumBytes: maximumBytes,
+      afterInitialRead: afterInitialRead
     )
     try requireControlDirectoryPathIdentity(directoryURL, descriptor: directory, record: record)
     return data
@@ -513,10 +569,12 @@ public enum SecureFixtureStorage {
 private final class BoundDescriptor: @unchecked Sendable {
   let rawValue: Int32
   let metadata: BoundMetadata
+  let contentDigest: Data?
 
-  init(rawValue: Int32, metadata: BoundMetadata) {
+  init(rawValue: Int32, metadata: BoundMetadata, contentDigest: Data? = nil) {
     self.rawValue = rawValue
     self.metadata = metadata
+    self.contentDigest = contentDigest
   }
 
   deinit { close(rawValue) }
@@ -525,6 +583,7 @@ private final class BoundDescriptor: @unchecked Sendable {
 private struct BoundMetadata: Equatable, Sendable {
   let device: dev_t
   let inode: ino_t
+  let generation: UInt32
   let owner: uid_t
   let group: gid_t
   let mode: mode_t
@@ -538,6 +597,7 @@ private struct BoundMetadata: Equatable, Sendable {
   init(_ value: stat, extendedACL: ExtendedACLState = .notInspected) {
     device = value.st_dev
     inode = value.st_ino
+    generation = value.st_gen
     owner = value.st_uid
     group = value.st_gid
     mode = value.st_mode
@@ -553,15 +613,109 @@ private struct BoundMetadata: Equatable, Sendable {
     sameIdentityAndPOSIXAccess(as: other) && extendedACL == other.extendedACL
   }
 
+  func sameIdentity(as other: BoundMetadata) -> Bool {
+    device == other.device && inode == other.inode && generation == other.generation
+  }
+
+  func sameAccessPolicy(as other: BoundMetadata) -> Bool {
+    owner == other.owner && group == other.group && mode == other.mode
+      && extendedACL == other.extendedACL
+  }
+
   func sameIdentityAndPOSIXAccess(as other: BoundMetadata) -> Bool {
-    device == other.device && inode == other.inode && owner == other.owner
+    sameIdentity(as: other) && owner == other.owner
       && group == other.group && mode == other.mode
   }
 
-  func sameContentState(as other: BoundMetadata) -> Bool {
-    size == other.size && modifiedSeconds == other.modifiedSeconds
-      && modifiedNanoseconds == other.modifiedNanoseconds
-      && changedSeconds == other.changedSeconds && changedNanoseconds == other.changedNanoseconds
+  func contentMetadataChanged(from other: BoundMetadata) -> Bool {
+    size != other.size || modifiedSeconds != other.modifiedSeconds
+      || modifiedNanoseconds != other.modifiedNanoseconds
+      || changedSeconds != other.changedSeconds || changedNanoseconds != other.changedNanoseconds
+  }
+
+  func samePOSIXAccessPolicy(as other: BoundMetadata) -> Bool {
+    owner == other.owner && group == other.group && mode == other.mode
+  }
+}
+
+private struct CleanupRecoveryRecord: Codable, Equatable {
+  static let provenance = "diskplan-file-provider-fixture-cleanup-v2"
+
+  let version: Int
+  let operationID: UUID
+  let provenance: String
+  let runID: UUID
+  let stagingName: String
+  let manifestData: Data
+  let manifestSHA256: String
+  let stagingBinding: CleanupStagingBinding
+
+  init(
+    manifestData: Data,
+    manifest: FixtureManifest,
+    stagingName: String,
+    stagingMetadata: BoundMetadata
+  ) {
+    version = 1
+    operationID = UUID()
+    provenance = Self.provenance
+    runID = manifest.runID
+    self.stagingName = stagingName
+    self.manifestData = manifestData
+    manifestSHA256 = manifestData.sha256Hex
+    stagingBinding = CleanupStagingBinding(stagingMetadata)
+  }
+
+  func validate(expectedRunDirectory: URL) throws -> FixtureManifest {
+    let runName = expectedRunDirectory.lastPathComponent
+    guard version == 1, provenance == Self.provenance,
+      runID.uuidString.lowercased() == runName,
+      stagingName == ".cleanup-\(runName)",
+      manifestData.count <= SecureFixtureStorage.maximumControlBytes,
+      manifestSHA256 == manifestData.sha256Hex,
+      stagingBinding.isOwnerPrivateDirectory
+    else { throw FixtureCleanupError.treeMismatch("cleanup-recovery-binding") }
+    let manifest: FixtureManifest
+    do {
+      manifest = try JSONDecoder().decode(FixtureManifest.self, from: manifestData)
+      try manifest.validate(expectedTaskRoot: expectedRunDirectory)
+      guard manifest.runID == runID,
+        URL(fileURLWithPath: manifest.appGroupRunPath).standardizedFileURL
+          == expectedRunDirectory.standardizedFileURL
+      else { throw FixtureContractError.unsafePath }
+    } catch {
+      throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
+    }
+    return manifest
+  }
+}
+
+private struct CleanupStagingBinding: Codable, Equatable {
+  let device: Int64
+  let inode: UInt64
+  let generation: UInt32
+  let owner: UInt32
+  let group: UInt32
+  let mode: UInt32
+  let extendedACLAbsent: Bool
+
+  init(_ metadata: BoundMetadata) {
+    device = Int64(metadata.device)
+    inode = UInt64(metadata.inode)
+    generation = metadata.generation
+    owner = UInt32(metadata.owner)
+    group = UInt32(metadata.group)
+    mode = UInt32(metadata.mode)
+    extendedACLAbsent = metadata.extendedACL == .absent
+  }
+
+  var isOwnerPrivateDirectory: Bool {
+    owner == UInt32(geteuid()) && mode & UInt32(S_IFMT) == UInt32(S_IFDIR)
+      && mode & 0o077 == 0 && extendedACLAbsent && inode > 0
+  }
+
+  func matches(_ metadata: BoundMetadata) -> Bool {
+    self == CleanupStagingBinding(metadata)
   }
 }
 
@@ -584,6 +738,26 @@ private indirect enum CleanupEntry {
   var isManifest: Bool {
     if case .file(_, _, let isManifest) = self { return isManifest }
     return false
+  }
+}
+
+private func requireUnpublishedRunEntries(_ entries: [CleanupEntry]) throws {
+  let fixedNames: Set<String> = [
+    "recorder.lock",
+    "recorder-attempt.lock",
+    "recorder-admissions.log",
+    "events.jsonl",
+  ]
+  for entry in entries {
+    guard case .file(let name, _, _) = entry else {
+      throw FixtureCleanupError.treeMismatch("unpublished-run-entry")
+    }
+    if fixedNames.contains(name) { continue }
+    let prefix = ".manifest.json.publish-"
+    let suffix = String(name.dropFirst(prefix.count))
+    guard name.hasPrefix(prefix), let identifier = UUID(uuidString: suffix),
+      identifier.uuidString.lowercased() == suffix
+    else { throw FixtureCleanupError.treeMismatch("unpublished-run-entry") }
   }
 }
 
@@ -669,6 +843,35 @@ private func openOptionalChildDirectory(
   )
 }
 
+private func decodeCleanupRecoveryRecord(
+  _ data: Data,
+  expectedRunDirectory: URL
+) throws -> CleanupRecoveryRecord {
+  let record: CleanupRecoveryRecord
+  do {
+    record = try JSONDecoder().decode(CleanupRecoveryRecord.self, from: data)
+    _ = try record.validate(expectedRunDirectory: expectedRunDirectory)
+  } catch let error as FixtureCleanupError {
+    throw error
+  } catch {
+    throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
+  }
+  return record
+}
+
+private func requireCleanupStagingBinding(
+  _ record: CleanupRecoveryRecord,
+  staging: BoundDescriptor,
+  parent: BoundDescriptor,
+  name: String
+) throws {
+  let current = try metadata(descriptor: staging.rawValue)
+  guard record.stagingBinding.matches(current) else {
+    throw FixtureCleanupError.objectChanged("cleanup-staging-binding")
+  }
+  try requirePathIdentity(parent: parent, name: name, expected: current)
+}
+
 private func requireMissingPath(
   parent: BoundDescriptor,
   name: String,
@@ -687,7 +890,8 @@ private func readBoundControlFile(
   directory: BoundDescriptor,
   name: String,
   record: FixtureControlRecord,
-  maximumBytes: Int = SecureFixtureStorage.maximumControlBytes
+  maximumBytes: Int = SecureFixtureStorage.maximumControlBytes,
+  afterInitialRead: () throws -> Void = {}
 ) throws -> Data {
   let descriptor = openat(
     directory.rawValue,
@@ -708,22 +912,52 @@ private func readBoundControlFile(
   } catch let error as POSIXError {
     throw FixtureControlReadError.unreadable(record, errno: error.code.rawValue)
   }
-  let after = try controlMetadata(descriptor: descriptor, record: record)
-  guard before.sameIdentityAndAccess(as: after) else {
-    throw FixtureControlReadError.mismatch(record, .identityChanged)
-  }
-  guard before.sameContentState(as: after) else {
-    throw FixtureControlReadError.mismatch(record, .contentChanged)
+  try afterInitialRead()
+  var after = try controlMetadata(descriptor: descriptor, record: record)
+  try requireSameControlObject(before, after, record: record)
+  if after.contentMetadataChanged(from: before) {
+    guard after.size >= 0, after.size <= maximumBytes else {
+      throw FixtureControlReadError.mismatch(record, .sizeLimit)
+    }
+    let second: Data
+    do {
+      second = try readAll(descriptor: descriptor, count: Int(after.size))
+    } catch let error as POSIXError {
+      throw FixtureControlReadError.unreadable(record, errno: error.code.rawValue)
+    }
+    let final = try controlMetadata(descriptor: descriptor, record: record)
+    try requireSameControlObject(after, final, record: record)
+    guard after.size == final.size, data == second else {
+      throw FixtureControlReadError.mismatch(record, .contentChanged)
+    }
+    after = final
   }
   var current = stat()
   guard fstatat(directory.rawValue, name, &current, AT_SYMLINK_NOFOLLOW) == 0 else {
     if errno == ENOENT { throw FixtureControlReadError.missing(record) }
     throw FixtureControlReadError.unreadable(record, errno: errno)
   }
-  guard before.sameIdentityAndPOSIXAccess(as: BoundMetadata(current)) else {
+  let endpoint = BoundMetadata(current)
+  guard after.sameIdentity(as: endpoint) else {
     throw FixtureControlReadError.mismatch(record, .identityChanged)
   }
+  guard after.samePOSIXAccessPolicy(as: endpoint) else {
+    throw FixtureControlReadError.mismatch(record, .accessPolicy)
+  }
   return data
+}
+
+private func requireSameControlObject(
+  _ expected: BoundMetadata,
+  _ observed: BoundMetadata,
+  record: FixtureControlRecord
+) throws {
+  guard expected.sameIdentity(as: observed) else {
+    throw FixtureControlReadError.mismatch(record, .identityChanged)
+  }
+  guard expected.sameAccessPolicy(as: observed) else {
+    throw FixtureControlReadError.mismatch(record, .accessPolicy)
+  }
 }
 
 private func classifyOpenError(
@@ -848,7 +1082,15 @@ private func inventory(
         guard bound.sameIdentityAndPOSIXAccess(as: initial), bound.owner == geteuid(),
           bound.mode & 0o077 == 0, bound.extendedACL == .absent
         else { throw FixtureCleanupError.treeMismatch(name) }
-        descriptor = BoundDescriptor(rawValue: raw, metadata: bound)
+        descriptor = BoundDescriptor(
+          rawValue: raw,
+          metadata: bound,
+          contentDigest: try stableRegularFileDigest(
+            descriptor: raw,
+            expected: bound,
+            name: name
+          )
+        )
       } catch {
         close(raw)
         throw error
@@ -914,12 +1156,60 @@ private func requireStableObject(
   guard descriptor.metadata.sameIdentityAndAccess(as: current) else {
     throw FixtureCleanupError.objectChanged(name)
   }
-  if descriptor.metadata.mode & S_IFMT == S_IFREG,
-    !descriptor.metadata.sameContentState(as: current)
-  {
-    throw FixtureCleanupError.objectChanged(name)
+  if let expectedDigest = descriptor.contentDigest {
+    let currentDigest = try stableRegularFileDigest(
+      descriptor: descriptor.rawValue,
+      expected: current,
+      name: name
+    )
+    guard currentDigest == expectedDigest else {
+      throw FixtureCleanupError.objectChanged(name)
+    }
   }
   try requirePathIdentity(parent: parent, name: name, expected: current)
+}
+
+private func stableRegularFileDigest(
+  descriptor: Int32,
+  expected: BoundMetadata,
+  name: String
+) throws -> Data {
+  guard expected.size >= 0 else { throw FixtureCleanupError.objectChanged(name) }
+  let first = try regularFileDigest(descriptor: descriptor, size: expected.size, name: name)
+  let middle = try metadata(descriptor: descriptor)
+  guard expected.sameIdentityAndAccess(as: middle), expected.size == middle.size else {
+    throw FixtureCleanupError.objectChanged(name)
+  }
+  let second = try regularFileDigest(descriptor: descriptor, size: middle.size, name: name)
+  let final = try metadata(descriptor: descriptor)
+  guard middle.sameIdentityAndAccess(as: final), middle.size == final.size,
+    first == second
+  else { throw FixtureCleanupError.objectChanged(name) }
+  return second
+}
+
+private func regularFileDigest(
+  descriptor: Int32,
+  size: off_t,
+  name: String
+) throws -> Data {
+  var hasher = SHA256()
+  var offset: off_t = 0
+  var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+  while offset < size {
+    let remaining = size - offset
+    let requested = Int(min(remaining, off_t(buffer.count)))
+    let received = buffer.withUnsafeMutableBytes {
+      pread(descriptor, $0.baseAddress, requested, offset)
+    }
+    if received < 0, errno == EINTR { continue }
+    guard received > 0 else {
+      throw FixtureCleanupError.operationFailed(name, errno: errno == 0 ? EIO : errno)
+    }
+    hasher.update(data: Data(buffer.prefix(received)))
+    offset += off_t(received)
+  }
+  return Data(hasher.finalize())
 }
 
 private func requirePathIdentity(
@@ -1115,12 +1405,17 @@ private enum FixtureCleanupInjectedCrash: Error {
 }
 
 private func createExternalManifestRecovery(
-  _ data: Data,
+  _ proposed: CleanupRecoveryRecord,
+  expectedRunDirectory: URL,
   parent: BoundDescriptor,
   name: String,
   injectExistingFileSyncFailure: Bool = false,
   injectExistingParentSyncFailure: Bool = false
-) throws {
+) throws -> Data {
+  let data = try JSONEncoder().encode(proposed)
+  guard data.count <= SecureFixtureStorage.maximumControlBytes else {
+    throw FixtureCleanupError.treeMismatch("cleanup-recovery-size")
+  }
   let descriptor = openat(
     parent.rawValue,
     name,
@@ -1134,7 +1429,14 @@ private func createExternalManifestRecovery(
       record: .manifest,
       injectFileSyncFailure: injectExistingFileSyncFailure
     )
-    guard existing == data else {
+    let existingRecord = try decodeCleanupRecoveryRecord(
+      existing,
+      expectedRunDirectory: expectedRunDirectory
+    )
+    guard existingRecord.manifestData == proposed.manifestData,
+      existingRecord.stagingName == proposed.stagingName,
+      existingRecord.stagingBinding == proposed.stagingBinding
+    else {
       throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
     }
     if injectExistingParentSyncFailure {
@@ -1143,7 +1445,7 @@ private func createExternalManifestRecovery(
     guard fsync(parent.rawValue) == 0 else {
       throw FixtureCleanupError.operationFailed("sync-manifest-recovery-parent", errno: errno)
     }
-    return
+    return existing
   }
   guard descriptor >= 0 else {
     throw FixtureCleanupError.operationFailed("create-manifest-recovery-copy", errno: errno)
@@ -1168,6 +1470,7 @@ private func createExternalManifestRecovery(
   guard recovered == data else {
     throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
   }
+  return data
 }
 
 private func removeExternalManifestRecovery(
@@ -1183,6 +1486,35 @@ private func removeExternalManifestRecovery(
   guard recovered == data else {
     throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
   }
+  let descriptor = openat(
+    parent.rawValue,
+    name,
+    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+  )
+  guard descriptor >= 0 else {
+    throw FixtureCleanupError.operationFailed("open-manifest-recovery-removal", errno: errno)
+  }
+  defer { close(descriptor) }
+  try acquireSharedLock(descriptor, record: .manifest)
+  defer { flock(descriptor, LOCK_UN) }
+  let before = try controlMetadata(descriptor: descriptor, record: .manifest)
+  guard before.size == data.count else {
+    throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
+  }
+  let pinned = try readAll(descriptor: descriptor, count: data.count)
+  let after = try controlMetadata(descriptor: descriptor, record: .manifest)
+  try requireSameControlObject(before, after, record: .manifest)
+  guard pinned == data else {
+    throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
+  }
+  var endpoint = stat()
+  guard fstatat(parent.rawValue, name, &endpoint, AT_SYMLINK_NOFOLLOW) == 0 else {
+    throw FixtureCleanupError.operationFailed("revalidate-manifest-recovery-removal", errno: errno)
+  }
+  let endpointMetadata = BoundMetadata(endpoint)
+  guard after.sameIdentity(as: endpointMetadata),
+    after.samePOSIXAccessPolicy(as: endpointMetadata)
+  else { throw FixtureCleanupError.objectChanged("manifest-recovery-removal") }
   try unlink(parent: parent, name: name, flags: 0)
   guard fsync(parent.rawValue) == 0 else {
     throw FixtureCleanupError.operationFailed("sync-manifest-recovery-removal", errno: errno)
@@ -1264,22 +1596,40 @@ private func syncExistingBoundControlFile(
       errno: errno
     )
   }
-  let after = try controlMetadata(descriptor: descriptor, record: record)
-  guard before.sameIdentityAndAccess(as: after) else {
-    throw FixtureControlReadError.mismatch(record, .identityChanged)
-  }
-  guard before.sameContentState(as: after) else {
-    throw FixtureControlReadError.mismatch(record, .contentChanged)
+  var after = try controlMetadata(descriptor: descriptor, record: record)
+  try requireSameControlObject(before, after, record: record)
+  var stableData = data
+  if after.contentMetadataChanged(from: before) {
+    guard after.size >= 0, after.size <= SecureFixtureStorage.maximumControlBytes else {
+      throw FixtureControlReadError.mismatch(record, .sizeLimit)
+    }
+    let second: Data
+    do {
+      second = try readAll(descriptor: descriptor, count: Int(after.size))
+    } catch let error as POSIXError {
+      throw FixtureControlReadError.unreadable(record, errno: error.code.rawValue)
+    }
+    let final = try controlMetadata(descriptor: descriptor, record: record)
+    try requireSameControlObject(after, final, record: record)
+    guard after.size == final.size, data == second else {
+      throw FixtureControlReadError.mismatch(record, .contentChanged)
+    }
+    after = final
+    stableData = second
   }
   var current = stat()
   guard fstatat(directory.rawValue, name, &current, AT_SYMLINK_NOFOLLOW) == 0 else {
     if errno == ENOENT { throw FixtureControlReadError.missing(record) }
     throw FixtureControlReadError.unreadable(record, errno: errno)
   }
-  guard before.sameIdentityAndPOSIXAccess(as: BoundMetadata(current)) else {
+  let endpoint = BoundMetadata(current)
+  guard after.sameIdentity(as: endpoint) else {
     throw FixtureControlReadError.mismatch(record, .identityChanged)
   }
-  return data
+  guard after.samePOSIXAccessPolicy(as: endpoint) else {
+    throw FixtureControlReadError.mismatch(record, .accessPolicy)
+  }
+  return stableData
 }
 
 private func readAll(descriptor: Int32, count: Int) throws -> Data {
@@ -1313,6 +1663,12 @@ private func writeAll(_ data: Data, descriptor: Int32) throws {
       remaining -= written
       pointer = pointer.advanced(by: written)
     }
+  }
+}
+
+extension Data {
+  fileprivate var sha256Hex: String {
+    SHA256.hash(data: self).map { String(format: "%02x", $0) }.joined()
   }
 }
 

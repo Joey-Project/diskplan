@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum FixtureContract {
@@ -131,9 +132,14 @@ public struct OracleSealedSnapshot: Sendable {
     self.events = events
   }
 
-  public func validate(runID: UUID, domainIdentifier: String) throws {
+  public func validate(
+    runID: UUID,
+    domainIdentifier: String,
+    expectedBootGeneration: String
+  ) throws {
     try window.validate()
     guard window.endNanoseconds != nil,
+      window.bootGeneration == expectedBootGeneration,
       window.eventCount == events.count,
       window.lastSequence == UInt64(events.count)
     else { throw OracleAcceptanceError.windowMismatch }
@@ -142,6 +148,7 @@ public struct OracleSealedSnapshot: Sendable {
       try event.validate(
         expectedRunID: runID,
         expectedDomainIdentifier: domainIdentifier,
+        expectedBootGeneration: expectedBootGeneration,
         expectedSequence: UInt64(index + 1)
       )
       guard window.contains(event) else {
@@ -260,6 +267,7 @@ public struct OracleEvent: Codable, Equatable, Sendable {
   public var sequence: UInt64
   public let runID: UUID
   public let domainIdentifier: String
+  public let bootGeneration: String
   public let itemIdentifier: String
   public let kind: OracleEventKind
   public let processID: Int32
@@ -270,6 +278,7 @@ public struct OracleEvent: Codable, Equatable, Sendable {
     sequence: UInt64 = 0,
     runID: UUID,
     domainIdentifier: String,
+    bootGeneration: String,
     itemIdentifier: String,
     kind: OracleEventKind,
     processID: Int32,
@@ -279,6 +288,7 @@ public struct OracleEvent: Codable, Equatable, Sendable {
     self.sequence = sequence
     self.runID = runID
     self.domainIdentifier = domainIdentifier
+    self.bootGeneration = bootGeneration
     self.itemIdentifier = itemIdentifier
     self.kind = kind
     self.processID = processID
@@ -289,6 +299,7 @@ public struct OracleEvent: Codable, Equatable, Sendable {
   public func validate(
     expectedRunID: UUID,
     expectedDomainIdentifier: String,
+    expectedBootGeneration: String,
     expectedSequence: UInt64
   ) throws {
     guard sequence == expectedSequence else {
@@ -297,7 +308,9 @@ public struct OracleEvent: Codable, Equatable, Sendable {
         actual: sequence
       )
     }
-    guard runID == expectedRunID, domainIdentifier == expectedDomainIdentifier else {
+    guard runID == expectedRunID, domainIdentifier == expectedDomainIdentifier,
+      bootGeneration == expectedBootGeneration
+    else {
       throw OracleAcceptanceError.identityMismatch(sequence: sequence)
     }
     guard !itemIdentifier.isEmpty,
@@ -305,6 +318,7 @@ public struct OracleEvent: Codable, Equatable, Sendable {
       processID > 0,
       monotonicNanoseconds > 0,
       requestFlags == requestFlags.sorted(),
+      isCanonicalBootGeneration(bootGeneration),
       requestFlags.allSatisfy({ flag in
         !flag.isEmpty
           && flag.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7f }
@@ -315,27 +329,38 @@ public struct OracleEvent: Codable, Equatable, Sendable {
 
 public struct OracleWindow: Codable, Equatable, Sendable {
   public let beginNanoseconds: UInt64
+  public let bootGeneration: String
   public let endNanoseconds: UInt64?
   public let quietMilliseconds: Int?
   public let eventCount: Int?
   public let lastSequence: UInt64?
+  public let eventSeal: OracleEventSeal?
 
   public init(
     beginNanoseconds: UInt64,
+    bootGeneration: String,
     endNanoseconds: UInt64? = nil,
     quietMilliseconds: Int? = nil,
     eventCount: Int? = nil,
-    lastSequence: UInt64? = nil
+    lastSequence: UInt64? = nil,
+    eventSeal: OracleEventSeal? = nil
   ) {
     self.beginNanoseconds = beginNanoseconds
+    self.bootGeneration = bootGeneration
     self.endNanoseconds = endNanoseconds
     self.quietMilliseconds = quietMilliseconds
     self.eventCount = eventCount
     self.lastSequence = lastSequence
+    self.eventSeal = eventSeal
   }
 
   public func validate() throws {
+    guard isCanonicalBootGeneration(bootGeneration) else {
+      throw FixtureContractError.invalidManifest
+    }
     if let endNanoseconds {
+      guard let eventSeal else { throw FixtureContractError.invalidManifest }
+      try eventSeal.validate()
       guard endNanoseconds >= beginNanoseconds,
         let quietMilliseconds, (50...5_000).contains(quietMilliseconds),
         let eventCount, eventCount >= 0,
@@ -344,7 +369,8 @@ public struct OracleWindow: Codable, Equatable, Sendable {
         endNanoseconds - beginNanoseconds >= UInt64(quietMilliseconds) * 1_000_000
       else { throw FixtureContractError.invalidManifest }
     } else {
-      guard quietMilliseconds == nil, eventCount == nil, lastSequence == nil else {
+      guard quietMilliseconds == nil, eventCount == nil, lastSequence == nil, eventSeal == nil
+      else {
         throw FixtureContractError.invalidManifest
       }
     }
@@ -354,5 +380,45 @@ public struct OracleWindow: Codable, Equatable, Sendable {
     guard event.monotonicNanoseconds >= beginNanoseconds else { return false }
     guard let endNanoseconds else { return true }
     return event.monotonicNanoseconds <= endNanoseconds
+  }
+}
+
+private func isCanonicalBootGeneration(_ value: String) -> Bool {
+  guard let parsed = UUID(uuidString: value) else { return false }
+  return parsed.uuidString.lowercased() == value
+}
+
+public struct OracleEventSeal: Codable, Equatable, Sendable {
+  public let byteCount: Int
+  public let frameSHA256: String
+  public let device: Int64
+  public let inode: UInt64
+  public let owner: UInt32
+  public let group: UInt32
+  public let mode: UInt32
+
+  public init(
+    byteCount: Int,
+    frameSHA256: String,
+    device: Int64,
+    inode: UInt64,
+    owner: UInt32,
+    group: UInt32,
+    mode: UInt32
+  ) {
+    self.byteCount = byteCount
+    self.frameSHA256 = frameSHA256
+    self.device = device
+    self.inode = inode
+    self.owner = owner
+    self.group = group
+    self.mode = mode
+  }
+
+  public func validate() throws {
+    guard byteCount >= 0, frameSHA256.utf8.count == 64,
+      frameSHA256.utf8.allSatisfy({ (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }),
+      inode > 0, mode & UInt32(S_IFMT) == UInt32(S_IFREG), mode & 0o077 == 0
+    else { throw FixtureContractError.invalidManifest }
   }
 }

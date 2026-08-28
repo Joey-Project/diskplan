@@ -200,10 +200,12 @@ private final class RecordingCapability: @unchecked Sendable {
   }
 
   func record(_ kind: OracleEventKind, item: String, flags: [String] = []) throws {
-    try recorder.record { [runID, domainIdentifier] in
+    let bootGeneration = try ExternalMutationBootSession.currentGeneration()
+    try recorder.record { [runID, domainIdentifier, bootGeneration] in
       OracleEvent(
         runID: runID,
         domainIdentifier: domainIdentifier,
+        bootGeneration: bootGeneration,
         itemIdentifier: item,
         kind: kind,
         processID: getpid(),

@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -6,10 +7,26 @@ enum OracleWindowWriteInjectedFailure: Error, Equatable {
   case afterRenameBeforeDirectorySync
 }
 
+enum OraclePrepareInjectedFailure: Error, Equatable {
+  case afterRecorderFilesCreatedBeforeDirectorySync
+}
+
 public struct OracleLog: Sendable {
   public let runDirectory: URL
+  private let bootGenerationProvider: @Sendable () throws -> String
 
-  public init(runDirectory: URL) { self.runDirectory = runDirectory }
+  public init(runDirectory: URL) {
+    self.runDirectory = runDirectory
+    bootGenerationProvider = ExternalMutationBootSession.currentGeneration
+  }
+
+  init(
+    runDirectory: URL,
+    bootGenerationProvider: @escaping @Sendable () throws -> String
+  ) {
+    self.runDirectory = runDirectory
+    self.bootGenerationProvider = bootGenerationProvider
+  }
 
   public static func appGroup(runID: UUID) throws -> OracleLog {
     guard
@@ -22,9 +39,65 @@ public struct OracleLog: Sendable {
   }
 
   public func prepare() throws {
+    try prepare(injecting: nil)
+  }
+
+  func prepare(injecting failure: OraclePrepareInjectedFailure?) throws {
+    var createdRun = false
+    do {
+      try createInitialRunDirectory()
+      createdRun = true
+    } catch let error as POSIXError where error.code == .EEXIST {
+      let directory = try openExistingRunDirectory(runDirectory)
+      defer { close(directory) }
+      try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
+    }
+    do {
+      try initializeRecorder(injecting: failure)
+    } catch {
+      if createdRun {
+        do {
+          try SecureFixtureStorage.recoverUnpublishedRun(
+            expectedRunDirectory: runDirectory
+          )
+        } catch {
+          throw FixtureCleanupError.retained(runDirectory.path)
+        }
+      }
+      throw error
+    }
+  }
+
+  public func createInitialRunDirectory() throws {
     let parent = runDirectory.deletingLastPathComponent()
     try makeOwnerPrivateDirectory(parent)
-    try makeOwnerPrivateDirectory(runDirectory)
+    guard mkdir(runDirectory.path, 0o700) == 0 else { throw makePOSIXError(code: errno) }
+    do {
+      let parentDescriptor = open(
+        parent.path,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+      )
+      guard parentDescriptor >= 0 else { throw makePOSIXError(code: errno) }
+      defer { close(parentDescriptor) }
+      let directory = try openExistingRunDirectory(runDirectory)
+      defer { close(directory) }
+      try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
+      guard fsync(parentDescriptor) == 0 else { throw makePOSIXError(code: errno) }
+    } catch {
+      do {
+        try SecureFixtureStorage.recoverUnpublishedRun(expectedRunDirectory: runDirectory)
+      } catch {
+        throw FixtureCleanupError.retained(runDirectory.path)
+      }
+      throw error
+    }
+  }
+
+  public func initializeRecorder() throws {
+    try initializeRecorder(injecting: nil)
+  }
+
+  func initializeRecorder(injecting failure: OraclePrepareInjectedFailure?) throws {
     let directory = try openExistingRunDirectory(runDirectory)
     defer { close(directory) }
     let lock = openat(
@@ -54,9 +127,21 @@ public struct OracleLog: Sendable {
     guard admissions >= 0 else { throw makePOSIXError(code: errno) }
     defer { close(admissions) }
     try validateOwnerPrivateRegularFile(descriptor: admissions)
-    guard fsync(lock) == 0, fsync(attemptLock) == 0, fsync(admissions) == 0,
-      fsync(directory) == 0
+    let events = openat(
+      directory,
+      "events.jsonl",
+      O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+      0o600
+    )
+    guard events >= 0 else { throw makePOSIXError(code: errno) }
+    defer { close(events) }
+    try validateOwnerPrivateRegularFile(descriptor: events)
+    guard fsync(lock) == 0, fsync(attemptLock) == 0, fsync(admissions) == 0, fsync(events) == 0
     else { throw makePOSIXError(code: errno) }
+    if failure == .afterRecorderFilesCreatedBeforeDirectorySync {
+      throw OraclePrepareInjectedFailure.afterRecorderFilesCreatedBeforeDirectorySync
+    }
+    guard fsync(directory) == 0 else { throw makePOSIXError(code: errno) }
   }
 
   public func append(_ original: OracleEvent) throws {
@@ -124,6 +209,9 @@ public struct OracleLog: Sendable {
           includeIncompleteAttempts: !duringRecordAttempt
         )
       }
+      guard original.bootGeneration == (try bootGenerationProvider()) else {
+        throw OracleAcceptanceError.identityMismatch(sequence: original.sequence)
+      }
       try createRecorderMarker(
         "recorder-poisoned",
         directory: directory,
@@ -163,6 +251,9 @@ public struct OracleLog: Sendable {
         try writeAll(encoded, descriptor: descriptor)
         if failure == .eventStorage { throw OracleAppendInjectedFailure.eventStorage }
         guard fsync(descriptor) == 0 else { throw makePOSIXError(code: errno) }
+        if failure == .afterEventSyncBeforePoisonRemoval {
+          throw OracleAppendInjectedFailure.afterEventSyncBeforePoisonRemoval
+        }
         try removeRecorderMarker("recorder-poisoned", directory: directory)
       } catch {
         throw error
@@ -382,21 +473,35 @@ public struct OracleLog: Sendable {
       return []
     }
     do {
-      return try data.split(separator: 0x0a).map(decodeOracleEventStrict)
+      return try decodeOracleEventFrames(data)
     } catch {
       throw FixtureControlReadError.mismatch(.events, .malformed)
     }
   }
 
   public func sealedSnapshot() throws -> OracleSealedSnapshot {
+    try sealedSnapshot(onBoundSnapshot: {})
+  }
+
+  func sealedSnapshot(onBoundSnapshot: () throws -> Void) throws -> OracleSealedSnapshot {
     try withSynchronizedRecorder { directory in
       guard try lockedRecorderState(directory: directory) == .sealed else {
         throw try recorderError(directory: directory)
       }
-      return try OracleSealedSnapshot(
-        window: lockedWindow(directory: directory),
-        events: lockedEvents(directory: directory)
-      )
+      let bootGeneration = try bootGenerationProvider()
+      let windowSnapshot = try lockedWindowSnapshot(directory: directory)
+      let eventSnapshot = try lockedEventSnapshot(directory: directory)
+      try onBoundSnapshot()
+      guard windowSnapshot.window.bootGeneration == bootGeneration,
+        eventSnapshot.events.allSatisfy({ $0.bootGeneration == bootGeneration }),
+        windowSnapshot.window.eventSeal == eventSnapshot.seal
+      else {
+        throw OracleAcceptanceError.windowMismatch
+      }
+      try eventSnapshot.revalidate(directory: directory)
+      try windowSnapshot.revalidate(directory: directory)
+      try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
+      return OracleSealedSnapshot(window: windowSnapshot.window, events: eventSnapshot.events)
     }
   }
 
@@ -408,9 +513,7 @@ public struct OracleLog: Sendable {
   }
 
   public func window() throws -> OracleWindow {
-    let directory = try openExistingRunDirectory(runDirectory)
-    defer { close(directory) }
-    return try lockedWindow(directory: directory)
+    try withSynchronizedRecorder { try lockedWindow(directory: $0) }
   }
 
   public func closeWindowAfterQuiescence(
@@ -437,13 +540,17 @@ public struct OracleLog: Sendable {
     let directory = try openExistingRunDirectory(runDirectory)
     defer { close(directory) }
     try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
-    let openedWindow = try lockedWindow(directory: directory)
+    let openedWindowSnapshot = try lockedWindowSnapshot(directory: directory)
+    let openedWindow = openedWindowSnapshot.window
+    guard openedWindow.bootGeneration == (try bootGenerationProvider()) else {
+      throw OracleAcceptanceError.windowMismatch
+    }
     let start = clock.nowNanoseconds()
     let (deadline, overflow) = start.addingReportingOverflow(
       UInt64(timeoutMilliseconds) * 1_000_000
     )
     guard !overflow else { throw OracleQuiescenceError.invalidBounds }
-    var fingerprint = try eventFingerprint(
+    var observedSnapshot = try eventSnapshot(
       directory: directory,
       deadlineNanoseconds: deadline,
       clock: clock
@@ -456,7 +563,7 @@ public struct OracleLog: Sendable {
       guard clock.nowNanoseconds() - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
         throw OracleQuiescenceError.timedOut
       }
-      let current = try eventFingerprint(
+      let current = try eventSnapshot(
         directory: directory,
         deadlineNanoseconds: deadline,
         clock: clock
@@ -465,15 +572,18 @@ public struct OracleLog: Sendable {
       guard now - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
         throw OracleQuiescenceError.timedOut
       }
-      if current != fingerprint {
-        fingerprint = current
+      if !observedSnapshot.isSame(as: current) {
+        guard observedSnapshot.allowsAppend(to: current) else {
+          throw OracleRecorderError.poisoned
+        }
+        observedSnapshot = current
         quietStart = now
       }
       if now - quietStart >= UInt64(quietMilliseconds) * 1_000_000 {
         switch try sealWindowSnapshotIfQuiet(
           directory: directory,
-          openedWindow: openedWindow,
-          expectedFingerprint: current,
+          openedWindowSnapshot: openedWindowSnapshot,
+          expectedSnapshot: current,
           quietStartNanoseconds: quietStart,
           quietMilliseconds: quietMilliseconds,
           deadlineNanoseconds: deadline,
@@ -482,7 +592,7 @@ public struct OracleLog: Sendable {
           windowWriteFailure: windowWriteFailure
         ) {
         case .changed(let changed, let changedAt):
-          fingerprint = changed
+          observedSnapshot = changed
           quietStart = changedAt
         case .waiting:
           break
@@ -496,8 +606,8 @@ public struct OracleLog: Sendable {
 
   private func sealWindowSnapshotIfQuiet(
     directory: Int32,
-    openedWindow: OracleWindow,
-    expectedFingerprint: OracleEventFingerprint,
+    openedWindowSnapshot: BoundOracleWindowFile,
+    expectedSnapshot: OracleEventSnapshot,
     quietStartNanoseconds: UInt64,
     quietMilliseconds: Int,
     deadlineNanoseconds: UInt64,
@@ -505,6 +615,7 @@ public struct OracleLog: Sendable {
     onFinalSnapshotLocked: @Sendable () -> Void,
     windowWriteFailure: OracleWindowWriteInjectedFailure?
   ) throws -> WindowSealAttempt {
+    let openedWindow = openedWindowSnapshot.window
     let prepared = try withRecorderLock(
       directory: directory,
       deadlineNanoseconds: deadlineNanoseconds,
@@ -514,30 +625,29 @@ public struct OracleLog: Sendable {
       guard try lockedRecorderState(directory: directory) == .healthy else {
         throw try recorderError(directory: directory)
       }
-      let values = try lockedEvents(directory: directory)
-      let current = OracleEventFingerprint(
-        count: values.count,
-        lastSequence: values.last?.sequence ?? 0
-      )
+      let snapshot = try lockedEventSnapshot(directory: directory)
       let now = clock.nowNanoseconds()
       guard now < deadlineNanoseconds else { throw OracleQuiescenceError.timedOut }
-      guard current == expectedFingerprint else {
-        return WindowSealPreparation.changed(current, now)
+      if !expectedSnapshot.isSame(as: snapshot) {
+        guard expectedSnapshot.allowsAppend(to: snapshot) else {
+          throw OracleRecorderError.poisoned
+        }
+        return WindowSealPreparation.changed(snapshot, now)
       }
       guard now >= quietStartNanoseconds,
         now - quietStartNanoseconds >= UInt64(quietMilliseconds) * 1_000_000
       else { return .waiting }
       try createRecorderMarker("recorder-sealing", directory: directory)
-      return .ready(current)
+      return .ready(snapshot)
     }
-    let preparedFingerprint: OracleEventFingerprint
+    let preparedSnapshot: OracleEventSnapshot
     switch prepared {
     case .changed(let current, let now):
       return .changed(current, now)
     case .waiting:
       return .waiting
-    case .ready(let fingerprint):
-      preparedFingerprint = fingerprint
+    case .ready(let snapshot):
+      preparedSnapshot = snapshot
     }
     return try withAttemptGate(
       directory: directory,
@@ -559,27 +669,42 @@ public struct OracleLog: Sendable {
           try !recorderHasUnresolvedAdmissions(directory: directory),
           try !recorderMarkerExists("recorder-sealed", directory: directory)
         else { throw OracleRecorderError.poisoned }
-        let values = try lockedEvents(directory: directory)
-        let current = OracleEventFingerprint(
-          count: values.count,
-          lastSequence: values.last?.sequence ?? 0
-        )
+        try preparedSnapshot.revalidate(directory: directory)
+        try openedWindowSnapshot.revalidate(directory: directory)
+        let currentSnapshot = try lockedEventSnapshot(directory: directory)
+        let bootGeneration = try bootGenerationProvider()
+        guard openedWindow.bootGeneration == bootGeneration,
+          currentSnapshot.events.allSatisfy({ $0.bootGeneration == bootGeneration })
+        else { throw OracleAcceptanceError.windowMismatch }
+        let current = currentSnapshot.fingerprint
         let now = clock.nowNanoseconds()
         guard now < deadlineNanoseconds else { throw OracleQuiescenceError.timedOut }
-        guard current == preparedFingerprint else { throw OracleRecorderError.poisoned }
+        guard current == preparedSnapshot.fingerprint else { throw OracleRecorderError.poisoned }
+        guard let eventSeal = currentSnapshot.seal else { throw OracleRecorderError.poisoned }
         onFinalSnapshotLocked()
+        let closedWindow = OracleWindow(
+          beginNanoseconds: openedWindow.beginNanoseconds,
+          bootGeneration: bootGeneration,
+          endNanoseconds: now,
+          quietMilliseconds: quietMilliseconds,
+          eventCount: current.count,
+          lastSequence: current.lastSequence,
+          eventSeal: eventSeal
+        )
         try writeWindow(
-          OracleWindow(
-            beginNanoseconds: openedWindow.beginNanoseconds,
-            endNanoseconds: now,
-            quietMilliseconds: quietMilliseconds,
-            eventCount: current.count,
-            lastSequence: current.lastSequence
-          ),
+          closedWindow,
           directory: directory,
           injecting: windowWriteFailure
         )
+        let closedWindowSnapshot = try lockedWindowSnapshot(directory: directory)
+        guard closedWindowSnapshot.window == closedWindow else {
+          throw OracleRecorderError.poisoned
+        }
         try createRecorderMarker("recorder-sealed", directory: directory)
+        try currentSnapshot.revalidate(directory: directory)
+        try closedWindowSnapshot.revalidate(directory: directory)
+        try preparedSnapshot.revalidate(directory: directory)
+        try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
         return WindowSealAttempt.sealed(
           OracleQuiescence(
             eventCount: current.count,
@@ -591,11 +716,11 @@ public struct OracleLog: Sendable {
     }
   }
 
-  private func eventFingerprint(
+  private func eventSnapshot(
     directory: Int32,
     deadlineNanoseconds: UInt64,
     clock: any OracleQuiescenceClock
-  ) throws -> OracleEventFingerprint {
+  ) throws -> OracleEventSnapshot {
     try withAttemptGate(
       directory: directory,
       deadlineNanoseconds: deadlineNanoseconds,
@@ -611,64 +736,59 @@ public struct OracleLog: Sendable {
         guard try lockedRecorderState(directory: directory) == .healthy else {
           throw try recorderError(directory: directory)
         }
-        let values = try lockedEvents(directory: directory)
+        let snapshot = try lockedEventSnapshot(directory: directory)
         clock.didReadFingerprint()
-        return OracleEventFingerprint(
-          count: values.count,
-          lastSequence: values.last?.sequence ?? 0
-        )
+        return snapshot
       }
     }
   }
 
   private func lockedEvents(directory: Int32) throws -> [OracleEvent] {
+    try lockedEventSnapshot(directory: directory).events
+  }
+
+  private func lockedEventSnapshot(directory: Int32) throws -> OracleEventSnapshot {
     let descriptor = openat(
       directory,
       "events.jsonl",
       O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
     )
     if descriptor < 0 {
-      if errno == ENOENT { return [] }
+      if errno == ENOENT { return .missing }
       throw makePOSIXError(code: errno)
     }
-    defer { close(descriptor) }
-    try validateOwnerPrivateRegularFile(descriptor: descriptor)
-    var metadata = stat()
-    guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
-    guard metadata.st_size >= 0, metadata.st_size <= FixtureContract.maximumOracleBytes else {
-      throw FixtureContractError.oracleTooLarge
-    }
-    let data = try readAll(descriptor: descriptor, count: Int(metadata.st_size))
     do {
-      return try data.split(separator: 0x0a).map(decodeOracleEventStrict)
+      return .file(
+        try BoundOracleEventFile(
+          descriptor: descriptor,
+          directory: directory
+        )
+      )
     } catch {
-      throw FixtureControlReadError.mismatch(.events, .malformed)
+      close(descriptor)
+      throw error
     }
   }
 
   private func lockedWindow(directory: Int32) throws -> OracleWindow {
+    try lockedWindowSnapshot(directory: directory).window
+  }
+
+  private func lockedWindowSnapshot(directory: Int32) throws -> BoundOracleWindowFile {
     let descriptor = openat(
       directory,
       "window.json",
       O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
     )
-    guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
-    defer { close(descriptor) }
-    try validateOwnerPrivateRegularFile(descriptor: descriptor)
-    var metadata = stat()
-    guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
-    guard metadata.st_size >= 0, metadata.st_size <= SecureFixtureStorage.maximumControlBytes else {
-      throw FixtureControlReadError.mismatch(.window, .sizeLimit)
+    guard descriptor >= 0 else {
+      if errno == ENOENT { throw FixtureControlReadError.missing(.window) }
+      throw FixtureControlReadError.unreadable(.window, errno: errno)
     }
-    let data = try readAll(descriptor: descriptor, count: Int(metadata.st_size))
     do {
-      let window = try JSONDecoder().decode(OracleWindow.self, from: data)
-      try window.validate()
-      return window
-    } catch let error as FixtureControlReadError {
-      throw error
+      return try BoundOracleWindowFile(descriptor: descriptor, directory: directory)
     } catch {
-      throw FixtureControlReadError.mismatch(.window, .malformed)
+      close(descriptor)
+      throw error
     }
   }
 
@@ -709,18 +829,361 @@ public struct OracleLog: Sendable {
 private struct OracleEventFingerprint: Equatable {
   let count: Int
   let lastSequence: UInt64
+  let frameDigest: [UInt8]
+  let fileIdentity: OracleEventFileIdentity?
+  let accessPolicy: OracleEventFileAccessPolicy?
+}
+
+private struct OracleEventFileIdentity: Equatable {
+  let device: dev_t
+  let inode: ino_t
+}
+
+private struct OracleEventFileAccessPolicy: Equatable {
+  let owner: uid_t
+  let group: gid_t
+  let mode: mode_t
+}
+
+private struct OracleEventFileMetadata {
+  let identity: OracleEventFileIdentity
+  let accessPolicy: OracleEventFileAccessPolicy
+  let size: off_t
+
+  init(_ value: stat) {
+    identity = OracleEventFileIdentity(device: value.st_dev, inode: value.st_ino)
+    accessPolicy = OracleEventFileAccessPolicy(
+      owner: value.st_uid,
+      group: value.st_gid,
+      mode: value.st_mode
+    )
+    size = value.st_size
+  }
+}
+
+private enum OracleEventSnapshot {
+  case missing
+  case file(BoundOracleEventFile)
+
+  var events: [OracleEvent] {
+    switch self {
+    case .missing: []
+    case .file(let file): file.events
+    }
+  }
+
+  var fingerprint: OracleEventFingerprint {
+    switch self {
+    case .missing:
+      OracleEventFingerprint(
+        count: 0,
+        lastSequence: 0,
+        frameDigest: Array(SHA256.hash(data: Data())),
+        fileIdentity: nil,
+        accessPolicy: nil
+      )
+    case .file(let file): file.fingerprint
+    }
+  }
+
+  var seal: OracleEventSeal? {
+    switch self {
+    case .missing: nil
+    case .file(let file): file.seal
+    }
+  }
+
+  func isSame(as other: OracleEventSnapshot) -> Bool {
+    fingerprint == other.fingerprint
+  }
+
+  func allowsAppend(to other: OracleEventSnapshot) -> Bool {
+    guard case .file(let previous) = self, case .file(let current) = other,
+      previous.metadata.identity == current.metadata.identity,
+      previous.metadata.accessPolicy == current.metadata.accessPolicy,
+      current.data.count > previous.data.count,
+      current.data.starts(with: previous.data),
+      current.events.starts(with: previous.events)
+    else { return false }
+    var expected = previous.events.last?.sequence ?? 0
+    for event in current.events.dropFirst(previous.events.count) {
+      let (next, overflow) = expected.addingReportingOverflow(1)
+      guard !overflow, event.sequence == next else { return false }
+      expected = next
+    }
+    return true
+  }
+
+  func revalidate(directory: Int32) throws {
+    switch self {
+    case .missing:
+      var current = stat()
+      guard fstatat(directory, "events.jsonl", &current, AT_SYMLINK_NOFOLLOW) != 0,
+        errno == ENOENT
+      else { throw FixtureControlReadError.mismatch(.events, .contentChanged) }
+    case .file(let file):
+      try file.revalidate(directory: directory)
+    }
+  }
+}
+
+private final class BoundOracleEventFile {
+  let descriptor: Int32
+  let metadata: OracleEventFileMetadata
+  let data: Data
+  let events: [OracleEvent]
+
+  var fingerprint: OracleEventFingerprint {
+    OracleEventFingerprint(
+      count: events.count,
+      lastSequence: events.last?.sequence ?? 0,
+      frameDigest: Array(SHA256.hash(data: data)),
+      fileIdentity: metadata.identity,
+      accessPolicy: metadata.accessPolicy
+    )
+  }
+
+  var seal: OracleEventSeal {
+    OracleEventSeal(
+      byteCount: data.count,
+      frameSHA256: data.sha256Hex,
+      device: Int64(metadata.identity.device),
+      inode: UInt64(metadata.identity.inode),
+      owner: UInt32(metadata.accessPolicy.owner),
+      group: UInt32(metadata.accessPolicy.group),
+      mode: UInt32(metadata.accessPolicy.mode)
+    )
+  }
+
+  init(descriptor: Int32, directory: Int32) throws {
+    self.descriptor = descriptor
+    let before = try oracleEventMetadata(descriptor: descriptor)
+    guard before.size >= 0, before.size <= FixtureContract.maximumOracleBytes else {
+      throw FixtureContractError.oracleTooLarge
+    }
+    let first = try readAll(descriptor: descriptor, count: Int(before.size))
+    let middle = try oracleEventMetadata(descriptor: descriptor)
+    try requireSameOracleEventObject(before, middle)
+    guard before.size == middle.size else {
+      throw FixtureControlReadError.mismatch(.events, .contentChanged)
+    }
+    let second = try readAll(descriptor: descriptor, count: Int(middle.size))
+    let after = try oracleEventMetadata(descriptor: descriptor)
+    try requireSameOracleEventObject(middle, after)
+    guard middle.size == after.size, first == second else {
+      throw FixtureControlReadError.mismatch(.events, .contentChanged)
+    }
+    try requireOracleEventEndpoint(directory: directory, expected: after)
+    metadata = after
+    data = second
+    do {
+      events = try decodeOracleEventFrames(second)
+    } catch let error as FixtureControlReadError {
+      throw error
+    } catch {
+      throw FixtureControlReadError.mismatch(.events, .malformed)
+    }
+  }
+
+  func revalidate(directory: Int32) throws {
+    let before = try oracleEventMetadata(descriptor: descriptor)
+    try requireSameOracleEventObject(metadata, before)
+    guard before.size >= 0, before.size <= FixtureContract.maximumOracleBytes else {
+      throw FixtureContractError.oracleTooLarge
+    }
+    let current = try readAll(descriptor: descriptor, count: Int(before.size))
+    let after = try oracleEventMetadata(descriptor: descriptor)
+    try requireSameOracleEventObject(before, after)
+    guard before.size == after.size, current == data else {
+      throw FixtureControlReadError.mismatch(.events, .contentChanged)
+    }
+    try requireOracleEventEndpoint(directory: directory, expected: after)
+    _ = try decodeOracleEventFrames(current)
+  }
+
+  deinit { close(descriptor) }
+}
+
+private func oracleEventMetadata(descriptor: Int32) throws -> OracleEventFileMetadata {
+  var value = stat()
+  guard fstat(descriptor, &value) == 0 else {
+    throw FixtureControlReadError.unreadable(.events, errno: errno)
+  }
+  guard value.st_mode & S_IFMT == S_IFREG else {
+    throw FixtureControlReadError.mismatch(.events, .objectType)
+  }
+  guard value.st_uid == geteuid() else {
+    throw FixtureControlReadError.mismatch(.events, .owner)
+  }
+  guard value.st_mode & 0o077 == 0 else {
+    throw FixtureControlReadError.mismatch(.events, .accessPolicy)
+  }
+  do {
+    try requireNoExtendedACL(descriptor: descriptor)
+  } catch is FixtureContractError {
+    throw FixtureControlReadError.mismatch(.events, .accessPolicy)
+  } catch let error as POSIXError {
+    throw FixtureControlReadError.unreadable(.events, errno: error.code.rawValue)
+  }
+  return OracleEventFileMetadata(value)
+}
+
+private func requireSameOracleEventObject(
+  _ expected: OracleEventFileMetadata,
+  _ observed: OracleEventFileMetadata
+) throws {
+  guard expected.identity == observed.identity else {
+    throw FixtureControlReadError.mismatch(.events, .identityChanged)
+  }
+  guard expected.accessPolicy == observed.accessPolicy else {
+    throw FixtureControlReadError.mismatch(.events, .accessPolicy)
+  }
+}
+
+private func requireOracleEventEndpoint(
+  directory: Int32,
+  expected: OracleEventFileMetadata
+) throws {
+  var value = stat()
+  guard fstatat(directory, "events.jsonl", &value, AT_SYMLINK_NOFOLLOW) == 0 else {
+    if errno == ENOENT { throw FixtureControlReadError.missing(.events) }
+    throw FixtureControlReadError.unreadable(.events, errno: errno)
+  }
+  let observed = OracleEventFileMetadata(value)
+  try requireSameOracleEventObject(expected, observed)
+}
+
+private final class BoundOracleWindowFile {
+  let descriptor: Int32
+  let metadata: OracleEventFileMetadata
+  let data: Data
+  let window: OracleWindow
+
+  init(descriptor: Int32, directory: Int32) throws {
+    self.descriptor = descriptor
+    let before = try oracleWindowMetadata(descriptor: descriptor)
+    guard before.size >= 0, before.size <= SecureFixtureStorage.maximumControlBytes else {
+      throw FixtureControlReadError.mismatch(.window, .sizeLimit)
+    }
+    let first = try readAll(descriptor: descriptor, count: Int(before.size))
+    let middle = try oracleWindowMetadata(descriptor: descriptor)
+    try requireSameOracleWindowObject(before, middle)
+    guard before.size == middle.size else {
+      throw FixtureControlReadError.mismatch(.window, .contentChanged)
+    }
+    let second = try readAll(descriptor: descriptor, count: Int(middle.size))
+    let after = try oracleWindowMetadata(descriptor: descriptor)
+    try requireSameOracleWindowObject(middle, after)
+    guard middle.size == after.size, first == second else {
+      throw FixtureControlReadError.mismatch(.window, .contentChanged)
+    }
+    try requireOracleWindowEndpoint(directory: directory, expected: after)
+    metadata = after
+    data = second
+    do {
+      window = try JSONDecoder().decode(OracleWindow.self, from: second)
+      try window.validate()
+    } catch let error as FixtureControlReadError {
+      throw error
+    } catch {
+      throw FixtureControlReadError.mismatch(.window, .malformed)
+    }
+  }
+
+  func revalidate(directory: Int32) throws {
+    let before = try oracleWindowMetadata(descriptor: descriptor)
+    try requireSameOracleWindowObject(metadata, before)
+    guard before.size >= 0, before.size <= SecureFixtureStorage.maximumControlBytes else {
+      throw FixtureControlReadError.mismatch(.window, .sizeLimit)
+    }
+    let current = try readAll(descriptor: descriptor, count: Int(before.size))
+    let after = try oracleWindowMetadata(descriptor: descriptor)
+    try requireSameOracleWindowObject(before, after)
+    guard before.size == after.size, current == data else {
+      throw FixtureControlReadError.mismatch(.window, .contentChanged)
+    }
+    try requireOracleWindowEndpoint(directory: directory, expected: after)
+    do {
+      let decoded = try JSONDecoder().decode(OracleWindow.self, from: current)
+      try decoded.validate()
+      guard decoded == window else {
+        throw FixtureControlReadError.mismatch(.window, .contentChanged)
+      }
+    } catch let error as FixtureControlReadError {
+      throw error
+    } catch {
+      throw FixtureControlReadError.mismatch(.window, .malformed)
+    }
+  }
+
+  deinit { close(descriptor) }
+}
+
+private func oracleWindowMetadata(descriptor: Int32) throws -> OracleEventFileMetadata {
+  var value = stat()
+  guard fstat(descriptor, &value) == 0 else {
+    throw FixtureControlReadError.unreadable(.window, errno: errno)
+  }
+  guard value.st_mode & S_IFMT == S_IFREG else {
+    throw FixtureControlReadError.mismatch(.window, .objectType)
+  }
+  guard value.st_uid == geteuid() else {
+    throw FixtureControlReadError.mismatch(.window, .owner)
+  }
+  guard value.st_mode & 0o077 == 0 else {
+    throw FixtureControlReadError.mismatch(.window, .accessPolicy)
+  }
+  do {
+    try requireNoExtendedACL(descriptor: descriptor)
+  } catch is FixtureContractError {
+    throw FixtureControlReadError.mismatch(.window, .accessPolicy)
+  } catch let error as POSIXError {
+    throw FixtureControlReadError.unreadable(.window, errno: error.code.rawValue)
+  }
+  return OracleEventFileMetadata(value)
+}
+
+private func requireSameOracleWindowObject(
+  _ expected: OracleEventFileMetadata,
+  _ observed: OracleEventFileMetadata
+) throws {
+  guard expected.identity == observed.identity else {
+    throw FixtureControlReadError.mismatch(.window, .identityChanged)
+  }
+  guard expected.accessPolicy == observed.accessPolicy else {
+    throw FixtureControlReadError.mismatch(.window, .accessPolicy)
+  }
+}
+
+private func requireOracleWindowEndpoint(
+  directory: Int32,
+  expected: OracleEventFileMetadata
+) throws {
+  var value = stat()
+  guard fstatat(directory, "window.json", &value, AT_SYMLINK_NOFOLLOW) == 0 else {
+    if errno == ENOENT { throw FixtureControlReadError.missing(.window) }
+    throw FixtureControlReadError.unreadable(.window, errno: errno)
+  }
+  let observed = OracleEventFileMetadata(value)
+  try requireSameOracleWindowObject(expected, observed)
+}
+
+extension Data {
+  fileprivate var sha256Hex: String {
+    SHA256.hash(data: self).map { String(format: "%02x", $0) }.joined()
+  }
 }
 
 private enum WindowSealAttempt {
-  case changed(OracleEventFingerprint, UInt64)
+  case changed(OracleEventSnapshot, UInt64)
   case waiting
   case sealed(OracleQuiescence)
 }
 
 private enum WindowSealPreparation {
-  case changed(OracleEventFingerprint, UInt64)
+  case changed(OracleEventSnapshot, UInt64)
   case waiting
-  case ready(OracleEventFingerprint)
+  case ready(OracleEventSnapshot)
 }
 
 protocol OracleQuiescenceClock: Sendable {
@@ -1518,16 +1981,28 @@ private func readAll(descriptor: Int32, count: Int) throws -> Data {
 }
 
 private func nextSequence(_ data: Data) throws -> UInt64 {
-  guard let last = data.split(separator: 0x0a).last else { return 1 }
-  let event = try decodeOracleEventStrict(last)
+  guard let event = try decodeOracleEventFrames(data).last else { return 1 }
   guard event.sequence < UInt64.max else { throw FixtureContractError.oracleTooLarge }
   return event.sequence + 1
+}
+
+private func decodeOracleEventFrames(_ data: Data) throws -> [OracleEvent] {
+  guard !data.isEmpty else { return [] }
+  guard data.last == 0x0a else {
+    throw FixtureControlReadError.mismatch(.events, .malformed)
+  }
+  var frames = data.split(separator: 0x0a, omittingEmptySubsequences: false)
+  guard frames.popLast()?.isEmpty == true, frames.allSatisfy({ !$0.isEmpty }) else {
+    throw FixtureControlReadError.mismatch(.events, .malformed)
+  }
+  return try frames.map(decodeOracleEventStrict)
 }
 
 private let oracleEventJSONKeys: Set<String> = [
   "sequence",
   "runID",
   "domainIdentifier",
+  "bootGeneration",
   "itemIdentifier",
   "kind",
   "processID",

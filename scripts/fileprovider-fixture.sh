@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/fileprovider-fixture.sh build-unsigned|build-signed|accept|recover <manifest>" >&2
+  echo "usage: scripts/fileprovider-fixture.sh build-unsigned|build-signed|accept|recover <manifest>|recover-unpublished <run-id>" >&2
   exit 64
 }
 
@@ -249,15 +249,19 @@ recover() {
   fi
 }
 
+recover_unpublished() {
+  if (($# != 1)); then
+    usage
+  fi
+  verify_signed_artifacts
+  "$host" recover-unpublished --run-id "$1"
+}
+
 accept() {
   python3 "$repo_root/scripts/fileprovider-fixture-pending-preflight.py"
   build_signed
   run_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
   manifest=$($host manifest-path --run-id "$run_id")
-  "$host" prepare \
-    --run-id "$run_id" \
-    --app-path "$app" \
-    --extension-path "$appex"
   complete=0
   report_recovery() {
     if ((complete == 0)); then
@@ -268,11 +272,20 @@ accept() {
       if [[ ! -f $retained_manifest && -f $sibling_manifest && ! -L $sibling_manifest ]]; then
         retained_manifest=$sibling_manifest
       fi
-      echo "fixture did not complete; retained manifest: $retained_manifest" >&2
-      echo "recover with: scripts/fileprovider-fixture.sh recover '$retained_manifest'" >&2
+      if [[ -f $retained_manifest && ! -L $retained_manifest ]]; then
+        echo "fixture did not complete; retained manifest: $retained_manifest" >&2
+        echo "recover with: scripts/fileprovider-fixture.sh recover '$retained_manifest'" >&2
+      else
+        echo "fixture prepare did not publish a recoverable manifest for run: $run_id" >&2
+        echo "recover with: scripts/fileprovider-fixture.sh recover-unpublished '$run_id'" >&2
+      fi
     fi
   }
   trap report_recovery EXIT
+  "$host" prepare \
+    --run-id "$run_id" \
+    --app-path "$app" \
+    --extension-path "$appex"
   register_extension
   verify_elected_extension
   confirm_registered_extension
@@ -310,6 +323,9 @@ case "$command" in
     ;;
   recover)
     recover "$@"
+    ;;
+  recover-unpublished)
+    recover_unpublished "$@"
     ;;
   *)
     usage

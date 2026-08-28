@@ -5,6 +5,64 @@ import Testing
 @testable import DiskplanFileProviderFixtureSupport
 
 @Test
+func controlReadTreatsMetadataOnlyChangeAsARevalidationTrigger() throws {
+  let fixture = try StorageFixture()
+  defer { fixture.remove() }
+  try fixture.writePrivate(fixture.manifestData, to: fixture.manifestURL)
+
+  let observed = try SecureFixtureStorage.readControlFile(
+    at: fixture.manifestURL,
+    record: .manifest,
+    afterInitialRead: {
+      try FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSince1970: 1)],
+        ofItemAtPath: fixture.manifestURL.path
+      )
+    }
+  )
+  #expect(observed == fixture.manifestData)
+}
+
+@Test
+func controlReadSeparatesSameObjectContentDriftFromAccessPolicyDrift() throws {
+  let fixture = try StorageFixture()
+  defer { fixture.remove() }
+  try fixture.writePrivate(fixture.manifestData, to: fixture.manifestURL)
+  var changed = fixture.manifestData
+  changed[changed.startIndex] ^= 0x01
+
+  #expect(throws: FixtureControlReadError.mismatch(.manifest, .contentChanged)) {
+    try SecureFixtureStorage.readControlFile(
+      at: fixture.manifestURL,
+      record: .manifest,
+      afterInitialRead: {
+        let descriptor = open(fixture.manifestURL.path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+        defer { close(descriptor) }
+        let result = changed.withUnsafeBytes {
+          pwrite(descriptor, $0.baseAddress, $0.count, 0)
+        }
+        guard result == changed.count, fsync(descriptor) == 0 else {
+          throw POSIXError(.EIO)
+        }
+      }
+    )
+  }
+
+  try fixture.manifestData.write(to: fixture.manifestURL)
+  guard chmod(fixture.manifestURL.path, 0o600) == 0 else { throw POSIXError(.EACCES) }
+  #expect(throws: FixtureControlReadError.mismatch(.manifest, .accessPolicy)) {
+    try SecureFixtureStorage.readControlFile(
+      at: fixture.manifestURL,
+      record: .manifest,
+      afterInitialRead: {
+        guard chmod(fixture.manifestURL.path, 0o644) == 0 else { throw POSIXError(.EACCES) }
+      }
+    )
+  }
+}
+
+@Test
 func initialManifestPublishIsAtomicAndDurableBeforeReturning() throws {
   let fixture = try StorageFixture()
   defer { fixture.remove() }
@@ -80,6 +138,63 @@ func initialManifestNeverReportsSuccessBeforeDirectorySync(
   #expect(try fixture.entryNames() == ["manifest.json"])
 }
 
+@Test
+func unpublishedRunRecoveryRemovesOnlyRecorderInitializationArtifacts() throws {
+  let fixture = try StorageFixture()
+  defer { fixture.remove() }
+  try OracleLog(runDirectory: fixture.runDirectory).initializeRecorder()
+
+  try SecureFixtureStorage.recoverUnpublishedRun(
+    expectedRunDirectory: fixture.runDirectory
+  )
+  #expect(!FileManager.default.fileExists(atPath: fixture.runDirectory.path))
+}
+
+@Test
+func prepareInitializationFailureRollsBackItsManifestlessRunTransaction() throws {
+  let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-prepare-rollback-\(UUID().uuidString.lowercased())",
+    isDirectory: true
+  )
+  defer { try? FileManager.default.removeItem(at: container) }
+  try FileManager.default.createDirectory(at: container, withIntermediateDirectories: false)
+  guard chmod(container.path, 0o700) == 0 else { throw POSIXError(.EACCES) }
+  let runDirectory = container.appendingPathComponent(
+    UUID().uuidString.lowercased(),
+    isDirectory: true
+  )
+
+  #expect(throws: OraclePrepareInjectedFailure.afterRecorderFilesCreatedBeforeDirectorySync) {
+    try OracleLog(runDirectory: runDirectory).prepare(
+      injecting: .afterRecorderFilesCreatedBeforeDirectorySync
+    )
+  }
+  #expect(!FileManager.default.fileExists(atPath: runDirectory.path))
+}
+
+@Test
+func unpublishedRunRecoveryRetainsUnknownOrPublishedContent() throws {
+  let fixture = try StorageFixture()
+  defer { fixture.remove() }
+  let unknown = fixture.runDirectory.appendingPathComponent("unknown")
+  try fixture.writePrivate(Data("preserve".utf8), to: unknown)
+
+  #expect(throws: FixtureCleanupError.treeMismatch("unpublished-run-entry")) {
+    try SecureFixtureStorage.recoverUnpublishedRun(
+      expectedRunDirectory: fixture.runDirectory
+    )
+  }
+  #expect(try String(contentsOf: unknown, encoding: .utf8) == "preserve")
+
+  try fixture.writePrivate(fixture.manifestData, to: fixture.manifestURL)
+  #expect(throws: FixtureCleanupError.treeMismatch("published-manifest")) {
+    try SecureFixtureStorage.recoverUnpublishedRun(
+      expectedRunDirectory: fixture.runDirectory
+    )
+  }
+  #expect(FileManager.default.fileExists(atPath: fixture.manifestURL.path))
+}
+
 @Test(arguments: [
   ExistingRecoveryInjection.fileSyncFailure,
   .parentSyncFailure,
@@ -91,7 +206,16 @@ func existingRecoveryCopyMustBeFreshlySyncedBeforeCleanupCanStage(
   defer { fixture.remove() }
   try fixture.writePrivate(fixture.manifestData, to: fixture.manifestURL)
   let recoveryURL = SecureFixtureStorage.cleanupRecoveryManifestURL(for: fixture.runDirectory)
-  try fixture.writePrivate(fixture.manifestData, to: recoveryURL)
+  let stagingURL = SecureFixtureStorage.cleanupStagingDirectoryURL(for: fixture.runDirectory)
+  #expect(throws: Error.self) {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: fixture.manifestURL,
+      expectedRunDirectory: fixture.runDirectory,
+      injectFinalDirectoryRemovalFailure: false,
+      injectCrashAfterStagingDirectoryParentSync: true
+    )
+  }
+  try FileManager.default.moveItem(at: stagingURL, to: fixture.runDirectory)
   let expectedError: FixtureCleanupError =
     if injection == .fileSyncFailure {
       .operationFailed("sync-existing-manifest-recovery-copy", errno: EIO)
@@ -150,6 +274,55 @@ func cleanupCrashAfterDurableStagingRenameOccursBeforeAnyDeletion() throws {
   )
   #expect(!FileManager.default.fileExists(atPath: stagingURL.path))
   #expect(!FileManager.default.fileExists(atPath: recoveryURL.path))
+}
+
+@Test
+func cleanupRecoveryRetainsEvidenceAndUnrelatedReplacementStaging() throws {
+  let fixture = try StorageFixture()
+  defer { fixture.remove() }
+  try fixture.writePrivate(fixture.manifestData, to: fixture.manifestURL)
+  let recoveryURL = SecureFixtureStorage.cleanupRecoveryManifestURL(for: fixture.runDirectory)
+  let stagingURL = SecureFixtureStorage.cleanupStagingDirectoryURL(for: fixture.runDirectory)
+
+  #expect(throws: Error.self) {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: fixture.manifestURL,
+      expectedRunDirectory: fixture.runDirectory,
+      injectFinalDirectoryRemovalFailure: false,
+      injectCrashAfterStagingDirectoryParentSync: true
+    )
+  }
+  let recoveryObject = try #require(
+    JSONSerialization.jsonObject(with: Data(contentsOf: recoveryURL)) as? [String: Any]
+  )
+  #expect(
+    recoveryObject["provenance"] as? String
+      == "diskplan-file-provider-fixture-cleanup-v2"
+  )
+  #expect(UUID(uuidString: try #require(recoveryObject["operationID"] as? String)) != nil)
+  let stagingBinding = try #require(recoveryObject["stagingBinding"] as? [String: Any])
+  #expect(stagingBinding["device"] != nil)
+  #expect(stagingBinding["inode"] != nil)
+  #expect(stagingBinding["generation"] != nil)
+  #expect(stagingBinding["extendedACLAbsent"] as? Bool == true)
+  let displaced = stagingURL.deletingLastPathComponent().appendingPathComponent(
+    ".displaced-\(UUID().uuidString.lowercased())"
+  )
+  try FileManager.default.moveItem(at: stagingURL, to: displaced)
+  try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: false)
+  guard chmod(stagingURL.path, 0o700) == 0 else { throw POSIXError(.EACCES) }
+  let sentinel = stagingURL.appendingPathComponent("unrelated")
+  try fixture.writePrivate(Data("preserve".utf8), to: sentinel)
+
+  #expect(throws: FixtureCleanupError.retained(recoveryURL.path)) {
+    try SecureFixtureStorage.recoverCleanup(
+      recoveryManifestURL: recoveryURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+  }
+  #expect(try String(contentsOf: sentinel, encoding: .utf8) == "preserve")
+  #expect(FileManager.default.fileExists(atPath: displaced.path))
+  #expect(FileManager.default.fileExists(atPath: recoveryURL.path))
 }
 
 @Test(arguments: [

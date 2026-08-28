@@ -4,6 +4,8 @@ import Testing
 
 @testable import DiskplanFileProviderFixtureSupport
 
+private let fixtureTestBootGeneration = "11111111-1111-1111-1111-111111111111"
+
 @Test
 func sentinelHasExactStableSize() {
   let first = FixtureContract.sentinelContents()
@@ -36,6 +38,7 @@ func oracleAssignsMonotonicSequenceUnderOneLockedFile() throws {
       OracleEvent(
         runID: runID,
         domainIdentifier: FixtureContract.domainIdentifier(runID: runID),
+        bootGeneration: try ExternalMutationBootSession.currentGeneration(),
         itemIdentifier: FixtureContract.sentinelIdentifier,
         kind: kind,
         processID: 1,
@@ -64,6 +67,7 @@ func oracleSerializesConcurrentWriters() async throws {
           OracleEvent(
             runID: runID,
             domainIdentifier: FixtureContract.domainIdentifier(runID: runID),
+            bootGeneration: try ExternalMutationBootSession.currentGeneration(),
             itemIdentifier: String(index),
             kind: .itemMetadata,
             processID: 1,
@@ -124,19 +128,27 @@ func readyOverlayIsBoundToManifestAndExactFixtureNames() throws {
 @Test
 func oracleWindowCountsOnlyForbiddenEventsInsideBounds() {
   let runID = UUID()
-  let window = OracleWindow(beginNanoseconds: 20, endNanoseconds: 30)
+  let window = OracleWindow(
+    beginNanoseconds: 20,
+    bootGeneration: fixtureTestBootGeneration,
+    endNanoseconds: 30
+  )
   let events = [
     OracleEvent(
-      runID: runID, domainIdentifier: "d", itemIdentifier: "i", kind: .fetchContents, processID: 1,
+      runID: runID, domainIdentifier: "d", bootGeneration: fixtureTestBootGeneration,
+      itemIdentifier: "i", kind: .fetchContents, processID: 1,
       monotonicNanoseconds: 19),
     OracleEvent(
-      runID: runID, domainIdentifier: "d", itemIdentifier: "i", kind: .fetchContents, processID: 1,
+      runID: runID, domainIdentifier: "d", bootGeneration: fixtureTestBootGeneration,
+      itemIdentifier: "i", kind: .fetchContents, processID: 1,
       monotonicNanoseconds: 20),
     OracleEvent(
-      runID: runID, domainIdentifier: "d", itemIdentifier: "i", kind: .rootEnumeration,
+      runID: runID, domainIdentifier: "d", bootGeneration: fixtureTestBootGeneration,
+      itemIdentifier: "i", kind: .rootEnumeration,
       processID: 1, monotonicNanoseconds: 25),
     OracleEvent(
-      runID: runID, domainIdentifier: "d", itemIdentifier: "i", kind: .deleteItem, processID: 1,
+      runID: runID, domainIdentifier: "d", bootGeneration: fixtureTestBootGeneration,
+      itemIdentifier: "i", kind: .deleteItem, processID: 1,
       monotonicNanoseconds: 31),
   ]
   let rejected = events.filter {
@@ -366,12 +378,6 @@ func cleanupCrashBeforeFinalRemovalRetainsExternalRecoveryEvidence() throws {
   #expect(!FileManager.default.fileExists(atPath: fixture.runDirectory.path))
   #expect(FileManager.default.fileExists(atPath: recoveryURL.path))
   #expect(
-    try SecureFixtureStorage.readControlFile(
-      at: recoveryURL,
-      record: .manifest
-    ) == fixture.manifestData
-  )
-  #expect(
     try SecureFixtureStorage.readCleanupRecoveryManifest(
       at: recoveryURL,
       expectedRunDirectory: fixture.runDirectory
@@ -477,7 +483,18 @@ func recoveryCleanupFailsClosedWhenCanonicalRunStillExists() throws {
     for: fixture.runDirectory
   )
   try fixture.writePrivate(fixture.manifestData, to: manifestURL)
-  try fixture.writePrivate(fixture.manifestData, to: recoveryURL)
+  #expect(throws: Error.self) {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: manifestURL,
+      expectedRunDirectory: fixture.runDirectory,
+      injectFinalDirectoryRemovalFailure: false,
+      injectCrashAfterStagingDirectoryParentSync: true
+    )
+  }
+  let stagingURL = SecureFixtureStorage.cleanupStagingDirectoryURL(
+    for: fixture.runDirectory
+  )
+  try FileManager.default.moveItem(at: stagingURL, to: fixture.runDirectory)
   #expect(throws: FixtureCleanupError.retained(recoveryURL.path)) {
     try SecureFixtureStorage.recoverCleanup(
       recoveryManifestURL: recoveryURL,
@@ -550,13 +567,15 @@ func oracleCloseRequiresTwoSecondsAfterALateCallback() throws {
     OracleEvent(
       runID: fixture.runID,
       domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+      bootGeneration: fixture.bootGeneration,
       itemIdentifier: FixtureContract.sentinelIdentifier,
       kind: .itemMetadata,
       processID: 1,
       monotonicNanoseconds: 1
     )
   )
-  try log.writeWindow(OracleWindow(beginNanoseconds: 1))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 1, bootGeneration: fixture.bootGeneration))
   let clock = DeterministicOracleClock()
   clock.onAdvance = { nanoseconds in
     guard nanoseconds == 1_000_000_000 else { return }
@@ -564,6 +583,7 @@ func oracleCloseRequiresTwoSecondsAfterALateCallback() throws {
       OracleEvent(
         runID: fixture.runID,
         domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+        bootGeneration: fixture.bootGeneration,
         itemIdentifier: FixtureContract.sentinelIdentifier,
         kind: .itemMetadata,
         processID: 2,
@@ -594,6 +614,7 @@ func oracleRecorderPoisonsAfterInjectedAppendFailure() throws {
   let event = OracleEvent(
     runID: fixture.runID,
     domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+    bootGeneration: fixture.bootGeneration,
     itemIdentifier: FixtureContract.sentinelIdentifier,
     kind: .fetchContents,
     processID: 1,
@@ -611,11 +632,11 @@ func recorderPoisonPersistsAcrossRecorderRecreation() throws {
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
   let eventsURL = fixture.runDirectory.appendingPathComponent("events.jsonl")
-  try fixture.writePrivate(Data(), to: eventsURL)
   guard chmod(eventsURL.path, 0o644) == 0 else { throw POSIXError(.EIO) }
   let event = OracleEvent(
     runID: fixture.runID,
     domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+    bootGeneration: fixture.bootGeneration,
     itemIdentifier: FixtureContract.sentinelIdentifier,
     kind: .fetchContents,
     processID: 1,
@@ -702,6 +723,28 @@ func writeAheadPoisonSurvivesInjectedEventStorageFailure() throws {
 }
 
 @Test
+func firstEventSyncCrashRetainsBothDurableEventAndPoisonEvidence() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+
+  #expect(throws: OracleAppendInjectedFailure.afterEventSyncBeforePoisonRemoval) {
+    try log.append(
+      fixture.oracleEvent(kind: .itemMetadata),
+      injecting: .afterEventSyncBeforePoisonRemoval
+    )
+  }
+
+  let eventsURL = fixture.runDirectory.appendingPathComponent("events.jsonl")
+  let poisonURL = fixture.runDirectory.appendingPathComponent("recorder-poisoned")
+  let persistedEvents = try Data(contentsOf: eventsURL)
+  #expect(!persistedEvents.isEmpty)
+  #expect(FileManager.default.fileExists(atPath: poisonURL.path))
+  #expect(try log.recorderState() == .poisoned)
+}
+
+@Test
 func appendDoesNotRecreateMissingRunDirectory() throws {
   let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: container) }
@@ -710,6 +753,7 @@ func appendDoesNotRecreateMissingRunDirectory() throws {
   let event = OracleEvent(
     runID: UUID(),
     domainIdentifier: "missing",
+    bootGeneration: try ExternalMutationBootSession.currentGeneration(),
     itemIdentifier: FixtureContract.sentinelIdentifier,
     kind: .itemMetadata,
     processID: 1,
@@ -729,6 +773,7 @@ func sealedRecorderRejectsLateAppendWithoutRecreatingState() throws {
   let event = OracleEvent(
     runID: fixture.runID,
     domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+    bootGeneration: fixture.bootGeneration,
     itemIdentifier: FixtureContract.sentinelIdentifier,
     kind: .itemMetadata,
     processID: 1,
@@ -744,7 +789,8 @@ func oracleDeadlineWinsWhenQuietAndTimeoutBecomeEligibleTogether() throws {
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
   let clock = DeterministicOracleClock()
   #expect(throws: OracleQuiescenceError.timedOut) {
     try log.closeWindowAfterQuiescence(
@@ -761,7 +807,8 @@ func oracleQuietStartsAfterInitialFingerprintRead() throws {
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
   let clock = AdvancingOracleClock()
   _ = try log.closeWindowAfterQuiescence(
     quietMilliseconds: 2_000,
@@ -778,7 +825,8 @@ func finalSnapshotAndSealExcludeARacingCallback() throws {
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
   try log.append(fixture.oracleEvent(kind: .itemMetadata))
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
   let started = DispatchSemaphore(value: 0)
   let finished = DispatchSemaphore(value: 0)
   let result = LockedRecorderResult()
@@ -808,12 +856,95 @@ func finalSnapshotAndSealExcludeARacingCallback() throws {
 }
 
 @Test
+func sealedSnapshotRejectsPostSealFrameRewriteAndWindowReplacement() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(
+    runDirectory: fixture.runDirectory,
+    bootGenerationProvider: { fixture.bootGeneration }
+  )
+  try log.prepare()
+  try log.append(fixture.oracleEvent(kind: .itemMetadata))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
+  _ = try log.closeWindowAfterQuiescence(
+    quietMilliseconds: 50,
+    timeoutMilliseconds: 1_000,
+    clock: DeterministicOracleClock()
+  )
+
+  let eventsURL = fixture.runDirectory.appendingPathComponent("events.jsonl")
+  let originalEvents = try Data(contentsOf: eventsURL)
+  guard var rewritten = String(data: originalEvents, encoding: .utf8),
+    let range = rewritten.range(of: FixtureContract.sentinelIdentifier)
+  else { throw POSIXError(.EINVAL) }
+  rewritten.replaceSubrange(range, with: "tentinel")
+  try Data(rewritten.utf8).write(to: eventsURL)
+  guard chmod(eventsURL.path, 0o600) == 0 else { throw POSIXError(.EACCES) }
+  #expect(throws: OracleAcceptanceError.windowMismatch) { try log.sealedSnapshot() }
+
+  try originalEvents.write(to: eventsURL)
+  guard chmod(eventsURL.path, 0o600) == 0 else { throw POSIXError(.EACCES) }
+  let windowURL = fixture.runDirectory.appendingPathComponent("window.json")
+  let windowData = try Data(contentsOf: windowURL)
+  #expect(throws: FixtureControlReadError.self) {
+    try log.sealedSnapshot {
+      try FileManager.default.removeItem(at: windowURL)
+      try windowData.write(to: windowURL, options: .withoutOverwriting)
+      guard chmod(windowURL.path, 0o600) == 0 else { throw POSIXError(.EACCES) }
+    }
+  }
+}
+
+@Test
+func sealedOracleRejectsAChangedBootGenerationEvenWhenPIDCanRepeat() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let firstBoot = fixture.bootGeneration
+  let nextBoot = "22222222-2222-2222-2222-222222222222"
+  let first = OracleLog(
+    runDirectory: fixture.runDirectory,
+    bootGenerationProvider: { firstBoot }
+  )
+  try first.prepare()
+  try first.append(fixture.oracleEvent(kind: .itemMetadata))
+  #expect(throws: OracleAcceptanceError.identityMismatch(sequence: 0)) {
+    try first.append(
+      OracleEvent(
+        runID: fixture.runID,
+        domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+        bootGeneration: nextBoot,
+        itemIdentifier: FixtureContract.sentinelIdentifier,
+        kind: .itemMetadata,
+        processID: 1,
+        monotonicNanoseconds: 1
+      )
+    )
+  }
+  try first.writeWindow(OracleWindow(beginNanoseconds: 0, bootGeneration: firstBoot))
+  _ = try first.closeWindowAfterQuiescence(
+    quietMilliseconds: 50,
+    timeoutMilliseconds: 1_000,
+    clock: DeterministicOracleClock()
+  )
+
+  let afterReboot = OracleLog(
+    runDirectory: fixture.runDirectory,
+    bootGenerationProvider: { nextBoot }
+  )
+  #expect(throws: OracleAcceptanceError.windowMismatch) {
+    try afterReboot.sealedSnapshot()
+  }
+}
+
+@Test
 func sealWaitsForInFlightFailureMarkerPublication() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
   let failureStarted = DispatchSemaphore(value: 0)
   let releaseFailure = DispatchSemaphore(value: 0)
   let recordFinished = DispatchSemaphore(value: 0)
@@ -873,7 +1004,8 @@ func sealAttemptGateContentionFailsWithinAbsoluteDeadline() throws {
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
   let attemptClock = DeterministicOracleClock()
   let attempt = try log.beginRecordAttempt(
     deadlineNanoseconds: 1_000_000_000,
@@ -897,7 +1029,8 @@ func failedFailureMarkerPublicationLeavesDurableIncompleteAttempt() throws {
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
   let recorder = OracleRecorder(
     append: { _, _ in Issue.record("append unexpectedly ran after state-read failure") },
     state: { _ in throw POSIXError(.EIO) },
@@ -927,7 +1060,8 @@ func abandonedRecordAttemptRemainsFailClosedAfterRecorderRecreation() throws {
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
   let attempt = try log.beginRecordAttempt(
     deadlineNanoseconds: clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) + 1_000_000_000,
     clock: SystemOracleQuiescenceClock()
@@ -1065,7 +1199,6 @@ func eventLockContentionUsesTheSameAbsoluteDeadlineAndPoisons() throws {
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
   let eventsURL = fixture.runDirectory.appendingPathComponent("events.jsonl")
-  try fixture.writePrivate(Data(), to: eventsURL)
   let descriptor = open(eventsURL.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)
   guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
   defer { close(descriptor) }
@@ -1111,6 +1244,7 @@ func secureWindowReadRejectsInvalidClosedWindowSemantics() throws {
   defer { fixture.remove() }
   let invalid = OracleWindow(
     beginNanoseconds: 20,
+    bootGeneration: fixture.bootGeneration,
     endNanoseconds: 10,
     quietMilliseconds: 2_000,
     eventCount: 0,
@@ -1214,12 +1348,14 @@ private final class LockedCounter: @unchecked Sendable {
 private struct TemporaryFixtureRun {
   let container: URL
   let runID: UUID
+  let bootGeneration: String
   let runDirectory: URL
   let manifestData: Data
 
   init() throws {
     container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     runID = UUID()
+    bootGeneration = try ExternalMutationBootSession.currentGeneration()
     let runs = container.appendingPathComponent("runs")
     runDirectory = runs.appendingPathComponent(runID.uuidString.lowercased())
     try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
@@ -1245,6 +1381,7 @@ private struct TemporaryFixtureRun {
     OracleEvent(
       runID: runID,
       domainIdentifier: FixtureContract.domainIdentifier(runID: runID),
+      bootGeneration: bootGeneration,
       itemIdentifier: FixtureContract.sentinelIdentifier,
       kind: kind,
       processID: 1,

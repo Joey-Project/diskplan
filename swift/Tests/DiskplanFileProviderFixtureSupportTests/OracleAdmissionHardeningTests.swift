@@ -61,7 +61,8 @@ func admittedCallbackCannotDisappearBehindSealingCutoff() throws {
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
   let recorder = try OracleRecorder(log: log)
   let admitted = DispatchSemaphore(value: 0)
   let release = DispatchSemaphore(value: 0)
@@ -159,7 +160,8 @@ func windowDurabilityFailureCannotPublishSealedRecorder() throws {
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
   try log.append(fixture.event(.itemMetadata))
-  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  try log.writeWindow(
+    OracleWindow(beginNanoseconds: 0, bootGeneration: fixture.bootGeneration))
 
   #expect(throws: OracleWindowWriteInjectedFailure.afterRenameBeforeDirectorySync) {
     _ = try log.closeWindowAfterQuiescence(
@@ -226,8 +228,10 @@ private struct AdmissionFixture: @unchecked Sendable {
   let root: URL
   let runDirectory: URL
   let runID = UUID()
+  let bootGeneration: String
 
   init() throws {
+    bootGeneration = try ExternalMutationBootSession.currentGeneration()
     root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "diskplan-admission-\(UUID().uuidString.lowercased())",
       isDirectory: true
@@ -243,6 +247,7 @@ private struct AdmissionFixture: @unchecked Sendable {
     OracleEvent(
       runID: runID,
       domainIdentifier: FixtureContract.domainIdentifier(runID: runID),
+      bootGeneration: bootGeneration,
       itemIdentifier: FixtureContract.sentinelIdentifier,
       kind: kind,
       processID: getpid(),
