@@ -128,6 +128,9 @@ func boundedLsofCollectorRunsOneNormalizedSnapshotAndParsesIt() async throws {
 @Test
 func boundedLsofCollectorKeepsDeadlineLimitAndPermissionFailuresDistinct() async {
   let clean = ProcessSnapshotCleanupReport(residualProcessGroup: false)
+  let unknown = ProcessSnapshotCleanupReport(
+    processGroupState: .observationFailed(errorCode: EIO)
+  )
   let cases: [(ProcessSnapshotExecution, ProcessActivityObservation)] = [
     (
       .deadlineExceeded(cleanup: clean),
@@ -143,6 +146,13 @@ func boundedLsofCollectorKeepsDeadlineLimitAndPermissionFailuresDistinct() async
     (
       .supervisionFailed(reason: "waitpid failed", errorCode: EIO, cleanup: clean),
       .failed(reason: "waitpid failed", errorCode: EIO)
+    ),
+    (
+      .supervisionFailed(reason: "liveness failed", errorCode: EIO, cleanup: unknown),
+      .failed(
+        reason: "liveness failed; process-group quiescence was not verified",
+        errorCode: EIO
+      )
     ),
     (
       .launchFailed(
@@ -283,6 +293,24 @@ func processGroupSupervisorBoundsDescendantHeldEOFAndReportsDeadlineCleanup() as
     return
   }
   #expect(!cleanup.residualProcessGroup)
+}
+
+@Test
+func processGroupSupervisorDetectsRedirectedDescendantBeforeLeaderRelease() async {
+  let runner = FoundationProcessSnapshotRunner()
+  let result = await runner.run(
+    executableURL: URL(fileURLWithPath: "/bin/sh"),
+    arguments: ["-c", "(sleep 2 </dev/null >/dev/null 2>/dev/null) & exit 0"],
+    environment: BoundedLsofProcessActivityCollector.sanitizedEnvironment,
+    deadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 2_000_000_000,
+    maximumOutputBytes: 4_096
+  )
+  guard case .supervisionFailed(let reason, _, let cleanup) = result else {
+    Issue.record("expected the held leader generation to expose its redirected descendant")
+    return
+  }
+  #expect(reason.contains("process group remained active"))
+  #expect(cleanup.processGroupState == .quiescent)
 }
 
 @Test
@@ -444,7 +472,6 @@ func deterministicProcessGroupSupervisorHardFinishesRetainedReaders() throws {
     backend.signalEvents == [
       .init(timeNanoseconds: start, signal: .terminate),
       .init(timeNanoseconds: graceDeadline, signal: .kill),
-      .init(timeNanoseconds: hardDeadline, signal: .kill),
     ]
   )
   #expect(backend.closeReaderTimes == [hardDeadline])
@@ -481,7 +508,6 @@ func deterministicProcessGroupSupervisorReportsBoundedResidualGroup() throws {
     backend.signalEvents == [
       .init(timeNanoseconds: executionDeadline, signal: .terminate),
       .init(timeNanoseconds: graceDeadline, signal: .kill),
-      .init(timeNanoseconds: hardDeadline, signal: .kill),
     ]
   )
   #expect(backend.reapedStatuses.isEmpty)
@@ -491,6 +517,168 @@ func deterministicProcessGroupSupervisorReportsBoundedResidualGroup() throws {
     return
   }
   #expect(cleanup.residualProcessGroup)
+}
+
+@Test
+func deterministicProcessGroupSupervisorProvesDelayedQuiescenceAfterCoalescedTimers() throws {
+  let executionDeadline: UInt64 = 1_000
+  let backend = DeterministicProcessGroupSnapshotBackend(
+    nowNanoseconds: 100,
+    killBehavior: .becomesQuiescentAfter(nanoseconds: 50_000_000)
+  )
+  let result = FixtureValueRecorder<ProcessSnapshotExecution>()
+  let graceDeadline =
+    executionDeadline + BoundedProcessGroupSnapshotState.termGraceNanoseconds
+  let hardDeadline =
+    executionDeadline + BoundedProcessGroupSnapshotState.cleanupAllowanceNanoseconds
+  let coalescedDelivery = hardDeadline + 1_000_000
+  let quiescenceDeadline =
+    coalescedDelivery + BoundedProcessGroupSnapshotState.postKillQuiescenceNanoseconds
+  let state = BoundedProcessGroupSnapshotState(
+    completion: { result.record($0) },
+    backend: backend,
+    executionDeadlineNanoseconds: executionDeadline,
+    maximumOutputBytes: 4_096
+  )
+
+  state.start()
+  backend.deliverTimer(deadlineNanoseconds: executionDeadline, at: executionDeadline)
+  backend.deliverTimer(deadlineNanoseconds: graceDeadline, at: coalescedDelivery)
+  backend.deliverReaped(status: SIGKILL)
+  backend.deliverStandardOutput(Data())
+  backend.deliverStandardError(Data())
+  backend.deliverTimer(deadlineNanoseconds: hardDeadline, at: coalescedDelivery)
+
+  #expect(result.value == nil)
+  #expect(backend.scheduledDeadlines.contains(quiescenceDeadline))
+  backend.advance(to: quiescenceDeadline)
+
+  #expect(
+    backend.signalEvents == [
+      .init(timeNanoseconds: executionDeadline, signal: .terminate),
+      .init(timeNanoseconds: coalescedDelivery, signal: .kill),
+    ]
+  )
+  #expect(backend.closeReaderTimes == [quiescenceDeadline])
+  guard case .deadlineExceeded(let cleanup) = try #require(result.value) else {
+    Issue.record("expected delayed group disappearance to complete within the bounded proof window")
+    return
+  }
+  #expect(!cleanup.residualProcessGroup)
+}
+
+@Test
+func deterministicProcessGroupSupervisorPreservesLivenessFailureAfterCancellationWins() throws {
+  let start: UInt64 = 4_000
+  let backend = DeterministicProcessGroupSnapshotBackend(
+    nowNanoseconds: start,
+    killBehavior: .remainsLive
+  )
+  let result = FixtureValueRecorder<ProcessSnapshotExecution>()
+  let hardDeadline = start + BoundedProcessGroupSnapshotState.cleanupAllowanceNanoseconds
+  let state = BoundedProcessGroupSnapshotState(
+    completion: { result.record($0) },
+    backend: backend,
+    executionDeadlineNanoseconds: 2_000_000_000,
+    maximumOutputBytes: 4_096
+  )
+
+  state.start()
+  state.requestCancellation()
+  backend.setLivenessFailureCode(EIO)
+  backend.deliverReaped(status: 0)
+  backend.deliverStandardOutput(Data())
+  backend.deliverStandardError(Data())
+  backend.setLivenessFailureCode(nil)
+  backend.setGroupIsLive(false)
+  backend.advance(to: hardDeadline)
+
+  guard
+    case .supervisionFailed(let reason, let errorCode, let cleanup) =
+      try #require(result.value)
+  else {
+    Issue.record("expected the first liveness failure to remain authoritative")
+    return
+  }
+  #expect(reason.contains("liveness check failed"))
+  #expect(errorCode == EIO)
+  #expect(cleanup.processGroupState == .quiescent)
+}
+
+@Test
+func deterministicProcessGroupSupervisorPreservesLivenessFailureAfterDeadlineWins() throws {
+  let executionDeadline: UInt64 = 6_000
+  let backend = DeterministicProcessGroupSnapshotBackend(
+    nowNanoseconds: 100,
+    killBehavior: .remainsLive
+  )
+  let result = FixtureValueRecorder<ProcessSnapshotExecution>()
+  let hardDeadline =
+    executionDeadline + BoundedProcessGroupSnapshotState.cleanupAllowanceNanoseconds
+  let state = BoundedProcessGroupSnapshotState(
+    completion: { result.record($0) },
+    backend: backend,
+    executionDeadlineNanoseconds: executionDeadline,
+    maximumOutputBytes: 4_096
+  )
+
+  state.start()
+  backend.advance(to: executionDeadline)
+  backend.setLivenessFailureCode(EIO)
+  backend.deliverReaped(status: 0)
+  backend.deliverStandardOutput(Data())
+  backend.deliverStandardError(Data())
+  backend.setLivenessFailureCode(nil)
+  backend.setGroupIsLive(false)
+  backend.advance(to: hardDeadline)
+
+  guard
+    case .supervisionFailed(let reason, let errorCode, let cleanup) =
+      try #require(result.value)
+  else {
+    Issue.record("expected deadline cleanup to retain the observed liveness failure")
+    return
+  }
+  #expect(reason.contains("liveness check failed"))
+  #expect(errorCode == EIO)
+  #expect(cleanup.processGroupState == .quiescent)
+}
+
+@Test
+func deterministicProcessGroupSupervisorKeepsFailedQuiescenceUnknown() throws {
+  let executionDeadline: UInt64 = 5_000
+  let backend = DeterministicProcessGroupSnapshotBackend(
+    nowNanoseconds: 100,
+    killBehavior: .remainsLive
+  )
+  let result = FixtureValueRecorder<ProcessSnapshotExecution>()
+  let graceDeadline =
+    executionDeadline + BoundedProcessGroupSnapshotState.termGraceNanoseconds
+  let hardDeadline =
+    executionDeadline + BoundedProcessGroupSnapshotState.cleanupAllowanceNanoseconds
+  let state = BoundedProcessGroupSnapshotState(
+    completion: { result.record($0) },
+    backend: backend,
+    executionDeadlineNanoseconds: executionDeadline,
+    maximumOutputBytes: 4_096
+  )
+
+  state.start()
+  backend.advance(to: graceDeadline)
+  backend.setLivenessFailureCode(EINVAL)
+  backend.advance(to: hardDeadline)
+
+  guard
+    case .supervisionFailed(let reason, let errorCode, let cleanup) =
+      try #require(result.value)
+  else {
+    Issue.record("expected a typed liveness observation failure")
+    return
+  }
+  #expect(reason.contains("liveness check failed"))
+  #expect(errorCode == EINVAL)
+  #expect(cleanup.processGroupState == .observationFailed(errorCode: EINVAL))
+  #expect(!cleanup.residualProcessGroup)
 }
 
 @Test
@@ -613,7 +801,6 @@ func deterministicProcessGroupSupervisorClassifiesUnexpectedResidualDescendant()
     backend.signalEvents == [
       .init(timeNanoseconds: start, signal: .terminate),
       .init(timeNanoseconds: graceDeadline, signal: .kill),
-      .init(timeNanoseconds: hardDeadline, signal: .kill),
     ]
   )
   guard
@@ -671,20 +858,83 @@ func deterministicProcessGroupSupervisorPreservesWaitpidFailure() throws {
 @Test
 func posixReapBridgeKeepsWaitpidErrorsSeparateFromExitStatus() {
   #expect(
-    POSIXProcessGroupSnapshotBackend.classifyWaitResult(
+    POSIXProcessGroupSnapshotBackend.classifyWaitIDResult(
       processID: 42,
-      waitResult: -1,
-      rawStatus: 0,
+      waitIDResult: -1,
+      observedProcessID: 0,
+      observedStatus: 0,
       errorCode: ECHILD
     ) == .failed(errorCode: ECHILD)
   )
   #expect(
-    POSIXProcessGroupSnapshotBackend.classifyWaitResult(
+    POSIXProcessGroupSnapshotBackend.classifyWaitIDResult(
       processID: 42,
-      waitResult: 42,
-      rawStatus: 7 << 8,
+      waitIDResult: 0,
+      observedProcessID: 42,
+      observedStatus: 7,
       errorCode: 0
     ) == .reaped(exitStatus: 7)
+  )
+}
+
+@Test
+func posixGroupLivenessBridgeKeepsAbsentPermissionAndFailureDistinct() {
+  #expect(
+    POSIXProcessGroupSnapshotBackend.classifyGroupLiveness(
+      killResult: -1,
+      errorCode: ESRCH
+    ) == .absent
+  )
+  #expect(
+    POSIXProcessGroupSnapshotBackend.classifyGroupLiveness(
+      killResult: -1,
+      errorCode: EPERM
+    ) == .live
+  )
+  #expect(
+    POSIXProcessGroupSnapshotBackend.classifyGroupLiveness(
+      killResult: -1,
+      errorCode: EINVAL
+    ) == .failed(errorCode: EINVAL)
+  )
+  #expect(
+    POSIXProcessGroupSnapshotBackend.groupMemberBufferPlan(
+      requiredPIDCount: 100,
+      errorCode: 0
+    ) == .allocate(pidCount: 164)
+  )
+  #expect(
+    POSIXProcessGroupSnapshotBackend.groupMemberBufferPlan(
+      requiredPIDCount: 0,
+      errorCode: EIO
+    ) == .failed(errorCode: EIO)
+  )
+  #expect(
+    POSIXProcessGroupSnapshotBackend.classifyGroupMembers(
+      [],
+      returnedCount: 0,
+      bufferPIDCount: 64,
+      errorCode: EIO,
+      leaderProcessID: 42
+    ) == .failed(errorCode: EIO)
+  )
+  #expect(
+    POSIXProcessGroupSnapshotBackend.classifyGroupMembers(
+      [42, 99],
+      returnedCount: 2,
+      bufferPIDCount: 64,
+      errorCode: 0,
+      leaderProcessID: 42
+    ) == .live
+  )
+  #expect(
+    POSIXProcessGroupSnapshotBackend.classifyGroupMembers(
+      [42],
+      returnedCount: 1,
+      bufferPIDCount: 64,
+      errorCode: 0,
+      leaderProcessID: 42
+    ) == .absent
   )
 }
 
@@ -994,6 +1244,7 @@ private final class DeterministicProcessGroupSnapshotBackend: ProcessGroupSnapsh
 
   enum KillBehavior {
     case becomesQuiescent
+    case becomesQuiescentAfter(nanoseconds: UInt64)
     case remainsLive
   }
 
@@ -1001,6 +1252,7 @@ private final class DeterministicProcessGroupSnapshotBackend: ProcessGroupSnapsh
   private(set) var signalEvents: [SignalEvent] = []
   private(set) var reapedStatuses: [Int32] = []
   private(set) var closeReaderTimes: [UInt64] = []
+  private(set) var releaseIdentityTimes: [UInt64] = []
   private var groupIsLive: Bool
   private var readersAreClosed = false
   private var standardOutputHandler: (@Sendable (Data) -> Void)?
@@ -1008,6 +1260,8 @@ private final class DeterministicProcessGroupSnapshotBackend: ProcessGroupSnapsh
   private var reapHandler: (@Sendable (ProcessGroupSnapshotReapOutcome) -> Void)?
   private var timers: [DeterministicProcessGroupSnapshotTimer] = []
   private let killBehavior: KillBehavior
+  private var groupQuiescenceDeadline: UInt64?
+  private var livenessFailureCode: Int32?
 
   init(
     nowNanoseconds: UInt64,
@@ -1055,13 +1309,20 @@ private final class DeterministicProcessGroupSnapshotBackend: ProcessGroupSnapsh
     switch killBehavior {
     case .becomesQuiescent:
       groupIsLive = false
+    case .becomesQuiescentAfter(let delay):
+      groupQuiescenceDeadline = nowNanoseconds + delay
     case .remainsLive:
       return
     }
   }
 
-  func processGroupExists() -> Bool {
-    groupIsLive
+  func processGroupLiveness() -> ProcessGroupSnapshotLiveness {
+    if let livenessFailureCode { return .failed(errorCode: livenessFailureCode) }
+    if let deadline = groupQuiescenceDeadline, nowNanoseconds >= deadline {
+      groupIsLive = false
+      groupQuiescenceDeadline = nil
+    }
+    return groupIsLive ? .live : .absent
   }
 
   func closeReaders() {
@@ -1070,8 +1331,17 @@ private final class DeterministicProcessGroupSnapshotBackend: ProcessGroupSnapsh
     closeReaderTimes.append(nowNanoseconds)
   }
 
+  func releaseProcessGroupIdentity() {
+    releaseIdentityTimes.append(nowNanoseconds)
+  }
+
   func setGroupIsLive(_ isLive: Bool) {
     groupIsLive = isLive
+    groupQuiescenceDeadline = nil
+  }
+
+  func setLivenessFailureCode(_ errorCode: Int32?) {
+    livenessFailureCode = errorCode
   }
 
   func deliverReaped(status: Int32) {
@@ -1112,6 +1382,16 @@ private final class DeterministicProcessGroupSnapshotBackend: ProcessGroupSnapsh
     }
     nowNanoseconds = deliveryNanoseconds
     timer.deliverEvenIfCancelled()
+  }
+
+  func deliverTimer(deadlineNanoseconds: UInt64, at deliveryNanoseconds: UInt64) {
+    precondition(deliveryNanoseconds >= nowNanoseconds)
+    guard let timer = timers.first(where: { $0.deadlineNanoseconds == deadlineNanoseconds }) else {
+      Issue.record("deterministic timer was not scheduled")
+      return
+    }
+    nowNanoseconds = deliveryNanoseconds
+    timer.fire()
   }
 }
 

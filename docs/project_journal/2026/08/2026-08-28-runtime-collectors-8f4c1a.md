@@ -62,6 +62,15 @@ superseded_by:
   grace, KILL, and hard-finish deadlines, quiescent/reaped completion, retained-reader closure, and
   typed residual reporting. Separate production-runner fixtures retain real `posix_spawn` `ENOENT`
   and non-executable permission coverage without a recording runner.
+- Process-group cleanup sends SIGKILL at most once. If dispatch pressure coalesces the grace and hard
+  timers, the supervisor grants that first SIGKILL a fixed 100 ms quiescence-proof window before it
+  reports a residual group. `kill(-pgid, 0)` classifies `ESRCH` as absent, `EPERM` as live, and every
+  other errno as a typed supervision failure instead of treating an unreadable observation as absence.
+- The POSIX backend observes leader exit with `waitid(..., WNOWAIT)` and does not reap that exact PID
+  generation until terminal claim has revoked every timer's signal authority. While the leader is
+  held, bounded `proc_listpgrppids` enumeration distinguishes the held leader from descendants; the
+  signal/enumeration syscall itself is serialized with identity-loss and release. Enumeration error,
+  churn that fills the capped buffer, and lost identity remain typed unknown rather than absence.
 
 ## Next Steps
 
@@ -125,3 +134,15 @@ superseded_by:
   tests, `DiskplanScanTests` passed 73 of 73, and the serial full Swift gate passed 366 of 366. The
   toolchain was swift-driver 1.148.6 / Apple Swift 6.3.3 targeting arm64 macOS 26. A post-gate query
   found no surviving test bundle, shell/sleep, `yes`, or retired TERM-ignore fixture process.
+- PR #15's required macOS 26 job exposed a dispatch-pressure race: both real cleanup fixtures reached
+  the hard timer before group disappearance was observable and conservatively reported a residual.
+  The deterministic regression now delivers grace and hard timers at the same late monotonic instant,
+  delays group disappearance, and proves bounded convergence without another signal. The initial fix
+  passed a 13-of-13 focus, `DiskplanScanTests` 75 of 75, and the serial full Swift gate 425 of 425.
+  Fresh review then required typed unknown cleanup and a retained leader-generation proof. The final
+  focused set passed 18 of 18, including cancellation/deadline races with failed-to-absent liveness,
+  libproc count/error semantics, and a real same-PGID descendant with all standard streams redirected.
+  The same fresh reviewer found the final state clean with no P0-P2. After a new serialized dynamic
+  slot was granted, `DiskplanScanTests` passed 79 of 79 and the serial full Swift gate passed 429 of
+  429. Both original macOS 26 CI regression fixtures and the redirected-descendant lifecycle fixture
+  ran in both gates; a final process query found no surviving test bundle, `sleep`, or `yes` process.

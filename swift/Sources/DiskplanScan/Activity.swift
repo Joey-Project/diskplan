@@ -278,11 +278,25 @@ public protocol ProcessActivityCollecting: Sendable {
   func collect(deadlineNanoseconds: UInt64) async -> ProcessActivityObservation
 }
 
+public enum ProcessSnapshotGroupCleanupState: Equatable, Sendable {
+  case quiescent
+  case residual
+  case observationFailed(errorCode: Int32)
+}
+
 public struct ProcessSnapshotCleanupReport: Equatable, Sendable {
-  public let residualProcessGroup: Bool
+  public let processGroupState: ProcessSnapshotGroupCleanupState
+
+  public var residualProcessGroup: Bool {
+    processGroupState == .residual
+  }
 
   public init(residualProcessGroup: Bool) {
-    self.residualProcessGroup = residualProcessGroup
+    processGroupState = residualProcessGroup ? .residual : .quiescent
+  }
+
+  public init(processGroupState: ProcessSnapshotGroupCleanupState) {
+    self.processGroupState = processGroupState
   }
 }
 
@@ -458,7 +472,14 @@ public struct BoundedLsofProcessActivityCollector: ProcessActivityCollecting {
     _ reason: String,
     cleanup: ProcessSnapshotCleanupReport
   ) -> String {
-    cleanup.residualProcessGroup ? "\(reason); residual process group remains" : reason
+    switch cleanup.processGroupState {
+    case .quiescent:
+      return reason
+    case .residual:
+      return "\(reason); residual process group remains"
+    case .observationFailed:
+      return "\(reason); process-group quiescence was not verified"
+    }
   }
 
   private func processFailureReason(

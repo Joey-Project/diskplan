@@ -12,6 +12,17 @@ package enum ProcessGroupSnapshotReapOutcome: Equatable, Sendable {
   case failed(errorCode: Int32)
 }
 
+package enum ProcessGroupSnapshotLiveness: Equatable, Sendable {
+  case live
+  case absent
+  case failed(errorCode: Int32)
+}
+
+package enum ProcessGroupMemberBufferPlan: Equatable, Sendable {
+  case allocate(pidCount: Int)
+  case failed(errorCode: Int32)
+}
+
 package protocol ProcessGroupSnapshotTimer: AnyObject, Sendable {
   func activate()
   func cancel()
@@ -36,7 +47,9 @@ package protocol ProcessGroupSnapshotBackend: AnyObject, Sendable {
   /// Must be bounded and must not invoke installed reader or reap callbacks synchronously.
   func signalProcessGroup(_ signal: ProcessGroupSnapshotSignal)
   /// Must be bounded and must not invoke installed reader or reap callbacks synchronously.
-  func processGroupExists() -> Bool
+  func processGroupLiveness() -> ProcessGroupSnapshotLiveness
+  /// Releases the owned leader generation only after the terminal claim prevents more PGID use.
+  func releaseProcessGroupIdentity()
   func closeReaders()
 }
 
@@ -54,6 +67,7 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
     case cancellation
     case unexpectedResidualGroup
     case reapFailure
+    case livenessFailure
   }
 
   private struct TerminalClaim {
@@ -64,11 +78,13 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
   private enum CompletionEvaluation {
     case none
     case beginUnexpectedResidualCleanup
+    case beginLivenessFailureCleanup
     case complete(TerminalClaim)
   }
 
   package static let termGraceNanoseconds: UInt64 = 100_000_000
   package static let cleanupAllowanceNanoseconds: UInt64 = 500_000_000
+  package static let postKillQuiescenceNanoseconds: UInt64 = 100_000_000
 
   private let lock = NSLock()
   private let completion: @Sendable (ProcessSnapshotExecution) -> Void
@@ -81,11 +97,13 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
   private var errorClosed = false
   private var terminationStatus: Int32?
   private var reapFailureCode: Int32?
+  private var livenessFailureCode: Int32?
   private var cleanupTrigger: CleanupTrigger?
   private var cleanupGeneration: UInt64 = 0
   private var executionDeadlineTimer: (any ProcessGroupSnapshotTimer)?
   private var killTimer: (any ProcessGroupSnapshotTimer)?
   private var cleanupDeadlineTimer: (any ProcessGroupSnapshotTimer)?
+  private var killSentAtNanoseconds: UInt64?
   private var resumed = false
 
   package init(
@@ -175,8 +193,14 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
       guard !resumed, terminationStatus != nil || reapFailureCode != nil,
         outputClosed, errorClosed
       else { return .none }
-      if backend.processGroupExists() {
+      switch backend.processGroupLiveness() {
+      case .live:
         return cleanupTrigger == nil ? .beginUnexpectedResidualCleanup : .none
+      case .failed(let errorCode):
+        if livenessFailureCode == nil { livenessFailureCode = errorCode }
+        return cleanupTrigger == nil ? .beginLivenessFailureCleanup : .none
+      case .absent:
+        break
       }
       let result = self.result(
         trigger: cleanupTrigger,
@@ -191,6 +215,8 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
       return
     case .beginUnexpectedResidualCleanup:
       beginCleanup(.unexpectedResidualGroup)
+    case .beginLivenessFailureCleanup:
+      beginCleanup(.livenessFailure)
     case .complete(let terminal):
       complete(terminal)
     }
@@ -244,25 +270,60 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
 
   private func signalKillAtGrace(generation: UInt64) {
     let sent = lock.withLock { () -> Bool in
-      guard !resumed, cleanupGeneration == generation else { return false }
+      guard !resumed, cleanupGeneration == generation, killSentAtNanoseconds == nil else {
+        return false
+      }
       backend.signalProcessGroup(.kill)
+      killSentAtNanoseconds = backend.nowNanoseconds
       return true
     }
     if sent { evaluateCompletion() }
   }
 
   private func finishCleanupAtHardDeadline(generation: UInt64) {
+    var followupTimer: (any ProcessGroupSnapshotTimer)?
     let terminal = lock.withLock { () -> TerminalClaim? in
       guard !resumed, cleanupGeneration == generation else { return nil }
-      backend.signalProcessGroup(.kill)
-      let residual = backend.processGroupExists()
+      if killSentAtNanoseconds == nil {
+        backend.signalProcessGroup(.kill)
+        killSentAtNanoseconds = backend.nowNanoseconds
+      }
+      let now = backend.nowNanoseconds
+      let quiescenceDeadline = Self.saturatingAdd(
+        killSentAtNanoseconds ?? now,
+        Self.postKillQuiescenceNanoseconds
+      )
+      let liveness = backend.processGroupLiveness()
+      if liveness == .live, now < quiescenceDeadline {
+        let timer = backend.makeTimer(deadlineNanoseconds: quiescenceDeadline) { [weak self] in
+          self?.finishCleanupAtHardDeadline(generation: generation)
+        }
+        cleanupDeadlineTimer = timer
+        followupTimer = timer
+        return nil
+      }
+      let processGroupState: ProcessSnapshotGroupCleanupState
+      let effectiveTrigger: CleanupTrigger
+      switch liveness {
+      case .absent:
+        processGroupState = .quiescent
+        effectiveTrigger = cleanupTrigger ?? .unexpectedResidualGroup
+      case .live:
+        processGroupState = .residual
+        effectiveTrigger = cleanupTrigger ?? .unexpectedResidualGroup
+      case .failed(let errorCode):
+        if livenessFailureCode == nil { livenessFailureCode = errorCode }
+        processGroupState = .observationFailed(errorCode: errorCode)
+        effectiveTrigger = .livenessFailure
+      }
       let result = self.result(
-        trigger: cleanupTrigger ?? .unexpectedResidualGroup,
-        cleanup: ProcessSnapshotCleanupReport(residualProcessGroup: residual),
+        trigger: effectiveTrigger,
+        cleanup: ProcessSnapshotCleanupReport(processGroupState: processGroupState),
         terminationStatus: terminationStatus ?? ECHILD
       )
       return claimTerminalLocked(result)
     }
+    followupTimer?.activate()
     if let terminal { complete(terminal) }
   }
 
@@ -275,6 +336,13 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
       return .supervisionFailed(
         reason: "waitpid failed with POSIX error \(reapFailureCode)",
         errorCode: reapFailureCode,
+        cleanup: cleanup
+      )
+    }
+    if let livenessFailureCode {
+      return .supervisionFailed(
+        reason: "process-group liveness check failed with POSIX error \(livenessFailureCode)",
+        errorCode: livenessFailureCode,
         cleanup: cleanup
       )
     }
@@ -302,6 +370,12 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
         errorCode: nil,
         cleanup: cleanup
       )
+    case .livenessFailure:
+      return .supervisionFailed(
+        reason: "process-group liveness check failed without a POSIX error code",
+        errorCode: nil,
+        cleanup: cleanup
+      )
     }
   }
 
@@ -318,6 +392,7 @@ package final class BoundedProcessGroupSnapshotState: ProcessSnapshotCancellatio
   private func complete(_ terminal: TerminalClaim) {
     for timer in terminal.timers { timer.cancel() }
     backend.closeReaders()
+    backend.releaseProcessGroupIdentity()
     completion(terminal.result)
   }
 
@@ -334,6 +409,7 @@ final class POSIXProcessGroupSnapshotBackend: ProcessGroupSnapshotBackend,
   private let outputHandle: FileHandle
   private let errorHandle: FileHandle
   private let readerLock = NSLock()
+  private let leaderRelease = ProcessGroupLeaderReleaseGate()
   private var readersClosed = false
 
   init(process: SpawnedPOSIXProcessGroup) {
@@ -384,24 +460,33 @@ final class POSIXProcessGroupSnapshotBackend: ProcessGroupSnapshotBackend,
   func startReaping(
     _ completion: @escaping @Sendable (ProcessGroupSnapshotReapOutcome) -> Void
   ) {
-    // The owned child must eventually be reaped; abandoning this wait can create a zombie. The
-    // state supplies a weak completion, so a residual child does not retain the caller-visible
-    // supervisor after its hard deadline.
-    DispatchQueue.global(qos: .utility).async { [process] in
-      var rawStatus: Int32 = 0
+    // `WNOWAIT` observes exit without reaping the process-group leader. Retaining that exact child
+    // generation prevents its numeric PID/PGID from being reused while cleanup may still signal or
+    // query the group. The terminal claim releases the leader for the final blocking reap only after
+    // every timer has lost signal authority.
+    DispatchQueue.global(qos: .utility).async { [process, leaderRelease] in
+      var information = siginfo_t()
       var result: Int32
       repeat {
-        result = waitpid(process.processID, &rawStatus, 0)
+        result = waitid(P_PID, id_t(process.processID), &information, WEXITED | WNOWAIT)
       } while result < 0 && errno == EINTR
       let errorCode = errno
+      if result == 0, information.si_pid == process.processID {
+        leaderRelease.markExitObserved()
+      } else {
+        leaderRelease.markIdentityLost(errorCode: errorCode == 0 ? ECHILD : errorCode)
+      }
       completion(
-        Self.classifyWaitResult(
+        Self.classifyWaitIDResult(
           processID: process.processID,
-          waitResult: result,
-          rawStatus: rawStatus,
+          waitIDResult: result,
+          observedProcessID: information.si_pid,
+          observedStatus: information.si_status,
           errorCode: errorCode
         )
       )
+      leaderRelease.waitUntilReleased()
+      Self.reapReleasedLeader(processID: process.processID)
     }
   }
 
@@ -418,13 +503,31 @@ final class POSIXProcessGroupSnapshotBackend: ProcessGroupSnapshotBackend,
   func signalProcessGroup(_ signal: ProcessGroupSnapshotSignal) {
     guard process.processID > 0 else { return }
     let rawSignal: Int32 = signal == .terminate ? SIGTERM : SIGKILL
-    _ = Darwin.kill(-process.processID, rawSignal)
+    leaderRelease.withSignalAuthority {
+      _ = Darwin.kill(-process.processID, rawSignal)
+    }
   }
 
-  func processGroupExists() -> Bool {
-    guard process.processID > 0 else { return false }
-    if Darwin.kill(-process.processID, 0) == 0 { return true }
-    return errno == EPERM
+  func processGroupLiveness() -> ProcessGroupSnapshotLiveness {
+    guard process.processID > 0 else { return .absent }
+    return leaderRelease.withLivenessAuthority { observation in
+      switch observation {
+      case .exitObserved:
+        return Self.classifyHeldLeaderProcessGroup(
+          processGroupID: process.processID,
+          leaderProcessID: process.processID
+        )
+      case .active:
+        let result = Darwin.kill(-process.processID, 0)
+        return Self.classifyGroupLiveness(killResult: result, errorCode: errno)
+      case .identityLost:
+        preconditionFailure("identity loss is rejected by the authority gate")
+      }
+    }
+  }
+
+  func releaseProcessGroupIdentity() {
+    leaderRelease.release()
   }
 
   func closeReaders() {
@@ -438,19 +541,160 @@ final class POSIXProcessGroupSnapshotBackend: ProcessGroupSnapshotBackend,
     }
   }
 
-  static func classifyWaitResult(
+  static func classifyWaitIDResult(
     processID: Int32,
-    waitResult: Int32,
-    rawStatus: Int32,
+    waitIDResult: Int32,
+    observedProcessID: pid_t,
+    observedStatus: Int32,
     errorCode: Int32
   ) -> ProcessGroupSnapshotReapOutcome {
-    guard waitResult == processID else { return .failed(errorCode: errorCode) }
-    return .reaped(exitStatus: decodeWaitStatus(rawStatus))
+    guard waitIDResult == 0, observedProcessID == processID else {
+      return .failed(errorCode: errorCode == 0 ? ECHILD : errorCode)
+    }
+    return .reaped(exitStatus: observedStatus)
   }
 
-  private static func decodeWaitStatus(_ status: Int32) -> Int32 {
-    let signal = status & 0x7f
-    return signal == 0 ? (status >> 8) & 0xff : signal
+  static func classifyGroupLiveness(
+    killResult: Int32,
+    errorCode: Int32
+  ) -> ProcessGroupSnapshotLiveness {
+    if killResult == 0 { return .live }
+    switch errorCode {
+    case ESRCH: return .absent
+    case EPERM: return .live
+    default: return .failed(errorCode: errorCode)
+    }
+  }
+
+  private static func classifyHeldLeaderProcessGroup(
+    processGroupID: Int32,
+    leaderProcessID: Int32
+  ) -> ProcessGroupSnapshotLiveness {
+    errno = 0
+    let requiredPIDCount = Int(proc_listpgrppids(processGroupID, nil, 0))
+    let probeErrorCode = errno
+    let bufferPIDCount: Int
+    switch groupMemberBufferPlan(
+      requiredPIDCount: requiredPIDCount,
+      errorCode: probeErrorCode
+    ) {
+    case .allocate(let pidCount):
+      bufferPIDCount = pidCount
+    case .failed(let errorCode):
+      return .failed(errorCode: errorCode)
+    }
+    var members = [pid_t](repeating: 0, count: bufferPIDCount)
+    errno = 0
+    let returnedCount = members.withUnsafeMutableBytes { buffer in
+      Int(proc_listpgrppids(processGroupID, buffer.baseAddress, Int32(buffer.count)))
+    }
+    let enumerationErrorCode = errno
+    return classifyGroupMembers(
+      members,
+      returnedCount: returnedCount,
+      bufferPIDCount: bufferPIDCount,
+      errorCode: enumerationErrorCode,
+      leaderProcessID: leaderProcessID
+    )
+  }
+
+  static func groupMemberBufferPlan(
+    requiredPIDCount: Int,
+    errorCode: Int32
+  ) -> ProcessGroupMemberBufferPlan {
+    let maximumPIDCount = 4_096
+    let sparePIDCount = 64
+    if requiredPIDCount < 0 || (requiredPIDCount == 0 && errorCode != 0) {
+      return .failed(errorCode: errorCode == 0 ? EIO : errorCode)
+    }
+    guard requiredPIDCount <= maximumPIDCount else {
+      return .failed(errorCode: EOVERFLOW)
+    }
+    return .allocate(
+      pidCount: min(
+        maximumPIDCount,
+        max(sparePIDCount, requiredPIDCount + sparePIDCount)
+      )
+    )
+  }
+
+  static func classifyGroupMembers(
+    _ members: [pid_t],
+    returnedCount: Int,
+    bufferPIDCount: Int,
+    errorCode: Int32,
+    leaderProcessID: Int32
+  ) -> ProcessGroupSnapshotLiveness {
+    if returnedCount < 0 || (returnedCount == 0 && errorCode != 0) {
+      return .failed(errorCode: errorCode == 0 ? EIO : errorCode)
+    }
+    guard returnedCount < bufferPIDCount, returnedCount <= members.count else {
+      return .failed(errorCode: EOVERFLOW)
+    }
+    return members.prefix(returnedCount).contains(where: { member in
+      member > 0 && member != leaderProcessID
+    }) ? .live : .absent
+  }
+
+  private static func reapReleasedLeader(processID: Int32) {
+    var rawStatus: Int32 = 0
+    var result: Int32
+    repeat {
+      result = waitpid(processID, &rawStatus, 0)
+    } while result < 0 && errno == EINTR
+  }
+}
+
+private final class ProcessGroupLeaderReleaseGate: @unchecked Sendable {
+  enum Observation {
+    case active
+    case exitObserved
+    case identityLost(errorCode: Int32)
+  }
+
+  private let condition = NSCondition()
+  private var released = false
+  private var storedObservation = Observation.active
+
+  func markExitObserved() {
+    condition.withLock { storedObservation = .exitObserved }
+  }
+
+  func markIdentityLost(errorCode: Int32) {
+    condition.withLock { storedObservation = .identityLost(errorCode: errorCode) }
+  }
+
+  func withSignalAuthority(_ operation: () -> Void) {
+    condition.lock()
+    defer { condition.unlock() }
+    guard !released else { return }
+    if case .identityLost = storedObservation { return }
+    operation()
+  }
+
+  func withLivenessAuthority(
+    _ operation: (Observation) -> ProcessGroupSnapshotLiveness
+  ) -> ProcessGroupSnapshotLiveness {
+    condition.lock()
+    defer { condition.unlock() }
+    guard !released else { return .failed(errorCode: ECHILD) }
+    if case .identityLost(let errorCode) = storedObservation {
+      return .failed(errorCode: errorCode)
+    }
+    return operation(storedObservation)
+  }
+
+  func release() {
+    condition.lock()
+    released = true
+    condition.broadcast()
+    condition.unlock()
+  }
+
+  func waitUntilReleased() {
+    condition.lock()
+    while !released { condition.wait() }
+    condition.unlock()
   }
 }
 
