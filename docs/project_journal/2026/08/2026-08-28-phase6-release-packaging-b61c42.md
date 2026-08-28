@@ -46,6 +46,11 @@ superseded_by:
   chain and revalidates every child slot, object/access-policy identity,
   device/filesystem boundary, and security-relevant mount flags. Missing,
   mismatched, and failed revalidation remain distinct outcomes.
+- Managed tree proof now extends through the `bin`, `libexec`, and
+  `libexec/diskplan` parent/child slots. Each slot binds its directory object,
+  access policy, filesystem and mount boundary, and is checked around publish,
+  activation, and deletion; real slot replacements are covered by the native
+  white-box harness.
 - The frontend binds the no-follow engine source by identity, access policy, and
   SHA-256, creates one bounded owner-private executable snapshot, and uses that
   same snapshot for the product/protocol probe and operational session. Source,
@@ -54,6 +59,30 @@ superseded_by:
   most one reopen and rehash; final proof binds identity, access policy, size,
   and SHA-256, so benign `touch` churn is accepted while content or policy drift
   is rejected.
+- Stable copy uses the copied SHA-256 and size as its content proof. A timestamp
+  delta triggers a bounded reopen and rehash; content or protected access-policy
+  drift still fails. Filesystem flags are reduced to the explicit
+  immutable/append/restricted/data-vault/no-unlink access mask, with benign
+  hidden/nodump changes covered separately.
+- The engine launch namespace now retains the full descriptor-bound ancestor
+  chain and makes spawn internal to `BoundEngine`, so a caller cannot carry a
+  validated pathname `Command` past the launch proof. Because native macOS
+  rejects Mach-O `/dev/fd/<fd>` execution, the owner-private snapshot path stays
+  internal and the final pre-spawn/post-spawn checks cover every ancestor,
+  access-policy, slot, filesystem/mount, and snapshot signal.
+  Access safety and operational mutability are distinct: restrictive ancestor
+  flags such as `SF_NOUNLINK` are accepted for traversal while sealed into the
+  identity proof. Mutability is operation-specific: the temporary parent may
+  retain stable `SF_NOUNLINK` because Diskplan mutates only its child namespace,
+  while immutable/append flags that block child-entry changes are rejected. The
+  private launch directory and snapshot require self-mutability and therefore
+  reject `SF_NOUNLINK` and all other selected restrictive flags. Benign
+  hidden/nodump flags remain outside the sealed security mask.
+  Digest reads are expected-size/512-MiB bounded with distinct oversize and
+  mismatch errors. Launch-directory creation and cleanup avoid recursive
+  `TempDir` pathname removal; last-owner cleanup removes only the exact
+  descriptor-bound file and directory slot, while a mismatch retains the object
+  and emits a typed report.
 - Swift release compilation maps the private random work root to a fixed logical
   path and excludes debug STABS before Mach-O UUID and ad-hoc signature
   generation. The published engine therefore retains the UUID required by dyld
@@ -106,3 +135,33 @@ superseded_by:
   14.0. A negative focused probe confirmed that removing `LC_UUID` is rejected
   by dyld; two independent prefix-mapped link-time-stripped engine builds were
   byte-identical and remained operational.
+- Final fixed-range follow-up is implemented with static regression coverage for
+  managed-child replacement, launch-ancestor replacement at the internal spawn
+  boundary, exact-vs-retained launch cleanup, digest oversize versus length
+  mismatch, copy-time timestamp churn, and benign versus protected flags.
+  Dynamic build, lifecycle, and deterministic archive evidence is intentionally
+  deferred to the integration slot owner.
+- Static-only follow-up gate: Cargo 1.95.0/rustfmt 1.9.0 formatting and locked
+  offline metadata validation pass; all tracked shell scripts pass `bash -n` and
+  ShellCheck 0.11.0; all tracked Python files pass bytecode compilation;
+  actionlint 1.7.12, both project-journal validators, and `git diff --check`
+  pass. No C/Rust compilation, test executable, archive build, or lifecycle
+  command was run while the integration workstream owned the dynamic slot.
+- Integration's pre-commit macOS probe showed stable `SF_NOUNLINK` on `/` and
+  `/Users`; the former access-safety predicate therefore rejected every absolute
+  engine path before launch. The follow-up splits traversal safety from flag
+  sealing and operational mutability, with static regressions for accepted stable
+  `SF_NOUNLINK`, rejected security-flag drift, restrictive mutable-node rejection,
+  and ignored hidden/nodump flags. Cargo formatting and locked offline metadata,
+  both journal validators, and diff checks pass; dynamic validation remains with
+  the paused integration checkpoint.
+- Integration's focused follow-up showed that the default owner-private temporary
+  parent also carries stable `SF_NOUNLINK`, while a flags-zero private parent
+  completed all eight focused launch cases. The second refinement separates
+  child-namespace mutability from self-mutability: stable parent `SF_NOUNLINK` is
+  accepted and exact-sealed, immutable/append parent flags are rejected, and a
+  launch root carrying `SF_NOUNLINK` remains ineligible for rename/removal. Static
+  regressions cover each case. Cargo formatting and locked offline metadata, both
+  journal validators, and `git diff --check` pass; no compilation or test binary
+  ran during this static-only refinement, and dynamic validation remains owned by
+  integration.

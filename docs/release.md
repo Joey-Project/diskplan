@@ -82,13 +82,19 @@ packaged mode, and revalidates type, owner, group, mode, link count, ACL, flags,
 size, and content before publication.
 
 The helper also holds no-follow descriptors for the complete managed ancestor
-chain. It reopens every child slot relative to its retained parent and
+chain and for the managed `bin`, `libexec`, and `libexec/diskplan` child slots.
+It reopens every child slot relative to its retained parent and
 revalidates object identity, owner/group/mode/flags/ACL access policy, device,
 filesystem identity, mount boundary, and security-relevant mount flags. An
-ancestor replacement or mount-over therefore fails closed. Bundle content proof
+ancestor or managed child replacement therefore fails closed before and after
+publication, activation, and deletion. Bundle content proof
 uses artifact identity, access policy, size, and SHA-256; mtime and ctime changes
 only trigger one bounded reopen and rehash and are never treated as content
-proof. The helper publishes a new immutable version with an exclusive
+proof. The copy path applies the same rule: a timestamp-only transition during
+copy triggers a bounded source reopen and digest comparison instead of rejection.
+Access-policy flag proof uses an explicit immutable/append/restricted/data-vault/
+no-unlink mask; benign `UF_HIDDEN` and `UF_NODUMP` churn is ignored. The helper
+publishes a new immutable version with an exclusive
 same-filesystem rename, proves the published directory is the verified staging
 object, and conditionally replaces only the launcher leaf it observed. Existing
 versions are retained. Roll back by activating one verified installed version:
@@ -109,13 +115,35 @@ Use `--prefix /absolute/path` with any lifecycle script for an isolated install.
 The installer never calls `sudo`, modifies TCC, or removes an older version.
 
 The Rust launcher opens the selected engine once with `O_NOFOLLOW`, binds its
-object identity, access policy, and SHA-256, then creates one bounded exact copy
-inside an owner-private launch directory. The exact product/protocol identity
-probe and operational session both execute that same retained snapshot. Before
-each launch it revalidates the source descriptor, snapshot descriptor, private
-directory, and snapshot pathname slot. Replacing the original engine pathname
-between launches cannot redirect execution; unlink or hard-link drift
-separately invalidates the source one-link policy.
+object identity, access policy, bounded size, and SHA-256, then creates one exact
+copy inside an owner-private launch directory. It retains and revalidates the
+complete root-to-launch-directory descriptor chain, every parent/child slot,
+mount/access signals, the snapshot descriptor, and the snapshot slot at the
+actual internal spawn boundary. No caller can retain a naked `Command` pathname.
+Restrictive ancestor flags such as `SF_NOUNLINK` are sealed into that identity
+proof and must remain stable, but do not by themselves make traversal unsafe.
+Operation-specific mutability checks distinguish changing a parent's child
+namespace from renaming or removing the object itself. The temporary parent may
+retain stable `SF_NOUNLINK` because Diskplan only creates and removes child
+entries there, but immutable or append-only parent flags fail closed. The
+private launch directory and snapshot must themselves remain mutable, so
+`SF_NOUNLINK`, immutable, append-only, or other selected restrictive flags on
+those objects are rejected. All selected flags remain exact-sealed across
+revalidation; benign `UF_HIDDEN` and `UF_NODUMP` remain outside the
+security-relevant flag mask.
+Native macOS Mach-O execution through `/dev/fd/<fd>` is rejected with `EACCES`,
+so the private snapshot pathname remains an internal implementation detail and
+is revalidated immediately before and after the single operational `spawn()`.
+The exact product/protocol identity probe and operational session both execute
+that same retained snapshot. Digest reads consume at most the expected size or
+the 512 MiB engine ceiling plus one byte and distinguish an oversize object from
+a size mismatch. Launch-directory creation and cleanup do not use `TempDir`
+pathname recursion: the launcher creates the private child through its bound
+parent descriptor, then removes only the descriptor-bound snapshot and proved
+parent slot. A mismatch retains the directory and emits a typed cleanup report.
+Replacing the original engine pathname between launches cannot redirect
+execution; unlink or hard-link drift separately invalidates the source one-link
+policy.
 
 ## Release Tests
 
@@ -131,8 +159,10 @@ sibling-engine launch, checksum rejection, upgrade, rollback activation,
 protocol-major mismatch rejection, and exact uninstall. Its adversarial cases
 cover symlinked prefix ancestors, replacement races, artifact mode drift, stale
 lifecycle locks on the system Bash 3.2 runtime, launcher activation races,
-hostile packager output leaves, engine probe-to-launch replacement, ancestor and
-mount-boundary revalidation, timestamp-only churn, SHA-256 content drift,
+hostile packager output leaves, engine probe-to-launch replacement, launch-chain
+replacement and cleanup retention, managed-child and mount-boundary
+revalidation, copy-time and proof-time timestamp-only churn, selected-flags
+behavior, SHA-256 content drift,
 closed-output timeouts, signal cancellation, and background descendants.
 
 ## India Host Acceptance

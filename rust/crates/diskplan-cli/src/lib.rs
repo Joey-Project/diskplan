@@ -2,12 +2,14 @@
 
 pub mod tui;
 
+use std::ffi::{OsStr, OsString};
+use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
@@ -22,8 +24,10 @@ use diskplan_proto::diskplan::v1::{
     envelope,
 };
 use prost::Message;
+use rustix::fs::{
+    AtFlags, CWD, Mode, OFlags, RenameFlags, mkdirat, openat, renameat_with, statat, unlinkat,
+};
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 use thiserror::Error;
 
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,6 +45,26 @@ const MAXIMUM_RETAINED_NODE_PAYLOAD_BYTES: u64 = 768 * 1024 * 1024;
 const CHECKPOINT_EVIDENCE_DIGEST_DOMAIN: &[u8] = b"diskplan/scan-checkpoint-evidence/v1\0";
 const CHECKPOINT_FINAL_DIGEST_DOMAIN: &[u8] = b"diskplan/scan-checkpoint-final/v1\0";
 const MAX_ENGINE_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(test)]
+const DARWIN_UF_NODUMP: u32 = 0x0000_0001;
+#[cfg(test)]
+const DARWIN_UF_HIDDEN: u32 = 0x0000_8000;
+const DARWIN_UF_IMMUTABLE: u32 = 0x0000_0002;
+const DARWIN_UF_APPEND: u32 = 0x0000_0004;
+const DARWIN_UF_DATAVAULT: u32 = 0x0000_0080;
+const DARWIN_SF_IMMUTABLE: u32 = 0x0002_0000;
+const DARWIN_SF_APPEND: u32 = 0x0004_0000;
+const DARWIN_SF_RESTRICTED: u32 = 0x0008_0000;
+const DARWIN_SF_NOUNLINK: u32 = 0x0010_0000;
+const SECURITY_RELEVANT_FILE_FLAGS: u32 = DARWIN_UF_IMMUTABLE
+    | DARWIN_UF_APPEND
+    | DARWIN_UF_DATAVAULT
+    | DARWIN_SF_IMMUTABLE
+    | DARWIN_SF_APPEND
+    | DARWIN_SF_RESTRICTED
+    | DARWIN_SF_NOUNLINK;
+const CHILD_NAMESPACE_BLOCKING_FLAGS: u32 =
+    DARWIN_UF_IMMUTABLE | DARWIN_UF_APPEND | DARWIN_SF_IMMUTABLE | DARWIN_SF_APPEND;
 
 type FrameResult = Result<Option<Vec<u8>>, FrameError>;
 
@@ -53,10 +77,12 @@ struct EngineObjectIdentity {
     gid: u32,
     link_count: u64,
     size: u64,
+    flags: u32,
 }
 
 impl EngineObjectIdentity {
-    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
+    fn from_file(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
         if !metadata.file_type().is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -78,8 +104,10 @@ impl EngineObjectIdentity {
         }
         if metadata.size() > MAX_ENGINE_BYTES {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "engine exceeds the executable size limit",
+                io::ErrorKind::FileTooLarge,
+                EngineDigestLengthIssue::Oversize {
+                    limit: MAX_ENGINE_BYTES,
+                },
             ));
         }
         Ok(Self {
@@ -90,6 +118,7 @@ impl EngineObjectIdentity {
             gid: metadata.gid(),
             link_count: metadata.nlink(),
             size: metadata.size(),
+            flags: selected_file_access_flags(file)?,
         })
     }
 }
@@ -101,24 +130,789 @@ struct LaunchDirectoryIdentity {
     mode: u32,
     uid: u32,
     gid: u32,
+    flags: u32,
+    filesystem_id: u64,
+    mount_flags: u64,
 }
 
 impl LaunchDirectoryIdentity {
-    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
-        if !metadata.file_type().is_dir() || metadata.mode() & 0o777 != 0o700 {
+    fn from_file(file: &File, owner_private: bool) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "private engine launch directory access policy is unsafe",
+                "engine launch ancestor is not a directory",
             ));
         }
-        Ok(Self {
+        let identity = Self {
             device: metadata.dev(),
             inode: metadata.ino(),
             mode: metadata.mode(),
             uid: metadata.uid(),
             gid: metadata.gid(),
-        })
+            flags: selected_file_access_flags(file)?,
+            filesystem_id: rustix::fs::fstatvfs(file)?.f_fsid,
+            mount_flags: selected_mount_access_flags(file)?,
+        };
+        identity.require_safe_access(owner_private)?;
+        Ok(identity)
     }
+
+    fn require_safe_access(&self, owner_private: bool) -> io::Result<()> {
+        let current_uid = rustix::process::geteuid().as_raw();
+        let current_gid = rustix::process::getegid().as_raw();
+        let permissions = self.mode & 0o7777;
+        let safe = if owner_private {
+            self.uid == current_uid && self.gid == current_gid && permissions == 0o700
+        } else {
+            let owner_safe = self.uid == 0 || self.uid == current_uid;
+            let writable_by_others = permissions & 0o022 != 0;
+            let root_sticky = self.uid == 0 && permissions & 0o1000 != 0;
+            owner_safe && (!writable_by_others || root_sticky)
+        };
+        if !safe {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "engine launch ancestor access policy is unsafe",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn selected_security_file_flags(flags: u32) -> u32 {
+    flags & SECURITY_RELEVANT_FILE_FLAGS
+}
+
+fn require_child_namespace_mutability(flags: u32, label: &str) -> io::Result<()> {
+    if flags & CHILD_NAMESPACE_BLOCKING_FLAGS != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{label} flags prevent child namespace mutation"),
+        ));
+    }
+    Ok(())
+}
+
+fn require_self_mutability(flags: u32, label: &str) -> io::Result<()> {
+    if flags != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{label} flags prevent object rename or removal"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn selected_file_access_flags(file: &File) -> io::Result<u32> {
+    let metadata = rustix::fs::fstat(file)?;
+    // Darwin's security-relevant subset from <sys/stat.h>. UF_HIDDEN and
+    // UF_NODUMP are deliberately excluded because they do not change access.
+    Ok(selected_security_file_flags(metadata.st_flags))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn selected_file_access_flags(_file: &File) -> io::Result<u32> {
+    Ok(0)
+}
+
+#[cfg(target_os = "macos")]
+fn selected_mount_access_flags(file: &File) -> io::Result<u64> {
+    let metadata = rustix::fs::fstatfs(file)?;
+    let mask = (libc::MNT_RDONLY | libc::MNT_NOEXEC | libc::MNT_NOSUID | libc::MNT_NODEV) as u64;
+    Ok((metadata.f_flags as u64) & mask)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn selected_mount_access_flags(_file: &File) -> io::Result<u64> {
+    Ok(0)
+}
+
+#[derive(Debug)]
+struct LaunchDirectoryBinding {
+    file: File,
+    name: Option<OsString>,
+    identity: LaunchDirectoryIdentity,
+    parent_device: u64,
+    parent_filesystem_id: u64,
+    crosses_device: bool,
+    crosses_mount: bool,
+}
+
+#[derive(Debug, Error)]
+enum LaunchCleanupError {
+    #[error("launch namespace revalidation failed; retained unverified path hint {path}: {source}")]
+    NamespaceChanged {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("descriptor-bound engine snapshot cleanup is incomplete at {path}: {source}")]
+    SnapshotRemoval {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("descriptor-bound engine launch-directory cleanup is incomplete at {path}: {source}")]
+    DirectoryRemoval {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+#[derive(Debug)]
+struct LaunchDirectoryGuard {
+    directories: Option<Vec<LaunchDirectoryBinding>>,
+    path: PathBuf,
+}
+
+impl LaunchDirectoryGuard {
+    fn into_parts(mut self) -> (Vec<LaunchDirectoryBinding>, PathBuf) {
+        let directories = self
+            .directories
+            .take()
+            .expect("launch directory guard is armed");
+        (directories, self.path.clone())
+    }
+}
+
+impl Drop for LaunchDirectoryGuard {
+    fn drop(&mut self) {
+        let Some(directories) = self.directories.as_ref() else {
+            return;
+        };
+        if let Err(error) = cleanup_bound_launch_directory(directories, &self.path) {
+            eprintln!("diskplan: {error}");
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LaunchNamespace {
+    directories: Vec<LaunchDirectoryBinding>,
+    path: PathBuf,
+    engine_name: OsString,
+    engine_file: File,
+    engine_identity: EngineObjectIdentity,
+    engine_sha256: [u8; 32],
+}
+
+impl LaunchNamespace {
+    fn create(
+        source: &File,
+        source_identity: &EngineObjectIdentity,
+        source_sha256: [u8; 32],
+    ) -> io::Result<Self> {
+        let temporary_parent = std::fs::canonicalize(std::env::temp_dir())?;
+        let launch_guard = create_launch_directory(&temporary_parent)?;
+        let launch_directory = &launch_guard
+            .directories
+            .as_ref()
+            .expect("launch directory guard is armed")
+            .last()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "launch chain is empty"))?
+            .file;
+        let engine_name = OsString::from("diskplan-engine");
+        let engine_fd = openat(
+            launch_directory,
+            &engine_name,
+            OFlags::RDWR
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC
+                | OFlags::NONBLOCK,
+            Mode::from_raw_mode(0o700),
+        )?;
+        let mut writable_engine_file = File::from(engine_fd);
+        copy_exact_file(source, &mut writable_engine_file, source_identity.size)?;
+        writable_engine_file.flush()?;
+        rustix::fs::fchown(
+            &writable_engine_file,
+            Some(rustix::process::geteuid()),
+            Some(rustix::process::getegid()),
+        )?;
+        writable_engine_file.set_permissions(std::fs::Permissions::from_mode(0o500))?;
+        writable_engine_file.sync_all()?;
+        drop(writable_engine_file);
+        let engine_file = File::from(openat(
+            launch_directory,
+            &engine_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?);
+        let engine_identity = EngineObjectIdentity::from_file(&engine_file)?;
+        require_self_mutability(engine_identity.flags, "engine launch snapshot")?;
+        let engine_sha256 = digest_file(&engine_file, engine_identity.size)?;
+        if engine_sha256 != source_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private engine launch snapshot does not match bound source content",
+            ));
+        }
+        let (directories, path) = launch_guard.into_parts();
+        let result = Self {
+            directories,
+            path,
+            engine_name,
+            engine_file,
+            engine_identity,
+            engine_sha256,
+        };
+        result.revalidate()?;
+        Ok(result)
+    }
+
+    fn revalidate_directory_count(&self, count: usize) -> io::Result<()> {
+        revalidate_directory_bindings(&self.directories, count)
+    }
+
+    fn revalidate_directories(&self) -> io::Result<()> {
+        self.revalidate_directory_count(self.directories.len())
+    }
+
+    fn revalidate(&self) -> io::Result<()> {
+        self.revalidate_directories()?;
+        let engine_identity = EngineObjectIdentity::from_file(&self.engine_file)?;
+        require_self_mutability(engine_identity.flags, "engine launch snapshot")?;
+        if engine_identity != self.engine_identity
+            || digest_file(&self.engine_file, self.engine_identity.size)? != self.engine_sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private engine launch snapshot changed",
+            ));
+        }
+        let launch_directory = &self
+            .directories
+            .last()
+            .expect("launch chain is non-empty")
+            .file;
+        let launch_slot = File::from(openat(
+            launch_directory,
+            &self.engine_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?);
+        let launch_slot_identity = EngineObjectIdentity::from_file(&launch_slot)?;
+        require_self_mutability(launch_slot_identity.flags, "engine launch snapshot slot")?;
+        if launch_slot_identity != self.engine_identity
+            || digest_file(&launch_slot, self.engine_identity.size)? != self.engine_sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private engine launch slot no longer selects the bound snapshot",
+            ));
+        }
+        Ok(())
+    }
+
+    fn cleanup_exact(&mut self) -> Result<(), LaunchCleanupError> {
+        self.revalidate()
+            .map_err(|source| LaunchCleanupError::NamespaceChanged {
+                path: self.path.clone(),
+                source,
+            })?;
+        cleanup_bound_engine_snapshot(
+            &self.directories,
+            &self.path,
+            &self.engine_name,
+            &self.engine_identity,
+            self.engine_sha256,
+        )?;
+        cleanup_bound_launch_directory(&self.directories, &self.path)
+    }
+}
+
+impl Drop for LaunchNamespace {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup_exact() {
+            eprintln!("diskplan: {error}");
+        }
+    }
+}
+
+fn directory_open_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK
+}
+
+fn revalidate_directory_bindings(
+    directories: &[LaunchDirectoryBinding],
+    count: usize,
+) -> io::Result<()> {
+    for (index, binding) in directories.iter().take(count).enumerate() {
+        let launch_root = index + 1 == directories.len();
+        let current_identity = LaunchDirectoryIdentity::from_file(&binding.file, launch_root)?;
+        if launch_root {
+            require_self_mutability(current_identity.flags, "engine launch directory")?;
+        }
+        if current_identity != binding.identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine launch ancestor identity, access policy, or mount flags changed",
+            ));
+        }
+        let reopened = if index == 0 {
+            File::from(openat(CWD, "/", directory_open_flags(), Mode::empty())?)
+        } else {
+            let parent = &directories[index - 1];
+            File::from(openat(
+                &parent.file,
+                binding.name.as_ref().expect("non-root binding has a name"),
+                directory_open_flags(),
+                Mode::empty(),
+            )?)
+        };
+        let reopened_identity = LaunchDirectoryIdentity::from_file(&reopened, launch_root)?;
+        if launch_root {
+            require_self_mutability(reopened_identity.flags, "engine launch directory slot")?;
+        }
+        if reopened_identity != binding.identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine launch ancestor pathname no longer selects the bound directory",
+            ));
+        }
+        let parent_device = if index == 0 {
+            binding.identity.device
+        } else {
+            directories[index - 1].identity.device
+        };
+        let parent_filesystem_id = if index == 0 {
+            binding.identity.filesystem_id
+        } else {
+            directories[index - 1].identity.filesystem_id
+        };
+        if binding.parent_device != parent_device
+            || binding.crosses_device != (binding.identity.device != parent_device)
+            || binding.parent_filesystem_id != parent_filesystem_id
+            || binding.crosses_mount != (binding.identity.filesystem_id != parent_filesystem_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine launch ancestor mount boundary changed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn restore_quarantined_slot(parent: &File, quarantine: &OsStr, original: &OsStr) -> io::Result<()> {
+    renameat_with(parent, quarantine, parent, original, RenameFlags::NOREPLACE)
+        .map_err(io::Error::from)
+}
+
+fn cleanup_bound_engine_snapshot(
+    directories: &[LaunchDirectoryBinding],
+    path: &Path,
+    engine_name: &OsStr,
+    expected_identity: &EngineObjectIdentity,
+    expected_sha256: [u8; 32],
+) -> Result<(), LaunchCleanupError> {
+    let launch_directory = &directories.last().expect("launch chain is non-empty").file;
+    let quarantine = random_scoped_name(".diskplan-engine-cleanup.").map_err(|source| {
+        LaunchCleanupError::SnapshotRemoval {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    renameat_with(
+        launch_directory,
+        engine_name,
+        launch_directory,
+        &quarantine,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|source| LaunchCleanupError::SnapshotRemoval {
+        path: path.to_path_buf(),
+        source: io::Error::from(source),
+    })?;
+    let quarantined = match openat(
+        launch_directory,
+        &quarantine,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(source) => {
+            let restore = restore_quarantined_slot(launch_directory, &quarantine, engine_name);
+            return Err(LaunchCleanupError::SnapshotRemoval {
+                path: path.to_path_buf(),
+                source: io::Error::other(format!(
+                    "cannot reopen quarantined snapshot: {}; restore result: {}",
+                    io::Error::from(source),
+                    restore
+                        .map(|()| "restored".to_string())
+                        .unwrap_or_else(|error| error.to_string())
+                )),
+            });
+        }
+    };
+    let matches = match EngineObjectIdentity::from_file(&quarantined).and_then(|identity| {
+        require_self_mutability(identity.flags, "quarantined engine launch snapshot")?;
+        Ok(identity == *expected_identity
+            && digest_file(&quarantined, expected_identity.size)? == expected_sha256)
+    }) {
+        Ok(matches) => matches,
+        Err(proof_error) => {
+            let restore = restore_quarantined_slot(launch_directory, &quarantine, engine_name);
+            return Err(LaunchCleanupError::SnapshotRemoval {
+                path: path.to_path_buf(),
+                source: io::Error::other(format!(
+                    "cannot revalidate quarantined snapshot: {proof_error}; restore result: {}",
+                    restore
+                        .map(|()| "restored".to_string())
+                        .unwrap_or_else(|error| error.to_string())
+                )),
+            });
+        }
+    };
+    if !matches {
+        let restore = restore_quarantined_slot(launch_directory, &quarantine, engine_name);
+        return Err(LaunchCleanupError::NamespaceChanged {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "quarantined snapshot proof mismatch; restore result: {}",
+                    restore
+                        .map(|()| "restored".to_string())
+                        .unwrap_or_else(|error| error.to_string())
+                ),
+            ),
+        });
+    }
+    if let Err(source) = unlinkat(launch_directory, &quarantine, AtFlags::empty()) {
+        let restore = restore_quarantined_slot(launch_directory, &quarantine, engine_name);
+        return Err(LaunchCleanupError::SnapshotRemoval {
+            path: path.to_path_buf(),
+            source: io::Error::other(format!(
+                "cannot remove exact quarantined snapshot: {}; restore result: {}",
+                io::Error::from(source),
+                restore
+                    .map(|()| "restored".to_string())
+                    .unwrap_or_else(|error| error.to_string())
+            )),
+        });
+    }
+    launch_directory
+        .sync_all()
+        .map_err(|source| LaunchCleanupError::SnapshotRemoval {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    for name in [engine_name, quarantine.as_os_str()] {
+        match statat(launch_directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(source) => {
+                return Err(LaunchCleanupError::SnapshotRemoval {
+                    path: path.to_path_buf(),
+                    source: io::Error::from(source),
+                });
+            }
+            Ok(_) => {
+                return Err(LaunchCleanupError::SnapshotRemoval {
+                    path: path.to_path_buf(),
+                    source: io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "engine snapshot slot was repopulated during exact cleanup",
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_bound_launch_directory(
+    directories: &[LaunchDirectoryBinding],
+    path: &Path,
+) -> Result<(), LaunchCleanupError> {
+    revalidate_directory_bindings(directories, directories.len()).map_err(|source| {
+        LaunchCleanupError::NamespaceChanged {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    let leaf = directories.last().expect("launch chain is non-empty");
+    let parent = directories
+        .get(directories.len().saturating_sub(2))
+        .expect("launch root has a parent");
+    selected_file_access_flags(&parent.file)
+        .and_then(|flags| {
+            require_child_namespace_mutability(flags, "engine launch parent directory")
+        })
+        .map_err(|source| LaunchCleanupError::DirectoryRemoval {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let leaf_name = leaf.name.as_ref().expect("launch root has a slot name");
+    let quarantine = random_scoped_name(".diskplan-launch-cleanup.").map_err(|source| {
+        LaunchCleanupError::DirectoryRemoval {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    renameat_with(
+        &parent.file,
+        leaf_name,
+        &parent.file,
+        &quarantine,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|source| LaunchCleanupError::DirectoryRemoval {
+        path: path.to_path_buf(),
+        source: io::Error::from(source),
+    })?;
+    let quarantined = match openat(
+        &parent.file,
+        &quarantine,
+        directory_open_flags(),
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(source) => {
+            let restore = restore_quarantined_slot(&parent.file, &quarantine, leaf_name);
+            return Err(LaunchCleanupError::DirectoryRemoval {
+                path: path.to_path_buf(),
+                source: io::Error::other(format!(
+                    "cannot reopen quarantined launch directory: {}; restore result: {}",
+                    io::Error::from(source),
+                    restore
+                        .map(|()| "restored".to_string())
+                        .unwrap_or_else(|error| error.to_string())
+                )),
+            });
+        }
+    };
+    let quarantine_identity = match LaunchDirectoryIdentity::from_file(&quarantined, true) {
+        Ok(identity) => {
+            if let Err(proof_error) =
+                require_self_mutability(identity.flags, "quarantined engine launch directory")
+            {
+                let restore = restore_quarantined_slot(&parent.file, &quarantine, leaf_name);
+                return Err(LaunchCleanupError::DirectoryRemoval {
+                    path: path.to_path_buf(),
+                    source: io::Error::other(format!(
+                        "quarantined launch directory is not mutable: {proof_error}; restore result: {}",
+                        restore
+                            .map(|()| "restored".to_string())
+                            .unwrap_or_else(|error| error.to_string())
+                    )),
+                });
+            }
+            identity
+        }
+        Err(proof_error) => {
+            let restore = restore_quarantined_slot(&parent.file, &quarantine, leaf_name);
+            return Err(LaunchCleanupError::DirectoryRemoval {
+                path: path.to_path_buf(),
+                source: io::Error::other(format!(
+                    "cannot revalidate quarantined launch directory: {proof_error}; restore result: {}",
+                    restore
+                        .map(|()| "restored".to_string())
+                        .unwrap_or_else(|error| error.to_string())
+                )),
+            });
+        }
+    };
+    if quarantine_identity != leaf.identity {
+        let restore = restore_quarantined_slot(&parent.file, &quarantine, leaf_name);
+        return Err(LaunchCleanupError::NamespaceChanged {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "quarantined launch directory proof mismatch; restore result: {}",
+                    restore
+                        .map(|()| "restored".to_string())
+                        .unwrap_or_else(|error| error.to_string())
+                ),
+            ),
+        });
+    }
+    if let Err(source) = unlinkat(&parent.file, &quarantine, AtFlags::REMOVEDIR) {
+        let restore = restore_quarantined_slot(&parent.file, &quarantine, leaf_name);
+        return Err(LaunchCleanupError::DirectoryRemoval {
+            path: path.to_path_buf(),
+            source: io::Error::other(format!(
+                "cannot remove exact quarantined launch directory: {}; restore result: {}",
+                io::Error::from(source),
+                restore
+                    .map(|()| "restored".to_string())
+                    .unwrap_or_else(|error| error.to_string())
+            )),
+        });
+    }
+    parent
+        .file
+        .sync_all()
+        .map_err(|source| LaunchCleanupError::DirectoryRemoval {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    for name in [leaf_name.as_os_str(), quarantine.as_os_str()] {
+        match statat(&parent.file, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(source) => {
+                return Err(LaunchCleanupError::DirectoryRemoval {
+                    path: path.to_path_buf(),
+                    source: io::Error::from(source),
+                });
+            }
+            Ok(_) => {
+                return Err(LaunchCleanupError::DirectoryRemoval {
+                    path: path.to_path_buf(),
+                    source: io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "launch directory slot was repopulated during exact cleanup",
+                    ),
+                });
+            }
+        }
+    }
+    revalidate_directory_bindings(directories, directories.len() - 1).map_err(|source| {
+        LaunchCleanupError::NamespaceChanged {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    Ok(())
+}
+
+fn random_scoped_name(prefix: &str) -> io::Result<OsString> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(io::Error::other)?;
+    let mut name = String::from(prefix);
+    for byte in random {
+        write!(&mut name, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(OsString::from(name))
+}
+
+fn create_launch_directory(temporary_parent: &Path) -> io::Result<LaunchDirectoryGuard> {
+    let mut bindings = bind_launch_directory_chain(temporary_parent, false)?;
+    let parent = bindings
+        .last()
+        .expect("absolute temporary parent has a root binding");
+    require_child_namespace_mutability(parent.identity.flags, "engine launch parent directory")?;
+    let mut selected_name = None;
+    for _ in 0..64 {
+        let name = random_scoped_name("diskplan-engine-launch.")?;
+        match mkdirat(&parent.file, &name, Mode::from_raw_mode(0o700)) {
+            Ok(()) => {
+                selected_name = Some(name);
+                break;
+            }
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(source) => return Err(io::Error::from(source)),
+        }
+    }
+    let name = selected_name.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "cannot allocate a unique engine launch directory slot",
+        )
+    })?;
+    let child = File::from(openat(
+        &parent.file,
+        &name,
+        directory_open_flags(),
+        Mode::empty(),
+    )?);
+    rustix::fs::fchown(
+        &child,
+        Some(rustix::process::geteuid()),
+        Some(rustix::process::getegid()),
+    )?;
+    child.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    let identity = LaunchDirectoryIdentity::from_file(&child, true)?;
+    require_self_mutability(identity.flags, "engine launch directory")?;
+    let reopened = File::from(openat(
+        &parent.file,
+        &name,
+        directory_open_flags(),
+        Mode::empty(),
+    )?);
+    let reopened_identity = LaunchDirectoryIdentity::from_file(&reopened, true)?;
+    require_self_mutability(reopened_identity.flags, "engine launch directory slot")?;
+    if reopened_identity != identity {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "engine launch directory slot changed while binding",
+        ));
+    }
+    let path = temporary_parent.join(&name);
+    let parent_device = parent.identity.device;
+    let parent_filesystem_id = parent.identity.filesystem_id;
+    bindings.push(LaunchDirectoryBinding {
+        file: child,
+        name: Some(name),
+        parent_device,
+        parent_filesystem_id,
+        crosses_device: identity.device != parent_device,
+        crosses_mount: identity.filesystem_id != parent_filesystem_id,
+        identity,
+    });
+    Ok(LaunchDirectoryGuard {
+        directories: Some(bindings),
+        path,
+    })
+}
+
+fn bind_launch_directory_chain(
+    path: &Path,
+    exact_leaf: bool,
+) -> io::Result<Vec<LaunchDirectoryBinding>> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "engine launch directory is not absolute",
+        ));
+    }
+    let root = File::from(openat(CWD, "/", directory_open_flags(), Mode::empty())?);
+    let root_identity = LaunchDirectoryIdentity::from_file(&root, false)?;
+    let mut bindings = vec![LaunchDirectoryBinding {
+        file: root,
+        name: None,
+        identity: root_identity.clone(),
+        parent_device: root_identity.device,
+        parent_filesystem_id: root_identity.filesystem_id,
+        crosses_device: false,
+        crosses_mount: false,
+    }];
+    let component_count = path
+        .components()
+        .filter(|part| matches!(part, Component::Normal(_)))
+        .count();
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let parent = bindings.last().expect("root binding exists");
+        let child = File::from(openat(
+            &parent.file,
+            name,
+            directory_open_flags(),
+            Mode::empty(),
+        )?);
+        let parent_device = parent.identity.device;
+        let parent_filesystem_id = parent.identity.filesystem_id;
+        let launch_root = exact_leaf && bindings.len() == component_count;
+        let identity = LaunchDirectoryIdentity::from_file(&child, launch_root)?;
+        bindings.push(LaunchDirectoryBinding {
+            file: child,
+            name: Some(name.to_os_string()),
+            parent_device,
+            parent_filesystem_id,
+            crosses_device: identity.device != parent_device,
+            crosses_mount: identity.filesystem_id != parent_filesystem_id,
+            identity,
+        });
+    }
+    Ok(bindings)
 }
 
 #[derive(Clone, Debug)]
@@ -126,12 +920,7 @@ pub struct BoundEngine {
     source_file: Arc<File>,
     source_identity: EngineObjectIdentity,
     source_sha256: [u8; 32],
-    launch_root: Arc<TempDir>,
-    launch_root_identity: LaunchDirectoryIdentity,
-    launch_file: Arc<File>,
-    launch_identity: EngineObjectIdentity,
-    launch_sha256: [u8; 32],
-    launch_path: PathBuf,
+    launch: Arc<LaunchNamespace>,
 }
 
 impl BoundEngine {
@@ -143,42 +932,21 @@ impl BoundEngine {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)?;
-        let source_identity = EngineObjectIdentity::from_metadata(&file.metadata()?)?;
-        let source_sha256 = digest_file(&file)?;
-        if EngineObjectIdentity::from_metadata(&file.metadata()?)? != source_identity {
+        let source_identity = EngineObjectIdentity::from_file(&file)?;
+        let source_sha256 = digest_file(&file, source_identity.size)?;
+        if EngineObjectIdentity::from_file(&file)? != source_identity {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "engine identity or access policy changed while binding content",
             ));
         }
-        let launch_root = tempfile::Builder::new()
-            .prefix("diskplan-engine-launch.")
-            .tempdir()?;
-        std::fs::set_permissions(launch_root.path(), std::fs::Permissions::from_mode(0o700))?;
-        let launch_root_identity =
-            LaunchDirectoryIdentity::from_metadata(&launch_root.path().symlink_metadata()?)?;
-        let launch_path = launch_root.path().join("diskplan-engine");
-        let mut launch_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&launch_path)?;
-        copy_exact_file(&file, &mut launch_file, source_identity.size)?;
-        launch_file.flush()?;
-        launch_file.set_permissions(std::fs::Permissions::from_mode(0o500))?;
-        launch_file.sync_all()?;
-        let launch_identity = EngineObjectIdentity::from_metadata(&launch_file.metadata()?)?;
-        let launch_sha256 = digest_file(&launch_file)?;
-        if launch_sha256 != source_sha256 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "private engine launch snapshot does not match bound source content",
-            ));
-        }
-        if EngineObjectIdentity::from_metadata(&file.metadata()?)? != source_identity
-            || digest_file(&file)? != source_sha256
+        let launch = Arc::new(LaunchNamespace::create(
+            &file,
+            &source_identity,
+            source_sha256,
+        )?);
+        if EngineObjectIdentity::from_file(&file)? != source_identity
+            || digest_file(&file, source_identity.size)? != source_sha256
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -189,71 +957,75 @@ impl BoundEngine {
             source_file: Arc::new(file),
             source_identity,
             source_sha256,
-            launch_root: Arc::new(launch_root),
-            launch_root_identity,
-            launch_file: Arc::new(launch_file),
-            launch_identity,
-            launch_sha256,
-            launch_path,
+            launch,
         })
     }
 
-    pub fn command(&self) -> io::Result<Command> {
+    fn spawn_child(&self, configure: impl FnOnce(&mut Command)) -> io::Result<Child> {
+        self.spawn_child_at_boundary(configure, || Ok(()))
+    }
+
+    fn spawn_child_at_boundary(
+        &self,
+        configure: impl FnOnce(&mut Command),
+        before_spawn: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Child> {
         self.revalidate()?;
-        Ok(Command::new(&self.launch_path))
+        // macOS rejects native Mach-O execution through /dev/fd. Keep the
+        // pathname launch inside BoundEngine so it cannot outlive the complete
+        // owner-private namespace proof, and revalidate immediately on both
+        // sides of the only operational pathname spawn.
+        let mut command = Command::new(self.launch.path.join(&self.launch.engine_name));
+        configure(&mut command);
+        before_spawn()?;
+        self.revalidate()?;
+        let mut child = command.spawn()?;
+        if let Err(error) = self.revalidate() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok(child)
+    }
+
+    pub fn output(&self, arguments: &[&OsStr]) -> io::Result<Output> {
+        let child = self.spawn_child(|command| {
+            command
+                .args(arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        })?;
+        let output = child.wait_with_output()?;
+        self.revalidate()?;
+        Ok(output)
     }
 
     pub fn revalidate(&self) -> io::Result<()> {
-        let current = EngineObjectIdentity::from_metadata(&self.source_file.metadata()?)?;
+        let current = EngineObjectIdentity::from_file(&self.source_file)?;
         if current != self.source_identity {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "bound engine identity or access policy changed",
             ));
         }
-        if digest_file(&self.source_file)? != self.source_sha256 {
+        if digest_file(&self.source_file, self.source_identity.size)? != self.source_sha256 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "bound engine content changed",
             ));
         }
-        if LaunchDirectoryIdentity::from_metadata(&self.launch_root.path().symlink_metadata()?)?
-            != self.launch_root_identity
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "private engine launch directory identity or access policy changed",
-            ));
-        }
-        let launch_current = EngineObjectIdentity::from_metadata(&self.launch_file.metadata()?)?;
-        if launch_current != self.launch_identity
-            || digest_file(&self.launch_file)? != self.launch_sha256
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "private engine launch snapshot changed",
-            ));
-        }
-        let launch_slot = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&self.launch_path)?;
-        if EngineObjectIdentity::from_metadata(&launch_slot.metadata()?)? != self.launch_identity
-            || digest_file(&launch_slot)? != self.launch_sha256
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "private engine launch pathname no longer selects the bound snapshot",
-            ));
-        }
-        Ok(())
+        self.launch.revalidate()
     }
 }
 
 fn copy_exact_file(source: &File, destination: &mut File, expected_size: u64) -> io::Result<()> {
     let mut reader = source.try_clone()?;
     reader.seek(SeekFrom::Start(0))?;
-    let copied = io::copy(&mut reader.take(expected_size + 1), destination)?;
+    let copied = io::copy(
+        &mut reader.take(expected_size.saturating_add(1)),
+        destination,
+    )?;
     if copied != expected_size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -263,19 +1035,244 @@ fn copy_exact_file(source: &File, destination: &mut File, expected_size: u64) ->
     Ok(())
 }
 
-fn digest_file(file: &File) -> io::Result<[u8; 32]> {
+#[derive(Debug, Error)]
+enum EngineDigestLengthIssue {
+    #[error("engine exceeds the executable size limit of {limit} bytes")]
+    Oversize { limit: u64 },
+    #[error("engine size changed while hashing: expected {expected} bytes, observed {actual}")]
+    Mismatch { expected: u64, actual: u64 },
+}
+
+fn digest_file(file: &File, expected_size: u64) -> io::Result<[u8; 32]> {
+    if expected_size > MAX_ENGINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            EngineDigestLengthIssue::Oversize {
+                limit: MAX_ENGINE_BYTES,
+            },
+        ));
+    }
     let mut reader = file.try_clone()?;
     reader.seek(SeekFrom::Start(0))?;
+    let read_limit = expected_size
+        .saturating_add(1)
+        .min(MAX_ENGINE_BYTES.saturating_add(1));
+    let mut reader = reader.take(read_limit);
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut consumed = 0_u64;
     loop {
         let count = reader.read(&mut buffer)?;
         if count == 0 {
             break;
         }
+        consumed += count as u64;
         digest.update(&buffer[..count]);
     }
+    if consumed > MAX_ENGINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            EngineDigestLengthIssue::Oversize {
+                limit: MAX_ENGINE_BYTES,
+            },
+        ));
+    }
+    if consumed != expected_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            EngineDigestLengthIssue::Mismatch {
+                expected: expected_size,
+                actual: consumed,
+            },
+        ));
+    }
     Ok(digest.finalize().into())
+}
+
+#[cfg(test)]
+mod bound_engine_tests {
+    use super::*;
+    use std::fs;
+
+    fn bound_test_engine() -> (tempfile::TempDir, BoundEngine) {
+        let root = tempfile::tempdir().expect("temporary source root");
+        let path = root.path().join("diskplan-engine");
+        fs::copy(
+            std::env::current_exe().expect("current test executable"),
+            &path,
+        )
+        .expect("copy test engine");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("set test engine mode");
+        let engine = BoundEngine::open(&path).expect("bind test engine");
+        (root, engine)
+    }
+
+    fn directory_identity(flags: u32, owner_private: bool) -> LaunchDirectoryIdentity {
+        LaunchDirectoryIdentity {
+            device: 1,
+            inode: 2,
+            mode: (libc::S_IFDIR as u32) | if owner_private { 0o700 } else { 0o755 },
+            uid: rustix::process::geteuid().as_raw(),
+            gid: rustix::process::getegid().as_raw(),
+            flags,
+            filesystem_id: 3,
+            mount_flags: 0,
+        }
+    }
+
+    #[test]
+    fn parent_nounlink_is_safe_for_child_namespace_mutation_but_remains_sealed() {
+        let expected = directory_identity(DARWIN_SF_NOUNLINK, false);
+        expected
+            .require_safe_access(false)
+            .expect("stable restrictive ancestor flag must not deny traversal");
+        require_child_namespace_mutability(expected.flags, "temporary parent")
+            .expect("nounlink on parent does not prevent child entry mutation");
+
+        let mut drifted = expected.clone();
+        drifted.flags = 0;
+        assert_ne!(
+            expected, drifted,
+            "security-relevant flag drift must break proof"
+        );
+    }
+
+    #[test]
+    fn launch_root_nounlink_is_not_self_mutable() {
+        let owner_private = directory_identity(DARWIN_SF_NOUNLINK, true);
+        owner_private
+            .require_safe_access(true)
+            .expect("restrictive flags are separate from access safety");
+        let error = require_self_mutability(owner_private.flags, "launch root")
+            .expect_err("nounlink launch root must not be renamed or removed");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn immutable_and_append_parent_flags_block_child_namespace_mutation() {
+        for flag in [
+            DARWIN_UF_IMMUTABLE,
+            DARWIN_UF_APPEND,
+            DARWIN_SF_IMMUTABLE,
+            DARWIN_SF_APPEND,
+        ] {
+            let error = require_child_namespace_mutability(flag, "temporary parent")
+                .expect_err("immutable/append parent must reject child namespace mutation");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
+    #[test]
+    fn benign_hidden_and_nodump_flags_are_outside_the_sealed_mask() {
+        assert_eq!(
+            selected_security_file_flags(DARWIN_UF_HIDDEN | DARWIN_UF_NODUMP),
+            0
+        );
+        assert_eq!(
+            selected_security_file_flags(DARWIN_UF_HIDDEN | DARWIN_SF_NOUNLINK),
+            DARWIN_SF_NOUNLINK
+        );
+    }
+
+    #[test]
+    fn digest_length_failures_distinguish_oversize_from_mismatch() {
+        let root = tempfile::tempdir().expect("temporary digest root");
+        let path = root.path().join("engine");
+        fs::write(&path, b"four").expect("write digest fixture");
+        let file = File::open(path).expect("open digest fixture");
+
+        let mismatch = digest_file(&file, 3).expect_err("unexpected length must fail");
+        assert_eq!(mismatch.kind(), io::ErrorKind::InvalidData);
+        assert!(matches!(
+            mismatch
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<EngineDigestLengthIssue>()),
+            Some(EngineDigestLengthIssue::Mismatch { .. })
+        ));
+
+        let oversize = digest_file(&file, MAX_ENGINE_BYTES + 1)
+            .expect_err("declared oversize executable must fail");
+        assert_eq!(oversize.kind(), io::ErrorKind::FileTooLarge);
+        assert!(matches!(
+            oversize
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<EngineDigestLengthIssue>()),
+            Some(EngineDigestLengthIssue::Oversize { .. })
+        ));
+    }
+
+    #[test]
+    fn bound_engine_drop_removes_only_the_exact_launch_objects() {
+        let (_source, engine) = bound_test_engine();
+        let launch_path = engine.launch.path.clone();
+        assert!(launch_path.join("diskplan-engine").is_file());
+        drop(engine);
+        assert!(!launch_path.exists());
+    }
+
+    #[test]
+    fn bound_engine_drop_retains_replaced_launch_slot() {
+        let (_source, engine) = bound_test_engine();
+        let launch_path = engine.launch.path.clone();
+        let retained = launch_path.with_extension("retained-test-object");
+        fs::rename(&launch_path, &retained).expect("retire bound launch root");
+        fs::create_dir(&launch_path).expect("create replacement launch root");
+        fs::set_permissions(&launch_path, fs::Permissions::from_mode(0o700))
+            .expect("set replacement launch mode");
+
+        drop(engine);
+
+        assert!(retained.join("diskplan-engine").is_file());
+        assert!(launch_path.is_dir());
+        fs::remove_dir_all(&retained).expect("remove retained test object");
+        fs::remove_dir(&launch_path).expect("remove replacement test object");
+    }
+
+    #[test]
+    fn bound_engine_drop_retains_replaced_snapshot_slot() {
+        let (_source, engine) = bound_test_engine();
+        let launch_path = engine.launch.path.clone();
+        let snapshot = launch_path.join("diskplan-engine");
+        let retained = launch_path.join("diskplan-engine.retained-test-object");
+        fs::rename(&snapshot, &retained).expect("retire bound snapshot");
+        fs::write(&snapshot, b"replacement snapshot").expect("write replacement snapshot");
+        fs::set_permissions(&snapshot, fs::Permissions::from_mode(0o500))
+            .expect("set replacement snapshot mode");
+
+        drop(engine);
+
+        assert!(retained.is_file());
+        assert!(snapshot.is_file());
+        fs::remove_dir_all(&launch_path).expect("remove retained snapshot test directory");
+    }
+
+    #[test]
+    fn spawn_boundary_rejects_launch_ancestor_replacement() {
+        let (_source, engine) = bound_test_engine();
+        let launch_path = engine.launch.path.clone();
+        let retained = launch_path.with_extension("spawn-retained-test-object");
+        let error = engine
+            .spawn_child_at_boundary(
+                |command| {
+                    command.arg("--help");
+                },
+                || {
+                    fs::rename(&launch_path, &retained)?;
+                    fs::create_dir(&launch_path)?;
+                    fs::set_permissions(&launch_path, fs::Permissions::from_mode(0o700))?;
+                    Ok(())
+                },
+            )
+            .expect_err("replacement before spawn must fail closed");
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::InvalidData | io::ErrorKind::NotFound
+        ));
+        drop(engine);
+        fs::remove_dir_all(&retained).expect("remove retained spawn test object");
+        fs::remove_dir(&launch_path).expect("remove replacement spawn test object");
+    }
 }
 
 #[derive(Debug, Error)]
@@ -392,18 +1389,28 @@ impl EngineSession {
         engine: &BoundEngine,
         timeout: Duration,
     ) -> Result<Self, ClientError> {
-        let mut command = engine.command()?;
-        Self::spawn_command(&mut command, timeout)
+        let child = engine.spawn_child(|command| {
+            command
+                .process_group(0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+        })?;
+        Self::connect_spawned(child, timeout)
     }
 
     pub fn spawn_command(command: &mut Command, timeout: Duration) -> Result<Self, ClientError> {
-        let reaper = spawn_reaper()?;
         command.process_group(0);
-        let mut child = command
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()?;
+        Self::connect_spawned(child, timeout)
+    }
+
+    fn connect_spawned(mut child: Child, timeout: Duration) -> Result<Self, ClientError> {
+        let reaper = spawn_reaper()?;
         let stdin = child
             .stdin
             .take()

@@ -48,9 +48,10 @@
  * - Content stability is an exact SHA-256 tree proof plus stable size. Mtime
  *   and ctime only trigger one bounded reopen and rehash; they are not proof.
  * - Access policy is the effective-UID owner, exact managed modes, one link for
- *   regular files, no extended ACL, no immutable/append flags, and stable
- *   mount access flags. Managed-prefix traversal retains every ancestor and
- *   revalidates each child slot, filesystem identity, and mount boundary.
+ *   regular files, no extended ACL, no immutable/append/restricted/data-vault/
+ *   no-unlink flags, and stable mount access flags. Managed-prefix traversal
+ *   retains every ancestor and revalidates each child slot, filesystem identity,
+ *   and mount boundary. Hidden/nodump flags are deliberately not access proof.
  *
  * Directory child churn is not itself treated as content mutation. Exact entry
  * enumeration and the per-leaf signals above establish the selected property.
@@ -87,6 +88,9 @@ static const char *k_lock_name = ".diskplan-install.lock";
 static int cleanup_root_fd = -1;
 static int cleanup_stage_fd = -1;
 static char cleanup_stage_name[NAME_MAX + 1];
+#ifdef DISKPLAN_FS_HELPER_TESTING
+extern void diskplan_copy_test_hook(int source_fd);
+#endif
 static int emergency_prefix_fd = -1;
 static int emergency_lock_fd = -1;
 static bool emergency_lock_armed = false;
@@ -199,6 +203,23 @@ static bool timespec_equal(struct timespec left, struct timespec right) {
     return left.tv_sec == right.tv_sec && left.tv_nsec == right.tv_nsec;
 }
 
+static uint32_t selected_access_flags(uint32_t flags) {
+    uint32_t mask = UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND;
+#ifdef UF_RESTRICTED
+    mask |= UF_RESTRICTED;
+#endif
+#ifdef UF_DATAVAULT
+    mask |= UF_DATAVAULT;
+#endif
+#ifdef SF_RESTRICTED
+    mask |= SF_RESTRICTED;
+#endif
+#ifdef SF_NOUNLINK
+    mask |= SF_NOUNLINK;
+#endif
+    return flags & mask;
+}
+
 static bool same_object(const struct stat *left, const struct stat *right) {
     return left->st_dev == right->st_dev && left->st_ino == right->st_ino &&
            left->st_gen == right->st_gen;
@@ -208,7 +229,7 @@ static bool same_content_signals(const struct stat *left, const struct stat *rig
     return same_object(left, right) && left->st_size == right->st_size &&
            left->st_mode == right->st_mode && left->st_uid == right->st_uid &&
            left->st_gid == right->st_gid && left->st_nlink == right->st_nlink &&
-           left->st_flags == right->st_flags &&
+           selected_access_flags(left->st_flags) == selected_access_flags(right->st_flags) &&
            timespec_equal(left->st_mtimespec, right->st_mtimespec) &&
            timespec_equal(left->st_ctimespec, right->st_ctimespec);
 }
@@ -216,13 +237,13 @@ static bool same_content_signals(const struct stat *left, const struct stat *rig
 static bool safe_symlink_metadata(const struct stat *metadata) {
     return S_ISLNK(metadata->st_mode) && metadata->st_uid == geteuid() &&
            metadata->st_gid == getegid() &&
-           (metadata->st_flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND)) == 0;
+           selected_access_flags(metadata->st_flags) == 0;
 }
 
 static bool same_symlink_signals(const struct stat *left, const struct stat *right) {
     return same_object(left, right) && left->st_mode == right->st_mode &&
            left->st_uid == right->st_uid && left->st_gid == right->st_gid &&
-           left->st_flags == right->st_flags;
+           selected_access_flags(left->st_flags) == selected_access_flags(right->st_flags);
 }
 
 static void identity_string(const struct stat *metadata, char output[128]) {
@@ -277,7 +298,7 @@ static void access_identity_string(int fd, char output[192]) {
     snprintf(output, 192, "%llu:%llu:%u:%04o:%u:%u:%x",
              (unsigned long long)metadata.st_dev, (unsigned long long)metadata.st_ino,
              metadata.st_gen, metadata.st_mode & 07777, metadata.st_uid, metadata.st_gid,
-             metadata.st_flags);
+             selected_access_flags(metadata.st_flags));
 }
 
 static void require_identity(const struct stat *metadata, const char *expected) {
@@ -315,7 +336,7 @@ static void require_directory_policy(int fd, mode_t exact_mode, bool exact) {
     mode_t mode = metadata.st_mode & 07777;
     if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != geteuid() ||
         metadata.st_gid != getegid() || fd_has_acl(fd) ||
-        (metadata.st_flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND)) != 0) {
+        selected_access_flags(metadata.st_flags) != 0) {
         fatal("directory owner or access policy is unsafe");
     }
     if ((exact && mode != exact_mode) || (!exact && (mode & 0022) != 0)) {
@@ -331,7 +352,7 @@ static void require_regular_policy(int fd, mode_t expected_mode) {
     if (!S_ISREG(metadata.st_mode) || metadata.st_uid != geteuid() ||
         metadata.st_gid != getegid() || metadata.st_nlink != 1 ||
         (metadata.st_mode & 07777) != expected_mode || fd_has_acl(fd) ||
-        (metadata.st_flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND)) != 0) {
+        selected_access_flags(metadata.st_flags) != 0) {
         fatal("file type, owner, mode, link count, or access policy is unsafe");
     }
 }
@@ -344,7 +365,7 @@ static void require_archive_directory_policy(int fd) {
     mode_t mode = metadata.st_mode & 07777;
     if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != geteuid() ||
         (metadata.st_gid != 0 && metadata.st_gid != getegid()) || fd_has_acl(fd) ||
-        (metadata.st_flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND)) != 0 ||
+        selected_access_flags(metadata.st_flags) != 0 ||
         (mode & 0022) != 0) {
         fatal("archive source directory owner or access policy is unsafe");
     }
@@ -370,7 +391,7 @@ static void require_archive_regular_policy(int fd, mode_t expected_mode, const c
         fatal(message);
     }
     if (fd_has_acl(fd)) fatal("archive source artifact access-control list is unsafe");
-    if ((metadata.st_flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND)) != 0)
+    if (selected_access_flags(metadata.st_flags) != 0)
         fatal("archive source artifact flags are unsafe");
 }
 
@@ -411,6 +432,12 @@ struct path_binding {
     size_t capacity;
 };
 
+struct child_directory_binding {
+    int parent_fd;
+    struct directory_binding entry;
+    bool active;
+};
+
 static char *directory_acl_text(int fd) {
     errno = 0;
     acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
@@ -439,7 +466,8 @@ static char *directory_acl_text(int fd) {
 static bool same_directory_access(const struct stat *left, const struct stat *right) {
     return same_object(left, right) && S_ISDIR(right->st_mode) &&
            left->st_mode == right->st_mode && left->st_uid == right->st_uid &&
-           left->st_gid == right->st_gid && left->st_flags == right->st_flags;
+           left->st_gid == right->st_gid &&
+           selected_access_flags(left->st_flags) == selected_access_flags(right->st_flags);
 }
 
 static bool same_filesystem_id(fsid_t left, fsid_t right) {
@@ -451,11 +479,9 @@ static unsigned long selected_mount_access_flags(const struct statfs *metadata) 
            (MNT_RDONLY | MNT_NOEXEC | MNT_NOSUID | MNT_NODEV);
 }
 
-static void append_directory_binding(struct path_binding *binding, int fd, const char *name,
-                                     dev_t parent_device, fsid_t parent_filesystem_id) {
-    if (binding->count >= binding->capacity)
-        fatal("absolute path contains too many components");
-    struct directory_binding *entry = &binding->entries[binding->count];
+static void capture_directory_binding(struct directory_binding *entry, int fd, const char *name,
+                                      dev_t parent_device, fsid_t parent_filesystem_id) {
+    memset(entry, 0, sizeof(*entry));
     if (fstat(fd, &entry->metadata) != 0 || !S_ISDIR(entry->metadata.st_mode))
         fatal_errno("cannot bind directory component metadata");
     struct statfs filesystem;
@@ -472,6 +498,14 @@ static void append_directory_binding(struct path_binding *binding, int fd, const
     entry->parent_device = parent_device;
     entry->crosses_device = entry->metadata.st_dev != parent_device;
     entry->crosses_mount = !same_filesystem_id(entry->filesystem_id, parent_filesystem_id);
+}
+
+static void append_directory_binding(struct path_binding *binding, int fd, const char *name,
+                                     dev_t parent_device, fsid_t parent_filesystem_id) {
+    if (binding->count >= binding->capacity)
+        fatal("absolute path contains too many components");
+    struct directory_binding *entry = &binding->entries[binding->count];
+    capture_directory_binding(entry, fd, name, parent_device, parent_filesystem_id);
     binding->count += 1;
 }
 
@@ -487,89 +521,150 @@ static enum path_binding_result path_binding_failure(int saved_errno) {
     return PATH_BINDING_FAILED;
 }
 
+static enum path_binding_result check_directory_binding(
+    const struct directory_binding *entry, int parent_fd) {
+    struct stat current;
+    struct statfs current_filesystem;
+    if (fstat(entry->fd, &current) != 0) return path_binding_failure(errno);
+    if (!same_directory_access(&entry->metadata, &current)) return PATH_BINDING_MISMATCH;
+    if (fstatfs(entry->fd, &current_filesystem) != 0) return path_binding_failure(errno);
+    if (!same_filesystem_id(entry->filesystem_id, current_filesystem.f_fsid) ||
+        entry->mount_access_flags != selected_mount_access_flags(&current_filesystem))
+        return PATH_BINDING_MISMATCH;
+    char *acl_text = directory_acl_text(entry->fd);
+    bool acl_matches = strcmp(entry->acl_text, acl_text) == 0;
+    free(acl_text);
+    if (!acl_matches) return PATH_BINDING_MISMATCH;
+
+    struct stat parent_metadata;
+    struct statfs parent_filesystem;
+    int reopened;
+    struct stat slot_metadata = {0};
+    if (parent_fd < 0) {
+        parent_metadata = current;
+        parent_filesystem = current_filesystem;
+        reopened = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    } else {
+        if (fstat(parent_fd, &parent_metadata) != 0 ||
+            fstatfs(parent_fd, &parent_filesystem) != 0)
+            return path_binding_failure(errno);
+        if (fstatat(parent_fd, entry->name, &slot_metadata, AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno == ENOENT) return PATH_BINDING_MISSING;
+            return path_binding_failure(errno);
+        }
+        if (!same_directory_access(&entry->metadata, &slot_metadata))
+            return PATH_BINDING_MISMATCH;
+        reopened = openat(parent_fd, entry->name,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    }
+    if (reopened < 0) {
+        if (errno == ENOENT) return PATH_BINDING_MISSING;
+        if (errno == ELOOP || errno == ENOTDIR) return PATH_BINDING_MISMATCH;
+        return path_binding_failure(errno);
+    }
+    struct stat reopened_metadata;
+    struct statfs reopened_filesystem;
+    if (fstat(reopened, &reopened_metadata) != 0 ||
+        fstatfs(reopened, &reopened_filesystem) != 0) {
+        int saved = errno;
+        close(reopened);
+        return path_binding_failure(saved);
+    }
+    bool matches = same_directory_access(&entry->metadata, &reopened_metadata) &&
+                   (parent_fd < 0 || same_object(&slot_metadata, &reopened_metadata)) &&
+                   same_filesystem_id(entry->filesystem_id, reopened_filesystem.f_fsid) &&
+                   entry->mount_access_flags == selected_mount_access_flags(&reopened_filesystem);
+    if (matches) {
+        char *reopened_acl = directory_acl_text(reopened);
+        matches = strcmp(entry->acl_text, reopened_acl) == 0;
+        free(reopened_acl);
+    }
+    int close_result = close(reopened);
+    if (!matches) return PATH_BINDING_MISMATCH;
+    if (close_result != 0) return path_binding_failure(errno);
+
+    if (entry->parent_device != parent_metadata.st_dev ||
+        entry->crosses_device != (current.st_dev != parent_metadata.st_dev) ||
+        !same_filesystem_id(entry->parent_filesystem_id, parent_filesystem.f_fsid) ||
+        entry->crosses_mount !=
+            !same_filesystem_id(current_filesystem.f_fsid, parent_filesystem.f_fsid))
+        return PATH_BINDING_MISMATCH;
+    return PATH_BINDING_MATCHES;
+}
+
 static enum path_binding_result check_path_binding(const struct path_binding *binding) {
     if (binding->count == 0) return PATH_BINDING_MISMATCH;
-    dev_t previous_device = 0;
-    fsid_t previous_filesystem_id;
-    memset(&previous_filesystem_id, 0, sizeof(previous_filesystem_id));
     for (size_t index = 0; index < binding->count; ++index) {
         const struct directory_binding *entry = &binding->entries[index];
-        struct stat current;
-        struct statfs current_filesystem;
-        if (fstat(entry->fd, &current) != 0) return path_binding_failure(errno);
-        if (!same_directory_access(&entry->metadata, &current))
-            return PATH_BINDING_MISMATCH;
-        if (fstatfs(entry->fd, &current_filesystem) != 0)
-            return path_binding_failure(errno);
-        if (!same_filesystem_id(entry->filesystem_id, current_filesystem.f_fsid) ||
-            entry->mount_access_flags != selected_mount_access_flags(&current_filesystem))
-            return PATH_BINDING_MISMATCH;
-        char *acl_text = directory_acl_text(entry->fd);
-        bool acl_matches = strcmp(entry->acl_text, acl_text) == 0;
-        free(acl_text);
-        if (!acl_matches) return PATH_BINDING_MISMATCH;
-
-        int reopened;
-        struct stat slot_metadata = {0};
-        if (index == 0)
-            reopened = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        else {
-            if (fstatat(binding->entries[index - 1].fd, entry->name, &slot_metadata,
-                        AT_SYMLINK_NOFOLLOW) != 0) {
-                if (errno == ENOENT) return PATH_BINDING_MISSING;
-                return path_binding_failure(errno);
-            }
-            if (!same_directory_access(&entry->metadata, &slot_metadata))
-                return PATH_BINDING_MISMATCH;
-            reopened = openat(binding->entries[index - 1].fd, entry->name,
-                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        }
-        if (reopened < 0) {
-            if (errno == ENOENT) return PATH_BINDING_MISSING;
-            if (errno == ELOOP || errno == ENOTDIR) return PATH_BINDING_MISMATCH;
-            return path_binding_failure(errno);
-        }
-        struct stat reopened_metadata;
-        struct statfs reopened_filesystem;
-        if (fstat(reopened, &reopened_metadata) != 0) {
-            int saved = errno;
-            close(reopened);
-            return path_binding_failure(saved);
-        }
-        bool matches = same_directory_access(&entry->metadata, &reopened_metadata) &&
-                       (index == 0 || same_object(&slot_metadata, &reopened_metadata));
-        if (matches && fstatfs(reopened, &reopened_filesystem) != 0) {
-            int saved = errno;
-            close(reopened);
-            return path_binding_failure(saved);
-        }
-        if (matches)
-            matches = same_filesystem_id(entry->filesystem_id,
-                                         reopened_filesystem.f_fsid) &&
-                      entry->mount_access_flags ==
-                          selected_mount_access_flags(&reopened_filesystem);
-        if (matches) {
-            char *reopened_acl = directory_acl_text(reopened);
-            matches = strcmp(entry->acl_text, reopened_acl) == 0;
-            free(reopened_acl);
-        }
-        int close_result = close(reopened);
-        if (!matches) return PATH_BINDING_MISMATCH;
-        if (close_result != 0) return path_binding_failure(errno);
-        dev_t current_parent_device = index == 0 ? current.st_dev : previous_device;
-        fsid_t current_parent_filesystem_id =
-            index == 0 ? current_filesystem.f_fsid : previous_filesystem_id;
-        if (entry->parent_device != current_parent_device ||
-            entry->crosses_device != (current.st_dev != current_parent_device) ||
-            !same_filesystem_id(entry->parent_filesystem_id,
-                                current_parent_filesystem_id) ||
-            entry->crosses_mount != !same_filesystem_id(current_filesystem.f_fsid,
-                                                        current_parent_filesystem_id))
-            return PATH_BINDING_MISMATCH;
-        previous_device = current.st_dev;
-        previous_filesystem_id = current_filesystem.f_fsid;
+        enum path_binding_result result =
+            check_directory_binding(entry, index == 0 ? -1 : binding->entries[index - 1].fd);
+        if (result != PATH_BINDING_MATCHES) return result;
     }
     return PATH_BINDING_MATCHES;
+}
+
+static struct child_directory_binding bind_child_directory(int parent_fd, int fd,
+                                                           const char *name) {
+    struct stat parent_metadata;
+    struct statfs parent_filesystem;
+    if (fstat(parent_fd, &parent_metadata) != 0 ||
+        fstatfs(parent_fd, &parent_filesystem) != 0)
+        fatal_errno("cannot bind managed child parent");
+    int retained_parent = dup(parent_fd);
+    if (retained_parent < 0) fatal_errno("cannot retain managed child parent");
+    struct child_directory_binding binding = {
+        .parent_fd = retained_parent,
+        .active = true,
+    };
+    capture_directory_binding(&binding.entry, fd, name, parent_metadata.st_dev,
+                              parent_filesystem.f_fsid);
+    if (check_directory_binding(&binding.entry, binding.parent_fd) != PATH_BINDING_MATCHES)
+        fatal("managed child slot changed while binding");
+    return binding;
+}
+
+static enum path_binding_result check_child_directory_binding(
+    const struct child_directory_binding *binding) {
+    if (!binding->active) {
+        if (binding->parent_fd < 0 || binding->entry.name == NULL) {
+            errno = EBADF;
+            return PATH_BINDING_FAILED;
+        }
+        struct stat metadata;
+        if (fstatat(binding->parent_fd, binding->entry.name, &metadata,
+                    AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno == ENOENT) return PATH_BINDING_MATCHES;
+            return path_binding_failure(errno);
+        }
+        return PATH_BINDING_MISMATCH;
+    }
+    return check_directory_binding(&binding->entry, binding->parent_fd);
+}
+
+static void mark_child_directory_removed(struct child_directory_binding *binding) {
+    if (!binding->active) fatal("managed child slot was already marked absent");
+    if (binding->entry.fd >= 0 && close(binding->entry.fd) != 0)
+        fatal_errno("cannot close removed managed child descriptor");
+    binding->entry.fd = -1;
+    binding->active = false;
+    enum path_binding_result result = check_child_directory_binding(binding);
+    if (result == PATH_BINDING_MISMATCH)
+        fatal("removed managed child slot was unexpectedly repopulated");
+    if (result == PATH_BINDING_MISSING)
+        fatal("removed managed child slot reported an inconsistent missing state");
+    if (result == PATH_BINDING_FAILED)
+        fatal_errno("cannot prove removed managed child slot is absent");
+}
+
+static void close_child_directory_binding(struct child_directory_binding *binding) {
+    if (binding->active && binding->entry.fd >= 0) close(binding->entry.fd);
+    if (binding->parent_fd >= 0) close(binding->parent_fd);
+    free(binding->entry.name);
+    free(binding->entry.acl_text);
+    memset(&binding->entry, 0, sizeof(binding->entry));
+    binding->entry.fd = -1;
+    binding->parent_fd = -1;
+    binding->active = false;
 }
 
 static void require_current_path_binding(const struct path_binding *binding) {
@@ -718,26 +813,58 @@ struct managed {
     int bin;
     int libexec;
     int root;
+    struct child_directory_binding bin_slot;
+    struct child_directory_binding libexec_slot;
+    struct child_directory_binding root_slot;
 };
 
 static void close_managed(struct managed *managed);
 
-static void managed_identity_string(const struct managed *managed, char output[1024]) {
+static void require_child_binding(const struct child_directory_binding *binding,
+                                  const char *label) {
+    switch (check_child_directory_binding(binding)) {
+        case PATH_BINDING_MATCHES:
+            return;
+        case PATH_BINDING_MISSING: {
+            char message[192];
+            snprintf(message, sizeof(message), "managed %s child slot is missing", label);
+            fatal(message);
+        }
+        case PATH_BINDING_MISMATCH: {
+            char message[256];
+            snprintf(message, sizeof(message),
+                     "managed %s child identity, access policy, or mount boundary changed",
+                     label);
+            fatal(message);
+        }
+        case PATH_BINDING_FAILED: {
+            char message[192];
+            snprintf(message, sizeof(message), "cannot revalidate managed %s child slot", label);
+            fatal_errno(message);
+        }
+    }
+}
+
+static void require_current_managed(const struct managed *managed) {
     require_current_path_binding(&managed->prefix_path);
     require_directory_policy(managed->prefix, 0, false);
-    require_directory_policy(managed->bin, 0755, false);
-    require_directory_policy(managed->libexec, 0755, false);
-    require_directory_policy(managed->root, 0700, true);
+    require_child_binding(&managed->bin_slot, "bin");
+    require_child_binding(&managed->libexec_slot, "libexec");
+    require_child_binding(&managed->root_slot, "libexec/diskplan");
+    if (managed->bin_slot.active) require_directory_policy(managed->bin, 0755, false);
+    if (managed->libexec_slot.active)
+        require_directory_policy(managed->libexec, 0755, false);
+    if (managed->root_slot.active) require_directory_policy(managed->root, 0700, true);
+}
+
+static void managed_identity_string(const struct managed *managed, char output[1024]) {
+    require_current_managed(managed);
     char prefix[192], bin[192], libexec[192], root[192];
     access_identity_string(managed->prefix, prefix);
     access_identity_string(managed->bin, bin);
     access_identity_string(managed->libexec, libexec);
     access_identity_string(managed->root, root);
-    require_directory_policy(managed->prefix, 0, false);
-    require_directory_policy(managed->bin, 0755, false);
-    require_directory_policy(managed->libexec, 0755, false);
-    require_directory_policy(managed->root, 0700, true);
-    require_current_path_binding(&managed->prefix_path);
+    require_current_managed(managed);
     snprintf(output, 1024, "v1|%s|%s|%s|%s", prefix, bin, libexec, root);
 }
 
@@ -746,13 +873,20 @@ static struct managed open_managed(const char *path, const char *prefix_identity
                              .prefix = -1,
                              .bin = -1,
                              .libexec = -1,
-                             .root = -1};
+                             .root = -1,
+                             .bin_slot = {.parent_fd = -1, .entry = {.fd = -1}},
+                             .libexec_slot = {.parent_fd = -1, .entry = {.fd = -1}},
+                             .root_slot = {.parent_fd = -1, .entry = {.fd = -1}}};
     result.prefix_path = bind_absolute_directory(path, create);
     result.prefix = result.prefix_path.entries[result.prefix_path.count - 1].fd;
     require_directory_policy(result.prefix, 0, false);
     result.bin = ensure_directory_at(result.prefix, "bin", 0755, true, create);
+    result.bin_slot = bind_child_directory(result.prefix, result.bin, "bin");
     result.libexec = ensure_directory_at(result.prefix, "libexec", 0755, true, create);
+    result.libexec_slot = bind_child_directory(result.prefix, result.libexec, "libexec");
     result.root = ensure_directory_at(result.libexec, "diskplan", 0700, false, create);
+    result.root_slot = bind_child_directory(result.libexec, result.root, "diskplan");
+    require_current_managed(&result);
     if (prefix_identity != NULL) {
         char actual[1024];
         managed_identity_string(&result, actual);
@@ -765,10 +899,10 @@ static struct managed open_managed(const char *path, const char *prefix_identity
 }
 
 static void close_managed(struct managed *managed) {
-    require_current_path_binding(&managed->prefix_path);
-    if (managed->root >= 0) close(managed->root);
-    if (managed->libexec >= 0) close(managed->libexec);
-    if (managed->bin >= 0) close(managed->bin);
+    require_current_managed(managed);
+    close_child_directory_binding(&managed->root_slot);
+    close_child_directory_binding(&managed->libexec_slot);
+    close_child_directory_binding(&managed->bin_slot);
     close_path_binding(&managed->prefix_path);
     managed->root = managed->libexec = managed->bin = managed->prefix = -1;
 }
@@ -904,7 +1038,8 @@ static bool same_artifact_protected_properties(const struct stat *left,
                                                const struct stat *right) {
     return same_object(left, right) && left->st_mode == right->st_mode &&
            left->st_uid == right->st_uid && left->st_gid == right->st_gid &&
-           left->st_nlink == right->st_nlink && left->st_flags == right->st_flags;
+           left->st_nlink == right->st_nlink &&
+           selected_access_flags(left->st_flags) == selected_access_flags(right->st_flags);
 }
 
 static bool same_artifact_timestamps(const struct stat *left, const struct stat *right) {
@@ -1015,7 +1150,7 @@ static void bundle_proof(int directory, bool managed_exact, bool archive_source,
         hash_u64(&digest, proof.metadata.st_uid);
         hash_u64(&digest, proof.metadata.st_gid);
         hash_u64(&digest, proof.metadata.st_nlink);
-        hash_u64(&digest, proof.metadata.st_flags);
+        hash_u64(&digest, selected_access_flags(proof.metadata.st_flags));
         hash_u64(&digest, (uint64_t)proof.content_size);
         hash_bytes(&digest, proof.sha256, sizeof(proof.sha256));
     }
@@ -1036,7 +1171,8 @@ static void bundle_proof(int directory, bool managed_exact, bool archive_source,
         directory_before.st_mode != directory_after.st_mode ||
         directory_before.st_uid != directory_after.st_uid ||
         directory_before.st_gid != directory_after.st_gid ||
-        directory_before.st_flags != directory_after.st_flags) {
+        selected_access_flags(directory_before.st_flags) !=
+            selected_access_flags(directory_after.st_flags)) {
         fatal("bundle directory identity or access policy changed");
     }
     char identity[192];
@@ -1284,9 +1420,11 @@ static bool directory_is_empty(int directory) {
     }
 }
 
-static bool remove_empty_bound_directory(int parent, int *directory, const char *name,
+static bool remove_empty_bound_directory(int parent, int *directory,
+                                         struct child_directory_binding *slot, const char *name,
                                          const char *temporary_prefix, mode_t mode,
                                          bool shared) {
+    require_child_binding(slot, name);
     require_directory_policy(*directory, mode, !shared);
     if (!directory_is_empty(*directory)) return false;
     struct stat before;
@@ -1312,24 +1450,29 @@ static bool remove_empty_bound_directory(int parent, int *directory, const char 
         close(quarantined);
         if (renameatx_np(parent, temporary, parent, name, RENAME_EXCL) != 0)
             fatal_errno("cannot restore directory after conditional cleanup lost identity");
+        require_child_binding(slot, name);
         return false;
     }
     close(quarantined);
-    close(*directory);
-    *directory = -1;
     if (unlinkat(parent, temporary, AT_REMOVEDIR) != 0 || fsync(parent) != 0)
         fatal_errno("cannot remove identity-proven empty directory");
+    mark_child_directory_removed(slot);
+    *directory = -1;
     return true;
 }
 
 static void prune_empty_managed_directories(struct managed *managed) {
     bool removed_root = remove_empty_bound_directory(
-        managed->libexec, &managed->root, "diskplan", "diskplan-root", 0700, false);
+        managed->libexec, &managed->root, &managed->root_slot, "diskplan", "diskplan-root",
+        0700, false);
     if (!removed_root) return;
     (void)remove_empty_bound_directory(
-        managed->prefix, &managed->libexec, "libexec", "diskplan-libexec", 0755, true);
+        managed->prefix, &managed->libexec, &managed->libexec_slot, "libexec",
+        "diskplan-libexec", 0755, true);
     (void)remove_empty_bound_directory(
-        managed->prefix, &managed->bin, "bin", "diskplan-bin", 0755, true);
+        managed->prefix, &managed->bin, &managed->bin_slot, "bin", "diskplan-bin", 0755,
+        true);
+    require_current_managed(managed);
 }
 
 static void retire_owned_lock(struct managed *managed, const struct stat *metadata) {
@@ -1391,6 +1534,9 @@ static void copy_file_stable(int source_directory, int destination_directory, si
     unsigned char buffer[64 * 1024];
     ssize_t count;
     off_t consumed = 0;
+    CC_SHA256_CTX copied_digest_context;
+    if (CC_SHA256_Init(&copied_digest_context) != 1)
+        fatal("cannot initialize copied artifact digest");
     while ((count = read(source, buffer, sizeof(buffer))) > 0) {
         consumed += count;
         if (consumed > k_artifacts[index].maximum_size) {
@@ -1408,7 +1554,11 @@ static void copy_file_stable(int source_directory, int destination_directory, si
             }
             written += result;
         }
+        hash_bytes(&copied_digest_context, buffer, (size_t)count);
     }
+    unsigned char copied_digest[CC_SHA256_DIGEST_LENGTH];
+    if (CC_SHA256_Final(copied_digest, &copied_digest_context) != 1)
+        fatal("cannot finalize copied artifact digest");
     if (count < 0 || fchown(destination, geteuid(), getegid()) != 0 ||
         fchmod(destination, k_artifacts[index].mode) != 0 || fsync(destination) != 0) {
         close(destination);
@@ -1416,6 +1566,9 @@ static void copy_file_stable(int source_directory, int destination_directory, si
         fatal_errno("cannot finish staged artifact");
     }
     require_regular_policy(destination, k_artifacts[index].mode);
+#ifdef DISKPLAN_FS_HELPER_TESTING
+    diskplan_copy_test_hook(source);
+#endif
     struct stat after;
     if (fstat(source, &after) != 0) {
         close(destination);
@@ -1425,8 +1578,18 @@ static void copy_file_stable(int source_directory, int destination_directory, si
     require_archive_regular_policy(source, k_artifacts[index].mode, k_artifacts[index].name);
     close(destination);
     close(source);
-    if (!same_content_signals(&before, &after)) {
-        fatal("source artifact changed while it was copied");
+    if (!same_artifact_protected_properties(&before, &after) || before.st_size != consumed ||
+        after.st_size != consumed) {
+        fatal("source artifact identity, access policy, or size changed while it was copied");
+    }
+    if (!same_artifact_timestamps(&before, &after)) {
+        struct artifact_proof proof;
+        capture_artifact_proof(source_directory, index, true, &proof);
+        if (!same_artifact_protected_properties(&before, &proof.metadata) ||
+            proof.content_size != consumed ||
+            memcmp(proof.sha256, copied_digest, sizeof(copied_digest)) != 0) {
+            fatal("source artifact content changed during bounded post-copy rehash");
+        }
     }
 }
 
@@ -1569,11 +1732,12 @@ static void cmd_stage_bundle(int argc, char **argv) {
     require_exact_bundle_entries(source, false, true);
     char source_before[256];
     bundle_proof(source, false, true, source_before);
+    require_current_managed(&managed);
     char nonce[33];
     random_hex(nonce);
     snprintf(cleanup_stage_name, sizeof(cleanup_stage_name), ".install-stage-%s", nonce);
-    cleanup_root_fd = managed.root;
-    managed.root = -1;
+    cleanup_root_fd = dup(managed.root);
+    if (cleanup_root_fd < 0) fatal_errno("cannot retain managed staging root descriptor");
     if (mkdirat(cleanup_root_fd, cleanup_stage_name, 0700) != 0)
         fatal_errno("cannot create staging directory");
     cleanup_stage_fd = openat(cleanup_root_fd, cleanup_stage_name,
@@ -1597,6 +1761,7 @@ static void cmd_stage_bundle(int argc, char **argv) {
     close(cleanup_root_fd);
     cleanup_root_fd = -1;
     cleanup_stage_name[0] = '\0';
+    require_current_managed(&managed);
     close_managed(&managed);
 }
 
@@ -1626,6 +1791,7 @@ static void cmd_publish_version(int argc, char **argv) {
     char proof[256];
     bundle_proof(stage, true, false, proof);
     if (strcmp(proof, argv[6]) != 0) fatal("staged bundle proof changed before publication");
+    require_current_managed(&managed);
     if (renameatx_np(managed.root, argv[5], managed.root, argv[7], RENAME_EXCL) != 0) {
         if (errno == EEXIST) {
             close(stage);
@@ -1639,6 +1805,7 @@ static void cmd_publish_version(int argc, char **argv) {
     char published_proof[256];
     bundle_proof(published, true, false, published_proof);
     if (strcmp(proof, published_proof) != 0) fatal("published bundle identity proof changed");
+    require_current_managed(&managed);
     printf("%s\n", published_proof);
     close(published);
     close(stage);
@@ -1653,7 +1820,9 @@ static void cmd_cleanup_stage(int argc, char **argv) {
     int lock = require_lock(managed.prefix, argv[4]);
     close(lock);
     int stage = open_named_bundle(managed.root, argv[5]);
+    require_current_managed(&managed);
     delete_exact_bundle(managed.root, stage, argv[5], argv[6]);
+    require_current_managed(&managed);
     close(stage);
     close_managed(&managed);
 }
@@ -1675,6 +1844,7 @@ static void cmd_activate(int argc, char **argv) {
     bundle_proof(bundle, true, false, proof);
     if (strcmp(proof, argv[6]) != 0) fatal("bundle proof changed before activation");
     close(bundle);
+    require_current_managed(&managed);
     char target[PATH_MAX];
     snprintf(target, sizeof(target), "../libexec/diskplan/%s/diskplan", argv[5]);
     struct stat old_metadata;
@@ -1735,6 +1905,7 @@ static void cmd_activate(int argc, char **argv) {
             fatal_errno("cannot remove displaced launcher");
     }
     if (fsync(managed.bin) != 0) fatal_errno("cannot sync activated launcher");
+    require_current_managed(&managed);
     close_managed(&managed);
 }
 
@@ -1793,8 +1964,10 @@ static void cmd_uninstall(int argc, char **argv) {
     int bundle = open_named_bundle(managed.root, argv[5]);
     char target[PATH_MAX];
     snprintf(target, sizeof(target), "../libexec/diskplan/%s/diskplan", argv[5]);
+    require_current_managed(&managed);
     remove_matching_launcher(managed.bin, target);
     delete_exact_bundle(managed.root, bundle, argv[5], argv[6]);
+    require_current_managed(&managed);
     close(bundle);
     prune_empty_managed_directories(&managed);
     retire_owned_lock(&managed, &lock_metadata);

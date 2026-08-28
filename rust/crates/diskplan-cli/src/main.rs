@@ -143,7 +143,7 @@ fn expected_engine_identity() -> String {
 }
 
 fn verify_engine_identity(engine: &BoundEngine, label: &Path) -> std::io::Result<()> {
-    let output = engine.command()?.arg("--version-json").output()?;
+    let output = engine.output(&[std::ffi::OsStr::new("--version-json")])?;
     engine.revalidate()?;
     if !output.status.success() {
         return Err(std::io::Error::other(format!(
@@ -265,10 +265,7 @@ mod tests {
             .expect("set original executable mode");
         let bound = BoundEngine::open(&engine).expect("bind original engine object");
         let probe = bound
-            .command()
-            .expect("revalidate bound engine before probe")
-            .arg("--help")
-            .output()
+            .output(&[std::ffi::OsStr::new("--help")])
             .expect("launch bound probe object");
         assert!(probe.status.success());
 
@@ -281,10 +278,7 @@ mod tests {
         fs::rename(&replacement, &engine).expect("replace original engine path");
 
         let output = bound
-            .command()
-            .expect("revalidate the retained probe object")
-            .arg("--help")
-            .output()
+            .output(&[std::ffi::OsStr::new("--help")])
             .expect("launch the retained probe object");
         assert!(output.status.success());
     }

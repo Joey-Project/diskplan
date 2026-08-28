@@ -11,9 +11,11 @@ diskplan-core = { path = "../diskplan-core" }
 diskplan-proto = { path = "../diskplan-proto" }
 futures-util.workspace = true
 hex.workspace = true
+getrandom.workspace = true
 libc.workspace = true
 prost.workspace = true
 ratatui.workspace = true
+rustix.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
