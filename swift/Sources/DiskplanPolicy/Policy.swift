@@ -303,6 +303,33 @@ public struct PolicyEvaluation: Equatable, Sendable {
     }
     return GateVote(dimension: vote.dimension, result: result)
   }
+
+  func replacingVotesPreservingContext(_ votes: [GateVote]) throws -> Self {
+    let providerBound = recommendation == .managedByProvider
+    let classificationConflict = recommendation == .classificationConflict
+    let defaultReviewRecommendation: Recommendation
+    switch recommendation {
+    case .likelyRebuildable, .needsSemanticReview, .keep:
+      defaultReviewRecommendation = recommendation
+    default:
+      defaultReviewRecommendation = .needsSemanticReview
+    }
+    if let sourceBinding {
+      return try Self.init(
+        votes: votes,
+        providerBound: providerBound,
+        classificationConflict: classificationConflict,
+        defaultReviewRecommendation: defaultReviewRecommendation,
+        sourceBinding: sourceBinding
+      )
+    }
+    return try Self.init(
+      votes: votes,
+      providerBound: providerBound,
+      classificationConflict: classificationConflict,
+      defaultReviewRecommendation: defaultReviewRecommendation
+    )
+  }
 }
 
 extension GateResult {

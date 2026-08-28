@@ -45,14 +45,33 @@ superseded_by:
 - Editable overlays retain lineage-only consent cores. Validation resolves each lineage
   uniquely and emits current action/plan/evidence epoch requirements; Phase 4 owns the opaque
   credential and execution epoch/deadline.
-- Frozen evidence, global facts, file topology, policy votes, and classification claims share
-  one capture/global-facts provenance. Policy construction derives all seven votes from that
-  bundle and fails closed on provider ancestors, incomplete matching-root coverage, collector,
-  activity, content, access, dependency, and failed recoverability evidence.
+- Frozen typed evidence, global facts, file topology, and classification claims share one
+  capture/global-facts provenance. The adapter cannot declare votes or stageability; policy
+  construction authoritatively derives all seven votes and fails closed on explicit
+  protection, provider ancestors, incomplete matching-root coverage, collector, activity,
+  content, access, dependency, and failed recoverability evidence.
+- Independent semantic, agent-per-missing-facet, recoverability, and local-Git-discard
+  predicates are unioned with all reasons preserved. Fact collections and gate payloads are
+  canonicalized before their respective evidence/action hash boundaries.
+- Git worktree remove contracts bind no-follow traversal, HEAD, index, local changes, nested
+  repositories, submodules, trusted-exclusive namespace, and post-quarantine coverage. Dirty
+  work requires a separate explicit discard action prerequisite whose typed clean successor
+  preserves HEAD identity and becomes the remove action's JIT content baseline. Action-aware
+  policy records the prerequisite discharge before action hashing.
+- Complete-release actions bind the exact verified release graph, owner topology, actions,
+  candidates, and bytes; plans reject empty, duplicate, or mismatched action bindings. Bound
+  owners are mandatory prerequisites for consent validation. A closed composite execution
+  step retains every owner JIT contract and rewritten prerequisite edges while preventing
+  duplicate individual deletion; credit-only release sets remain independent of aggregates.
 - Raw-path and raw-UTF8 identity are preserved across graph keys, adapter scopes, release
   owners, and hashes. Full-corpus absolute-namespace overlap blocks selected parents even
   when nested candidates are not selected, while unrelated sibling and distinct-root targets
   remain independent.
+- Frozen claim/source payloads and adapter-scope sets are validated and canonicalized before
+  hashing. Overlay terminal effects, including Git discard, are checked against the complete
+  frozen corpus and reject unauthorized alias or ancestor effects. Duplicate-survivor consent
+  protects every plan-declared survivor namespace even when the declaring duplicate is not
+  selected.
 
 ## Task List
 
@@ -70,6 +89,11 @@ superseded_by:
   full-corpus overlap, capture-bound topology, exact evaluated ActionID, typed content
   baseline, disconnected graph nodes, duplicate binding traps, and checked total release
   arithmetic. Reject duplicate selected action lineages even when no waiver is present.
+- [x] Remove adapter-declared votes, add authoritative typed-fact derivation with additive
+  exact waivers, bind complete Git worktree evidence and explicit discard actions, require
+  exact verified release-set action bindings, and canonicalize all gate payloads.
+- [x] Close frozen-review execution findings with successor baselines, action-aware Git
+  discharge, composite release steps, terminal namespace exclusivity, and survivor invariants.
 
 ## Handoff
 
@@ -84,8 +108,8 @@ superseded_by:
 - Policy contract: `docs/design/policy-core.md`.
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
-  overlay consent binding; the latest focused run passed all 34 tests.
-- The final full local `swift test --package-path swift` run passed all 62 tests, including
-  all 34 focused policy tests.
+  overlay consent binding; the latest focused run passed all 42 tests.
+- The final full local `swift test --package-path swift` run passed all 70 tests, including
+  all 42 focused policy tests.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.

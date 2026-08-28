@@ -13,9 +13,11 @@ their typed coverage state. A stable top-K is a viewport optimization, not a com
 candidate corpus, and cannot be used as policy input by itself. Missing, unknown,
 unreadable, and failed observations remain distinct across the adapter boundary.
 Every snapshot binds one scan capture ID and the exact full-global-facts hash. Its seven
-policy facts and classification claims are part of the frozen evidence bytes; callers cannot
-attach unrelated gate results or classification from another candidate or capture after the
-fact. The evidence-freeze context is constructible only from those frozen global facts.
+policy fact families and classification claims are part of the frozen evidence bytes. The
+adapter cannot provide `GateResult`, `GateVote`, stageability, or any other final safety
+declaration. The policy core alone derives all seven votes from typed protection, collector,
+activity, semantic-review, recoverability-review, dependency, Git, and topology facts. The
+evidence-freeze context is constructible only from the frozen global facts.
 
 The adapter must construct canonical `RawRootPath` and `RawTargetPath` values. A target is a
 non-empty relative component sequence; empty components, `.`, `..`, slash, and NUL are
@@ -42,6 +44,12 @@ conflict and cannot make a classification ready. They remain visible as review e
 for facets with no deterministic resolution or conflict, where policy may require the exact
 agent-assisted waiver predicate. Explicit type hints are represented only as recognizer
 routes, not as classification claims.
+
+The freeze boundary rejects empty claim values, evidence keys, and typed source identifiers,
+as well as duplicate claims. Adapter scopes are one canonical unordered set; equivalent
+primary/additional input permutations produce the same evidence bytes. Git scope is exclusive,
+and generic scope may coexist only with exact release-set scopes, so a generic action cannot
+downgrade a worktree-specific safety contract.
 
 ## One-vote policy
 
@@ -70,7 +78,16 @@ provider boundaries, matching-root global coverage, collector state, activity, o
 namespace access evidence, content baseline, dependency observations, recoverability, and
 classification are checked before a source-bound evaluation can enter an action. Unknown,
 unreadable, or failed hard evidence cannot be papered over by a caller-supplied satisfied
-vote. Unknown recoverability becomes an exact waiver predicate rather than ready state.
+vote. Explicit protection is a typed hard gate. Unknown recoverability becomes an exact
+waiver predicate rather than ready state.
+
+Independent review facts are additive. Recency, task-semantic, duplicate-survivor, normal
+keep, static-rebuild, rebuild-cost, and fully observed local-Git-discard predicates are
+canonicalized and unioned; none replaces another. Each deterministically missing
+classification facet requires its own matching agent suggestion and exact facet-bound
+predicate. A missing facet without such a suggestion hard rejects. Gate reasons,
+predicates, and conditions are deduplicated and canonically ordered before action hashing;
+typed fact collections are canonicalized before evidence hashing.
 
 Waivers are closed to the accepted eight cases. Recency, agent, task-semantic, duplicate,
 and normal-keep waivers belong only to the semantic gate. Static rebuild, unknown rebuild
@@ -126,10 +143,28 @@ release topology.
 The unified action-prototype builder has no arbitrary argv surface. Generic removal derives
 the exact target kind, prototype path slot, unavoidable path-race residual, trusted namespace,
 and `rm -f` warning state from evidence. Worktree removal requires directory identity and
-known quarantine capability. Cleanup scope, artifact kind/version, and allocation-group IDs
-must be non-empty, match the evidence-frozen adapter scope by raw UTF-8 bytes, and produce the
-matching typed postcondition. Production filesystem
+known quarantine capability. Its closed contract also binds a complete no-follow traversal,
+HEAD identity, index digest, local-change digest, absence of nested repositories and
+submodules, trusted-exclusive namespace, and complete post-quarantine coverage. Dirty local
+work is represented by a separate discard-local-changes action and exact waiver. Its typed
+postcondition seals a clean successor HEAD/index/content baseline, preserves HEAD identity,
+and becomes the dependent remove action's JIT baseline. The remove's action-aware evaluation
+records that the exact discard prerequisite discharges the local-work predicate, rather than
+silently changing consent requirements during overlay validation. Cleanup
+scope and artifact kind/version must be non-empty, match a canonical evidence-frozen adapter
+scope by raw UTF-8 bytes, and produce the matching typed postcondition. Production filesystem
 binding remains outside this pure target.
+
+A complete-release-set action can only be built from the closed binding exported by a
+successfully evaluated `PlanReleaseSet`. The binding includes allocation-group ID, full graph
+digest, complete topology expectation, exact owner candidate/action IDs, and conditional
+bytes. `ImmutablePlan` rejects an empty or non-matching release-set list for such an action,
+as well as duplicate release-action bindings, and requires every bound owner action as an
+explicit prerequisite. Overlay validation therefore checks every owner action's stageability
+and exact consents. A selected aggregate produces a closed composite execution step containing
+the exact release set, every owner JIT-revalidation action, and rewritten external prerequisite
+step IDs. Individual owner removals are not also executed. Credit-only release sets remain
+valid without an aggregate action and activate shared credit only when all owners are selected.
 
 The private policy binding encoder uses the accepted fixed-width, length-prefixed,
 domain-separated v1 rules. It does not modify the existing cross-language
@@ -151,8 +186,15 @@ shape; the Phase 4 engine owns issuance and authentication.
 An overlay can only select existing actions and supply exact consent cores. Validation
 rejects stale plan/evidence hashes, injected or duplicate selections, missing prerequisites,
 duplicate selected lineages, hard-blocked actions, missing predicates, extra predicates, and
-any consent whose lineage,
-policy version, predicate, value bucket, semantic evidence, reason, event, or consent hash
-does not match. Display order is separate from canonical action order: UI
-metrics use typed known/unknown lexicographic ordering, while execution order is always
-ActionID bytes.
+any consent whose lineage, policy version, predicate, value bucket, semantic evidence,
+reason, event, or consent hash does not match. Terminal mutations are mutually exclusive
+across alias and ancestor/descendant namespaces, except for an exact owner-to-release-composite
+replacement. Duplicate-survivor consent requires one plan-consistent survivor and rejects
+direct or ancestor deletion of its namespace. A selected terminal mutation, including a Git
+discard transition, is checked directionally against the complete frozen evidence corpus; it
+cannot mutate an alias or descendant snapshot whose independent seven-gate evidence was not
+authorized. Git-specific evidence dominates non-Git adapters across the whole plan, so a
+second generic snapshot cannot downgrade quarantine or local-work contracts. Display order is
+separate from canonical action order: UI metrics use typed known/unknown lexicographic
+ordering. Plan hashing uses ActionID-byte order; validated execution steps use deterministic
+topological order with ActionID-byte tie breaking.

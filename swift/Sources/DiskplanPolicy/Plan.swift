@@ -177,9 +177,187 @@ public enum ProviderState: String, Equatable, Sendable {
   case fileProviderManaged
 }
 
+public enum CollectorCompletionState: String, Equatable, Sendable {
+  case complete
+}
+
+public enum ActivityState: String, Equatable, Sendable {
+  case inactive
+  case active
+}
+
+public enum ExplicitProtectionState: String, Equatable, Sendable {
+  case notProtected
+  case protected
+}
+
+public enum DependencyState: String, Equatable, Sendable {
+  case complete
+}
+
+public enum RecoverabilityState: String, Equatable, Sendable {
+  case recoverable
+  case reviewRequired
+  case irrecoverable
+}
+
+public enum SemanticReviewFact: Equatable, Sendable {
+  case recencyAgePolicy(valueBucket: String, evidenceHash: PolicyDigest)
+  case taskSemanticCompletion(taskID: String, evidenceHash: PolicyDigest)
+  case duplicateSurvivorChoice(
+    groupID: String, survivorCandidateID: String, evidenceHash: PolicyDigest)
+  case normalKeepPolicy(policyID: String, evidenceHash: PolicyDigest)
+
+  var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    switch self {
+    case .recencyAgePolicy(let valueBucket, let evidenceHash):
+      encoder.uint8(0)
+      encoder.string(valueBucket)
+      encoder.data(evidenceHash.bytes)
+    case .taskSemanticCompletion(let taskID, let evidenceHash):
+      encoder.uint8(1)
+      encoder.string(taskID)
+      encoder.data(evidenceHash.bytes)
+    case .duplicateSurvivorChoice(let groupID, let survivorCandidateID, let evidenceHash):
+      encoder.uint8(2)
+      encoder.string(groupID)
+      encoder.string(survivorCandidateID)
+      encoder.data(evidenceHash.bytes)
+    case .normalKeepPolicy(let policyID, let evidenceHash):
+      encoder.uint8(3)
+      encoder.string(policyID)
+      encoder.data(evidenceHash.bytes)
+    }
+    return encoder.data
+  }
+}
+
+public enum RecoverabilityReviewFact: Equatable, Sendable {
+  case staticOnlyRebuildEvidence(artifactKind: String, evidenceHash: PolicyDigest)
+  case unknownRebuildCost(valueBucket: String, evidenceHash: PolicyDigest)
+
+  var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    switch self {
+    case .staticOnlyRebuildEvidence(let artifactKind, let evidenceHash):
+      encoder.uint8(0)
+      encoder.string(artifactKind)
+      encoder.data(evidenceHash.bytes)
+    case .unknownRebuildCost(let valueBucket, let evidenceHash):
+      encoder.uint8(1)
+      encoder.string(valueBucket)
+      encoder.data(evidenceHash.bytes)
+    }
+    return encoder.data
+  }
+}
+
+public enum GitLocalChangesState: Equatable, Sendable {
+  case clean
+  case present(changeSetDigest: PolicyDigest)
+}
+
+public enum GitContainedRepositoryState: String, Equatable, Sendable {
+  case none
+  case present
+}
+
+public struct GitWorktreeExecutionBaseline: Equatable, Sendable {
+  public let headIdentity: PolicyDigest
+  public let indexDigest: PolicyDigest
+  public let localChanges: GitLocalChangesState
+  public let contentProtection: ContentProtectionBaseline
+
+  public init(
+    headIdentity: PolicyDigest,
+    indexDigest: PolicyDigest,
+    localChanges: GitLocalChangesState,
+    contentProtection: ContentProtectionBaseline
+  ) throws {
+    guard localChanges == .clean else { throw PolicyModelError.invalidActionContract }
+    self.headIdentity = headIdentity
+    self.indexDigest = indexDigest
+    self.localChanges = localChanges
+    self.contentProtection = contentProtection
+  }
+
+  var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encoder.data(headIdentity.bytes)
+    encoder.data(indexDigest.bytes)
+    encoder.uint8(0)
+    switch contentProtection {
+    case .requiredDigest(let digest):
+      encoder.uint8(0)
+      encoder.data(digest.bytes)
+    case .explicitlyNotApplicable(let reason):
+      encoder.uint8(1)
+      encoder.string(reason.rawValue)
+    }
+    return encoder.data
+  }
+}
+
+public struct GitWorktreeEvidence: Equatable, Sendable {
+  public let noFollowTraversalComplete: Observation<Bool>
+  public let headIdentity: Observation<PolicyDigest>
+  public let indexDigest: Observation<PolicyDigest>
+  public let localChanges: Observation<GitLocalChangesState>
+  public let nestedRepositories: Observation<GitContainedRepositoryState>
+  public let submodules: Observation<GitContainedRepositoryState>
+  public let trustedExclusiveNamespace: Observation<Bool>
+  public let postQuarantineCoverage: Observation<EvidenceCoverage>
+  public let postDiscardSuccessor: Observation<GitWorktreeExecutionBaseline>
+
+  public init(
+    noFollowTraversalComplete: Observation<Bool>,
+    headIdentity: Observation<PolicyDigest>,
+    indexDigest: Observation<PolicyDigest>,
+    localChanges: Observation<GitLocalChangesState>,
+    nestedRepositories: Observation<GitContainedRepositoryState>,
+    submodules: Observation<GitContainedRepositoryState>,
+    trustedExclusiveNamespace: Observation<Bool>,
+    postQuarantineCoverage: Observation<EvidenceCoverage>,
+    postDiscardSuccessor: Observation<GitWorktreeExecutionBaseline>
+  ) {
+    self.noFollowTraversalComplete = noFollowTraversalComplete
+    self.headIdentity = headIdentity
+    self.indexDigest = indexDigest
+    self.localChanges = localChanges
+    self.nestedRepositories = nestedRepositories
+    self.submodules = submodules
+    self.trustedExclusiveNamespace = trustedExclusiveNamespace
+    self.postQuarantineCoverage = postQuarantineCoverage
+    self.postDiscardSuccessor = postDiscardSuccessor
+  }
+
+  var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encoder.observation(noFollowTraversalComplete) { $0.bool($1) }
+    encoder.observation(headIdentity) { $0.data($1.bytes) }
+    encoder.observation(indexDigest) { $0.data($1.bytes) }
+    encoder.observation(localChanges) { encoder, state in
+      switch state {
+      case .clean:
+        encoder.uint8(0)
+      case .present(let digest):
+        encoder.uint8(1)
+        encoder.data(digest.bytes)
+      }
+    }
+    encoder.observation(nestedRepositories) { $0.string($1.rawValue) }
+    encoder.observation(submodules) { $0.string($1.rawValue) }
+    encoder.observation(trustedExclusiveNamespace) { $0.bool($1) }
+    encoder.observation(postQuarantineCoverage) { $0.uint8($1.rawValue) }
+    encoder.observation(postDiscardSuccessor) { $0.data($1.bindingBytes) }
+    return encoder.data
+  }
+}
+
 public enum AdapterScopeEvidence: Equatable, Sendable {
   case genericRemove
-  case gitWorktreeRemove
+  case gitWorktree
   case codexCleanTemporary(cleanupScopeID: String)
   case versionedArtifactRemove(artifactKind: String, version: String)
   case completeReleaseSetRemove(allocationGroupID: String)
@@ -201,23 +379,34 @@ public struct FrozenEvidenceSnapshot: Equatable, Sendable {
   public let namespaceBinding: ProtectedNamespaceBinding
   public let identity: Observation<ObjectIdentity>
   public let coverage: EvidenceCoverage
-  public let collectorStatus: Observation<String>
-  public let activity: Observation<String>
+  public let collectorStatus: Observation<CollectorCompletionState>
+  public let activity: Observation<ActivityState>
+  public let explicitProtection: Observation<ExplicitProtectionState>
   public let providerState: Observation<ProviderState>
-  public let recoverability: Observation<String>
-  public let dependencyState: Observation<String>
+  public let recoverability: Observation<RecoverabilityState>
+  public let recoverabilityReviewFacts: [RecoverabilityReviewFact]
+  public let dependencyState: Observation<DependencyState>
+  public let semanticReviewFacts: [SemanticReviewFact]
   public let accessPolicy: Observation<String>
   public let contentProtection: Observation<ContentProtectionBaseline>
   public let aclDigest: Observation<PolicyDigest>
   public let targetMountIdentity: Observation<String>
   public let removalForceRequirement: Observation<ForceRequirement>
   public let quarantineCapability: Observation<Bool>
+  public let gitWorktree: GitWorktreeEvidence?
   public let adapterScope: AdapterScopeEvidence
-  public let policyVotes: [GateVote]
+  public let additionalAdapterScopes: [AdapterScopeEvidence]
   public let classificationClaims: [ClassificationClaim]
   public let semanticReferenceTimeSeconds: Int64
   public let policyVersion: String
   public let schemaVersion: String
+
+  var hasGitWorktreeScope: Bool {
+    ([adapterScope] + additionalAdapterScopes).contains {
+      if case .gitWorktree = $0 { return true }
+      return false
+    }
+  }
 
   public init(
     captureID: PolicyDigest,
@@ -226,24 +415,63 @@ public struct FrozenEvidenceSnapshot: Equatable, Sendable {
     namespaceBinding: ProtectedNamespaceBinding,
     identity: Observation<ObjectIdentity>,
     coverage: EvidenceCoverage,
-    collectorStatus: Observation<String>,
-    activity: Observation<String>,
+    collectorStatus: Observation<CollectorCompletionState>,
+    activity: Observation<ActivityState>,
+    explicitProtection: Observation<ExplicitProtectionState>,
     providerState: Observation<ProviderState>,
-    recoverability: Observation<String>,
-    dependencyState: Observation<String>,
+    recoverability: Observation<RecoverabilityState>,
+    recoverabilityReviewFacts: [RecoverabilityReviewFact],
+    dependencyState: Observation<DependencyState>,
+    semanticReviewFacts: [SemanticReviewFact],
     accessPolicy: Observation<String>,
     contentProtection: Observation<ContentProtectionBaseline>,
     aclDigest: Observation<PolicyDigest>,
     targetMountIdentity: Observation<String>,
     removalForceRequirement: Observation<ForceRequirement>,
     quarantineCapability: Observation<Bool>,
+    gitWorktree: GitWorktreeEvidence?,
     adapterScope: AdapterScopeEvidence,
-    policyVotes: [GateVote],
+    additionalAdapterScopes: [AdapterScopeEvidence],
     classificationClaims: [ClassificationClaim],
     semanticReferenceTimeSeconds: Int64,
     policyVersion: String,
     schemaVersion: String
-  ) {
+  ) throws {
+    let canonicalRecoverabilityFacts = recoverabilityReviewFacts.sorted {
+      $0.bindingBytes.lexicographicallyPrecedes($1.bindingBytes)
+    }
+    let canonicalSemanticFacts = semanticReviewFacts.sorted {
+      $0.bindingBytes.lexicographicallyPrecedes($1.bindingBytes)
+    }
+    let canonicalScopes = ([adapterScope] + additionalAdapterScopes).sorted {
+      $0.bindingBytes.lexicographicallyPrecedes($1.bindingBytes)
+    }
+    guard let canonicalPrimaryScope = canonicalScopes.first else {
+      throw PolicyModelError.invalidActionContract
+    }
+    let canonicalAdditionalScopes = Array(canonicalScopes.dropFirst())
+    let canonicalClassificationClaims = classificationClaims.sorted {
+      $0.bindingBytes.lexicographicallyPrecedes($1.bindingBytes)
+    }
+    let hasGitScope = canonicalScopes.contains {
+      if case .gitWorktree = $0 { return true }
+      return false
+    }
+    guard
+      Set(canonicalRecoverabilityFacts.map(\.bindingBytes)).count
+        == canonicalRecoverabilityFacts.count,
+      Set(canonicalSemanticFacts.map(\.bindingBytes)).count == canonicalSemanticFacts.count,
+      Set(canonicalScopes.map(\.bindingBytes)).count == canonicalScopes.count,
+      Set(canonicalClassificationClaims.map(\.bindingBytes)).count
+        == canonicalClassificationClaims.count,
+      canonicalRecoverabilityFacts.allSatisfy(Self.valid),
+      canonicalSemanticFacts.allSatisfy(Self.valid),
+      Self.hasConsistentDuplicateSurvivors(canonicalSemanticFacts),
+      canonicalClassificationClaims.allSatisfy(Self.valid),
+      (gitWorktree != nil) == hasGitScope,
+      Self.validAdapterScopes(
+        primary: canonicalPrimaryScope, additional: canonicalAdditionalScopes)
+    else { throw PolicyModelError.invalidGateSet }
     self.captureID = captureID
     self.globalFactsHash = globalFactsHash
     self.candidateID = candidateID
@@ -252,23 +480,108 @@ public struct FrozenEvidenceSnapshot: Equatable, Sendable {
     self.coverage = coverage
     self.collectorStatus = collectorStatus
     self.activity = activity
+    self.explicitProtection = explicitProtection
     self.providerState = providerState
     self.recoverability = recoverability
+    self.recoverabilityReviewFacts = canonicalRecoverabilityFacts
     self.dependencyState = dependencyState
+    self.semanticReviewFacts = canonicalSemanticFacts
     self.accessPolicy = accessPolicy
     self.contentProtection = contentProtection
     self.aclDigest = aclDigest
     self.targetMountIdentity = targetMountIdentity
     self.removalForceRequirement = removalForceRequirement
     self.quarantineCapability = quarantineCapability
-    self.adapterScope = adapterScope
-    self.policyVotes = policyVotes.sorted { $0.dimension < $1.dimension }
-    self.classificationClaims = classificationClaims.sorted {
-      $0.bindingBytes.lexicographicallyPrecedes($1.bindingBytes)
-    }
+    self.gitWorktree = gitWorktree
+    self.adapterScope = canonicalPrimaryScope
+    self.additionalAdapterScopes = canonicalAdditionalScopes
+    self.classificationClaims = canonicalClassificationClaims
     self.semanticReferenceTimeSeconds = semanticReferenceTimeSeconds
     self.policyVersion = policyVersion
     self.schemaVersion = schemaVersion
+  }
+
+  private static func valid(_ fact: RecoverabilityReviewFact) -> Bool {
+    switch fact {
+    case .staticOnlyRebuildEvidence(let artifactKind, _): hasNonWhitespace(artifactKind)
+    case .unknownRebuildCost(let valueBucket, _): hasNonWhitespace(valueBucket)
+    }
+  }
+
+  private static func valid(_ fact: SemanticReviewFact) -> Bool {
+    switch fact {
+    case .recencyAgePolicy(let valueBucket, _): hasNonWhitespace(valueBucket)
+    case .taskSemanticCompletion(let taskID, _): hasNonWhitespace(taskID)
+    case .duplicateSurvivorChoice(let groupID, let survivorCandidateID, _):
+      hasNonWhitespace(groupID) && hasNonWhitespace(survivorCandidateID)
+    case .normalKeepPolicy(let policyID, _): hasNonWhitespace(policyID)
+    }
+  }
+
+  private static func hasConsistentDuplicateSurvivors(
+    _ facts: [SemanticReviewFact]
+  ) -> Bool {
+    let choices = facts.compactMap { fact -> (Data, Data)? in
+      guard case .duplicateSurvivorChoice(let groupID, let survivorCandidateID, _) = fact
+      else { return nil }
+      return (Data(groupID.utf8), Data(survivorCandidateID.utf8))
+    }
+    return Dictionary(grouping: choices, by: \.0).values.allSatisfy {
+      Set($0.map(\.1)).count == 1
+    }
+  }
+
+  private static func valid(_ claim: ClassificationClaim) -> Bool {
+    guard hasNonWhitespace(claim.value), hasNonWhitespace(claim.evidenceKey) else {
+      return false
+    }
+    switch claim.source {
+    case .authoritativeAdapter(let identifier), .structuralRecognizer(let identifier),
+      .pathConvention(let identifier), .agentSuggestion(let identifier):
+      return hasNonWhitespace(identifier)
+    case .genericFallback:
+      return true
+    }
+  }
+
+  private static func validAdapterScopes(
+    primary: AdapterScopeEvidence,
+    additional: [AdapterScopeEvidence]
+  ) -> Bool {
+    let scopes = [primary] + additional
+    guard scopes.allSatisfy(Self.valid) else { return false }
+    if scopes.contains(where: { if case .gitWorktree = $0 { true } else { false } }) {
+      return scopes.allSatisfy { if case .gitWorktree = $0 { true } else { false } }
+    }
+    let hasGeneric = scopes.contains { if case .genericRemove = $0 { true } else { false } }
+    if hasGeneric {
+      return scopes.allSatisfy {
+        switch $0 {
+        case .genericRemove, .completeReleaseSetRemove: true
+        default: false
+        }
+      }
+    }
+    let terminalScopes = scopes.filter {
+      switch $0 {
+      case .completeReleaseSetRemove: false
+      default: true
+      }
+    }
+    return terminalScopes.count <= 1
+  }
+
+  private static func valid(_ scope: AdapterScopeEvidence) -> Bool {
+    switch scope {
+    case .genericRemove, .gitWorktree:
+      return true
+    case .codexCleanTemporary(let cleanupScopeID):
+      return hasNonWhitespace(cleanupScopeID)
+    case .versionedArtifactRemove(let artifactKind, let version):
+      return hasNonWhitespace(artifactKind) && hasNonWhitespace(version)
+    case .completeReleaseSetRemove(let allocationGroupID):
+      return hasNonWhitespace(allocationGroupID)
+    }
   }
 
   public var evidenceID: PolicyDigest {
@@ -288,11 +601,14 @@ public struct FrozenEvidenceSnapshot: Equatable, Sendable {
       encoder.string(identity.type.rawValue)
     }
     encoder.uint8(coverage.rawValue)
-    encoder.observation(collectorStatus) { $0.string($1) }
-    encoder.observation(activity) { $0.string($1) }
+    encoder.observation(collectorStatus) { $0.string($1.rawValue) }
+    encoder.observation(activity) { $0.string($1.rawValue) }
+    encoder.observation(explicitProtection) { $0.string($1.rawValue) }
     encoder.observation(providerState) { $0.string($1.rawValue) }
-    encoder.observation(recoverability) { $0.string($1) }
-    encoder.observation(dependencyState) { $0.string($1) }
+    encoder.observation(recoverability) { $0.string($1.rawValue) }
+    encoder.array(recoverabilityReviewFacts) { $0.bindingBytes }
+    encoder.observation(dependencyState) { $0.string($1.rawValue) }
+    encoder.array(semanticReviewFacts) { $0.bindingBytes }
     encoder.observation(accessPolicy) { $0.string($1) }
     encoder.observation(contentProtection) { encoder, baseline in
       switch baseline {
@@ -308,13 +624,14 @@ public struct FrozenEvidenceSnapshot: Equatable, Sendable {
     encoder.observation(targetMountIdentity) { $0.string($1) }
     encoder.observation(removalForceRequirement) { $0.string($1.rawValue) }
     encoder.observation(quarantineCapability) { $0.bool($1) }
-    encodeAdapterScopeEvidence(adapterScope, into: &encoder)
-    encoder.array(policyVotes) { vote in
-      var nested = PolicyBindingEncoder()
-      nested.uint8(vote.dimension.rawValue)
-      ActionDefinition.encodeGateResult(vote.result, into: &nested)
-      return nested.data
+    if let gitWorktree {
+      encoder.bool(true)
+      encoder.data(gitWorktree.bindingBytes)
+    } else {
+      encoder.bool(false)
     }
+    encodeAdapterScopeEvidence(adapterScope, into: &encoder)
+    encoder.array(additionalAdapterScopes) { $0.bindingBytes }
     encoder.array(classificationClaims) { $0.bindingBytes }
     encoder.int64(semanticReferenceTimeSeconds)
     encoder.string(policyVersion)
@@ -420,6 +737,10 @@ public struct ProtectedPropertyContracts: Equatable, Sendable {
 
 public enum ActionPostcondition: Equatable, Sendable {
   case targetAbsent
+  case gitWorktreeLocalChangesDiscarded(
+    changeSetDigest: PolicyDigest,
+    successor: GitWorktreeExecutionBaseline
+  )
   case worktreeQuarantinedThenAbsent
   case cleanupScopeAbsent(String)
   case artifactVersionAbsent(kind: String, version: String)
@@ -465,7 +786,36 @@ public struct GenericRemoveContract: Equatable, Sendable {
 
 public struct GitWorktreeRemoveContract: Equatable, Sendable {
   public let quarantineRequired: Bool
-  fileprivate init() { quarantineRequired = true }
+  public let verifiedEvidence: GitWorktreeEvidence
+  public let executionBaseline: GitWorktreeExecutionBaseline
+  public let requiresDiscardLocalChanges: Bool
+
+  fileprivate init(
+    verifiedEvidence: GitWorktreeEvidence,
+    executionBaseline: GitWorktreeExecutionBaseline,
+    requiresDiscardLocalChanges: Bool
+  ) {
+    quarantineRequired = true
+    self.verifiedEvidence = verifiedEvidence
+    self.executionBaseline = executionBaseline
+    self.requiresDiscardLocalChanges = requiresDiscardLocalChanges
+  }
+}
+
+public struct GitWorktreeDiscardLocalChangesContract: Equatable, Sendable {
+  public let verifiedEvidence: GitWorktreeEvidence
+  public let changeSetDigest: PolicyDigest
+  public let successorBaseline: GitWorktreeExecutionBaseline
+
+  fileprivate init(
+    verifiedEvidence: GitWorktreeEvidence,
+    changeSetDigest: PolicyDigest,
+    successorBaseline: GitWorktreeExecutionBaseline
+  ) {
+    self.verifiedEvidence = verifiedEvidence
+    self.changeSetDigest = changeSetDigest
+    self.successorBaseline = successorBaseline
+  }
 }
 
 public struct CodexTemporaryRemoveContract: Equatable, Sendable {
@@ -482,22 +832,53 @@ public struct VersionedArtifactRemoveContract: Equatable, Sendable {
   }
 }
 
-public struct CompleteReleaseSetRemoveContract: Equatable, Sendable {
+public struct CompleteReleaseSetActionBinding: Equatable, Sendable {
   public let allocationGroupID: String
-  fileprivate init(allocationGroupID: String) { self.allocationGroupID = allocationGroupID }
+  public let graphDigest: PolicyDigest
+  public let topologyExpectation: ReleaseTopologyExpectation
+  public let ownerCandidateIDs: [String]
+  public let ownerActionIDs: [ActionID]
+  public let conditionalReclaimBytes: UInt64
+
+  fileprivate init(releaseSet: PlanReleaseSet) {
+    allocationGroupID = releaseSet.allocationGroupID
+    graphDigest = releaseSet.graphDigest
+    topologyExpectation = releaseSet.topologyExpectation
+    ownerCandidateIDs = releaseSet.ownerCandidateIDs
+    ownerActionIDs = releaseSet.ownerActionIDs
+    conditionalReclaimBytes = releaseSet.conditionalReclaimBytes
+  }
+
+  var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encoder.string(allocationGroupID)
+    encoder.data(graphDigest.bytes)
+    encoder.data(encodeReleaseTopologyExpectation(topologyExpectation))
+    encoder.array(ownerCandidateIDs) { Data($0.utf8) }
+    encoder.array(ownerActionIDs) { $0.digest.bytes }
+    encoder.uint64(conditionalReclaimBytes)
+    return encoder.data
+  }
+}
+
+public struct CompleteReleaseSetRemoveContract: Equatable, Sendable {
+  public let binding: CompleteReleaseSetActionBinding
+  fileprivate init(binding: CompleteReleaseSetActionBinding) { self.binding = binding }
 }
 
 public enum ActionAdapterRequest: Equatable, Sendable {
   case genericRemove
   case gitWorktreeRemove
+  case gitWorktreeDiscardLocalChanges
   case codexCleanTemporary(cleanupScopeID: String)
   case versionedArtifactRemove(artifactKind: String, version: String)
-  case completeReleaseSetRemove(allocationGroupID: String)
+  case completeReleaseSetRemove(binding: CompleteReleaseSetActionBinding)
 }
 
 public enum ActionAdapterContract: Equatable, Sendable {
   case genericRemove(GenericRemoveContract)
   case gitWorktreeRemove(GitWorktreeRemoveContract)
+  case gitWorktreeDiscardLocalChanges(GitWorktreeDiscardLocalChangesContract)
   case codexCleanTemporary(CodexTemporaryRemoveContract)
   case versionedArtifactRemove(VersionedArtifactRemoveContract)
   case completeReleaseSetRemove(CompleteReleaseSetRemoveContract)
@@ -579,9 +960,10 @@ public struct ActionPrototype: Equatable, Sendable {
 
     let adapter: ActionAdapterContract
     let postcondition: ActionPostcondition
+    var protectedContentBaseline = contentBaseline
     switch request {
     case .genericRemove:
-      guard evidence.adapterScope == .genericRemove,
+      guard evidenceSupportsAdapterScope(evidence, .genericRemove),
         case .known(let force) = evidence.removalForceRequirement
       else {
         throw PolicyModelError.invalidActionContract
@@ -597,17 +979,52 @@ public struct ActionPrototype: Equatable, Sendable {
       )
       postcondition = .targetAbsent
     case .gitWorktreeRemove:
-      guard evidence.adapterScope == .gitWorktreeRemove, identity.type == .directory,
-        evidence.quarantineCapability == .known(true)
+      guard evidenceSupportsAdapterScope(evidence, .gitWorktree), identity.type == .directory,
+        evidence.quarantineCapability == .known(true),
+        evidence.namespaceBinding.trustedNamespace == .ownerPrivate,
+        let gitWorktree = evidence.gitWorktree,
+        let localChanges = gitWorktree.verifiedLocalChanges,
+        let executionBaseline = gitWorktree.verifiedExecutionBaseline(
+          currentContent: contentBaseline)
       else {
         throw PolicyModelError.invalidActionContract
       }
-      adapter = .gitWorktreeRemove(GitWorktreeRemoveContract())
+      adapter = .gitWorktreeRemove(
+        GitWorktreeRemoveContract(
+          verifiedEvidence: gitWorktree,
+          executionBaseline: executionBaseline,
+          requiresDiscardLocalChanges: {
+            if case .present = localChanges { return true }
+            return false
+          }()
+        )
+      )
+      protectedContentBaseline = executionBaseline.contentProtection
       postcondition = .worktreeQuarantinedThenAbsent
+    case .gitWorktreeDiscardLocalChanges:
+      guard evidenceSupportsAdapterScope(evidence, .gitWorktree), identity.type == .directory,
+        evidence.namespaceBinding.trustedNamespace == .ownerPrivate,
+        let gitWorktree = evidence.gitWorktree,
+        case .present(let changeSetDigest) = gitWorktree.verifiedLocalChanges,
+        let successorBaseline = gitWorktree.verifiedDiscardSuccessor
+      else {
+        throw PolicyModelError.invalidActionContract
+      }
+      adapter = .gitWorktreeDiscardLocalChanges(
+        GitWorktreeDiscardLocalChangesContract(
+          verifiedEvidence: gitWorktree,
+          changeSetDigest: changeSetDigest,
+          successorBaseline: successorBaseline
+        )
+      )
+      postcondition = .gitWorktreeLocalChangesDiscarded(
+        changeSetDigest: changeSetDigest,
+        successor: successorBaseline
+      )
     case .codexCleanTemporary(let cleanupScopeID):
       guard hasNonWhitespace(cleanupScopeID),
-        adapterScopeMatches(
-          evidence.adapterScope, .codexCleanTemporary(cleanupScopeID: cleanupScopeID))
+        evidenceSupportsAdapterScope(
+          evidence, .codexCleanTemporary(cleanupScopeID: cleanupScopeID))
       else { throw PolicyModelError.invalidActionContract }
       adapter = .codexCleanTemporary(
         CodexTemporaryRemoveContract(cleanupScopeID: cleanupScopeID)
@@ -618,8 +1035,8 @@ public struct ActionPrototype: Equatable, Sendable {
         throw PolicyModelError.invalidActionContract
       }
       guard
-        adapterScopeMatches(
-          evidence.adapterScope,
+        evidenceSupportsAdapterScope(
+          evidence,
           .versionedArtifactRemove(artifactKind: artifactKind, version: version)
         )
       else { throw PolicyModelError.invalidActionContract }
@@ -627,18 +1044,23 @@ public struct ActionPrototype: Equatable, Sendable {
         VersionedArtifactRemoveContract(artifactKind: artifactKind, version: version)
       )
       postcondition = .artifactVersionAbsent(kind: artifactKind, version: version)
-    case .completeReleaseSetRemove(let allocationGroupID):
-      guard hasNonWhitespace(allocationGroupID),
-        adapterScopeMatches(
-          evidence.adapterScope,
-          .completeReleaseSetRemove(allocationGroupID: allocationGroupID))
+    case .completeReleaseSetRemove(let binding):
+      guard hasNonWhitespace(binding.allocationGroupID),
+        evidenceSupportsAdapterScope(
+          evidence,
+          .completeReleaseSetRemove(allocationGroupID: binding.allocationGroupID)),
+        !binding.ownerActionIDs.isEmpty,
+        binding.ownerActionIDs.count == binding.ownerCandidateIDs.count,
+        Set(binding.ownerActionIDs).count == binding.ownerActionIDs.count,
+        Set(binding.ownerCandidateIDs.map { Data($0.utf8) }).count
+          == binding.ownerCandidateIDs.count
       else {
         throw PolicyModelError.invalidActionContract
       }
       adapter = .completeReleaseSetRemove(
-        CompleteReleaseSetRemoveContract(allocationGroupID: allocationGroupID)
+        CompleteReleaseSetRemoveContract(binding: binding)
       )
-      postcondition = .allocationGroupReleased(allocationGroupID)
+      postcondition = .allocationGroupReleased(binding.allocationGroupID)
     }
     return Self(
       policyVersion: evidence.policyVersion,
@@ -648,7 +1070,7 @@ public struct ActionPrototype: Equatable, Sendable {
       namespaceBinding: evidence.namespaceBinding,
       protectedProperties: ProtectedPropertyContracts(
         identity: IdentityProtectionContract(expectedIdentity: identity),
-        content: ContentProtectionContract(expectedBaseline: contentBaseline),
+        content: ContentProtectionContract(expectedBaseline: protectedContentBaseline),
         accessPolicy: AccessPolicyProtectionContract(
           requiredBaseline: RequiredAccessPolicyBaseline(
             accessPolicyBytes: Data(accessPolicy.utf8),
@@ -700,13 +1122,18 @@ public struct ActionDefinition: Equatable, Sendable {
             == globalFacts.semanticReferenceTimeSeconds
       })
     else { throw PolicyModelError.mixedPolicyOrSchemaVersion }
+    let effectiveEvaluation = try actionAwareEvaluation(
+      evaluation,
+      prototype: prototype,
+      prerequisites: prerequisites
+    )
     return make(
       prototype: prototype,
       evidence: evidence,
       globalFactsHash: globalFacts.globalFactsHash,
       prerequisiteLineageIDs: Array(Set(prerequisites.map(\.lineageID))).sorted(),
       prerequisiteActionIDs: Array(Set(prerequisites.map(\.id))).sorted(),
-      evaluation: evaluation,
+      evaluation: effectiveEvaluation,
       displayMetrics: displayMetrics
     )
   }
@@ -737,8 +1164,7 @@ public struct ActionDefinition: Equatable, Sendable {
       case .known(let identity) = evidence.identity,
       identity == prototype.targetIdentity,
       prototype.protectedProperties.identity.expectedIdentity == identity,
-      evidence.contentProtection
-        == .known(prototype.protectedProperties.content.expectedBaseline),
+      contentProtectionBaselineMatches(prototype, evidence: evidence),
       accessPolicyBaselineMatches(
         prototype.protectedProperties.accessPolicy.requiredBaseline, evidence: evidence),
       rawStringEqual(globalFacts.policyVersion, evidence.policyVersion),
@@ -771,7 +1197,7 @@ public struct ActionDefinition: Equatable, Sendable {
   ) throws {
     switch prototype.adapterContract {
     case .genericRemove(let contract):
-      guard evidence.adapterScope == .genericRemove,
+      guard evidenceSupportsAdapterScope(evidence, .genericRemove),
         contract.removalPathSlot == .prototypeRawTargetPath,
         contract.targetKind == identity.type,
         contract.pathRaceResidual,
@@ -780,23 +1206,54 @@ public struct ActionDefinition: Equatable, Sendable {
         prototype.postcondition == .targetAbsent
       else { throw PolicyModelError.invalidActionContract }
     case .gitWorktreeRemove(let contract):
-      guard evidence.adapterScope == .gitWorktreeRemove, contract.quarantineRequired,
+      guard evidenceSupportsAdapterScope(evidence, .gitWorktree), contract.quarantineRequired,
         identity.type == .directory,
         evidence.quarantineCapability == .known(true),
+        evidence.namespaceBinding.trustedNamespace == .ownerPrivate,
+        evidence.gitWorktree == contract.verifiedEvidence,
+        contract.verifiedEvidence.verifiedLocalChanges != nil,
+        case .known(let currentContent) = evidence.contentProtection,
+        contract.verifiedEvidence.verifiedExecutionBaseline(currentContent: currentContent)
+          == contract.executionBaseline,
+        prototype.protectedProperties.content.expectedBaseline
+          == contract.executionBaseline.contentProtection,
         prototype.postcondition == .worktreeQuarantinedThenAbsent
+      else { throw PolicyModelError.invalidActionContract }
+      let expectedRequiresDiscard: Bool
+      if case .present = contract.verifiedEvidence.verifiedLocalChanges {
+        expectedRequiresDiscard = true
+      } else {
+        expectedRequiresDiscard = false
+      }
+      guard contract.requiresDiscardLocalChanges == expectedRequiresDiscard else {
+        throw PolicyModelError.invalidActionContract
+      }
+    case .gitWorktreeDiscardLocalChanges(let contract):
+      guard evidenceSupportsAdapterScope(evidence, .gitWorktree),
+        identity.type == .directory,
+        evidence.namespaceBinding.trustedNamespace == .ownerPrivate,
+        evidence.gitWorktree == contract.verifiedEvidence,
+        contract.verifiedEvidence.verifiedLocalChanges
+          == .present(changeSetDigest: contract.changeSetDigest),
+        contract.verifiedEvidence.verifiedDiscardSuccessor == contract.successorBaseline,
+        prototype.postcondition
+          == .gitWorktreeLocalChangesDiscarded(
+            changeSetDigest: contract.changeSetDigest,
+            successor: contract.successorBaseline
+          )
       else { throw PolicyModelError.invalidActionContract }
     case .codexCleanTemporary(let contract):
       guard hasNonWhitespace(contract.cleanupScopeID),
-        adapterScopeMatches(
-          evidence.adapterScope,
+        evidenceSupportsAdapterScope(
+          evidence,
           .codexCleanTemporary(cleanupScopeID: contract.cleanupScopeID)),
         postconditionMatches(
           prototype.postcondition, .cleanupScopeAbsent(contract.cleanupScopeID))
       else { throw PolicyModelError.invalidActionContract }
     case .versionedArtifactRemove(let contract):
       guard hasNonWhitespace(contract.artifactKind), hasNonWhitespace(contract.version),
-        adapterScopeMatches(
-          evidence.adapterScope,
+        evidenceSupportsAdapterScope(
+          evidence,
           .versionedArtifactRemove(
             artifactKind: contract.artifactKind, version: contract.version)),
         postconditionMatches(
@@ -804,14 +1261,52 @@ public struct ActionDefinition: Equatable, Sendable {
           .artifactVersionAbsent(kind: contract.artifactKind, version: contract.version))
       else { throw PolicyModelError.invalidActionContract }
     case .completeReleaseSetRemove(let contract):
-      guard hasNonWhitespace(contract.allocationGroupID),
-        adapterScopeMatches(
-          evidence.adapterScope,
-          .completeReleaseSetRemove(allocationGroupID: contract.allocationGroupID)),
+      guard hasNonWhitespace(contract.binding.allocationGroupID),
+        evidenceSupportsAdapterScope(
+          evidence,
+          .completeReleaseSetRemove(allocationGroupID: contract.binding.allocationGroupID)),
         postconditionMatches(
-          prototype.postcondition, .allocationGroupReleased(contract.allocationGroupID))
+          prototype.postcondition,
+          .allocationGroupReleased(contract.binding.allocationGroupID))
       else { throw PolicyModelError.invalidActionContract }
     }
+  }
+
+  fileprivate static func actionAwareEvaluation(
+    _ base: PolicyEvaluation,
+    prototype: ActionPrototype,
+    prerequisites: [ActionDefinition]
+  ) throws -> PolicyEvaluation {
+    guard case .gitWorktreeRemove(let contract) = prototype.adapterContract,
+      contract.requiresDiscardLocalChanges,
+      case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges,
+      prerequisites.contains(where: { prerequisite in
+        guard
+          case .gitWorktreeDiscardLocalChanges(let discard) =
+            prerequisite.prototype.adapterContract
+        else { return false }
+        return discard.changeSetDigest == changeSetDigest
+          && discard.verifiedEvidence == contract.verifiedEvidence
+          && discard.successorBaseline == contract.executionBaseline
+          && prerequisite.prototype.namespaceBinding.bindingBytes
+            == prototype.namespaceBinding.bindingBytes
+      })
+    else { return base }
+    let votes = base.votes.map { vote -> GateVote in
+      guard vote.dimension == .recoverability,
+        case .requiresWaiver(let predicates, let reasons) = vote.result
+      else { return vote }
+      let remaining = predicates.filter {
+        !($0.kind == .fullyObservedLocalGitWorkDiscard
+          && $0.semanticEvidenceHash == changeSetDigest)
+      }
+      let result: GateResult =
+        remaining.isEmpty
+        ? .satisfied(reasons: reasons)
+        : .requiresWaiver(predicates: remaining, reasons: reasons)
+      return GateVote(dimension: vote.dimension, result: result)
+    }
+    return try base.replacingVotesPreservingContext(votes)
   }
 
   private static func make(
@@ -879,16 +1374,24 @@ public struct ActionDefinition: Equatable, Sendable {
     case .gitWorktreeRemove(let contract):
       encoder.uint8(1)
       encoder.bool(contract.quarantineRequired)
-    case .codexCleanTemporary(let contract):
+      encoder.data(contract.verifiedEvidence.bindingBytes)
+      encoder.data(contract.executionBaseline.bindingBytes)
+      encoder.bool(contract.requiresDiscardLocalChanges)
+    case .gitWorktreeDiscardLocalChanges(let contract):
       encoder.uint8(2)
+      encoder.data(contract.verifiedEvidence.bindingBytes)
+      encoder.data(contract.changeSetDigest.bytes)
+      encoder.data(contract.successorBaseline.bindingBytes)
+    case .codexCleanTemporary(let contract):
+      encoder.uint8(3)
       encoder.string(contract.cleanupScopeID)
     case .versionedArtifactRemove(let contract):
-      encoder.uint8(3)
+      encoder.uint8(4)
       encoder.string(contract.artifactKind)
       encoder.string(contract.version)
     case .completeReleaseSetRemove(let contract):
-      encoder.uint8(4)
-      encoder.string(contract.allocationGroupID)
+      encoder.uint8(5)
+      encoder.data(contract.binding.bindingBytes)
     }
   }
 
@@ -918,17 +1421,21 @@ public struct ActionDefinition: Equatable, Sendable {
     switch postcondition {
     case .targetAbsent:
       encoder.uint8(0)
-    case .worktreeQuarantinedThenAbsent:
+    case .gitWorktreeLocalChangesDiscarded(let changeSetDigest, let successor):
       encoder.uint8(1)
-    case .cleanupScopeAbsent(let scope):
+      encoder.data(changeSetDigest.bytes)
+      encoder.data(successor.bindingBytes)
+    case .worktreeQuarantinedThenAbsent:
       encoder.uint8(2)
+    case .cleanupScopeAbsent(let scope):
+      encoder.uint8(3)
       encoder.string(scope)
     case .artifactVersionAbsent(let kind, let version):
-      encoder.uint8(3)
+      encoder.uint8(4)
       encoder.string(kind)
       encoder.string(version)
     case .allocationGroupReleased(let group):
-      encoder.uint8(4)
+      encoder.uint8(5)
       encoder.string(group)
     }
   }
@@ -1076,6 +1583,9 @@ public struct PlanReleaseSet: Equatable, Sendable {
 
   public var ownerCandidateIDs: [String] { owners.map(\.candidateID) }
   public var ownerActionIDs: [ActionID] { owners.map(\.actionID) }
+  public var actionBinding: CompleteReleaseSetActionBinding {
+    CompleteReleaseSetActionBinding(releaseSet: self)
+  }
 
   fileprivate init(
     allocationGroupID: String,
@@ -1152,16 +1662,18 @@ public struct PlanReleaseSet: Equatable, Sendable {
   ) -> Bool {
     switch action.prototype.postcondition {
     case .targetAbsent:
-      adapterScopeMatches(action.evidence.adapterScope, .genericRemove)
+      evidenceSupportsAdapterScope(action.evidence, .genericRemove)
+    case .gitWorktreeLocalChangesDiscarded:
+      false
     case .worktreeQuarantinedThenAbsent:
-      adapterScopeMatches(action.evidence.adapterScope, .gitWorktreeRemove)
+      evidenceSupportsAdapterScope(action.evidence, .gitWorktree)
     case .cleanupScopeAbsent(let cleanupScopeID):
-      adapterScopeMatches(
-        action.evidence.adapterScope,
+      evidenceSupportsAdapterScope(
+        action.evidence,
         .codexCleanTemporary(cleanupScopeID: cleanupScopeID))
     case .artifactVersionAbsent(let artifactKind, let version):
-      adapterScopeMatches(
-        action.evidence.adapterScope,
+      evidenceSupportsAdapterScope(
+        action.evidence,
         .versionedArtifactRemove(artifactKind: artifactKind, version: version))
     case .allocationGroupReleased(let boundGroupID):
       rawStringEqual(boundGroupID, allocationGroupID)
@@ -1238,9 +1750,65 @@ public struct ImmutablePlan: Equatable, Sendable {
       let expectedLineages = action.prerequisiteActionIDs.compactMap {
         actionByID[$0]?.lineageID
       }.sorted()
+      let prerequisites = action.prerequisiteActionIDs.compactMap { actionByID[$0] }
+      let baseEvaluation = try OneVotePolicy.evaluate(
+        OneVotePolicyInputs.build(evidence: action.evidence, globalFacts: globalFacts)
+      )
+      let expectedEvaluation = try ActionDefinition.actionAwareEvaluation(
+        baseEvaluation,
+        prototype: action.prototype,
+        prerequisites: prerequisites
+      )
       guard action.prerequisiteLineageIDs == expectedLineages,
-        action == action.recomputed
+        action == action.recomputed,
+        action.evaluation == expectedEvaluation
       else { throw PolicyModelError.invalidActionBinding(action.id) }
+    }
+    for action in canonicalActions {
+      guard case .gitWorktreeRemove(let contract) = action.prototype.adapterContract,
+        contract.requiresDiscardLocalChanges
+      else { continue }
+      let matchingDiscardActions = action.prerequisiteActionIDs.compactMap {
+        actionByID[$0]
+      }.filter { prerequisite in
+        guard
+          case .gitWorktreeDiscardLocalChanges(let discard) =
+            prerequisite.prototype.adapterContract
+        else { return false }
+        return prerequisite.prototype.namespaceBinding.bindingBytes
+          == action.prototype.namespaceBinding.bindingBytes
+          && discard.verifiedEvidence == contract.verifiedEvidence
+          && contract.verifiedEvidence.verifiedLocalChanges
+            == .present(changeSetDigest: discard.changeSetDigest)
+          && discard.successorBaseline == contract.executionBaseline
+      }
+      guard matchingDiscardActions.count == 1 else {
+        throw PolicyModelError.invalidActionContract
+      }
+    }
+    let gitEvidenceSnapshots = evidence.filter(\.hasGitWorktreeScope)
+    for action in canonicalActions {
+      switch action.prototype.adapterContract {
+      case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges:
+        continue
+      default:
+        break
+      }
+      let overlappingGitEvidence = gitEvidenceSnapshots.filter {
+        namespaceMutationAffects(
+          action.prototype.namespaceBinding, evidence: $0.namespaceBinding)
+      }
+      guard !overlappingGitEvidence.isEmpty else { continue }
+      guard case .completeReleaseSetRemove(let release) = action.prototype.adapterContract,
+        overlappingGitEvidence.allSatisfy({ gitEvidence in
+          release.binding.ownerActionIDs.contains(where: { ownerActionID in
+            guard let ownerAction = actionByID[ownerActionID],
+              case .gitWorktreeRemove = ownerAction.prototype.adapterContract
+            else { return false }
+            return ownerAction.evidenceID == gitEvidence.evidenceID
+          })
+        })
+      else { throw PolicyModelError.invalidActionContract }
     }
 
     let canonicalReleaseSets = releaseSets.sorted {
@@ -1288,6 +1856,51 @@ public struct ImmutablePlan: Equatable, Sendable {
     }
     guard graphProvenances.allSatisfy({ $0.evidenceHash == evidenceHash }) else {
       throw PolicyModelError.incompleteReleaseGraph
+    }
+    let releaseActionBindings = canonicalActions.compactMap { action -> Data? in
+      guard case .completeReleaseSetRemove(let contract) = action.prototype.adapterContract
+      else { return nil }
+      return contract.binding.bindingBytes
+    }
+    guard Set(releaseActionBindings).count == releaseActionBindings.count else {
+      throw PolicyModelError.duplicateIdentifier
+    }
+    let verifiedReleaseBindings = Set(canonicalReleaseSets.map { $0.actionBinding.bindingBytes })
+    guard releaseActionBindings.allSatisfy(verifiedReleaseBindings.contains) else {
+      throw PolicyModelError.incompleteReleaseGraph
+    }
+    for action in canonicalActions {
+      guard case .completeReleaseSetRemove(let contract) = action.prototype.adapterContract
+      else { continue }
+      guard
+        let releaseSet = canonicalReleaseSets.first(where: {
+          $0.actionBinding.bindingBytes == contract.binding.bindingBytes
+        }),
+        let anchorOwner = releaseSet.owners.first(where: {
+          rawStringEqual($0.candidateID, action.evidence.candidateID)
+        }),
+        anchorOwner.evidence.evidenceID == action.evidenceID,
+        Set(contract.binding.ownerActionIDs).isSubset(
+          of: Set(action.prerequisiteActionIDs)
+        )
+      else {
+        throw PolicyModelError.invalidActionContract
+      }
+    }
+    let duplicateFacts = evidence.flatMap { snapshot in
+      snapshot.semanticReviewFacts.compactMap { fact -> (String, String)? in
+        guard case .duplicateSurvivorChoice(let groupID, let survivorCandidateID, _) = fact
+        else { return nil }
+        return (groupID, survivorCandidateID)
+      }
+    }
+    let duplicateGroups = Dictionary(grouping: duplicateFacts, by: { Data($0.0.utf8) })
+    let candidateIDs = Set(evidence.map { Data($0.candidateID.utf8) })
+    for facts in duplicateGroups.values {
+      let survivors = Set(facts.map { Data($0.1.utf8) })
+      guard survivors.count == 1, let survivor = survivors.first,
+        candidateIDs.contains(survivor)
+      else { throw PolicyModelError.invalidActionContract }
     }
     self.policyVersion = policyVersion
     self.schemaVersion = schemaVersion
@@ -1621,8 +2234,28 @@ public struct DecisionOverlay: Equatable, Sendable {
   }
 }
 
+public struct ValidatedExecutionStep: Equatable, Sendable {
+  public let action: ActionDefinition
+  public let prerequisiteStepActionIDs: [ActionID]
+  public let jitRevalidationActions: [ActionDefinition]
+  public let releaseSet: PlanReleaseSet?
+
+  fileprivate init(
+    action: ActionDefinition,
+    prerequisiteStepActionIDs: [ActionID],
+    jitRevalidationActions: [ActionDefinition],
+    releaseSet: PlanReleaseSet?
+  ) {
+    self.action = action
+    self.prerequisiteStepActionIDs = prerequisiteStepActionIDs
+    self.jitRevalidationActions = jitRevalidationActions
+    self.releaseSet = releaseSet
+  }
+}
+
 public struct ValidatedDecisionOverlay: Equatable, Sendable {
   public let selectedActions: [ActionDefinition]
+  public let executionSteps: [ValidatedExecutionStep]
   public let activatedReleaseSets: [PlanReleaseSet]
   public let waiverConsents: [WaiverConsentCore]
   public let epochRequirements: [WaiverEpochRequirement]
@@ -1716,11 +2349,88 @@ public enum DecisionOverlayValidator {
       }
     }
 
-    let activated = plan.releaseSets.filter { releaseSet in
-      Set(releaseSet.ownerActionIDs).isSubset(of: selectedIDs)
+    try validateDuplicateSurvivors(selectedActions, plan: plan)
+    try validateFullCorpusDominance(selectedActions, plan: plan)
+    try validateTerminalMutationExclusivity(selectedActions)
+
+    let selectedReleaseActions = selectedActions.filter {
+      if case .completeReleaseSetRemove = $0.prototype.adapterContract { return true }
+      return false
     }
+    let selectedReleaseBindings = Set(
+      selectedReleaseActions.compactMap { action -> Data? in
+        guard case .completeReleaseSetRemove(let contract) = action.prototype.adapterContract
+        else { return nil }
+        return contract.binding.bindingBytes
+      })
+    let activated = plan.releaseSets.filter {
+      Set($0.ownerActionIDs).isSubset(of: selectedIDs)
+    }
+    let executionReleaseSets = activated.filter {
+      selectedReleaseBindings.contains($0.actionBinding.bindingBytes)
+    }
+    guard executionReleaseSets.count == selectedReleaseActions.count else {
+      throw PolicyModelError.incompleteReleaseGraph
+    }
+    var replacementActionID: [ActionID: ActionID] = [:]
+    for action in selectedReleaseActions {
+      guard case .completeReleaseSetRemove(let contract) = action.prototype.adapterContract
+      else { continue }
+      for ownerActionID in contract.binding.ownerActionIDs {
+        guard replacementActionID.updateValue(action.id, forKey: ownerActionID) == nil else {
+          throw PolicyModelError.incompleteReleaseGraph
+        }
+      }
+    }
+    let retainedActions = selectedActions.filter { replacementActionID[$0.id] == nil }
+    var executionSteps: [ValidatedExecutionStep] = []
+    for action in retainedActions {
+      if case .completeReleaseSetRemove(let contract) = action.prototype.adapterContract {
+        guard
+          let releaseSet = executionReleaseSets.first(where: {
+            $0.actionBinding.bindingBytes == contract.binding.bindingBytes
+          })
+        else { throw PolicyModelError.incompleteReleaseGraph }
+        let owners = try releaseSet.ownerActionIDs.map { ownerID -> ActionDefinition in
+          guard let owner = actionByID[ownerID] else {
+            throw PolicyModelError.releaseSetDanglingAction(ownerID)
+          }
+          return owner
+        }
+        let prerequisiteIDs = Set(
+          (action.prerequisiteActionIDs + owners.flatMap(\.prerequisiteActionIDs)).compactMap {
+            let replacement = replacementActionID[$0] ?? $0
+            return replacement == action.id ? nil : replacement
+          }
+        ).sorted()
+        executionSteps.append(
+          ValidatedExecutionStep(
+            action: action,
+            prerequisiteStepActionIDs: prerequisiteIDs,
+            jitRevalidationActions: ActionOrdering.canonical([action] + owners),
+            releaseSet: releaseSet
+          )
+        )
+      } else {
+        let prerequisiteIDs = Set(
+          action.prerequisiteActionIDs.map {
+            replacementActionID[$0] ?? $0
+          }
+        ).subtracting([action.id]).sorted()
+        executionSteps.append(
+          ValidatedExecutionStep(
+            action: action,
+            prerequisiteStepActionIDs: prerequisiteIDs,
+            jitRevalidationActions: [action],
+            releaseSet: nil
+          )
+        )
+      }
+    }
+    executionSteps = try topologicallyOrdered(executionSteps)
     return ValidatedDecisionOverlay(
       selectedActions: selectedActions,
+      executionSteps: executionSteps,
       activatedReleaseSets: activated,
       waiverConsents: overlay.waiverConsents.sorted(by: waiverConsentCorePrecedes),
       epochRequirements: epochRequirements.sorted { left, right in
@@ -1734,6 +2444,158 @@ public enum DecisionOverlayValidator {
 
   private static func hasNonWhitespace(_ value: String) -> Bool {
     value.unicodeScalars.contains { !CharacterSet.whitespacesAndNewlines.contains($0) }
+  }
+
+  private static func validateDuplicateSurvivors(
+    _ selectedActions: [ActionDefinition],
+    plan: ImmutablePlan
+  ) throws {
+    let evidenceByCandidate = Dictionary(
+      grouping: plan.evidenceSnapshots, by: { Data($0.candidateID.utf8) })
+    let survivorCandidateIDs = Set(
+      plan.evidenceSnapshots.flatMap { snapshot in
+        snapshot.semanticReviewFacts.compactMap { fact -> Data? in
+          guard case .duplicateSurvivorChoice(_, let survivorCandidateID, _) = fact else {
+            return nil
+          }
+          return Data(survivorCandidateID.utf8)
+        }
+      })
+    let mutationActions = selectedActions.filter {
+      if case .completeReleaseSetRemove = $0.prototype.adapterContract { return false }
+      return true
+    }
+    for survivorCandidateID in survivorCandidateIDs {
+      let survivorMatches = evidenceByCandidate[survivorCandidateID] ?? []
+      guard survivorMatches.count == 1, let survivor = survivorMatches.first,
+        !mutationActions.contains(where: {
+          namespaceMutationAffects(
+            $0.prototype.namespaceBinding, evidence: survivor.namespaceBinding)
+        })
+      else { throw PolicyModelError.invalidActionContract }
+    }
+  }
+
+  private static func validateTerminalMutationExclusivity(
+    _ selectedActions: [ActionDefinition]
+  ) throws {
+    let actionByID = Dictionary(uniqueKeysWithValues: selectedActions.map { ($0.id, $0) })
+    for leftIndex in selectedActions.indices {
+      for rightIndex in selectedActions.indices where rightIndex > leftIndex {
+        let left = selectedActions[leftIndex]
+        let right = selectedActions[rightIndex]
+        guard
+          namespacesMayOverlap(
+            left.prototype.namespaceBinding, right.prototype.namespaceBinding)
+        else { continue }
+        guard isAllowedMutationComposition(left, right, actionByID: actionByID) else {
+          throw PolicyModelError.invalidActionContract
+        }
+      }
+    }
+  }
+
+  private static func validateFullCorpusDominance(
+    _ selectedActions: [ActionDefinition],
+    plan: ImmutablePlan
+  ) throws {
+    for action in selectedActions {
+      switch action.prototype.adapterContract {
+      case .completeReleaseSetRemove:
+        continue
+      default:
+        break
+      }
+      let affectedEvidence = plan.evidenceSnapshots.filter {
+        namespaceMutationAffects(
+          action.prototype.namespaceBinding, evidence: $0.namespaceBinding)
+      }
+      guard affectedEvidence.allSatisfy({ $0.evidenceID == action.evidenceID }) else {
+        throw PolicyModelError.invalidActionContract
+      }
+    }
+  }
+
+  private static func isAllowedMutationComposition(
+    _ left: ActionDefinition,
+    _ right: ActionDefinition,
+    actionByID: [ActionID: ActionDefinition]
+  ) -> Bool {
+    if case .completeReleaseSetRemove(let release) = left.prototype.adapterContract {
+      return release.binding.ownerActionIDs.contains(right.id)
+        || releaseContainsExactDiscard(
+          release, discardAction: right, actionByID: actionByID)
+    }
+    if case .completeReleaseSetRemove(let release) = right.prototype.adapterContract {
+      return release.binding.ownerActionIDs.contains(left.id)
+        || releaseContainsExactDiscard(
+          release, discardAction: left, actionByID: actionByID)
+    }
+    return isExactGitDiscardPrerequisite(left, remove: right)
+      || isExactGitDiscardPrerequisite(right, remove: left)
+  }
+
+  private static func releaseContainsExactDiscard(
+    _ release: CompleteReleaseSetRemoveContract,
+    discardAction: ActionDefinition,
+    actionByID: [ActionID: ActionDefinition]
+  ) -> Bool {
+    release.binding.ownerActionIDs.contains { ownerActionID in
+      guard let owner = actionByID[ownerActionID] else { return false }
+      return isExactGitDiscardPrerequisite(discardAction, remove: owner)
+    }
+  }
+
+  private static func isExactGitDiscardPrerequisite(
+    _ discardAction: ActionDefinition,
+    remove: ActionDefinition
+  ) -> Bool {
+    guard
+      case .gitWorktreeDiscardLocalChanges(let discard) =
+        discardAction.prototype.adapterContract,
+      case .gitWorktreeRemove(let contract) = remove.prototype.adapterContract,
+      remove.prerequisiteActionIDs.contains(discardAction.id)
+    else { return false }
+    return discard.verifiedEvidence == contract.verifiedEvidence
+      && discard.successorBaseline == contract.executionBaseline
+      && contract.verifiedEvidence.verifiedLocalChanges
+        == .present(changeSetDigest: discard.changeSetDigest)
+      && discardAction.prototype.namespaceBinding.bindingBytes
+        == remove.prototype.namespaceBinding.bindingBytes
+  }
+
+  private static func topologicallyOrdered(
+    _ steps: [ValidatedExecutionStep]
+  ) throws -> [ValidatedExecutionStep] {
+    let stepByID = Dictionary(uniqueKeysWithValues: steps.map { ($0.action.id, $0) })
+    guard
+      steps.allSatisfy({ step in
+        step.prerequisiteStepActionIDs.allSatisfy { stepByID[$0] != nil }
+      })
+    else { throw PolicyModelError.invalidActionContract }
+    let dependents = Dictionary(
+      grouping: steps.flatMap { step in
+        step.prerequisiteStepActionIDs.map { ($0, step.action.id) }
+      }, by: \.0
+    ).mapValues { $0.map(\.1) }
+    var indegree = Dictionary(
+      uniqueKeysWithValues: steps.map { ($0.action.id, $0.prerequisiteStepActionIDs.count) })
+    var ready = indegree.filter { $0.value == 0 }.map(\.key).sorted()
+    var result: [ValidatedExecutionStep] = []
+    while let next = ready.first {
+      ready.removeFirst()
+      guard let step = stepByID[next] else { throw PolicyModelError.invalidActionContract }
+      result.append(step)
+      for dependent in (dependents[next] ?? []).sorted() {
+        indegree[dependent, default: 0] -= 1
+        if indegree[dependent] == 0 {
+          ready.append(dependent)
+          ready.sort()
+        }
+      }
+    }
+    guard result.count == steps.count else { throw PolicyModelError.actionCycle }
+    return result
   }
 }
 
@@ -1840,7 +2702,7 @@ private func encodeAdapterScopeEvidence(
   switch evidence {
   case .genericRemove:
     encoder.uint8(0)
-  case .gitWorktreeRemove:
+  case .gitWorktree:
     encoder.uint8(1)
   case .codexCleanTemporary(let cleanupScopeID):
     encoder.uint8(2)
@@ -1852,6 +2714,23 @@ private func encodeAdapterScopeEvidence(
   case .completeReleaseSetRemove(let allocationGroupID):
     encoder.uint8(4)
     encoder.string(allocationGroupID)
+  }
+}
+
+extension AdapterScopeEvidence {
+  fileprivate var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encodeAdapterScopeEvidence(self, into: &encoder)
+    return encoder.data
+  }
+}
+
+private func evidenceSupportsAdapterScope(
+  _ evidence: FrozenEvidenceSnapshot,
+  _ scope: AdapterScopeEvidence
+) -> Bool {
+  ([evidence.adapterScope] + evidence.additionalAdapterScopes).contains {
+    adapterScopeMatches($0, scope)
   }
 }
 
@@ -1882,12 +2761,85 @@ private func accessPolicyBaselineMatches(
     && baseline.mountIdentityBytes == Data(mountIdentity.utf8)
 }
 
+private func contentProtectionBaselineMatches(
+  _ prototype: ActionPrototype,
+  evidence: FrozenEvidenceSnapshot
+) -> Bool {
+  if case .gitWorktreeRemove(let contract) = prototype.adapterContract {
+    return prototype.protectedProperties.content.expectedBaseline
+      == contract.executionBaseline.contentProtection
+  }
+  return evidence.contentProtection
+    == .known(prototype.protectedProperties.content.expectedBaseline)
+}
+
+private func namespacesMayOverlap(
+  _ lhs: ProtectedNamespaceBinding,
+  _ rhs: ProtectedNamespaceBinding
+) -> Bool {
+  let leftAbsolute = rawRootComponents(lhs.rawRoot) + lhs.targetPath.components
+  let rightAbsolute = rawRootComponents(rhs.rawRoot) + rhs.targetPath.components
+  if pathComponentsOverlap(leftAbsolute, rightAbsolute) { return true }
+  if identitiesMayMatch(lhs.rootIdentity, rhs.rootIdentity),
+    lhs.targetPath.overlaps(rhs.targetPath)
+  {
+    return true
+  }
+  let leftAncestors = [lhs.rootIdentity] + lhs.parentChain.map(\.identity)
+  let rightAncestors = [rhs.rootIdentity] + rhs.parentChain.map(\.identity)
+  return identitiesMayMatch(lhs.targetIdentity, rhs.targetIdentity)
+    || rightAncestors.contains { identitiesMayMatch(lhs.targetIdentity, $0) }
+    || leftAncestors.contains { identitiesMayMatch(rhs.targetIdentity, $0) }
+}
+
+private func namespaceMutationAffects(
+  _ mutation: ProtectedNamespaceBinding,
+  evidence: ProtectedNamespaceBinding
+) -> Bool {
+  let mutationAbsolute = rawRootComponents(mutation.rawRoot) + mutation.targetPath.components
+  let evidenceAbsolute = rawRootComponents(evidence.rawRoot) + evidence.targetPath.components
+  if pathComponentsIsAncestor(mutationAbsolute, of: evidenceAbsolute) { return true }
+  if identitiesMayMatch(mutation.rootIdentity, evidence.rootIdentity),
+    evidence.targetPath.isWithin(mutation.targetPath)
+  {
+    return true
+  }
+  let evidenceAncestors = [evidence.rootIdentity] + evidence.parentChain.map(\.identity)
+  return identitiesMayMatch(mutation.targetIdentity, evidence.targetIdentity)
+    || evidenceAncestors.contains { identitiesMayMatch(mutation.targetIdentity, $0) }
+}
+
+private func rawRootComponents(_ root: RawRootPath) -> [Data] {
+  guard root.absoluteBytes != Data("/".utf8) else { return [] }
+  return Array(root.absoluteBytes).dropFirst().split(separator: 47).map { Data($0) }
+}
+
+private func pathComponentsOverlap(_ lhs: [Data], _ rhs: [Data]) -> Bool {
+  let sharedCount = Swift.min(lhs.count, rhs.count)
+  return Array(lhs.prefix(sharedCount)) == Array(rhs.prefix(sharedCount))
+}
+
+private func pathComponentsIsAncestor(_ ancestor: [Data], of path: [Data]) -> Bool {
+  guard ancestor.count <= path.count else { return false }
+  return Array(path.prefix(ancestor.count)) == ancestor
+}
+
+private func identitiesMayMatch(_ lhs: ObjectIdentity, _ rhs: ObjectIdentity) -> Bool {
+  guard lhs.device == rhs.device, lhs.object == rhs.object else { return false }
+  switch (lhs.generation, rhs.generation) {
+  case (.known(let left), .known(let right)):
+    return left == right
+  default:
+    return true
+  }
+}
+
 private func adapterScopeMatches(
   _ lhs: AdapterScopeEvidence,
   _ rhs: AdapterScopeEvidence
 ) -> Bool {
   switch (lhs, rhs) {
-  case (.genericRemove, .genericRemove), (.gitWorktreeRemove, .gitWorktreeRemove):
+  case (.genericRemove, .genericRemove), (.gitWorktree, .gitWorktree):
     true
   case (.codexCleanTemporary(let left), .codexCleanTemporary(let right)):
     rawStringEqual(left, right)
@@ -1911,6 +2863,11 @@ private func postconditionMatches(
   case (.targetAbsent, .targetAbsent),
     (.worktreeQuarantinedThenAbsent, .worktreeQuarantinedThenAbsent):
     true
+  case (
+    .gitWorktreeLocalChangesDiscarded(let leftDigest, let leftSuccessor),
+    .gitWorktreeLocalChangesDiscarded(let rightDigest, let rightSuccessor)
+  ):
+    leftDigest == rightDigest && leftSuccessor == rightSuccessor
   case (.cleanupScopeAbsent(let left), .cleanupScopeAbsent(let right)):
     rawStringEqual(left, right)
   case (
@@ -1923,6 +2880,29 @@ private func postconditionMatches(
   default:
     false
   }
+}
+
+private func encodeReleaseTopologyExpectation(
+  _ topology: ReleaseTopologyExpectation
+) -> Data {
+  var encoder = PolicyBindingEncoder()
+  encoder.string(topology.allocationGroupID)
+  encoder.array(topology.fileObjects) { file in
+    var nested = PolicyBindingEncoder()
+    nested.string(file.fileObjectID)
+    nested.array(file.owners) { owner in
+      var ownerEncoder = PolicyBindingEncoder()
+      ownerEncoder.string(owner.candidateID)
+      ownerEncoder.data(owner.path.bindingBytes)
+      return ownerEncoder.data
+    }
+    nested.observation(file.linkCount) { $0.uint64(UInt64($1)) }
+    return nested.data
+  }
+  encoder.observation(topology.cloneRefCount) { $0.uint64(UInt64($1)) }
+  encoder.observation(topology.sharedBytes) { $0.uint64($1) }
+  encoder.observation(topology.snapshotBlocker) { $0.bool($1) }
+  return encoder.data
 }
 
 private func rawStringArrayPrecedes(_ lhs: [String], _ rhs: [String]) -> Bool {
