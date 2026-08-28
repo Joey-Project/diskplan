@@ -31,7 +31,7 @@ superseded_by:
 - [x] Add actor scan control, checkpoints, provisional snapshots, partial finalization, and transcripts.
 - [x] Add a bounded process-activity collector abstraction and normalized `lsof -nP -F0` parser.
 - [x] Add deterministic fake-filesystem and controlled temporary-root tests.
-- [ ] Re-run the live Darwin temporary-root path after the authoritative directory
+- [x] Re-run the live Darwin temporary-root path after the authoritative directory
   packed-attribute parser fix is integrated.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [ ] Integrate scanner evidence into the versioned IPC workstream.
@@ -45,16 +45,12 @@ superseded_by:
 
 ## Handoff
 
-- Phase: Phase 1 integration against reviewed Phase 0 probes.
-- Next step: integrate the exact frozen directory parser fix, re-run the live
-  Darwin path, then complete full Swift gates and independent review.
-- Blocker: reviewed Phase 0 head `784cad41c7ff647c41258bed5d486f7df8e5addb`
-  passes its 29 focused macOS tests and CLI self-test, but the controlled scanner
-  root still receives typed `EPROTO` while probing a directory slot. Directory
-  `getattrlistat` results can omit invalid file attributes under
-  `FSOPT_PACK_INVAL_ATTRS`; the authoritative parser fix and a live directory probe
-  test belong to the macOS capability layer. The scanner does not bypass or relax
-  that probe.
+- Phase: Phase 1 validation against the reviewed foundation and macOS probes.
+- Next step: complete full Swift gates and independent review.
+- Blocker: none for the scanner slice. The authoritative directory packed-attribute
+  parser fix is integrated from foundation head
+  `e2135d9c708d5515c3cd5b6f965908d60a4ed44b`; the scanner keeps the live gate strict
+  and does not bypass or relax that probe.
 
 ## Evidence
 
@@ -67,6 +63,16 @@ superseded_by:
   event stream, control transcripts, a typed lsof parser, and the controlled Darwin
   temporary root's typed live-gate failure.
 - After integrating Phase 0, focused `DiskplanMacOSTests` pass 29 tests and
-  `diskplan-macos-probe --self-test` succeeds. Focused `DiskplanScanTests` pass 20
-  tests; the sole failure is the intentionally strict controlled-directory live
-  gate described above.
+  `diskplan-macos-probe --self-test` succeeds. That intermediate scanner integration
+  passed 20 tests and exposed the directory packed-buffer gap through its sole live
+  failure.
+- After integrating foundation head `e2135d9c708d5515c3cd5b6f965908d60a4ed44b`,
+  focused `DiskplanScanTests` pass all 21 tests, including descriptor-relative
+  inspection of a controlled live directory root.
+- The complete Swift suite passes 69 tests, and the explicit Swift build with
+  automatic dependency resolution disabled succeeds.
+- `scripts/test-macos-capabilities.sh` passes 32 focused macOS tests plus the CLI
+  self-test. Controlled File Provider and APFS volume-group fixtures remain
+  explicitly unavailable on this local host rather than being inferred as passes.
+- Scanner Swift format lint, CI journal tests (17 tests), both journal validators,
+  `bash -n`, and ShellCheck pass for the relevant scanner/capability scope.
