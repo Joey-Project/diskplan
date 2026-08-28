@@ -55,7 +55,8 @@ where
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use diskplan_proto::diskplan::v1::{
-        ControlAccepted, EngineEvent, ScanCancelled, ScanControlKind, ScanState, engine_event,
+        ControlAccepted, EngineEvent, ScanCancelled, ScanControlKind, ScanProgress, ScanState,
+        ScanStateChanged, engine_event,
     };
     use ratatui::backend::TestBackend;
 
@@ -73,27 +74,44 @@ mod tests {
                     resulting_state: ScanState::Running as i32,
                 }),
             ),
+            engine(2, 1, state_changed(ScanState::Running, "scan started")),
+            engine(
+                3,
+                1,
+                engine_event::Body::ScanProgress(ScanProgress::default()),
+            ),
             key(' '),
             engine(
-                2,
+                4,
                 2,
                 engine_event::Body::ControlAccepted(ControlAccepted {
                     control: ScanControlKind::PauseScan as i32,
                     resulting_state: ScanState::Paused as i32,
                 }),
             ),
+            engine(5, 2, state_changed(ScanState::Paused, "pause acknowledged")),
             key(' '),
             engine(
-                3,
+                6,
                 3,
                 engine_event::Body::ControlAccepted(ControlAccepted {
                     control: ScanControlKind::ResumeScan as i32,
                     resulting_state: ScanState::Running as i32,
                 }),
             ),
+            engine(
+                7,
+                3,
+                state_changed(ScanState::Running, "resume acknowledged"),
+            ),
+            engine(
+                8,
+                3,
+                engine_event::Body::ScanProgress(ScanProgress::default()),
+            ),
             key('q'),
             engine(
-                4,
+                9,
                 4,
                 engine_event::Body::ControlAccepted(ControlAccepted {
                     control: ScanControlKind::CancelScan as i32,
@@ -101,7 +119,13 @@ mod tests {
                 }),
             ),
             engine(
-                5,
+                10,
+                4,
+                state_changed(ScanState::Cancelling, "cancel acknowledged"),
+            ),
+            engine(11, 4, state_changed(ScanState::Cancelled, "scan cancelled")),
+            engine(
+                12,
                 4,
                 engine_event::Body::ScanCancelled(ScanCancelled {
                     reason: "script complete".into(),
@@ -188,5 +212,12 @@ mod tests {
             request_id,
             body: Some(body),
         }))
+    }
+
+    fn state_changed(state: ScanState, reason: &str) -> engine_event::Body {
+        engine_event::Body::ScanStateChanged(ScanStateChanged {
+            state: state as i32,
+            reason: reason.into(),
+        })
     }
 }

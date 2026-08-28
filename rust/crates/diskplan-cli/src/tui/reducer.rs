@@ -1,7 +1,9 @@
 use crossterm::event::{KeyCode, KeyEventKind};
 use diskplan_proto::diskplan::v1::{ScanControlKind, ScanState, engine_event};
 
-use super::model::{AppState, Effect, EngineDelivery, Screen, TerminalState, UiEvent};
+use super::model::{
+    ActiveRequest, AppState, Effect, EngineDelivery, RequestPhase, Screen, TerminalState, UiEvent,
+};
 
 pub fn reduce(state: &mut AppState, event: UiEvent) -> Vec<Effect> {
     match event {
@@ -136,7 +138,28 @@ fn reduce_engine_event(state: &mut AppState, delivery: EngineDelivery) -> Vec<Ef
                     "engine acknowledged an unspecified scan state".into(),
                 );
             }
+            if !accepted_transition_is_valid(pending.kind, state.scan_state, resulting_state) {
+                return protocol_failure(
+                    state,
+                    format!(
+                        "engine acknowledged {:?} with impossible transition {:?} -> {:?}",
+                        pending.kind, state.scan_state, resulting_state
+                    ),
+                );
+            }
+            let phase = match pending.kind {
+                ScanControlKind::ResumeScan if state.provisional_plan.is_some() => {
+                    RequestPhase::AwaitingInvalidation
+                }
+                ScanControlKind::ResumeScan => RequestPhase::AwaitingResumeState,
+                _ => RequestPhase::AwaitingStateConfirmation,
+            };
             state.take_pending(event.request_id);
+            state.active_request = Some(ActiveRequest {
+                request_id: event.request_id,
+                kind: pending.kind,
+                phase,
+            });
             state.scan_state = resulting_state;
             state.banner = Some(format!("{} acknowledged", control_label(pending.kind)));
         }
@@ -185,49 +208,243 @@ fn reduce_engine_event(state: &mut AppState, delivery: EngineDelivery) -> Vec<Ef
             }
             state.banner = Some(format!("control rejected: {}", rejected.detail));
         }
-        Some(engine_event::Body::ScanStateChanged(changed)) => {
-            let Ok(scan_state) = ScanState::try_from(changed.state) else {
-                return protocol_failure(state, "engine reported an unknown scan state".into());
-            };
-            if scan_state == ScanState::Unspecified {
-                return protocol_failure(state, "engine reported an unspecified scan state".into());
+        Some(body) => {
+            if event.request_id == 0 {
+                return protocol_failure(state, "non-ack event has zero request_id".into());
             }
-            state.scan_state = scan_state;
-            state.banner = Some(changed.reason);
-        }
-        Some(engine_event::Body::ScanProgress(progress)) => {
-            state.progress = Some(progress);
-        }
-        Some(engine_event::Body::ProvisionalPlanReady(plan)) => {
-            state.provisional_plan = Some(plan);
-            state.screen = Screen::ProvisionalPlan;
-            state.help_visible = false;
-        }
-        Some(engine_event::Body::ProvisionalPlanInvalidated(_)) => {
-            state.provisional_plan = None;
-            state.screen = Screen::Scan;
-            state.help_visible = false;
-        }
-        Some(engine_event::Body::ScanCancelled(cancelled)) => {
-            state.scan_state = ScanState::Cancelled;
-            state.terminal = Some(TerminalState::Cancelled(cancelled.reason));
-        }
-        Some(engine_event::Body::ScanFinished(finished)) => {
-            state.scan_state = ScanState::Finished;
-            state.terminal = Some(TerminalState::Finished(finished.summary));
-        }
-        Some(engine_event::Body::EngineFailed(failed)) => {
-            state.scan_state = ScanState::Failed;
-            state.terminal = Some(TerminalState::Failed(format!(
-                "{}: {}",
-                failed.code, failed.detail
-            )));
+            let Some(origin) = state.active_request.clone() else {
+                return protocol_failure(
+                    state,
+                    format!(
+                        "event for request {} has no acknowledged origin",
+                        event.request_id
+                    ),
+                );
+            };
+            if origin.request_id != event.request_id {
+                return protocol_failure(
+                    state,
+                    format!(
+                        "event request {} does not match active origin {}",
+                        event.request_id, origin.request_id
+                    ),
+                );
+            }
+            return reduce_origin_event(state, origin, body);
         }
         None => {
             return protocol_failure(state, "engine emitted an empty event".into());
         }
     }
     Vec::new()
+}
+
+fn accepted_transition_is_valid(
+    control: ScanControlKind,
+    current: ScanState,
+    resulting: ScanState,
+) -> bool {
+    match control {
+        ScanControlKind::StartScan => current == ScanState::Idle && resulting == ScanState::Running,
+        ScanControlKind::PauseScan => {
+            current == ScanState::Running && resulting == ScanState::Paused
+        }
+        ScanControlKind::ResumeScan => {
+            matches!(current, ScanState::Paused | ScanState::ProvisionalPlanReady)
+                && resulting == ScanState::Running
+        }
+        ScanControlKind::PauseAndBuildProvisionalPlan => {
+            matches!(current, ScanState::Running | ScanState::Paused)
+                && resulting == ScanState::BuildingProvisionalPlan
+        }
+        ScanControlKind::CancelScan => {
+            matches!(
+                current,
+                ScanState::Running
+                    | ScanState::Paused
+                    | ScanState::BuildingProvisionalPlan
+                    | ScanState::ProvisionalPlanReady
+            ) && resulting == ScanState::Cancelling
+        }
+        ScanControlKind::Unspecified => false,
+    }
+}
+
+fn reduce_origin_event(
+    state: &mut AppState,
+    origin: ActiveRequest,
+    body: engine_event::Body,
+) -> Vec<Effect> {
+    match body {
+        engine_event::Body::ScanStateChanged(changed) => {
+            let Ok(next) = ScanState::try_from(changed.state) else {
+                return protocol_failure(state, "engine reported an unknown scan state".into());
+            };
+            if next == ScanState::Unspecified {
+                return protocol_failure(state, "engine reported an unspecified scan state".into());
+            }
+            let next_phase = match (origin.kind, origin.phase, state.scan_state, next) {
+                (
+                    ScanControlKind::StartScan,
+                    RequestPhase::AwaitingStateConfirmation,
+                    ScanState::Running,
+                    ScanState::Running,
+                )
+                | (
+                    ScanControlKind::PauseScan,
+                    RequestPhase::AwaitingStateConfirmation,
+                    ScanState::Paused,
+                    ScanState::Paused,
+                ) => RequestPhase::Steady,
+                (
+                    ScanControlKind::PauseAndBuildProvisionalPlan,
+                    RequestPhase::AwaitingStateConfirmation,
+                    ScanState::BuildingProvisionalPlan,
+                    ScanState::BuildingProvisionalPlan,
+                ) => RequestPhase::AwaitingPlanReadyState,
+                (
+                    ScanControlKind::PauseAndBuildProvisionalPlan,
+                    RequestPhase::AwaitingPlanReadyState,
+                    ScanState::BuildingProvisionalPlan,
+                    ScanState::ProvisionalPlanReady,
+                ) => RequestPhase::AwaitingPlanProjection,
+                (
+                    ScanControlKind::ResumeScan,
+                    RequestPhase::AwaitingResumeState,
+                    ScanState::Running,
+                    ScanState::Running,
+                ) => RequestPhase::AwaitingResumeProgress,
+                (
+                    ScanControlKind::CancelScan,
+                    RequestPhase::AwaitingStateConfirmation,
+                    ScanState::Cancelling,
+                    ScanState::Cancelling,
+                ) => RequestPhase::AwaitingCancelledState,
+                (
+                    ScanControlKind::CancelScan,
+                    RequestPhase::AwaitingCancelledState,
+                    ScanState::Cancelling,
+                    ScanState::Cancelled,
+                ) => RequestPhase::AwaitingCancelledTerminal,
+                _ => {
+                    return protocol_failure(
+                        state,
+                        format!(
+                            "state change {:?} -> {:?} is invalid for {:?} in {:?}",
+                            state.scan_state, next, origin.kind, origin.phase
+                        ),
+                    );
+                }
+            };
+            state.scan_state = next;
+            state.banner = Some(changed.reason);
+            set_active_phase(state, &origin, next_phase);
+        }
+        engine_event::Body::ScanProgress(progress) => {
+            let valid = state.scan_state == ScanState::Running
+                && matches!(
+                    (origin.kind, origin.phase),
+                    (ScanControlKind::StartScan, RequestPhase::Steady)
+                        | (
+                            ScanControlKind::ResumeScan,
+                            RequestPhase::AwaitingResumeProgress | RequestPhase::Steady
+                        )
+                );
+            if !valid {
+                return invalid_origin_event(state, &origin, "ScanProgress");
+            }
+            state.progress = Some(progress);
+            set_active_phase(state, &origin, RequestPhase::Steady);
+        }
+        engine_event::Body::ProvisionalPlanReady(plan) => {
+            if origin.kind != ScanControlKind::PauseAndBuildProvisionalPlan
+                || origin.phase != RequestPhase::AwaitingPlanProjection
+                || state.scan_state != ScanState::ProvisionalPlanReady
+                || state.provisional_plan.is_some()
+                || plan.plan_id.is_empty()
+            {
+                return invalid_origin_event(state, &origin, "ProvisionalPlanReady");
+            }
+            state.provisional_plan = Some(plan);
+            state.screen = Screen::ProvisionalPlan;
+            state.help_visible = false;
+            set_active_phase(state, &origin, RequestPhase::Steady);
+        }
+        engine_event::Body::ProvisionalPlanInvalidated(invalidated) => {
+            let Some(current_plan) = state.provisional_plan.as_ref() else {
+                return protocol_failure(state, "engine invalidated an unknown plan".into());
+            };
+            if origin.kind != ScanControlKind::ResumeScan
+                || origin.phase != RequestPhase::AwaitingInvalidation
+                || invalidated.previous_plan_id != current_plan.plan_id
+            {
+                return protocol_failure(
+                    state,
+                    format!(
+                        "plan invalidation {:?} does not match active plan {:?}",
+                        invalidated.previous_plan_id, current_plan.plan_id
+                    ),
+                );
+            }
+            state.provisional_plan = None;
+            state.screen = Screen::Scan;
+            state.help_visible = false;
+            set_active_phase(state, &origin, RequestPhase::AwaitingResumeState);
+        }
+        engine_event::Body::ScanCancelled(cancelled) => {
+            if origin.kind != ScanControlKind::CancelScan
+                || origin.phase != RequestPhase::AwaitingCancelledTerminal
+                || state.scan_state != ScanState::Cancelled
+            {
+                return invalid_origin_event(state, &origin, "ScanCancelled");
+            }
+            state.terminal = Some(TerminalState::Cancelled(cancelled.reason));
+        }
+        engine_event::Body::ScanFinished(finished) => {
+            if !matches!(
+                origin.kind,
+                ScanControlKind::StartScan | ScanControlKind::ResumeScan
+            ) || origin.phase != RequestPhase::Steady
+                || state.scan_state != ScanState::Running
+            {
+                return invalid_origin_event(state, &origin, "ScanFinished");
+            }
+            state.scan_state = ScanState::Finished;
+            state.terminal = Some(TerminalState::Finished(finished.summary));
+        }
+        engine_event::Body::EngineFailed(failed) => {
+            state.scan_state = ScanState::Failed;
+            state.terminal = Some(TerminalState::Failed(format!(
+                "{}: {}",
+                failed.code, failed.detail
+            )));
+        }
+        engine_event::Body::ControlAccepted(_) | engine_event::Body::ControlRejected(_) => {
+            return protocol_failure(
+                state,
+                "ack event bypassed acknowledgement validation".into(),
+            );
+        }
+    }
+    Vec::new()
+}
+
+fn set_active_phase(state: &mut AppState, origin: &ActiveRequest, phase: RequestPhase) {
+    state.active_request = Some(ActiveRequest {
+        request_id: origin.request_id,
+        kind: origin.kind,
+        phase,
+    });
+}
+
+fn invalid_origin_event(state: &mut AppState, origin: &ActiveRequest, event: &str) -> Vec<Effect> {
+    protocol_failure(
+        state,
+        format!(
+            "{event} is invalid for {:?} request {} in {:?}",
+            origin.kind, origin.request_id, origin.phase
+        ),
+    )
 }
 
 fn protocol_failure(state: &mut AppState, detail: String) -> Vec<Effect> {
@@ -252,8 +469,9 @@ fn control_label(kind: ScanControlKind) -> &'static str {
 mod tests {
     use crossterm::event::{KeyEvent, KeyEventState, KeyModifiers};
     use diskplan_proto::diskplan::v1::{
-        ControlAccepted, ControlRejected, EngineEvent, ProvisionalPlanReady, ScanProgress,
-        ScanState, engine_event,
+        ControlAccepted, ControlRejected, EngineEvent, EngineFailed, ProvisionalPlanInvalidated,
+        ProvisionalPlanReady, ScanCancelled, ScanFinished, ScanProgress, ScanState,
+        ScanStateChanged, engine_event,
     };
 
     use super::super::model::PendingControl;
@@ -307,6 +525,28 @@ mod tests {
             UiEvent::Engine(EngineDelivery::exact(engine_event(
                 2,
                 command.request_id,
+                engine_event::Body::ScanStateChanged(ScanStateChanged {
+                    state: ScanState::BuildingProvisionalPlan as i32,
+                    reason: "building".into(),
+                }),
+            ))),
+        );
+        reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                3,
+                command.request_id,
+                engine_event::Body::ScanStateChanged(ScanStateChanged {
+                    state: ScanState::ProvisionalPlanReady as i32,
+                    reason: "ready".into(),
+                }),
+            ))),
+        );
+        reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                4,
+                command.request_id,
                 engine_event::Body::ProvisionalPlanReady(ProvisionalPlanReady {
                     plan_id: "p1".into(),
                     ..Default::default()
@@ -318,6 +558,33 @@ mod tests {
         let resume = reduce(&mut state, key('r', KeyEventKind::Press));
         assert_eq!(resume.len(), 1);
         assert_eq!(state.screen, Screen::ProvisionalPlan);
+        let Effect::SendControl(resume_command) = resume[0] else {
+            panic!("expected resume control");
+        };
+        reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                5,
+                resume_command.request_id,
+                engine_event::Body::ControlAccepted(ControlAccepted {
+                    control: ScanControlKind::ResumeScan as i32,
+                    resulting_state: ScanState::Running as i32,
+                }),
+            ))),
+        );
+        let effects = reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                6,
+                resume_command.request_id,
+                engine_event::Body::ProvisionalPlanInvalidated(ProvisionalPlanInvalidated {
+                    previous_plan_id: "p1".into(),
+                }),
+            ))),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.screen, Screen::Scan);
+        assert!(state.provisional_plan.is_none());
     }
 
     #[test]
@@ -447,6 +714,206 @@ mod tests {
     }
 
     #[test]
+    fn accepted_transition_table_is_exhaustive() {
+        let controls = [
+            ScanControlKind::Unspecified,
+            ScanControlKind::StartScan,
+            ScanControlKind::PauseScan,
+            ScanControlKind::ResumeScan,
+            ScanControlKind::PauseAndBuildProvisionalPlan,
+            ScanControlKind::CancelScan,
+        ];
+        let states = [
+            ScanState::Unspecified,
+            ScanState::Idle,
+            ScanState::Running,
+            ScanState::Paused,
+            ScanState::BuildingProvisionalPlan,
+            ScanState::ProvisionalPlanReady,
+            ScanState::Cancelling,
+            ScanState::Cancelled,
+            ScanState::Finished,
+            ScanState::Failed,
+        ];
+        let valid = [
+            (
+                ScanControlKind::StartScan,
+                ScanState::Idle,
+                ScanState::Running,
+            ),
+            (
+                ScanControlKind::PauseScan,
+                ScanState::Running,
+                ScanState::Paused,
+            ),
+            (
+                ScanControlKind::ResumeScan,
+                ScanState::Paused,
+                ScanState::Running,
+            ),
+            (
+                ScanControlKind::ResumeScan,
+                ScanState::ProvisionalPlanReady,
+                ScanState::Running,
+            ),
+            (
+                ScanControlKind::PauseAndBuildProvisionalPlan,
+                ScanState::Running,
+                ScanState::BuildingProvisionalPlan,
+            ),
+            (
+                ScanControlKind::PauseAndBuildProvisionalPlan,
+                ScanState::Paused,
+                ScanState::BuildingProvisionalPlan,
+            ),
+            (
+                ScanControlKind::CancelScan,
+                ScanState::Running,
+                ScanState::Cancelling,
+            ),
+            (
+                ScanControlKind::CancelScan,
+                ScanState::Paused,
+                ScanState::Cancelling,
+            ),
+            (
+                ScanControlKind::CancelScan,
+                ScanState::BuildingProvisionalPlan,
+                ScanState::Cancelling,
+            ),
+            (
+                ScanControlKind::CancelScan,
+                ScanState::ProvisionalPlanReady,
+                ScanState::Cancelling,
+            ),
+        ];
+
+        for control in controls {
+            for current in states {
+                for resulting in states {
+                    assert_eq!(
+                        accepted_transition_is_valid(control, current, resulting),
+                        valid.contains(&(control, current, resulting)),
+                        "{control:?}: {current:?} -> {resulting:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn impossible_control_acceptance_fails_terminally() {
+        let mut state = pending_state(2, ScanControlKind::PauseScan);
+        let effects = reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                2,
+                engine_event::Body::ControlAccepted(ControlAccepted {
+                    control: ScanControlKind::PauseScan as i32,
+                    resulting_state: ScanState::Running as i32,
+                }),
+            ))),
+        );
+
+        assert_eq!(effects, vec![Effect::StopDriver]);
+        assert!(matches!(state.terminal, Some(TerminalState::Failed(_))));
+    }
+
+    #[test]
+    fn every_non_ack_variant_requires_the_active_nonzero_request() {
+        let bodies = vec![
+            engine_event::Body::ScanStateChanged(ScanStateChanged {
+                state: ScanState::Running as i32,
+                ..Default::default()
+            }),
+            engine_event::Body::ScanProgress(ScanProgress::default()),
+            engine_event::Body::ProvisionalPlanReady(ProvisionalPlanReady::default()),
+            engine_event::Body::ProvisionalPlanInvalidated(ProvisionalPlanInvalidated::default()),
+            engine_event::Body::ScanCancelled(ScanCancelled::default()),
+            engine_event::Body::ScanFinished(ScanFinished::default()),
+            engine_event::Body::EngineFailed(EngineFailed::default()),
+        ];
+
+        for (index, body) in bodies.into_iter().enumerate() {
+            for request_id in [0, 99] {
+                let mut state = running_state();
+                let effects = reduce(
+                    &mut state,
+                    UiEvent::Engine(EngineDelivery::exact(engine_event(
+                        1,
+                        request_id,
+                        body.clone(),
+                    ))),
+                );
+                assert_eq!(
+                    effects,
+                    vec![Effect::StopDriver],
+                    "body {index}, id {request_id}"
+                );
+                assert!(matches!(state.terminal, Some(TerminalState::Failed(_))));
+            }
+        }
+    }
+
+    #[test]
+    fn plan_invalidation_requires_the_exact_active_plan_id() {
+        for plan_id in ["stale", ""] {
+            let mut state = AppState {
+                screen: Screen::ProvisionalPlan,
+                scan_state: ScanState::Running,
+                provisional_plan: Some(ProvisionalPlanReady {
+                    plan_id: "current".into(),
+                    ..Default::default()
+                }),
+                active_request: Some(ActiveRequest {
+                    request_id: 3,
+                    kind: ScanControlKind::ResumeScan,
+                    phase: RequestPhase::AwaitingInvalidation,
+                }),
+                pending_controls: Vec::new(),
+                banner: None,
+                ..AppState::default()
+            };
+            let effects = reduce(
+                &mut state,
+                UiEvent::Engine(EngineDelivery::exact(engine_event(
+                    1,
+                    3,
+                    engine_event::Body::ProvisionalPlanInvalidated(ProvisionalPlanInvalidated {
+                        previous_plan_id: plan_id.into(),
+                    }),
+                ))),
+            );
+            assert_eq!(effects, vec![Effect::StopDriver]);
+            assert!(matches!(state.terminal, Some(TerminalState::Failed(_))));
+        }
+
+        let mut unknown = AppState {
+            scan_state: ScanState::Running,
+            active_request: Some(ActiveRequest {
+                request_id: 3,
+                kind: ScanControlKind::ResumeScan,
+                phase: RequestPhase::AwaitingInvalidation,
+            }),
+            pending_controls: Vec::new(),
+            ..AppState::default()
+        };
+        let effects = reduce(
+            &mut unknown,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                3,
+                engine_event::Body::ProvisionalPlanInvalidated(ProvisionalPlanInvalidated {
+                    previous_plan_id: "missing".into(),
+                }),
+            ))),
+        );
+        assert_eq!(effects, vec![Effect::StopDriver]);
+        assert!(matches!(unknown.terminal, Some(TerminalState::Failed(_))));
+    }
+
+    #[test]
     fn reducer_accepts_only_exactly_proven_progress_gaps() {
         let mut state = running_state();
         let accepted = reduce(
@@ -454,7 +921,7 @@ mod tests {
             UiEvent::Engine(EngineDelivery {
                 event: engine_event(
                     3,
-                    0,
+                    1,
                     engine_event::Body::ScanProgress(ScanProgress {
                         entries: 3,
                         ..Default::default()
@@ -480,7 +947,7 @@ mod tests {
                 UiEvent::Engine(EngineDelivery {
                     event: engine_event(
                         sequence,
-                        0,
+                        1,
                         engine_event::Body::ScanProgress(ScanProgress::default()),
                     ),
                     skipped_progress_events: skipped,
@@ -510,6 +977,11 @@ mod tests {
             ..AppState::default()
         };
         state.pending_controls.clear();
+        state.active_request = Some(ActiveRequest {
+            request_id: 1,
+            kind: ScanControlKind::StartScan,
+            phase: RequestPhase::Steady,
+        });
         state
     }
 

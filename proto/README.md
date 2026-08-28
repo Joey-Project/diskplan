@@ -75,7 +75,10 @@ scripts/test-cross-language.sh
 Protocol minor `1.2` adds a typed Phase 0 scan-control stream. The client sends
 `StartScanRequest` once and then `ScanControlRequest` values for pause, resume,
 pause-and-build-provisional-plan, or cancel. Every request has a non-zero,
-session-unique `request_id`; its envelope sequence must equal that request ID.
+strictly increasing `request_id`; its envelope sequence must equal that request
+ID. The Swift engine keeps only a high-water mark: malformed embedded requests,
+replays, duplicates, and out-of-order IDs pass through the same bounded
+duplicate-aware path.
 
 The engine responds only with `EngineEvent`. Every event repeats its originating
 `request_id`, has an `event_sequence` that starts at one and increases by exactly
@@ -89,6 +92,12 @@ value. The reducer receives the exact number of omitted progress events and
 accepts only the corresponding strictly increasing sequence gap. It still
 rejects duplicate, out-of-order, unproven-gap, or malformed semantic events and
 stops the engine driver on such a protocol invariant failure.
+
+The reducer also keeps one finite active-request lifecycle. Every non-ack event
+must carry that known non-zero request ID and be valid for its accepted control
+phase. Accepted control/resulting-state combinations are exhaustive; plan
+invalidation must name the exact currently displayed plan. Unknown provenance,
+impossible transitions, and stale invalidations fail closed.
 
 Control state does not change speculatively in the frontend. A
 `ControlAccepted` acknowledges the request and supplies the resulting engine

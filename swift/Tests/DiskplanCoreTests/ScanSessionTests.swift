@@ -52,6 +52,28 @@ func duplicateAndInvalidControlsAreRejectedWithoutChangingState() {
 }
 
 @Test
+func malformedAndOutOfOrderRequestIDsShareTheMonotonicHighWaterMark() {
+    var session = ScanSession()
+    _ = session.start(startRequest(id: 10))
+
+    let malformed = session.rejectMalformed(
+        requestID: 11,
+        control: .pauseScan,
+        detail: "envelope sequence must equal request_id"
+    )
+    #expect(malformed[0].controlRejected.code == .malformedRequest)
+
+    let duplicate = session.control(controlRequest(id: 11, .pauseScan))
+    #expect(duplicate[0].controlRejected.code == .duplicateRequestID)
+
+    let outOfOrder = session.control(controlRequest(id: 9, .pauseScan))
+    #expect(outOfOrder[0].controlRejected.code == .duplicateRequestID)
+
+    let next = session.control(controlRequest(id: 12, .pauseScan))
+    #expect(next[0].controlAccepted.resultingState == .paused)
+}
+
+@Test
 func cancelProducesTerminalEventAndMonotonicSequence() {
     var session = ScanSession()
     let start = session.start(startRequest(id: 41))

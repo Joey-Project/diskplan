@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,8 +10,9 @@ use diskplan::{ClientError, EngineSession, handshake_with_engine};
 use diskplan_core::framing::{FrameError, read_frame, write_frame};
 use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello};
 use diskplan_proto::diskplan::v1::{
-    BusinessEnvelope, EngineEvent, Envelope, HelloAccepted, HelloRejected, ProtocolVersion,
-    RejectCode, ScanControlKind, ScanProgress, ScanState, engine_event, envelope,
+    BusinessEnvelope, ControlRejectCode, EngineEvent, Envelope, HelloAccepted, HelloRejected,
+    ProtocolVersion, RejectCode, ScanControlKind, ScanControlRequest, ScanProgress, ScanState,
+    StartScanRequest, engine_event, envelope,
 };
 use prost::Message;
 use tempfile::TempDir;
@@ -195,6 +196,110 @@ fn rust_client_drives_swift_scan_control_protocol() {
         Some(engine_event::Body::ScanCancelled(_))
     ));
     session.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn swift_engine_malformed_embedding_consumes_request_id() {
+    let engine = required_engine_path();
+    let mut child = Command::new(engine)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let (sender, frames) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            let frame = read_frame(&mut stdout);
+            let terminal = !matches!(frame, Ok(Some(_)));
+            if sender.send(frame).is_err() || terminal {
+                break;
+            }
+        }
+    });
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 1,
+            body: Some(envelope::Body::Hello(rust_client_hello())),
+        },
+    );
+    assert!(matches!(
+        receive_raw_envelope(&frames).body,
+        Some(envelope::Body::HelloAccepted(_))
+    ));
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 100,
+            body: Some(envelope::Body::StartScanRequest(StartScanRequest {
+                request_id: 100,
+                profile: "standard".into(),
+            })),
+        },
+    );
+    for _ in 0..3 {
+        assert!(matches!(
+            receive_raw_envelope(&frames).body,
+            Some(envelope::Body::EngineEvent(_))
+        ));
+    }
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 999,
+            body: Some(envelope::Body::ScanControlRequest(ScanControlRequest {
+                request_id: 101,
+                control: ScanControlKind::PauseScan as i32,
+            })),
+        },
+    );
+    assert_control_rejected(
+        receive_raw_engine_event(&frames),
+        101,
+        ControlRejectCode::MalformedRequest,
+    );
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 101,
+            body: Some(envelope::Body::ScanControlRequest(ScanControlRequest {
+                request_id: 101,
+                control: ScanControlKind::PauseScan as i32,
+            })),
+        },
+    );
+    assert_control_rejected(
+        receive_raw_engine_event(&frames),
+        101,
+        ControlRejectCode::DuplicateRequestId,
+    );
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 102,
+            body: Some(envelope::Body::ScanControlRequest(ScanControlRequest {
+                request_id: 102,
+                control: ScanControlKind::CancelScan as i32,
+            })),
+        },
+    );
+    for _ in 0..4 {
+        assert!(matches!(
+            receive_raw_envelope(&frames).body,
+            Some(envelope::Body::EngineEvent(_))
+        ));
+    }
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]
@@ -576,6 +681,38 @@ fn encode_frame(envelope: &Envelope) -> Vec<u8> {
     let mut frame = Vec::new();
     write_frame(&mut frame, &payload).unwrap();
     frame
+}
+
+fn send_raw_envelope(stdin: &mut ChildStdin, envelope: Envelope) {
+    let payload = envelope.encode_to_vec();
+    write_frame(stdin, &payload).unwrap();
+}
+
+fn receive_raw_envelope(frames: &mpsc::Receiver<Result<Option<Vec<u8>>, FrameError>>) -> Envelope {
+    let payload = frames
+        .recv_timeout(Duration::from_secs(2))
+        .expect("Swift engine frame timed out")
+        .expect("Swift engine frame failed")
+        .expect("Swift engine closed stdout");
+    Envelope::decode(payload.as_slice()).unwrap()
+}
+
+fn receive_raw_engine_event(
+    frames: &mpsc::Receiver<Result<Option<Vec<u8>>, FrameError>>,
+) -> EngineEvent {
+    let envelope = receive_raw_envelope(frames);
+    let Some(envelope::Body::EngineEvent(event)) = envelope.body else {
+        panic!("expected engine event");
+    };
+    event
+}
+
+fn assert_control_rejected(event: EngineEvent, request_id: u64, code: ControlRejectCode) {
+    assert_eq!(event.request_id, request_id);
+    let Some(engine_event::Body::ControlRejected(rejected)) = event.body else {
+        panic!("expected control rejection");
+    };
+    assert_eq!(rejected.code, code as i32);
 }
 
 fn emit_then_drain(bytes: &[u8], fragmented: bool) -> String {

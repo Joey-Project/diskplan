@@ -8,7 +8,7 @@ public struct ScanSession {
     public private(set) var eventSequence: UInt64 = 0
 
     private var profile = "standard"
-    private var seenRequestIDs: Set<UInt64> = []
+    private var requestIDHighWaterMark: UInt64 = 0
     private var provisionalPlanID: String?
 
     public init() {}
@@ -17,15 +17,14 @@ public struct ScanSession {
         _ request: Diskplan_V1_StartScanRequest
     ) -> [Diskplan_V1_EngineEvent] {
         let requestID = request.requestID
-        guard validateRequestID(requestID) else {
+        if let failure = consumeRequestID(requestID) {
             return reject(
                 requestID: requestID,
                 control: .startScan,
-                code: requestID == 0 ? .malformedRequest : .duplicateRequestID,
-                detail: requestID == 0 ? "request_id must be non-zero" : "request_id was already used"
+                code: failure.code,
+                detail: failure.detail
             )
         }
-        seenRequestIDs.insert(requestID)
         guard state == .idle else {
             return reject(
                 requestID: requestID,
@@ -48,15 +47,14 @@ public struct ScanSession {
         _ request: Diskplan_V1_ScanControlRequest
     ) -> [Diskplan_V1_EngineEvent] {
         let requestID = request.requestID
-        guard validateRequestID(requestID) else {
+        if let failure = consumeRequestID(requestID) {
             return reject(
                 requestID: requestID,
                 control: request.control,
-                code: requestID == 0 ? .malformedRequest : .duplicateRequestID,
-                detail: requestID == 0 ? "request_id must be non-zero" : "request_id was already used"
+                code: failure.code,
+                detail: failure.detail
             )
         }
-        seenRequestIDs.insert(requestID)
 
         switch request.control {
         case .pauseScan where state == .running:
@@ -147,7 +145,15 @@ public struct ScanSession {
         control: Diskplan_V1_ScanControlKind,
         detail: String
     ) -> [Diskplan_V1_EngineEvent] {
-        reject(
+        if let failure = consumeRequestID(requestID) {
+            return reject(
+                requestID: requestID,
+                control: control,
+                code: failure.code,
+                detail: failure.detail
+            )
+        }
+        return reject(
             requestID: requestID,
             control: control,
             code: .malformedRequest,
@@ -155,8 +161,20 @@ public struct ScanSession {
         )
     }
 
-    private func validateRequestID(_ requestID: UInt64) -> Bool {
-        requestID != 0 && !seenRequestIDs.contains(requestID)
+    private mutating func consumeRequestID(
+        _ requestID: UInt64
+    ) -> (code: Diskplan_V1_ControlRejectCode, detail: String)? {
+        guard requestID != 0 else {
+            return (.malformedRequest, "request_id must be non-zero")
+        }
+        guard requestID > requestIDHighWaterMark else {
+            return (
+                .duplicateRequestID,
+                "request_id must be strictly greater than the previous request_id"
+            )
+        }
+        requestIDHighWaterMark = requestID
+        return nil
     }
 
     private mutating func accepted(

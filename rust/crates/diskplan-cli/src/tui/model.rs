@@ -15,6 +15,26 @@ pub struct PendingControl {
     pub kind: ScanControlKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RequestPhase {
+    AwaitingStateConfirmation,
+    AwaitingPlanReadyState,
+    AwaitingPlanProjection,
+    AwaitingInvalidation,
+    AwaitingResumeState,
+    AwaitingResumeProgress,
+    AwaitingCancelledState,
+    AwaitingCancelledTerminal,
+    Steady,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ActiveRequest {
+    pub request_id: u64,
+    pub kind: ScanControlKind,
+    pub phase: RequestPhase,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalState {
     Cancelled(String),
@@ -29,6 +49,7 @@ pub struct AppState {
     pub progress: Option<ScanProgress>,
     pub provisional_plan: Option<ProvisionalPlanReady>,
     pub pending_controls: Vec<PendingControl>,
+    pub(super) active_request: Option<ActiveRequest>,
     pub help_visible: bool,
     pub cancel_requested: bool,
     pub terminal: Option<TerminalState>,
@@ -49,6 +70,7 @@ impl Default for AppState {
                 request_id: 1,
                 kind: ScanControlKind::StartScan,
             }],
+            active_request: None,
             help_visible: false,
             cancel_requested: false,
             terminal: None,
