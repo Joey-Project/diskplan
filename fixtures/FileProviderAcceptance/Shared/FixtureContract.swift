@@ -200,6 +200,8 @@ public enum OracleEventKind: String, Codable, CaseIterable, Sendable {
   case modifyItem = "modify_item"
   case deleteItem = "delete_item"
   case materializedItemsDidChange = "materialized_items_did_change"
+  case changeEnumeration = "change_enumeration"
+  case syncAnchor = "sync_anchor"
 }
 
 public struct OracleEvent: Codable, Equatable, Sendable {
@@ -236,10 +238,38 @@ public struct OracleEvent: Codable, Equatable, Sendable {
 public struct OracleWindow: Codable, Equatable, Sendable {
   public let beginNanoseconds: UInt64
   public let endNanoseconds: UInt64?
+  public let quietMilliseconds: Int?
+  public let eventCount: Int?
+  public let lastSequence: UInt64?
 
-  public init(beginNanoseconds: UInt64, endNanoseconds: UInt64? = nil) {
+  public init(
+    beginNanoseconds: UInt64,
+    endNanoseconds: UInt64? = nil,
+    quietMilliseconds: Int? = nil,
+    eventCount: Int? = nil,
+    lastSequence: UInt64? = nil
+  ) {
     self.beginNanoseconds = beginNanoseconds
     self.endNanoseconds = endNanoseconds
+    self.quietMilliseconds = quietMilliseconds
+    self.eventCount = eventCount
+    self.lastSequence = lastSequence
+  }
+
+  public func validate() throws {
+    if let endNanoseconds {
+      guard endNanoseconds >= beginNanoseconds,
+        let quietMilliseconds, (50...5_000).contains(quietMilliseconds),
+        let eventCount, eventCount >= 0,
+        let lastSequence,
+        lastSequence == UInt64(eventCount),
+        endNanoseconds - beginNanoseconds >= UInt64(quietMilliseconds) * 1_000_000
+      else { throw FixtureContractError.invalidManifest }
+    } else {
+      guard quietMilliseconds == nil, eventCount == nil, lastSequence == nil else {
+        throw FixtureContractError.invalidManifest
+      }
+    }
   }
 
   public func contains(_ event: OracleEvent) -> Bool {

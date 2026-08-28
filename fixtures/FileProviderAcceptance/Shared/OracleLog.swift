@@ -97,15 +97,27 @@ public struct OracleLog: Sendable {
     quietMilliseconds: Int,
     timeoutMilliseconds: Int
   ) throws -> OracleQuiescence {
+    try closeWindowAfterQuiescence(
+      quietMilliseconds: quietMilliseconds,
+      timeoutMilliseconds: timeoutMilliseconds,
+      clock: SystemOracleQuiescenceClock()
+    )
+  }
+
+  func closeWindowAfterQuiescence(
+    quietMilliseconds: Int,
+    timeoutMilliseconds: Int,
+    clock: any OracleQuiescenceClock
+  ) throws -> OracleQuiescence {
     guard quietMilliseconds >= 50, quietMilliseconds <= 5_000,
       timeoutMilliseconds >= quietMilliseconds, timeoutMilliseconds <= 30_000
     else { throw OracleQuiescenceError.invalidBounds }
     let openedWindow = try window()
-    let start = monotonicNow()
+    let start = clock.nowNanoseconds()
     var quietStart = start
     var fingerprint = try eventFingerprint()
     while true {
-      let now = monotonicNow()
+      let now = clock.nowNanoseconds()
       let current = try eventFingerprint()
       if current != fingerprint {
         fingerprint = current
@@ -113,7 +125,13 @@ public struct OracleLog: Sendable {
       }
       if now - quietStart >= UInt64(quietMilliseconds) * 1_000_000 {
         try writeWindow(
-          OracleWindow(beginNanoseconds: openedWindow.beginNanoseconds, endNanoseconds: now)
+          OracleWindow(
+            beginNanoseconds: openedWindow.beginNanoseconds,
+            endNanoseconds: now,
+            quietMilliseconds: quietMilliseconds,
+            eventCount: current.count,
+            lastSequence: current.lastSequence
+          )
         )
         return OracleQuiescence(
           eventCount: current.count,
@@ -124,7 +142,7 @@ public struct OracleLog: Sendable {
       guard now - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
         throw OracleQuiescenceError.timedOut
       }
-      usleep(50_000)
+      clock.sleepForPoll()
     }
   }
 
@@ -132,6 +150,16 @@ public struct OracleLog: Sendable {
     let values = try events()
     return (values.count, values.last?.sequence ?? 0)
   }
+}
+
+protocol OracleQuiescenceClock {
+  func nowNanoseconds() -> UInt64
+  func sleepForPoll()
+}
+
+private struct SystemOracleQuiescenceClock: OracleQuiescenceClock {
+  func nowNanoseconds() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) }
+  func sleepForPoll() { usleep(50_000) }
 }
 
 private func makeOwnerPrivateDirectory(_ url: URL) throws {
@@ -199,5 +227,3 @@ private func nextSequence(_ data: Data) throws -> UInt64 {
 private func makePOSIXError(code: Int32) -> POSIXError {
   POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
 }
-
-private func monotonicNow() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) }

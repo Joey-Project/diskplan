@@ -48,6 +48,37 @@ class RegistrationParserTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match"):
                 MODULE.verify_registration("com.example.fixture", expected, output)
 
+    def test_registered_paths_include_all_exact_bundle_states(self) -> None:
+        output = """
+        -    com.example.fixture(1.0)
+             Path = /old/Fixture.appex
+        +    com.example.fixture(1.0)
+             Path = /current/Fixture.appex
+        !    com.example.fixture.extra(1.0)
+             Path = /other/Fixture.appex
+        """
+        self.assertEqual(
+            MODULE.registered_paths(output, "com.example.fixture"),
+            ["/old/Fixture.appex", "/current/Fixture.appex"],
+        )
+
+    def test_removal_rejects_non_elected_reference_to_expected_path(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            expected = Path(root) / "Fixture.appex"
+            expected.mkdir()
+            output = f"-    com.example.fixture(1.0)\n    Path = {expected}\n"
+            with self.assertRaisesRegex(ValueError, "still references"):
+                MODULE.verify_removal("com.example.fixture", expected, output)
+
+    def test_removal_allows_other_installation_of_same_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            expected = Path(root) / "Fixture.appex"
+            other = Path(root) / "Other.appex"
+            expected.mkdir()
+            other.mkdir()
+            output = f"+    com.example.fixture(1.0)\n    Path = {other}\n"
+            MODULE.verify_removal("com.example.fixture", expected, output)
+
 
 if __name__ == "__main__":
     unittest.main()

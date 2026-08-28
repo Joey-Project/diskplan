@@ -42,8 +42,8 @@ collects metadata for a provider-owned dataless item. The gate requires all of t
 3. The descriptor-relative `FileProviderBoundaryProbe` returns the exact fixture domain
    identity and report-only handling. The sealed directory returns
    `doNotDescendDataless`.
-4. The setup enumeration leaves at least one allowed callback in the oracle before assertion,
-   proving that the extension can append to the selected run log.
+4. A postflight root-enumerator signal inside the still-open window produces a new allowed
+   callback, proving that the extension can append to the selected run log after both probes.
 5. The window contains zero `fetchContents`, create, modify, delete,
    `materializedItemsDidChange`, or sealed-directory enumeration events.
 
@@ -52,9 +52,19 @@ Root and working-set enumeration plus item metadata callbacks are allowed. The s
 `NSFileProviderManager.temporaryDirectoryURL()` before completing. Therefore a future negative
 control can prove real materialization rather than passing because fetch is a stub.
 
-The window closes only after the JSONL sequence/count fingerprint remains unchanged for a
-bounded quiet interval. Polling is bounded by both a 50 ms cadence and an overall timeout;
-there is no fixed sleep interpreted as quiescence.
+Both provider/path postflight probes and the oracle-health barrier run before the window closes.
+After closure, assertion reads only descriptor-bound control and oracle files; it never touches
+the provider path. The window closes only after the JSONL sequence/count fingerprint remains
+unchanged for a continuous two seconds, within a 30-second total bound. The persisted close
+record binds its end timestamp, quiet interval, event count, and final sequence. Assertion
+rechecks that fingerprint, and malformed or internally inconsistent close metadata fails as a
+typed semantic mismatch.
+
+Oracle writes fail closed. The extension serializes recording through a poison latch: the first
+append failure fails that provider callback and permanently rejects later callbacks in that
+extension process. The in-window oracle-health barrier therefore cannot succeed after a hidden
+recording failure. Callback APIs with an error result return the recording error; enumeration
+fails its observer, and callbacks without an error channel do not report completion.
 
 ## Acceptance Levels
 
@@ -86,9 +96,18 @@ DISKPLAN_RUN_FILE_PROVIDER_FIXTURE=1 scripts/test-macos-capabilities.sh
 The lifecycle writes the immutable UUID recovery manifest first, registers one exact embedded
 `.appex`, and verifies that `pluginkit` elects that exact bundle ID from the physical path of the
 current embedded extension. It then adds one exact hidden UUID domain, writes the ready overlay,
-opens the oracle, runs the Diskplan provider probe, waits for bounded event quiescence, asserts
-the oracle, removes that exact domain with mode `.removeAll`, waits until it is absent,
-unregisters that exact `.appex`, and removes only the UUID paths named by the validated manifest.
+opens the oracle, runs two Diskplan provider probes, proves postflight oracle health, waits for
+bounded event quiescence, asserts only the sealed control data, removes that exact domain with
+mode `.removeAll`, waits until it is absent, unregisters that exact `.appex`, polls until the
+registry no longer references that physical extension path, and removes only the UUID paths
+named by the validated manifest. Registry add/remove mutation and convergence checks are each
+bounded. A timeout or stale exact-path registration fails closed and retains the manifest and
+build artifacts for recovery.
+
+All File Provider add, list, remove, signal, and user-visible-URL callbacks share one monotonic
+20-second deadline per lifecycle phase. A one-shot atomic gate discards callbacks arriving after
+the deadline, so a daemon that never replies or replies late cannot hang the host or resume a
+continuation twice.
 
 It never performs bulk domain removal and never deletes paths under the user-visible File
 Provider storage location. If the lifecycle fails, it retains the owner-private manifest and
@@ -108,11 +127,18 @@ then removes only the App Group UUID run directory.
 Cleanup protects object identity and owner/group/mode access policy for every held descriptor.
 Regular files additionally protect content stability. Directories deliberately do not compare
 mtime/ctime after child deletion because child-entry churn is benign for the protected property.
+The run root must be on the same device as its held parent, and every directory descent must
+remain on that root device. A mount point or any directory whose device cannot be proven equal
+fails closed before inventory, so cleanup never traverses or deletes a mounted volume.
 The exact UUID directory is atomically renamed with exclusive semantics inside the held
 owner-private `runs` directory before recursive deletion; symlinks and special objects fail
 closed. The manifest is deleted last, and an ordinary failure restores the isolated directory
 to its original path for recovery. These are point-in-time replacement checks and do not claim
 to exclude a malicious same-UID process that races after the final identity check.
+
+The device-boundary contract has a deterministic synthetic-device unit test. Creating and
+mounting a real filesystem inside the task-scoped run directory requires privileged mount
+operations and is intentionally not attempted by the ordinary local test suite.
 
 ## Signing Gate
 

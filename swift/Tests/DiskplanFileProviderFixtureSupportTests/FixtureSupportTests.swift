@@ -309,7 +309,7 @@ func cleanupRejectsSymlinkAndRestoresManifestForRecovery() throws {
 }
 
 @Test
-func oracleCloseWaitsForABoundedQuietWindow() throws {
+func oracleCloseRequiresTwoSecondsAfterALateCallback() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
@@ -324,13 +324,115 @@ func oracleCloseWaitsForABoundedQuietWindow() throws {
     )
   )
   try log.writeWindow(OracleWindow(beginNanoseconds: 1))
+  let clock = DeterministicOracleClock()
+  clock.onAdvance = { nanoseconds in
+    guard nanoseconds == 1_000_000_000 else { return }
+    try? log.append(
+      OracleEvent(
+        runID: fixture.runID,
+        domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+        itemIdentifier: FixtureContract.sentinelIdentifier,
+        kind: .itemMetadata,
+        processID: 2,
+        monotonicNanoseconds: nanoseconds
+      )
+    )
+  }
   let result = try log.closeWindowAfterQuiescence(
-    quietMilliseconds: 50,
-    timeoutMilliseconds: 500
+    quietMilliseconds: 2_000,
+    timeoutMilliseconds: 30_000,
+    clock: clock
   )
-  #expect(result.eventCount == 1)
-  #expect(result.lastSequence == 1)
-  #expect(try log.window().endNanoseconds != nil)
+  #expect(result.eventCount == 2)
+  #expect(result.lastSequence == 2)
+  #expect(clock.nanoseconds == 3_000_000_000)
+  #expect(try log.window().endNanoseconds == 3_000_000_000)
+}
+
+@Test
+func oracleRecorderPoisonsAfterInjectedAppendFailure() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let attempts = LockedCounter()
+  let recorder = OracleRecorder { _ in
+    attempts.increment()
+    throw POSIXError(.EIO)
+  }
+  let event = OracleEvent(
+    runID: fixture.runID,
+    domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+    itemIdentifier: FixtureContract.sentinelIdentifier,
+    kind: .fetchContents,
+    processID: 1,
+    monotonicNanoseconds: 1
+  )
+  #expect(throws: POSIXError.self) { try recorder.record(event) }
+  #expect(throws: OracleRecorderError.poisoned) { try recorder.record(event) }
+  #expect(attempts.value == 1)
+}
+
+@Test
+func callbackGateDeterministicallyRejectsLateAndNeverCallbacks() {
+  let lateCallback = OneShotCallbackGate()
+  #expect(lateCallback.claimCompletion(from: .callback))
+  #expect(!lateCallback.claimCompletion(from: .deadline))
+  #expect(lateCallback.completionSource == .callback)
+
+  let neverCallback = OneShotCallbackGate()
+  #expect(neverCallback.claimCompletion(from: .deadline))
+  #expect(!neverCallback.claimCompletion(from: .callback))
+  #expect(neverCallback.completionSource == .deadline)
+}
+
+@Test
+func secureWindowReadRejectsInvalidClosedWindowSemantics() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let invalid = OracleWindow(
+    beginNanoseconds: 20,
+    endNanoseconds: 10,
+    quietMilliseconds: 2_000,
+    eventCount: 0,
+    lastSequence: 0
+  )
+  try fixture.writePrivate(
+    try JSONEncoder().encode(invalid),
+    to: fixture.runDirectory.appendingPathComponent("window.json")
+  )
+  #expect(throws: FixtureControlReadError.mismatch(.window, .semantic)) {
+    try SecureFixtureStorage.readWindow(runDirectory: fixture.runDirectory)
+  }
+}
+
+@Test
+func cleanupDeviceBoundaryRejectsDifferentDevices() {
+  #expect(isSameCleanupDevice(42, 42))
+  #expect(!isSameCleanupDevice(42, 43))
+}
+
+private final class DeterministicOracleClock: OracleQuiescenceClock {
+  var nanoseconds: UInt64 = 0
+  var onAdvance: ((UInt64) -> Void)?
+
+  func nowNanoseconds() -> UInt64 { nanoseconds }
+
+  func sleepForPoll() {
+    nanoseconds += 50_000_000
+    onAdvance?(nanoseconds)
+  }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage = 0
+
+  var value: Int {
+    lock.withLock { storage }
+  }
+
+  func increment() {
+    lock.withLock { storage += 1 }
+  }
 }
 
 private struct TemporaryFixtureRun {

@@ -34,8 +34,13 @@ superseded_by:
   identity/access policy without treating directory child churn as replacement.
 - Recovery executes only the known signed host after physical-path, bundle/team identity, and
   signature validation. Registration verifies the elected bundle ID resolves to the current
-  embedded extension.
-- Oracle closure uses bounded event quiescence rather than a fixed delay. The current gate is
+  embedded extension, and unregister must converge to absence of that exact physical path.
+- Both provider probes and a postflight extension-liveness barrier run inside the oracle window.
+  Closure requires two continuous quiet seconds within 30 seconds; post-close assertion reads
+  only descriptor-bound control data and verifies the persisted event fingerprint.
+- Extension append failures poison the recorder and fail callbacks. File Provider callbacks and
+  `pluginkit` operations are bounded, and late callbacks are atomically discarded.
+- Cleanup rejects mount/device-boundary traversal before inventory. The current gate is
   explicitly probe-level; full scanner acceptance remains a later engine integration.
 - Local unsigned compile and support tests are available without provisioning.
 
@@ -47,6 +52,8 @@ superseded_by:
 - [x] Add local unit, static-contract, shell, and unsigned build validation.
 - [x] Harden control-file reads, manifest-bound cleanup, recovery trust, registration election,
   and quiet-window closure.
+- [x] Close acceptance-window, callback-failure, timeout, registry-removal, window-semantic, and
+  mounted-volume cleanup gaps found during integrated review.
 - [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
 - [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
 - [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
@@ -64,15 +71,17 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 13 targeted support tests pass
+- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 17 targeted support tests pass
   and cover
   concurrent JSONL writers, manifest/ready validation, typed secure-read failures,
-  symlink-retaining cleanup, recursive cleanup, and bounded quiet-window closure.
-- `python3 scripts/test-fileprovider-fixture-registration.py`: 3 parser/physical-path election
-  tests pass.
+  symlink-retaining cleanup, recursive cleanup, device-boundary rejection, append-failure
+  poisoning, late-callback arbitration, semantic window validation, and deterministic
+  two-second quiet-window reset after a one-second-late callback.
+- `python3 scripts/test-fileprovider-fixture-registration.py`: 6 parser/physical-path election
+  and exact-path removal tests pass.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
   compiled successfully with signing disabled.
-- The resolved-only complete Swift gate passed 53 tests on the integrated tree. Canonical binary
+- The resolved-only complete Swift gate passed 57 tests on the integrated tree. Canonical binary
   generation and the Swift/Rust cross-language process tests also passed.
 - `scripts/test-macos-capabilities.sh`: 29 `DiskplanMacOS` tests and the live self-test passed;
   the signed fixture and real-host APFS fixture remained explicitly unavailable without their

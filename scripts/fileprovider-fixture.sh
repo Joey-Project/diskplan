@@ -56,7 +56,23 @@ verify_signed_artifacts() {
 verify_elected_extension() {
   python3 "$repo_root/scripts/fileprovider-fixture-registration.py" \
     --bundle-id "$extension_bundle_id" \
-    --expected-path "$appex"
+    --expected-path "$appex" \
+    --state elected
+}
+
+verify_removed_extension() {
+  python3 "$repo_root/scripts/fileprovider-fixture-registration.py" \
+    --bundle-id "$extension_bundle_id" \
+    --expected-path "$appex" \
+    --state absent
+}
+
+register_extension() {
+  python3 "$repo_root/scripts/fileprovider-fixture-pluginkit.py" --action add --path "$appex"
+}
+
+unregister_extension() {
+  python3 "$repo_root/scripts/fileprovider-fixture-pluginkit.py" --action remove --path "$appex"
 }
 
 build_unsigned() {
@@ -127,7 +143,8 @@ recover() {
   fi
   echo "$domain_status"
   "$host" teardown --manifest "$manifest"
-  pluginkit -r "$manifest_appex"
+  unregister_extension
+  verify_removed_extension
   "$host" cleanup --manifest "$manifest"
 }
 
@@ -147,15 +164,18 @@ accept() {
     fi
   }
   trap report_recovery EXIT
-  pluginkit -a "$appex"
+  register_extension
   verify_elected_extension
   "$host" setup --manifest "$manifest"
   "$host" oracle-begin --manifest "$manifest"
   "$host" probe --manifest "$manifest"
-  "$host" oracle-end --manifest "$manifest" --quiet-ms 750 --timeout-ms 10000
+  "$host" probe --manifest "$manifest"
+  "$host" oracle-health --manifest "$manifest"
+  "$host" oracle-end --manifest "$manifest" --quiet-ms 2000 --timeout-ms 30000
   "$host" assert --manifest "$manifest"
   "$host" teardown --manifest "$manifest"
-  pluginkit -r "$appex"
+  unregister_extension
+  verify_removed_extension
   "$host" cleanup --manifest "$manifest"
   complete=1
   trap - EXIT

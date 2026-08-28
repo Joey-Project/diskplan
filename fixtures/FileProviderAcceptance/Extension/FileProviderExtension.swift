@@ -8,10 +8,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
 {
   private let domain: NSFileProviderDomain
   private let runID: UUID?
+  private let recorder: OracleRecorder?
 
   required init(domain: NSFileProviderDomain) {
     self.domain = domain
-    runID = FixtureContract.runID(domainIdentifier: domain.identifier.rawValue)
+    let resolvedRunID = FixtureContract.runID(domainIdentifier: domain.identifier.rawValue)
+    runID = resolvedRunID
+    if let resolvedRunID {
+      recorder = try? OracleRecorder(log: OracleLog.appGroup(runID: resolvedRunID))
+    } else {
+      recorder = nil
+    }
     super.init()
   }
 
@@ -22,7 +29,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     request: NSFileProviderRequest,
     completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void
   ) -> Progress {
-    record(.itemMetadata, item: identifier, request: request)
+    do {
+      try record(.itemMetadata, item: identifier, request: request)
+    } catch {
+      completionHandler(nil, error)
+      return completedProgress()
+    }
     guard let item = FixtureItem.resolve(identifier) else {
       completionHandler(nil, NSFileProviderError(.noSuchItem))
       return completedProgress()
@@ -37,7 +49,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     request: NSFileProviderRequest,
     completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
   ) -> Progress {
-    record(.fetchContents, item: itemIdentifier, request: request)
+    do {
+      try record(.fetchContents, item: itemIdentifier, request: request)
+    } catch {
+      completionHandler(nil, nil, error)
+      return completedProgress()
+    }
     guard itemIdentifier.rawValue == FixtureContract.sentinelIdentifier,
       let manager = NSFileProviderManager(for: domain),
       let temporaryDirectory = try? manager.temporaryDirectoryURL()
@@ -66,9 +83,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?
       ) -> Void
   ) -> Progress {
-    record(
-      .createItem, item: itemTemplate.itemIdentifier, request: request,
-      flags: ["fields:\(fields.rawValue)", "options:\(options.rawValue)"])
+    do {
+      try record(
+        .createItem, item: itemTemplate.itemIdentifier, request: request,
+        flags: ["fields:\(fields.rawValue)", "options:\(options.rawValue)"])
+    } catch {
+      completionHandler(nil, [], false, error)
+      return completedProgress()
+    }
     completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync))
     return completedProgress()
   }
@@ -85,9 +107,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?
       ) -> Void
   ) -> Progress {
-    record(
-      .modifyItem, item: item.itemIdentifier, request: request,
-      flags: ["fields:\(changedFields.rawValue)", "options:\(options.rawValue)"])
+    do {
+      try record(
+        .modifyItem, item: item.itemIdentifier, request: request,
+        flags: ["fields:\(changedFields.rawValue)", "options:\(options.rawValue)"])
+    } catch {
+      completionHandler(nil, [], false, error)
+      return completedProgress()
+    }
     completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync))
     return completedProgress()
   }
@@ -99,7 +126,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     request: NSFileProviderRequest,
     completionHandler: @escaping (Error?) -> Void
   ) -> Progress {
-    record(.deleteItem, item: identifier, request: request, flags: ["options:\(options.rawValue)"])
+    do {
+      try record(
+        .deleteItem,
+        item: identifier,
+        request: request,
+        flags: ["options:\(options.rawValue)"]
+      )
+    } catch {
+      completionHandler(error)
+      return completedProgress()
+    }
     completionHandler(NSFileProviderError(.excludedFromSync))
     return completedProgress()
   }
@@ -110,7 +147,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
   ) throws -> NSFileProviderEnumerator {
     let requestFlags = flags(for: request)
     return FixtureEnumerator(container: containerItemIdentifier) { [weak self] kind, item, flags in
-      self?.record(
+      guard let self else { throw OracleRecorderError.unavailable }
+      try self.record(
         kind,
         item: NSFileProviderItemIdentifier(item),
         flags: requestFlags + flags
@@ -119,7 +157,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
   }
 
   func materializedItemsDidChange(completionHandler: @escaping () -> Void) {
-    record(.materializedItemsDidChange, item: .rootContainer)
+    guard (try? record(.materializedItemsDidChange, item: .rootContainer)) != nil else {
+      return
+    }
     completionHandler()
   }
 
@@ -128,8 +168,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     item: NSFileProviderItemIdentifier,
     request: NSFileProviderRequest? = nil,
     flags: [String] = []
-  ) {
-    guard let runID else { return }
+  ) throws {
+    guard let runID, let recorder else { throw OracleRecorderError.unavailable }
     var requestFlags = flags
     if let request { requestFlags.append(contentsOf: self.flags(for: request)) }
     let event = OracleEvent(
@@ -141,7 +181,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
       monotonicNanoseconds: clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW),
       requestFlags: requestFlags
     )
-    try? OracleLog.appGroup(runID: runID).append(event)
+    try recorder.record(event)
   }
 
   private func flags(for request: NSFileProviderRequest) -> [String] {

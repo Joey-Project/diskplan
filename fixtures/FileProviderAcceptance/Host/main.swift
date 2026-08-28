@@ -42,8 +42,8 @@ enum FixtureHost {
     case "oracle-end":
       let manifest = try loadManifest(try options.requiredURL("manifest"))
       let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
-      let quietMilliseconds = try options.optionalInt("quiet-ms", default: 750)
-      let timeoutMilliseconds = try options.optionalInt("timeout-ms", default: 10_000)
+      let quietMilliseconds = try options.optionalInt("quiet-ms", default: 2_000)
+      let timeoutMilliseconds = try options.optionalInt("timeout-ms", default: 30_000)
       let quiescence = try log.closeWindowAfterQuiescence(
         quietMilliseconds: quietMilliseconds,
         timeoutMilliseconds: timeoutMilliseconds
@@ -55,9 +55,12 @@ enum FixtureHost {
         "last_sequence": String(quiescence.lastSequence),
         "quiet_ms": String(quiescence.quietMilliseconds),
       ])
+    case "oracle-health":
+      let manifest = try loadManifest(try options.requiredURL("manifest"))
+      try await assertOracleHealth(manifest: manifest)
     case "assert":
       let manifest = try loadManifest(try options.requiredURL("manifest"))
-      try assertAcceptance(manifest: manifest, policy: policy)
+      try assertAcceptance(manifest: manifest)
     case "status":
       let manifest = try loadManifest(try options.requiredURL("manifest"))
       try await status(manifest: manifest)
@@ -101,6 +104,7 @@ enum FixtureHost {
   }
 
   private static func setup(manifest: FixtureManifest) async throws {
+    let deadline = ContinuousClock.now + .seconds(20)
     let runID = manifest.runID
     let taskRoot = URL(fileURLWithPath: manifest.taskRoot)
     let domainIdentifier = manifest.domainIdentifier
@@ -110,18 +114,20 @@ enum FixtureHost {
     )
     domain.isHidden = true
     domain.testingModes = []
-    try await addDomain(domain)
+    try await addDomain(domain, deadline: deadline)
     guard let manager = NSFileProviderManager(for: domain) else {
       throw HostError.managerUnavailable
     }
-    try await signal(manager: manager, identifier: .rootContainer)
+    try await signal(manager: manager, identifier: .rootContainer, deadline: deadline)
     let visibleSentinel = try await waitForURL(
       manager: manager,
-      identifier: NSFileProviderItemIdentifier(FixtureContract.sentinelIdentifier)
+      identifier: NSFileProviderItemIdentifier(FixtureContract.sentinelIdentifier),
+      deadline: deadline
     )
     let visibleSealed = try await waitForURL(
       manager: manager,
-      identifier: NSFileProviderItemIdentifier(FixtureContract.sealedDirectoryIdentifier)
+      identifier: NSFileProviderItemIdentifier(FixtureContract.sealedDirectoryIdentifier),
+      deadline: deadline
     )
     let ready = FixtureReadyState(
       runID: runID,
@@ -176,21 +182,17 @@ enum FixtureHost {
     printJSON(["status": "provider-evidence-accepted", "domain": manifest.domainIdentifier])
   }
 
-  private static func assertAcceptance(manifest: FixtureManifest, policy: NoMaterializationPolicy)
-    throws
-  {
-    try probe(manifest: manifest, policy: policy)
+  private static func assertAcceptance(manifest: FixtureManifest) throws {
     let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
     let window = try log.window()
     guard window.endNanoseconds != nil else { throw HostError.oracleWindowOpen }
     let events = try log.events()
+    guard window.eventCount == events.count,
+      window.lastSequence == (events.last?.sequence ?? 0)
+    else { throw HostError.oracleWindowMismatch }
     let matching = events.filter {
       $0.runID == manifest.runID && $0.domainIdentifier == manifest.domainIdentifier
     }
-    let liveness = matching.filter {
-      !FixtureContract.forbiddenEventKinds.contains($0.kind)
-    }
-    guard !liveness.isEmpty else { throw HostError.oracleSilent }
     let observed = matching.filter {
       $0.runID == manifest.runID && $0.domainIdentifier == manifest.domainIdentifier
         && window.contains($0)
@@ -198,6 +200,10 @@ enum FixtureHost {
     let forbidden = observed.filter {
       FixtureContract.forbiddenEventKinds.contains($0.kind)
     }
+    let liveness = observed.filter {
+      !FixtureContract.forbiddenEventKinds.contains($0.kind)
+    }
+    guard !liveness.isEmpty else { throw HostError.oracleSilent }
     guard forbidden.isEmpty else {
       throw HostError.forbiddenCallbacks(forbidden.map { "\($0.sequence):\($0.kind.rawValue)" })
     }
@@ -214,13 +220,15 @@ enum FixtureHost {
   }
 
   private static func status(manifest: FixtureManifest) async throws {
-    let domains = try await registeredDomainIdentifiers()
+    let deadline = ContinuousClock.now + .seconds(20)
+    let domains = try await registeredDomainIdentifiers(deadline: deadline)
     let present = domains.contains(manifest.domainIdentifier)
     printJSON(["status": present ? "present" : "absent", "domain": manifest.domainIdentifier])
   }
 
   private static func teardown(manifest: FixtureManifest) async throws {
-    let matches = try await registeredDomainIdentifiers().filter {
+    let deadline = ContinuousClock.now + .seconds(20)
+    let matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
       $0 == manifest.domainIdentifier
     }
     guard matches.count <= 1 else { throw HostError.duplicateExactDomain }
@@ -229,17 +237,47 @@ enum FixtureHost {
         identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
         displayName: FixtureContract.displayName
       )
-      try await removeExactDomain(domain)
+      try await removeExactDomain(domain, deadline: deadline)
     }
-    let deadline = ContinuousClock.now + .seconds(20)
     while ContinuousClock.now < deadline {
-      if try await !registeredDomainIdentifiers().contains(manifest.domainIdentifier) {
+      if try await !registeredDomainIdentifiers(deadline: deadline).contains(
+        manifest.domainIdentifier
+      ) {
         printJSON(["status": "removed", "domain": manifest.domainIdentifier])
         return
       }
-      try await Task.sleep(for: .milliseconds(200))
+      try await sleepForPolling(.milliseconds(200), until: deadline)
     }
     throw HostError.domainRemovalTimedOut
+  }
+
+  private static func assertOracleHealth(manifest: FixtureManifest) async throws {
+    let deadline = ContinuousClock.now + .seconds(20)
+    let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
+    let window = try log.window()
+    guard window.endNanoseconds == nil else { throw HostError.oracleWindowClosed }
+    let baseline = try log.events().last?.sequence ?? 0
+    let domain = NSFileProviderDomain(
+      identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
+      displayName: FixtureContract.displayName
+    )
+    guard let manager = NSFileProviderManager(for: domain) else {
+      throw HostError.managerUnavailable
+    }
+    try await signal(manager: manager, identifier: .rootContainer, deadline: deadline)
+    while ContinuousClock.now < deadline {
+      let healthy = try log.events().contains {
+        $0.sequence > baseline && $0.runID == manifest.runID
+          && $0.domainIdentifier == manifest.domainIdentifier && window.contains($0)
+          && !FixtureContract.forbiddenEventKinds.contains($0.kind)
+      }
+      if healthy {
+        printJSON(["status": "oracle-healthy", "domain": manifest.domainIdentifier])
+        return
+      }
+      try await sleepForPolling(.milliseconds(100), until: deadline)
+    }
+    throw HostError.oracleHealthTimedOut
   }
 
   private static func cleanup(manifest: FixtureManifest, manifestURL: URL) throws {
@@ -324,71 +362,112 @@ private enum HostError: Error {
   case providerEvidenceRejected(String)
   case notDataless(String)
   case oracleWindowOpen
+  case oracleWindowClosed
+  case oracleWindowMismatch
   case oracleSilent
+  case oracleHealthTimedOut
+  case callbackTimedOut
   case forbiddenCallbacks([String])
   case duplicateExactDomain
   case domainRemovalTimedOut
 }
 
-private func addDomain(_ domain: NSFileProviderDomain) async throws {
-  try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+private func addDomain(
+  _ domain: NSFileProviderDomain,
+  deadline: ContinuousClock.Instant
+) async throws {
+  try await boundedCallback(deadline: deadline) { completion in
     NSFileProviderManager.add(domain) { error in
-      if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+      completion(error.map(Result.failure) ?? .success(()))
     }
   }
 }
 
-private func registeredDomainIdentifiers() async throws -> [String] {
-  try await withCheckedThrowingContinuation { continuation in
+private func registeredDomainIdentifiers(
+  deadline: ContinuousClock.Instant
+) async throws -> [String] {
+  try await boundedCallback(deadline: deadline) { completion in
     NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
       if let error {
-        continuation.resume(throwing: error)
+        completion(.failure(error))
       } else {
-        continuation.resume(returning: domains.map { $0.identifier.rawValue })
+        completion(.success(domains.map { $0.identifier.rawValue }))
       }
     }
   }
 }
 
-private func removeExactDomain(_ domain: NSFileProviderDomain) async throws {
-  try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+private func removeExactDomain(
+  _ domain: NSFileProviderDomain,
+  deadline: ContinuousClock.Instant
+) async throws {
+  try await boundedCallback(deadline: deadline) { completion in
     NSFileProviderManager.remove(domain, mode: .removeAll) { _, error in
-      if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+      completion(error.map(Result.failure) ?? .success(()))
     }
   }
 }
 
-private func signal(manager: NSFileProviderManager, identifier: NSFileProviderItemIdentifier)
-  async throws
-{
-  try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+private func signal(
+  manager: NSFileProviderManager,
+  identifier: NSFileProviderItemIdentifier,
+  deadline: ContinuousClock.Instant
+) async throws {
+  try await boundedCallback(deadline: deadline) { completion in
     manager.signalEnumerator(for: identifier) { error in
-      if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+      completion(error.map(Result.failure) ?? .success(()))
     }
   }
 }
 
 private func waitForURL(
   manager: NSFileProviderManager,
-  identifier: NSFileProviderItemIdentifier
+  identifier: NSFileProviderItemIdentifier,
+  deadline: ContinuousClock.Instant
 ) async throws -> URL {
-  let deadline = ContinuousClock.now + .seconds(20)
   while ContinuousClock.now < deadline {
     do {
-      return try await withCheckedThrowingContinuation { continuation in
+      return try await boundedCallback(deadline: deadline) { completion in
         manager.getUserVisibleURL(for: identifier) { url, error in
           if let url {
-            continuation.resume(returning: url)
+            completion(.success(url))
           } else {
-            continuation.resume(throwing: error ?? HostError.managerUnavailable)
+            completion(.failure(error ?? HostError.managerUnavailable))
           }
         }
       }
     } catch {
-      try await Task.sleep(for: .milliseconds(200))
+      try await sleepForPolling(.milliseconds(200), until: deadline)
     }
   }
   throw HostError.userVisibleURLTimedOut
+}
+
+private func sleepForPolling(
+  _ interval: Duration,
+  until deadline: ContinuousClock.Instant
+) async throws {
+  let clock = ContinuousClock()
+  let next = min(clock.now + interval, deadline)
+  try await clock.sleep(until: next)
+}
+
+private func boundedCallback<Value: Sendable>(
+  deadline: ContinuousClock.Instant,
+  start: (@escaping @Sendable (Result<Value, Error>) -> Void) -> Void
+) async throws -> Value {
+  let gate = OneShotCallbackGate()
+  return try await withCheckedThrowingContinuation { continuation in
+    Task {
+      try? await ContinuousClock().sleep(until: deadline)
+      if gate.claimCompletion(from: .deadline) {
+        continuation.resume(throwing: HostError.callbackTimedOut)
+      }
+    }
+    start { result in
+      if gate.claimCompletion(from: .callback) { continuation.resume(with: result) }
+    }
+  }
 }
 
 private func secureWrite(_ data: Data, to url: URL) throws {

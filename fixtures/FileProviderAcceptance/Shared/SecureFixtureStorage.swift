@@ -55,11 +55,18 @@ public enum SecureFixtureStorage {
       at: runDirectory.appendingPathComponent("window.json"),
       record: .window
     )
+    let window: OracleWindow
     do {
-      return try JSONDecoder().decode(OracleWindow.self, from: data)
+      window = try JSONDecoder().decode(OracleWindow.self, from: data)
     } catch {
       throw FixtureControlReadError.mismatch(.window, .malformed)
     }
+    do {
+      try window.validate()
+    } catch {
+      throw FixtureControlReadError.mismatch(.window, .semantic)
+    }
+    return window
   }
 
   public static func cleanupRun(
@@ -74,7 +81,12 @@ public enum SecureFixtureStorage {
     let runName = expectedRunDirectory.lastPathComponent
     let parent = try openDirectory(at: parentURL, cleanupPath: parentURL.path)
     try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
-    let root = try openChildDirectory(parent: parent, name: runName, depth: 0)
+    let root = try openChildDirectory(
+      parent: parent,
+      name: runName,
+      depth: 0,
+      expectedDevice: parent.metadata.device
+    )
     let manifestData = try readBoundControlFile(
       directory: root,
       name: "manifest.json",
@@ -106,6 +118,7 @@ public enum SecureFixtureStorage {
       var remainingEntries = maximumCleanupEntries
       let tree = try inventory(
         directory: root,
+        rootDevice: root.metadata.device,
         depth: 0,
         isRoot: true,
         remainingEntries: &remainingEntries
@@ -257,7 +270,8 @@ private func openDirectory(at url: URL, cleanupPath: String) throws -> BoundDesc
 private func openChildDirectory(
   parent: BoundDescriptor,
   name: String,
-  depth: Int
+  depth: Int,
+  expectedDevice: dev_t
 ) throws -> BoundDescriptor {
   guard depth <= SecureFixtureStorage.maximumCleanupDepth else {
     throw FixtureCleanupError.treeMismatch(name)
@@ -272,6 +286,9 @@ private func openChildDirectory(
     let metadata = try metadata(descriptor: descriptor)
     guard isOwnerPrivateDirectory(metadata) else {
       throw FixtureCleanupError.treeMismatch(name)
+    }
+    if !isSameCleanupDevice(expectedDevice, metadata.device) {
+      throw FixtureCleanupError.treeMismatch("mount-boundary:\(name)")
     }
     try requirePathIdentity(parent: parent, name: name, expected: metadata)
     return BoundDescriptor(rawValue: descriptor, metadata: metadata)
@@ -388,6 +405,7 @@ private func metadata(descriptor: Int32) throws -> BoundMetadata {
 
 private func inventory(
   directory: BoundDescriptor,
+  rootDevice: dev_t,
   depth: Int,
   isRoot: Bool,
   remainingEntries: inout Int
@@ -407,6 +425,9 @@ private func inventory(
       throw FixtureCleanupError.operationFailed(name, errno: errno)
     }
     let initial = BoundMetadata(current)
+    guard isSameCleanupDevice(rootDevice, initial.device) else {
+      throw FixtureCleanupError.treeMismatch("mount-boundary:\(name)")
+    }
     switch initial.mode & S_IFMT {
     case S_IFREG:
       let raw = openat(
@@ -429,9 +450,15 @@ private func inventory(
       result.append(
         .file(name: name, descriptor: descriptor, isManifest: isRoot && name == "manifest.json"))
     case S_IFDIR:
-      let child = try openChildDirectory(parent: directory, name: name, depth: depth + 1)
+      let child = try openChildDirectory(
+        parent: directory,
+        name: name,
+        depth: depth + 1,
+        expectedDevice: rootDevice
+      )
       let children = try inventory(
         directory: child,
+        rootDevice: rootDevice,
         depth: depth + 1,
         isRoot: false,
         remainingEntries: &remainingEntries
@@ -447,6 +474,10 @@ private func inventory(
     }
   }
   return result
+}
+
+func isSameCleanupDevice(_ rootDevice: dev_t, _ candidateDevice: dev_t) -> Bool {
+  rootDevice == candidateDevice
 }
 
 private func delete(entries: [CleanupEntry], from directory: BoundDescriptor) throws {
