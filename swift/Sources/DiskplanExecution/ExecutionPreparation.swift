@@ -180,7 +180,7 @@ public actor ExecutionPreparationEngine {
   }
 }
 
-private enum Revalidator {
+enum Revalidator {
   static func evaluate(
     request: RevalidationRequest,
     snapshot: CurrentRevalidationSnapshot
@@ -302,6 +302,100 @@ private enum Revalidator {
       actionOutcomes: sortedOutcomes,
       globalFindings: globalFindings,
       manifest: manifest
+    )
+  }
+
+  static func evaluateJIT(
+    request: JITRevalidationRequest,
+    snapshot: CurrentRevalidationSnapshot
+  ) -> JITRevalidationReport {
+    let expectedIDs = Set(request.actionIDs)
+    let actionByID = Dictionary(uniqueKeysWithValues: request.plan.actions.map { ($0.id, $0) })
+    var globalFindings: [RevalidationFinding] = []
+    let currentByID = observationsByActionID(snapshot.actions, findings: &globalFindings)
+    for extra in currentByID.keys where !expectedIDs.contains(extra) {
+      globalFindings.append(
+        RevalidationFinding(
+          actionID: extra, subject: .collector, kind: .unexpectedObservation))
+    }
+
+    let outcomes = request.actionIDs.sorted().map { actionID -> ActionRevalidationOutcome in
+      guard let expected = actionByID[actionID] else {
+        globalFindings.append(
+          RevalidationFinding(
+            actionID: actionID, subject: .collector, kind: .unexpectedObservation))
+        return ActionRevalidationOutcome(actionID: actionID, findings: [])
+      }
+      guard let current = currentByID[actionID] else {
+        return ActionRevalidationOutcome(
+          actionID: actionID,
+          findings: [
+            RevalidationFinding(actionID: actionID, subject: .collector, kind: .missing)
+          ])
+      }
+      return evaluateAction(expected, current: current)
+    }
+
+    globalFindings.append(
+      contentsOf: evaluateInvariant(
+        snapshot.invariants.duplicateSurvivorsPreserved,
+        subject: .duplicateSurvivors,
+        violation: .survivorInvariantViolated
+      ))
+    globalFindings.append(
+      contentsOf: evaluateInvariant(
+        snapshot.invariants.terminalNamespacesExclusive,
+        subject: .terminalNamespaces,
+        violation: .terminalNamespaceInvariantViolated
+      ))
+
+    let expectedGroups = Set(request.releaseGroupIDs)
+    let observedGroups = snapshot.releaseTopologies.map(\.allocationGroupID)
+    for groupID in Set(observedGroups) where !expectedGroups.contains(groupID) {
+      globalFindings.append(
+        RevalidationFinding(
+          actionID: nil,
+          subject: .releaseTopology(groupID),
+          kind: .unexpectedObservation
+        ))
+    }
+    for groupID in request.releaseGroupIDs {
+      let matches = snapshot.releaseTopologies.filter { $0.allocationGroupID == groupID }
+      guard
+        let expected = request.plan.releaseSets.first(where: {
+          $0.allocationGroupID == groupID
+        })?.topologyExpectation
+      else {
+        globalFindings.append(
+          RevalidationFinding(
+            actionID: nil,
+            subject: .releaseTopology(groupID),
+            kind: .unexpectedObservation
+          ))
+        continue
+      }
+      guard matches.count == 1 else {
+        globalFindings.append(
+          RevalidationFinding(
+            actionID: nil,
+            subject: .releaseTopology(groupID),
+            kind: matches.isEmpty ? .missing : .duplicateObservation
+          ))
+        continue
+      }
+      globalFindings.append(
+        contentsOf: compareObservation(
+          matches[0].topology,
+          expected: expected,
+          actionID: nil,
+          subject: .releaseTopology(groupID),
+          mismatch: .releaseTopologyMismatch
+        ))
+    }
+    globalFindings.sort(by: findingPrecedes)
+    return JITRevalidationReport(
+      actionOutcomes: outcomes.sorted { $0.actionID < $1.actionID },
+      globalFindings: globalFindings
     )
   }
 

@@ -523,7 +523,7 @@ private actor SequenceSource: RevalidationEvidenceSource {
   enum SourceError: Error { case exhausted }
 }
 
-private func prepareApply(
+func prepareApply(
   _ engine: ExecutionPreparationEngine,
   fixture: Fixture
 ) async throws -> (ApplyReadyReport, ApplyCapability) {
@@ -540,16 +540,16 @@ private func prepareApply(
   return (ready, capability)
 }
 
-private func deterministicEntropy(count: Int) throws -> Data {
+func deterministicEntropy(count: Int) throws -> Data {
   Data((0..<count).map { UInt8(($0 + count) & 0xff) })
 }
 
-private let passingInvariants = CurrentPlanInvariants(
+let passingInvariants = CurrentPlanInvariants(
   duplicateSurvivorsPreserved: .known(true),
   terminalNamespacesExclusive: .known(true)
 )
 
-private struct Fixture {
+struct Fixture {
   let facts: FrozenGlobalFacts
   let evidence: FrozenEvidenceSnapshot
   let action: ActionDefinition
@@ -604,7 +604,7 @@ private struct Fixture {
   }
 }
 
-private struct ReleaseFixture {
+struct ReleaseFixture {
   let ownerActions: [ActionDefinition]
   let releaseAction: ActionDefinition
   let releaseSet: PlanReleaseSet
@@ -656,7 +656,7 @@ private struct ReleaseFixture {
   }
 }
 
-private func currentEvidence(
+func currentEvidence(
   _ action: ActionDefinition,
   identity: Observation<ObjectIdentity>? = nil,
   content: Observation<ContentProtectionBaseline>? = nil,
@@ -702,11 +702,11 @@ private func currentEvidence(
   )
 }
 
-private func digest(_ byte: UInt8) -> PolicyDigest {
+func digest(_ byte: UInt8) -> PolicyDigest {
   try! PolicyDigest(bytes: Data(repeating: byte, count: 32))
 }
 
-private func globalFacts() -> FrozenGlobalFacts {
+func globalFacts() -> FrozenGlobalFacts {
   FrozenGlobalFacts(
     captureID: digest(89),
     profile: "standard",
@@ -724,14 +724,15 @@ private func globalFacts() -> FrozenGlobalFacts {
   )
 }
 
-private func snapshot(
+func snapshot(
   candidateID: String = "a",
   path: String = "a",
   object: UInt64 = 1,
   content: ContentProtectionBaseline = .requiredDigest(digest(92)),
   gitWorktree: GitWorktreeEvidence? = nil,
   adapterScope: AdapterScopeEvidence = .genericRemove,
-  additionalAdapterScopes: [AdapterScopeEvidence] = []
+  additionalAdapterScopes: [AdapterScopeEvidence] = [],
+  forceRequirement: ForceRequirement = .notRequired
 ) -> FrozenEvidenceSnapshot {
   let facts = globalFacts()
   let components = path.split(separator: "/").map { Data($0.utf8) }
@@ -772,7 +773,7 @@ private func snapshot(
     contentProtection: .known(content),
     aclDigest: .known(digest(93)),
     targetMountIdentity: .known("mount-1"),
-    removalForceRequirement: .known(.notRequired),
+    removalForceRequirement: .known(forceRequirement),
     quarantineCapability: .known(true),
     gitWorktree: gitWorktree,
     adapterScope: adapterScope,
@@ -784,7 +785,7 @@ private func snapshot(
   )
 }
 
-private func gitEvidence(
+func gitEvidence(
   worktreeObject: UInt64,
   indexDigest: Observation<PolicyDigest> = .known(digest(71))
 ) -> GitWorktreeEvidence {
@@ -815,7 +816,7 @@ private func gitEvidence(
   )
 }
 
-private func completeClassificationClaims() -> [ClassificationClaim] {
+func completeClassificationClaims() -> [ClassificationClaim] {
   ClassificationFacet.allCases.map { facet in
     ClassificationClaim(
       facet: facet,
@@ -826,7 +827,7 @@ private func completeClassificationClaims() -> [ClassificationClaim] {
   }
 }
 
-private func makeAction(
+func makeAction(
   evidence: FrozenEvidenceSnapshot,
   facts: FrozenGlobalFacts,
   prerequisites: [ActionDefinition] = [],
@@ -855,7 +856,7 @@ private func makeAction(
   )
 }
 
-private func completeStorageGraph(
+func completeStorageGraph(
   aEvidence: FrozenEvidenceSnapshot,
   bEvidence: FrozenEvidenceSnapshot
 ) throws -> StorageReleaseGraph {
@@ -891,4 +892,4 @@ private func completeStorageGraph(
   )
 }
 
-private enum FixtureError: Error { case unexpectedResult }
+enum FixtureError: Error { case unexpectedResult }

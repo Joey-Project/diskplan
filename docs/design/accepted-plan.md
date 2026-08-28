@@ -575,6 +575,8 @@ Rust launcher 只从自己的 versioned directory 定位 engine。升级通过�
 - Enable tested adapters incrementally.
 - Fixture-only actual mutation tests.
 - Partial failure, cancellation, and post-verify.
+- The authoritative implementation contract is documented in
+  [`best-effort-apply.md`](best-effort-apply.md).
 
 ### Phase 6: Real-Host Release Acceptance
 
