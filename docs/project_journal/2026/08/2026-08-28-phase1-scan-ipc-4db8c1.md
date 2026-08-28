@@ -142,3 +142,12 @@ superseded_by:
   remain unavailable locally and reserved for India.
 - `scripts/proto-codegen.sh check`, `scripts/protocol13-fixtures.sh check`, Rust
   format/check/clippy, strict Swift format lint, Bash syntax, and ShellCheck pass.
+- The cross-language gate now invokes the protocol 1.3 Swift-authority fixture
+  check directly. A CI script regression asserts that this call remains present
+  and that every nested SwiftPM invocation keeps automatic resolution disabled,
+  so fixture source or production encoder drift cannot be hidden by mutually
+  agreeing checked-in frames and language decoders.
+- The automatic-gate follow-up passes all 18 CI script regression tests, all 10
+  cross-language process cases, the canonical binary golden check, and both the
+  nested and standalone protocol 1.3 Swift-authority fixture checks. Bash syntax,
+  ShellCheck, journal validation, and diff checks also pass.
