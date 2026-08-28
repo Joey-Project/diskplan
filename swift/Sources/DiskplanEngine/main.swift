@@ -38,7 +38,7 @@ struct DiskplanEngine {
             case .rejected(let rejected):
                 try writeRejection(sequence: request.sequence, rejected)
             }
-        case .business:
+        case .business, .startScanRequest, .scanControlRequest:
             try writeRejection(
                 sequence: request.sequence,
                 Handshake.rejection(
@@ -46,7 +46,7 @@ struct DiskplanEngine {
                     detail: "business envelope received before handshake"
                 )
             )
-        case .helloAccepted, .helloRejected, .none:
+        case .helloAccepted, .helloRejected, .engineEvent, .none:
             try writeRejection(
                 sequence: request.sequence,
                 Handshake.rejection(.malformedEnvelope, detail: "expected client hello")
@@ -55,6 +55,7 @@ struct DiskplanEngine {
     }
 
     private static func runReadyLoop() throws {
+        var scanSession = ScanSession()
         while let payload = try FrameCodec.read(from: .standardInput) {
             let request: Diskplan_V1_Envelope
             do {
@@ -76,12 +77,45 @@ struct DiskplanEngine {
                         detail: "business messages are not implemented in the foundation engine"
                     )
                 )
-            case .hello, .helloAccepted, .helloRejected, .none:
+            case .startScanRequest(let start):
+                if request.sequence == start.requestID {
+                    try writeEvents(scanSession.start(start))
+                } else {
+                    try writeEvents(
+                        scanSession.rejectMalformed(
+                            requestID: start.requestID,
+                            control: .startScan,
+                            detail: "envelope sequence must equal request_id"
+                        )
+                    )
+                }
+            case .scanControlRequest(let control):
+                if request.sequence == control.requestID {
+                    try writeEvents(scanSession.control(control))
+                } else {
+                    try writeEvents(
+                        scanSession.rejectMalformed(
+                            requestID: control.requestID,
+                            control: control.control,
+                            detail: "envelope sequence must equal request_id"
+                        )
+                    )
+                }
+                if scanSession.state == .cancelled {
+                    return
+                }
+            case .hello, .helloAccepted, .helloRejected, .engineEvent, .none:
                 try writeRejection(
                     sequence: request.sequence,
                     Handshake.rejection(.malformedEnvelope, detail: "expected business envelope")
                 )
             }
+        }
+    }
+
+    private static func writeEvents(_ events: [Diskplan_V1_EngineEvent]) throws {
+        for event in events {
+            try writeResponse(sequence: event.eventSequence, body: .engineEvent(event))
         }
     }
 

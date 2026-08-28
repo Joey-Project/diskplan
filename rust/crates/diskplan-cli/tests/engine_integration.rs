@@ -10,7 +10,8 @@ use diskplan::{ClientError, EngineSession, handshake_with_engine};
 use diskplan_core::framing::{FrameError, read_frame, write_frame};
 use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello};
 use diskplan_proto::diskplan::v1::{
-    BusinessEnvelope, Envelope, HelloAccepted, HelloRejected, ProtocolVersion, RejectCode, envelope,
+    BusinessEnvelope, EngineEvent, Envelope, HelloAccepted, HelloRejected, ProtocolVersion,
+    RejectCode, ScanControlKind, ScanProgress, ScanState, engine_event, envelope,
 };
 use prost::Message;
 use tempfile::TempDir;
@@ -27,7 +28,12 @@ fn rust_client_negotiates_and_keeps_swift_engine_ready() {
     let mut session = EngineSession::connect(&engine).unwrap();
     assert_eq!(
         session.accepted().negotiated_capabilities,
-        ["canonical-binary-v1", "framing-v1", "plan-bootstrap"]
+        [
+            "canonical-binary-v1",
+            "framing-v1",
+            "plan-bootstrap",
+            "scan-control-v1"
+        ]
     );
     let response = session.request_business(2, "scan", Vec::new()).unwrap();
     let Some(envelope::Body::HelloRejected(rejected)) = response.body else {
@@ -78,6 +84,120 @@ fn swift_engine_rejects_pre_handshake_major_and_capability_errors() {
 }
 
 #[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn rust_client_drives_swift_scan_control_protocol() {
+    let engine = required_engine_path();
+    let mut session = EngineSession::connect(&engine).unwrap();
+
+    session.send_start_scan(100, "standard").unwrap();
+    assert_control_accepted(
+        session.read_engine_event().unwrap(),
+        100,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    assert_state_changed(
+        session.read_engine_event().unwrap(),
+        100,
+        ScanState::Running,
+    );
+    let progress = session.read_engine_event().unwrap();
+    assert_eq!(progress.request_id, 100);
+    let Some(engine_event::Body::ScanProgress(progress)) = progress.body else {
+        panic!("expected scan progress");
+    };
+    assert_eq!(progress.profile, "standard");
+    assert_eq!(progress.current_root, "phase0://deterministic-fixture");
+
+    session
+        .send_scan_control(101, ScanControlKind::PauseScan)
+        .unwrap();
+    assert_control_accepted(
+        session.read_engine_event().unwrap(),
+        101,
+        ScanControlKind::PauseScan,
+        ScanState::Paused,
+    );
+    assert_state_changed(session.read_engine_event().unwrap(), 101, ScanState::Paused);
+
+    session
+        .send_scan_control(102, ScanControlKind::PauseAndBuildProvisionalPlan)
+        .unwrap();
+    assert_control_accepted(
+        session.read_engine_event().unwrap(),
+        102,
+        ScanControlKind::PauseAndBuildProvisionalPlan,
+        ScanState::BuildingProvisionalPlan,
+    );
+    assert_state_changed(
+        session.read_engine_event().unwrap(),
+        102,
+        ScanState::BuildingProvisionalPlan,
+    );
+    assert_state_changed(
+        session.read_engine_event().unwrap(),
+        102,
+        ScanState::ProvisionalPlanReady,
+    );
+    let plan = session.read_engine_event().unwrap();
+    let Some(engine_event::Body::ProvisionalPlanReady(plan)) = plan.body else {
+        panic!("expected provisional plan");
+    };
+    assert_eq!(plan.groups.len(), 2);
+    assert_eq!(plan.groups[0].group_id, "ready");
+
+    session
+        .send_scan_control(103, ScanControlKind::ResumeScan)
+        .unwrap();
+    assert_control_accepted(
+        session.read_engine_event().unwrap(),
+        103,
+        ScanControlKind::ResumeScan,
+        ScanState::Running,
+    );
+    let invalidated = session.read_engine_event().unwrap();
+    let Some(engine_event::Body::ProvisionalPlanInvalidated(invalidated)) = invalidated.body else {
+        panic!("expected provisional plan invalidation");
+    };
+    assert_eq!(invalidated.previous_plan_id, "phase0-provisional-0001");
+    assert_state_changed(
+        session.read_engine_event().unwrap(),
+        103,
+        ScanState::Running,
+    );
+    assert!(matches!(
+        session.read_engine_event().unwrap().body,
+        Some(engine_event::Body::ScanProgress(_))
+    ));
+
+    session
+        .send_scan_control(104, ScanControlKind::CancelScan)
+        .unwrap();
+    assert_control_accepted(
+        session.read_engine_event().unwrap(),
+        104,
+        ScanControlKind::CancelScan,
+        ScanState::Cancelling,
+    );
+    assert_state_changed(
+        session.read_engine_event().unwrap(),
+        104,
+        ScanState::Cancelling,
+    );
+    assert_state_changed(
+        session.read_engine_event().unwrap(),
+        104,
+        ScanState::Cancelled,
+    );
+    let cancelled = session.read_engine_event().unwrap();
+    assert!(matches!(
+        cancelled.body,
+        Some(engine_event::Body::ScanCancelled(_))
+    ));
+    session.shutdown().unwrap();
+}
+
+#[test]
 fn fake_engine_acceptance_is_validated_fail_closed() {
     let cases = [
         (accepted_without_version(), ExpectedInvalid::MissingVersion),
@@ -90,7 +210,7 @@ fn fake_engine_acceptance_is_validated_fail_closed() {
             ExpectedInvalid::Major,
         ),
         (
-            accepted_envelope(1, 1, 2, &["framing-v1"]),
+            accepted_envelope(1, 1, 3, &["framing-v1"]),
             ExpectedInvalid::Minor,
         ),
         (
@@ -167,6 +287,32 @@ fn fake_engine_rejection_sequence_is_validated_before_the_rejection_is_accepted(
         ClientError::ResponseSequenceMismatch {
             expected: 1,
             actual: 99
+        }
+    ));
+}
+
+#[test]
+fn fake_engine_event_sequence_gap_fails_closed() {
+    let mut frames = encode_frame(&accepted_envelope(
+        1,
+        1,
+        2,
+        &["framing-v1", "scan-control-v1"],
+    ));
+    frames.extend(encode_frame(&engine_event_envelope(1)));
+    frames.extend(encode_frame(&engine_event_envelope(3)));
+    let (_root, path) = fake_engine_script(&emit_then_drain(&frames, false));
+    let mut session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT).unwrap();
+
+    assert_eq!(session.read_engine_event().unwrap().event_sequence, 1);
+    let error = session
+        .read_engine_event()
+        .expect_err("a sequence gap must fail closed");
+    assert!(matches!(
+        error,
+        ClientError::EventSequenceMismatch {
+            previous: 1,
+            actual: 3
         }
     ));
 }
@@ -413,6 +559,17 @@ fn accepted_envelope(sequence: u64, major: u32, minor: u32, capabilities: &[&str
     }
 }
 
+fn engine_event_envelope(sequence: u64) -> Envelope {
+    Envelope {
+        sequence,
+        body: Some(envelope::Body::EngineEvent(EngineEvent {
+            event_sequence: sequence,
+            request_id: 55,
+            body: Some(engine_event::Body::ScanProgress(ScanProgress::default())),
+        })),
+    }
+}
+
 fn encode_frame(envelope: &Envelope) -> Vec<u8> {
     let mut payload = Vec::new();
     envelope.encode(&mut payload).unwrap();
@@ -525,4 +682,30 @@ fn assert_rejection(response: Envelope, expected: RejectCode) {
         panic!("expected rejection");
     };
     assert_eq!(rejected.code, expected as i32);
+}
+
+fn assert_control_accepted(
+    event: diskplan_proto::diskplan::v1::EngineEvent,
+    request_id: u64,
+    control: ScanControlKind,
+    state: ScanState,
+) {
+    assert_eq!(event.request_id, request_id);
+    let Some(engine_event::Body::ControlAccepted(accepted)) = event.body else {
+        panic!("expected control acceptance");
+    };
+    assert_eq!(accepted.control, control as i32);
+    assert_eq!(accepted.resulting_state, state as i32);
+}
+
+fn assert_state_changed(
+    event: diskplan_proto::diskplan::v1::EngineEvent,
+    request_id: u64,
+    state: ScanState,
+) {
+    assert_eq!(event.request_id, request_id);
+    let Some(engine_event::Body::ScanStateChanged(changed)) = event.body else {
+        panic!("expected scan state change");
+    };
+    assert_eq!(changed.state, state as i32);
 }

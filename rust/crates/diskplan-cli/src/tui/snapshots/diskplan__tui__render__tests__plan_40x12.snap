@@ -1,0 +1,16 @@
+---
+source: rust/crates/diskplan-cli/src/tui/render.rs
+expression: "snapshot(&state, 40, 12)"
+---
+┌──────────────────────────────────────┐
+│ diskplan Provisional plan  •  Provisi│
+└──────────────────────────────────────┘
+┌ Plan-first summary ──────────────────┐
+│11 actions                            │
+│1.2 GiB immediate                     │
+│256.0 MiB shared unlock               │
+│Ready • 8 • ready                     │
+└──────────────────────────────────────┘
+────────────────────────────────────────
+q cancel  r resume + invalidate  ? help
+provisional plan ready
