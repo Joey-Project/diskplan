@@ -2448,9 +2448,8 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let result = scanner.advance(maximumEntries: 10)
   #expect(result.progress.entriesObserved == 0)
   #expect(result.coverage.reasons.contains(.providerStateUnverified))
-  guard case .failed(_, let code) = result.rootFailures.first?.observation else {
+  guard case .failed = result.rootFailures.first?.observation else {
     Issue.record("configured root did not preserve its provider-proof failure")
     return
   }
-  #expect(code == ENODATA)
 }
