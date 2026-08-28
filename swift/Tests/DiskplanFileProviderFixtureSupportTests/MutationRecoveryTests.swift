@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -219,6 +220,64 @@ func pendingGateAccessPolicyDriftIsNotMisreportedAsMissing() throws {
 }
 
 @Test
+func pendingGateTimestampOnlyChangeTriggersStableByteRevalidation() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.begin(.domainAdd, nowNanoseconds: 10)
+  try ordinary.markDispatched(.domainAdd, nowNanoseconds: 20)
+
+  let touching = try fixture.journal(
+    boot: firstBoot,
+    afterInitialRecordRead: { _, name, descriptor in
+      guard name == ".fileprovider-pending-run.json" else { return }
+      var metadata = stat()
+      guard fstat(descriptor, &metadata) == 0 else { throw POSIXError(.EIO) }
+      var times = [metadata.st_atimespec, metadata.st_mtimespec]
+      times[1].tv_sec = metadata.st_mtimespec.tv_sec == 1 ? 2 : 1
+      times[1].tv_nsec = 0
+      let result = times.withUnsafeBufferPointer { buffer in
+        futimens(descriptor, buffer.baseAddress)
+      }
+      guard result == 0 else { throw POSIXError(.EIO) }
+    }
+  )
+
+  #expect(try touching.pendingKinds() == [.domainAdd])
+}
+
+@Test
+func pendingGateByteChangeAfterInitialReadIsContentMutation() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.begin(.domainAdd, nowNanoseconds: 10)
+  try ordinary.markDispatched(.domainAdd, nowNanoseconds: 20)
+
+  let mutating = try fixture.journal(
+    boot: firstBoot,
+    afterInitialRecordRead: { directory, name, _ in
+      guard name == ".fileprovider-pending-run.json" else { return }
+      let descriptor = openat(
+        directory,
+        name,
+        O_WRONLY | O_CLOEXEC | O_NOFOLLOW
+      )
+      guard descriptor >= 0 else { throw POSIXError(.EIO) }
+      defer { close(descriptor) }
+      var replacement: UInt8 = 0x5b
+      guard pwrite(descriptor, &replacement, 1, 0) == 1 else {
+        throw POSIXError(.EIO)
+      }
+    }
+  )
+
+  #expect(throws: ExternalMutationJournalError.contentChanged) {
+    _ = try mutating.pendingKinds()
+  }
+}
+
+@Test
 func crashAfterDispatchedGateCannotRegressToPrepared() throws {
   let fixture = try TemporaryMutationJournal()
   defer { fixture.remove() }
@@ -263,12 +322,13 @@ func crashAfterPreparedGateIsProvablyNondispatched() throws {
 }
 
 @Test
-func replacementRemovalGateCanRecoverAcrossPredecessorStateCrash() throws {
+func replacementDomainRemovalGateRetainsDispatchedPredecessorAcrossCrash() throws {
   let fixture = try TemporaryMutationJournal()
   defer { fixture.remove() }
   let ordinary = try fixture.journal(boot: firstBoot)
   try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 10)
   try ordinary.markDispatched(.domainRemove, nowNanoseconds: 20)
+  let predecessorID = try #require(try ordinary.state(.domainRemove)?.operationID)
 
   let crashing = try fixture.journal(
     boot: firstBoot,
@@ -283,6 +343,83 @@ func replacementRemovalGateCanRecoverAcrossPredecessorStateCrash() throws {
     try crashing.beginRemovalAttempt(.domainRemove, nowNanoseconds: 30)
   }
 
+  let retained = try #require(try ordinary.state(.domainRemove))
+  #expect(retained.phase == .prepared)
+  #expect(retained.unresolvedPredecessorOperationIDs == [predecessorID])
+  #expect(
+    throws: ExternalMutationJournalError.unresolvedExternalMutation(
+      .domainRemove,
+      bootGeneration: firstBoot
+    )
+  ) {
+    try ordinary.requireClear()
+  }
+  #expect(!(try fixture.evidenceNames().isEmpty))
+
+  try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 40)
+  try ordinary.markDispatched(.domainRemove, nowNanoseconds: 50)
+  try ordinary.recordOriginalCompletion(
+    .domainRemove,
+    completion: .succeeded,
+    nowNanoseconds: 60
+  )
+  try ordinary.confirmFinished(.domainRemove, observed: .absent)
+  try ordinary.requireClear()
+  #expect(try fixture.evidenceNames().isEmpty)
+}
+
+@Test
+func replacementExtensionRemovalGateRetainsSucceededPredecessorAcrossCrash() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 10)
+  try ordinary.markDispatched(.extensionRemove, nowNanoseconds: 20)
+  try ordinary.recordOriginalCompletion(
+    .extensionRemove,
+    completion: .succeeded,
+    nowNanoseconds: 30
+  )
+  let predecessorID = try #require(try ordinary.state(.extensionRemove)?.operationID)
+
+  let crashing = try fixture.journal(
+    boot: firstBoot,
+    failureInjection: .afterGateBeforeState
+  )
+  #expect(
+    throws: ExternalMutationJournalError.operationFailed(
+      "injected-after-gate",
+      errno: EIO
+    )
+  ) {
+    try crashing.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 40)
+  }
+
+  let retained = try #require(try ordinary.state(.extensionRemove))
+  #expect(retained.phase == .prepared)
+  #expect(retained.unresolvedPredecessorOperationIDs == [predecessorID])
+  #expect(
+    throws: ExternalMutationJournalError.unresolvedExternalMutation(
+      .extensionRemove,
+      bootGeneration: firstBoot
+    )
+  ) {
+    try ordinary.requireClear()
+  }
+  #expect(!(try fixture.evidenceNames().isEmpty))
+  let laterRun = try fixture.journalForDifferentRun(boot: firstBoot)
+  #expect(throws: ExternalMutationJournalError.bindingMismatch) {
+    try laterRun.begin(.extensionAdd, nowNanoseconds: 45)
+  }
+
+  try ordinary.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 50)
+  try ordinary.markDispatched(.extensionRemove, nowNanoseconds: 60)
+  try ordinary.recordOriginalCompletion(
+    .extensionRemove,
+    completion: .succeeded,
+    nowNanoseconds: 70
+  )
+  try ordinary.confirmFinished(.extensionRemove, observed: .absent)
   try ordinary.requireClear()
   #expect(try fixture.evidenceNames().isEmpty)
 }
@@ -405,13 +542,20 @@ private struct TemporaryMutationJournal {
 
   func journal(
     boot: String,
-    failureInjection: ExternalMutationJournalFailureInjection = .none
+    failureInjection: ExternalMutationJournalFailureInjection = .none,
+    afterInitialRecordRead:
+      @escaping @Sendable (
+        _ directory: Int32,
+        _ name: String,
+        _ descriptor: Int32
+      ) throws -> Void = { _, _, _ in }
   ) throws -> ExternalMutationJournal {
     try ExternalMutationJournal(
       runDirectory: runDirectory,
       binding: binding,
       currentBootGeneration: boot,
-      failureInjection: failureInjection
+      failureInjection: failureInjection,
+      afterInitialRecordRead: afterInitialRecordRead
     )
   }
 

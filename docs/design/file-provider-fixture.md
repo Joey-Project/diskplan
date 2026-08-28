@@ -207,9 +207,21 @@ The journal and global gate use file and parent-directory durability barriers. T
 is intentionally fail closed: dispatch reaches the gate first, completion reaches the operation
 record first, and resolution first publishes a gate without the resolved entry while retaining
 the operation record until the next durable step.
-Removal retries form an explicit predecessor chain. If a crash occurs after successor state B is
-durable in the gate but before its per-kind leaf replaces predecessor A, recovery recognizes only
-that exact A-to-B relation and converges on B; unrelated operation UUIDs remain a typed mismatch.
+Removal retries carry a bounded, exact summary of every predecessor that was dispatched or
+authoritatively succeeded without a final exact-absence observation. If a crash occurs after
+successor state B is durable in the gate but before its per-kind leaf replaces predecessor A,
+recovery recognizes only the exact persisted A-to-B relation. A prepared or failed B cannot make A
+inactive: the host-global gate and per-run evidence remain until a successor is durably dispatched,
+authoritatively completes, and exact absence is observed, or a later boot-session ordering barrier
+permits the same exact-state reconciliation. This also keeps a timed-out PlugInKit removal from an
+older run from later unregistering the shared extension path after a newer run starts. Unrelated
+operation UUIDs remain a typed mismatch.
+
+Mutation-journal reads protect object identity (`st_dev` and `st_ino`), owner/group/mode/ACL access
+policy, and exact JSON bytes as separate properties. Size, mtime, or ctime drift triggers one bounded
+reread and restat; equal bytes on the same object with the same access policy are accepted, while
+byte drift, identity replacement, policy drift, and failed revalidation retain distinct typed
+results.
 
 Same-boot absence polling is never terminal evidence for an unresolved add. Even an
 authoritatively completed compensating removal cannot clear an earlier add whose original

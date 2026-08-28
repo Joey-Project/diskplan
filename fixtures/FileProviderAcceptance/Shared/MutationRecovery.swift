@@ -137,11 +137,14 @@ public enum ExternalMutationBootSession {
 }
 
 public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
+  fileprivate static let maximumPredecessors = 64
+
   public let version: Int
   public let binding: ExternalMutationRunBinding
   public let kind: ExternalMutationKind
   public let operationID: UUID
   public let predecessorOperationID: UUID?
+  fileprivate var predecessorStates: [ExternalMutationPredecessorState]?
   public let bootGeneration: String
   public let beganNanoseconds: UInt64
   public private(set) var phase: ExternalMutationPhase
@@ -152,7 +155,7 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     binding: ExternalMutationRunBinding,
     kind: ExternalMutationKind,
     operationID: UUID = UUID(),
-    predecessorOperationID: UUID? = nil,
+    predecessorStates: [ExternalMutationPredecessorState] = [],
     bootGeneration: String,
     nowNanoseconds: UInt64
   ) {
@@ -160,7 +163,8 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     self.binding = binding
     self.kind = kind
     self.operationID = operationID
-    self.predecessorOperationID = predecessorOperationID
+    predecessorOperationID = predecessorStates.last?.operationID
+    self.predecessorStates = predecessorStates
     self.bootGeneration = bootGeneration
     beganNanoseconds = nowNanoseconds
     phase = .prepared
@@ -192,7 +196,8 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
       try normalizeBootGeneration(bootGeneration) == bootGeneration,
       beganNanoseconds > 0,
       predecessorOperationID != operationID,
-      !kind.isAdd || predecessorOperationID == nil,
+      unresolvedPredecessors.count <= Self.maximumPredecessors,
+      !kind.isAdd || unresolvedPredecessors.isEmpty,
       (phase == .prepared) == (dispatchedNanoseconds == nil),
       (phase == .originalSucceeded || phase == .originalFailed)
         == (completionNanoseconds != nil),
@@ -200,24 +205,151 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
       dispatchedNanoseconds == nil || dispatchedNanoseconds! >= beganNanoseconds,
       completionNanoseconds == nil || completionNanoseconds! >= dispatchedNanoseconds!
     else { throw ExternalMutationJournalError.malformedState }
+    guard Set(unresolvedPredecessors.map(\.operationID)).count == unresolvedPredecessors.count,
+      unresolvedPredecessors.allSatisfy({ $0.operationID != operationID })
+    else { throw ExternalMutationJournalError.malformedState }
+    for predecessor in unresolvedPredecessors { try predecessor.validate() }
+    if let predecessorStates {
+      guard predecessorOperationID == predecessorStates.last?.operationID else {
+        throw ExternalMutationJournalError.malformedState
+      }
+    }
   }
 
   fileprivate func merging(_ other: Self) throws -> Self {
     guard version == other.version, binding == other.binding, kind == other.kind
     else { throw ExternalMutationJournalError.stateMismatch }
     if operationID != other.operationID {
-      if predecessorOperationID == other.operationID { return self }
-      if other.predecessorOperationID == operationID { return other }
+      if unresolvedPredecessors.contains(where: { $0.operationID == other.operationID }) {
+        var successor = self
+        try successor.mergePredecessor(other)
+        return successor
+      }
+      if other.unresolvedPredecessors.contains(where: { $0.operationID == operationID }) {
+        var successor = other
+        try successor.mergePredecessor(self)
+        return successor
+      }
       throw ExternalMutationJournalError.stateMismatch
     }
     guard predecessorOperationID == other.predecessorOperationID,
       bootGeneration == other.bootGeneration,
       beganNanoseconds == other.beganNanoseconds
     else { throw ExternalMutationJournalError.stateMismatch }
+    let mergedPredecessors: [ExternalMutationPredecessorState]
+    switch (predecessorStates, other.predecessorStates) {
+    case (.some(let lhs), .some(let rhs)):
+      guard lhs == rhs else { throw ExternalMutationJournalError.stateMismatch }
+      mergedPredecessors = lhs
+    case (.some(let value), .none), (.none, .some(let value)):
+      mergedPredecessors = value
+    case (.none, .none):
+      mergedPredecessors = unresolvedPredecessors
+    }
     if phase.rank == 2, other.phase.rank == 2, phase != other.phase {
       throw ExternalMutationJournalError.stateMismatch
     }
-    return phase.rank >= other.phase.rank ? self : other
+    var result = phase.rank >= other.phase.rank ? self : other
+    result.predecessorStates = mergedPredecessors
+    return result
+  }
+
+  fileprivate var unresolvedPredecessors: [ExternalMutationPredecessorState] {
+    if let predecessorStates { return predecessorStates }
+    guard let predecessorOperationID else { return [] }
+    return [
+      ExternalMutationPredecessorState(
+        operationID: predecessorOperationID,
+        bootGeneration: bootGeneration,
+        beganNanoseconds: beganNanoseconds,
+        phase: .dispatched,
+        dispatchedNanoseconds: beganNanoseconds,
+        completionNanoseconds: nil
+      )
+    ]
+  }
+
+  fileprivate var unresolvedRemovalOperations: [ExternalMutationPredecessorState] {
+    var result = unresolvedPredecessors
+    if phase == .dispatched || phase == .originalSucceeded {
+      result.append(ExternalMutationPredecessorState(self))
+    }
+    return result
+  }
+
+  fileprivate var hasPotentialLateEffect: Bool {
+    !unresolvedRemovalOperations.isEmpty
+  }
+
+  var unresolvedPredecessorOperationIDs: [UUID] {
+    unresolvedPredecessors.map(\.operationID)
+  }
+
+  fileprivate func canResolveAcrossBoot(_ currentBootGeneration: String) -> Bool {
+    let operations = unresolvedRemovalOperations
+    return !operations.isEmpty
+      && operations.allSatisfy { $0.bootGeneration != currentBootGeneration }
+  }
+
+  private mutating func mergePredecessor(_ state: Self) throws {
+    guard
+      let index = unresolvedPredecessors.firstIndex(where: {
+        $0.operationID == state.operationID
+      })
+    else { throw ExternalMutationJournalError.stateMismatch }
+    var values = unresolvedPredecessors
+    let exact = ExternalMutationPredecessorState(state)
+    let stored = values[index]
+    guard stored == exact || predecessorStates == nil else {
+      throw ExternalMutationJournalError.stateMismatch
+    }
+    values[index] = exact
+    predecessorStates = values
+  }
+}
+
+struct ExternalMutationPredecessorState: Codable, Equatable, Sendable {
+  let operationID: UUID
+  let bootGeneration: String
+  let beganNanoseconds: UInt64
+  let phase: ExternalMutationPhase
+  let dispatchedNanoseconds: UInt64?
+  let completionNanoseconds: UInt64?
+
+  init(_ state: ExternalMutationRecoveryState) {
+    operationID = state.operationID
+    bootGeneration = state.bootGeneration
+    beganNanoseconds = state.beganNanoseconds
+    phase = state.phase
+    dispatchedNanoseconds = state.dispatchedNanoseconds
+    completionNanoseconds = state.completionNanoseconds
+  }
+
+  init(
+    operationID: UUID,
+    bootGeneration: String,
+    beganNanoseconds: UInt64,
+    phase: ExternalMutationPhase,
+    dispatchedNanoseconds: UInt64?,
+    completionNanoseconds: UInt64?
+  ) {
+    self.operationID = operationID
+    self.bootGeneration = bootGeneration
+    self.beganNanoseconds = beganNanoseconds
+    self.phase = phase
+    self.dispatchedNanoseconds = dispatchedNanoseconds
+    self.completionNanoseconds = completionNanoseconds
+  }
+
+  func validate() throws {
+    guard try normalizeBootGeneration(bootGeneration) == bootGeneration,
+      beganNanoseconds > 0,
+      phase == .dispatched || phase == .originalSucceeded,
+      dispatchedNanoseconds != nil,
+      dispatchedNanoseconds! >= beganNanoseconds,
+      (phase == .originalSucceeded) == (completionNanoseconds != nil),
+      completionNanoseconds == nil || completionNanoseconds! >= dispatchedNanoseconds!
+    else { throw ExternalMutationJournalError.malformedState }
   }
 }
 
@@ -288,6 +420,8 @@ public struct ExternalMutationJournal: Sendable {
   public let binding: ExternalMutationRunBinding
   public let currentBootGeneration: String
   private let failureInjection: ExternalMutationJournalFailureInjection
+  private let afterInitialRecordRead:
+    @Sendable (_ directory: Int32, _ name: String, _ descriptor: Int32) throws -> Void
 
   public init(
     runDirectory: URL,
@@ -298,7 +432,8 @@ public struct ExternalMutationJournal: Sendable {
       runDirectory: runDirectory,
       binding: binding,
       currentBootGeneration: currentBootGeneration,
-      failureInjection: .none
+      failureInjection: .none,
+      afterInitialRecordRead: { _, _, _ in }
     )
   }
 
@@ -306,12 +441,19 @@ public struct ExternalMutationJournal: Sendable {
     runDirectory: URL,
     binding: ExternalMutationRunBinding,
     currentBootGeneration: String,
-    failureInjection: ExternalMutationJournalFailureInjection
+    failureInjection: ExternalMutationJournalFailureInjection,
+    afterInitialRecordRead:
+      @escaping @Sendable (
+        _ directory: Int32,
+        _ name: String,
+        _ descriptor: Int32
+      ) throws -> Void = { _, _, _ in }
   ) throws {
     self.runDirectory = runDirectory
     self.binding = binding
     self.currentBootGeneration = try normalizeBootGeneration(currentBootGeneration)
     self.failureInjection = failureInjection
+    self.afterInitialRecordRead = afterInitialRecordRead
     try binding.validate(runDirectory: runDirectory)
   }
 
@@ -336,8 +478,8 @@ public struct ExternalMutationJournal: Sendable {
     try publishState(state)
   }
 
-  /// Removal retries may replace an older ambiguous removal because a late removal success is
-  /// monotonic toward the same safe absent state. Add operations never use this API.
+  /// Removal retries replace the leaf operation only after carrying every potentially active
+  /// predecessor into the successor. Add operations never use this API.
   public func beginRemovalAttempt(
     _ kind: ExternalMutationKind,
     nowNanoseconds: UInt64 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
@@ -345,10 +487,17 @@ public struct ExternalMutationJournal: Sendable {
     guard !kind.isAdd else { throw ExternalMutationJournalError.invalidTransition }
     try finalizeProvablyInactive()
     var records = try loadRecords()
+    let predecessors = records[kind]?.unresolvedRemovalOperations ?? []
+    guard predecessors.count <= ExternalMutationRecoveryState.maximumPredecessors else {
+      throw ExternalMutationJournalError.unresolvedExternalMutation(
+        kind,
+        bootGeneration: records[kind]?.bootGeneration ?? currentBootGeneration
+      )
+    }
     let state = ExternalMutationRecoveryState(
       binding: binding,
       kind: kind,
-      predecessorOperationID: records[kind]?.operationID,
+      predecessorStates: predecessors,
       bootGeneration: currentBootGeneration,
       nowNanoseconds: nowNanoseconds
     )
@@ -390,7 +539,9 @@ public struct ExternalMutationJournal: Sendable {
         "injected-after-completion-state", errno: EIO)
     }
     try publishGate(records, nowNanoseconds: nowNanoseconds)
-    if completion == .failed { try resolve(kinds: [kind], from: records) }
+    if completion == .failed, state.unresolvedPredecessors.isEmpty {
+      try resolve(kinds: [kind], from: records)
+    }
   }
 
   public func confirmFinished(
@@ -419,7 +570,7 @@ public struct ExternalMutationJournal: Sendable {
     try finalizeProvablyInactive()
     let records = try loadRecords()
     guard let state = records[kind] else { return true }
-    guard state.bootGeneration != currentBootGeneration else { return false }
+    guard state.canResolveAcrossBoot(currentBootGeneration) else { return false }
     let terminalAfterReboot = kind.isAdd ? presence == .absent : presence == kind.terminalPresence
     guard terminalAfterReboot else { return false }
     try resolve(kinds: [kind], from: records)
@@ -465,7 +616,8 @@ public struct ExternalMutationJournal: Sendable {
     let inactive = Set(
       records.values.compactMap { state -> ExternalMutationKind? in
         switch state.phase {
-        case .prepared, .originalFailed: state.kind
+        case .prepared, .originalFailed:
+          state.hasPotentialLateEffect ? nil : state.kind
         case .dispatched, .originalSucceeded: nil
         }
       })
@@ -587,6 +739,7 @@ public struct ExternalMutationJournal: Sendable {
       throw ExternalMutationJournalError.malformedState
     }
     let first = try readExact(descriptor: descriptor, size: Int(before.st_size))
+    try afterInitialRecordRead(directory, name, descriptor)
     guard lseek(descriptor, 0, SEEK_SET) == 0 else {
       throw ExternalMutationJournalError.operationFailed("rewind-state", errno: errno)
     }
@@ -596,30 +749,39 @@ public struct ExternalMutationJournal: Sendable {
     guard fstat(descriptor, &after) == 0 else {
       throw ExternalMutationJournalError.operationFailed("restat-state", errno: errno)
     }
-    guard before.st_dev == after.st_dev, before.st_ino == after.st_ino else {
-      throw ExternalMutationJournalError.identityChanged
+    try requireSameMutationRecordObject(before, after)
+    guard before.st_size == after.st_size else {
+      throw ExternalMutationJournalError.contentChanged
     }
-    guard before.st_uid == after.st_uid, before.st_mode == after.st_mode else {
-      throw ExternalMutationJournalError.accessPolicyChanged
+    var stableData = second
+    var stableMetadata = after
+    if mutationRecordMetadataChanged(before, after) {
+      guard after.st_size >= 0, after.st_size <= SecureFixtureStorage.maximumControlBytes else {
+        throw ExternalMutationJournalError.malformedState
+      }
+      guard lseek(descriptor, 0, SEEK_SET) == 0 else {
+        throw ExternalMutationJournalError.operationFailed(
+          "rewind-state-revalidation", errno: errno)
+      }
+      let third = try readExact(descriptor: descriptor, size: Int(after.st_size))
+      var final = stat()
+      guard fstat(descriptor, &final) == 0 else {
+        throw ExternalMutationJournalError.operationFailed("final-restat-state", errno: errno)
+      }
+      try requireSameMutationRecordObject(after, final)
+      guard after.st_size == final.st_size, second == third else {
+        throw ExternalMutationJournalError.contentChanged
+      }
+      stableData = third
+      stableMetadata = final
     }
-    guard before.st_size == after.st_size,
-      before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-      before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
-      before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
-      before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec
-    else { throw ExternalMutationJournalError.contentChanged }
     try requireMutationJournalNoExtendedACL(descriptor)
     var current = stat()
     guard fstatat(directory, name, &current, AT_SYMLINK_NOFOLLOW) == 0 else {
       throw ExternalMutationJournalError.identityChanged
     }
-    guard current.st_dev == before.st_dev, current.st_ino == before.st_ino else {
-      throw ExternalMutationJournalError.identityChanged
-    }
-    guard current.st_uid == before.st_uid, current.st_mode == before.st_mode else {
-      throw ExternalMutationJournalError.accessPolicyChanged
-    }
-    guard let decoded = try? JSONDecoder().decode(T.self, from: first) else {
+    try requireSameMutationRecordObject(stableMetadata, current)
+    guard let decoded = try? JSONDecoder().decode(T.self, from: stableData) else {
       throw ExternalMutationJournalError.malformedState
     }
     return decoded
@@ -739,6 +901,23 @@ private func normalizeBootGeneration(_ value: String) throws -> String {
   return parsed.uuidString.lowercased()
 }
 
+private func requireSameMutationRecordObject(_ expected: stat, _ observed: stat) throws {
+  guard expected.st_dev == observed.st_dev, expected.st_ino == observed.st_ino else {
+    throw ExternalMutationJournalError.identityChanged
+  }
+  guard expected.st_uid == observed.st_uid, expected.st_gid == observed.st_gid,
+    expected.st_mode == observed.st_mode
+  else { throw ExternalMutationJournalError.accessPolicyChanged }
+}
+
+private func mutationRecordMetadataChanged(_ expected: stat, _ observed: stat) -> Bool {
+  expected.st_size != observed.st_size
+    || expected.st_mtimespec.tv_sec != observed.st_mtimespec.tv_sec
+    || expected.st_mtimespec.tv_nsec != observed.st_mtimespec.tv_nsec
+    || expected.st_ctimespec.tv_sec != observed.st_ctimespec.tv_sec
+    || expected.st_ctimespec.tv_nsec != observed.st_ctimespec.tv_nsec
+}
+
 private func requirePrivateRegularFile(_ descriptor: Int32, metadata supplied: stat? = nil) throws {
   var metadata = supplied ?? stat()
   if supplied == nil, fstat(descriptor, &metadata) != 0 {
@@ -789,6 +968,7 @@ private func readExact(descriptor: Int32, size: Int) throws -> Data {
       read(descriptor, bytes.baseAddress, min(bytes.count, size - data.count))
     }
     if count < 0, errno == EINTR { continue }
+    if count == 0 { throw ExternalMutationJournalError.contentChanged }
     guard count > 0 else {
       throw ExternalMutationJournalError.operationFailed(
         "read-state", errno: errno == 0 ? EIO : errno)
