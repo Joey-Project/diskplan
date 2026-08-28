@@ -2423,6 +2423,60 @@ func disjointReleaseContractionsPreserveCrossComponentPrerequisites() throws {
 }
 
 @Test
+func simultaneousReleaseContractionsRejectCrossComponentCycle() throws {
+  let graph = try twoGroupStorageGraph()
+  let evidenceByCandidate = Dictionary(
+    uniqueKeysWithValues: graph.candidates.map { ($0.id, $0.evidence) })
+  let a = try makeAction(
+    evidence: evidenceByCandidate["a"]!, facts: graph.globalFacts)
+  let d = try makeAction(
+    evidence: evidenceByCandidate["d"]!, facts: graph.globalFacts)
+  let c = try makeAction(
+    evidence: evidenceByCandidate["c"]!, facts: graph.globalFacts,
+    prerequisites: [a]
+  )
+  let b = try makeAction(
+    evidence: evidenceByCandidate["b"]!, facts: graph.globalFacts,
+    prerequisites: [d]
+  )
+  let actionByCandidate = ["a": a, "b": b, "c": c, "d": d]
+  let bindings = graph.candidates.map {
+    CandidateActionBinding(candidateID: $0.id, action: actionByCandidate[$0.id]!)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let aggregates = try bundle.releaseSets.map { release -> ActionDefinition in
+    let owners = release.ownerCandidateIDs.map { actionByCandidate[$0]! }
+    let anchorCandidateID = release.allocationGroupID == "group-one" ? "a" : "c"
+    let anchor = try #require(
+      owners.first { $0.evidence.candidateID == anchorCandidateID })
+    return try makeAction(
+      evidence: anchor.evidence,
+      facts: graph.globalFacts,
+      prerequisites: owners,
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
+    )
+  }
+  let plan = try makePlan(
+    actions: Array(actionByCandidate.values) + aggregates,
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: plan.actions.map(\.id),
+    waiverConsents: [],
+    userNotes: []
+  )
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try DecisionOverlayValidator.validate(overlay, against: plan)
+  }
+}
+
+@Test
 func completeReleaseLineageIgnoresReferenceEpochButBindsSemanticTopology() throws {
   func aggregateAction(
     facts: FrozenGlobalFacts,

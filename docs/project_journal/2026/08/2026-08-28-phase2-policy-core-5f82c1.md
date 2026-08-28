@@ -95,7 +95,8 @@ superseded_by:
   candidate identities, so one owner connecting many groups cannot cause repeated queue growth.
   Immutable-plan construction rejects an aggregate whose owner contraction introduces a
   leave-and-reenter cycle; overlay validation repeats the proof for all selected components at
-  once, preserving acyclic cross-component prerequisite direction.
+  once, preserving acyclic cross-component prerequisite direction and rejecting a simultaneous
+  two-component quotient cycle even when each component is individually contraction-safe.
 - Complete-release lineage now binds stable semantic topology and stable owner lineages without
   current graph/evidence/action/epoch data. Reference-time-only advancement preserves lineage,
   while an owner-topology change invalidates it. Current graph and owner action bindings remain
@@ -155,6 +156,8 @@ superseded_by:
   complexity findings.
 - [x] Bound release-component discovery, reject non-convex aggregate contractions before
   projection, and canonicalize StorageGraph diagnostics before observable validation.
+- [x] Cover the simultaneous multi-component contraction guard through public action, plan,
+  release-bundle, and overlay construction.
 
 ## Handoff
 
@@ -170,8 +173,8 @@ superseded_by:
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
   overlay consent binding, public API construction boundaries, and forged vote/tier rejection;
-  the latest focused run passed all 62 tests.
-- The final full local serial `swift test --no-parallel` run passed all 90 tests, including
-  all 62 focused policy tests; `swift build -c release` also completed successfully.
+  the latest focused run passed all 63 tests.
+- The final full local serial `swift test --no-parallel` run passed all 91 tests, including
+  all 63 focused policy tests; `swift build -c release` also completed successfully.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.
