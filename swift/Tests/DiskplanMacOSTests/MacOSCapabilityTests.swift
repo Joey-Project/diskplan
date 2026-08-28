@@ -111,6 +111,65 @@ func returnedMasksDegradeUnavailableAttributesWithoutCredit() throws {
 }
 
 @Test
+func itemShimRequestsRealDeviceForObjectIdentity() {
+  let options = dp_item_probe_options()
+  #expect(options & UInt64(FSOPT_RETURN_REALDEV) != 0)
+  #expect(options & UInt64(FSOPT_NOFOLLOW) != 0)
+  #expect(options & UInt64(FSOPT_RESOLVE_BENEATH) != 0)
+}
+
+@Test
+func shortKernelItemBufferPreservesUnavailableReturnedMasks() throws {
+  var raw = Data(repeating: 0, count: 24)
+  raw.store(UInt32(raw.count), at: 0)
+  raw.store(UInt32(ATTR_CMN_RETURNED_ATTRS), at: 4)
+  var wire = Data(repeating: 0, count: ItemWireV1.size)
+  var written = 0
+  let result = wire.withUnsafeMutableBytes { output in
+    raw.withUnsafeBytes { input in
+      dp_parse_item_buffer(
+        input.bindMemory(to: UInt8.self).baseAddress,
+        input.count,
+        output.bindMemory(to: UInt8.self).baseAddress,
+        output.count,
+        &written
+      )
+    }
+  }
+  #expect(result == 0)
+  #expect(written == ItemWireV1.size)
+  let evidence = try ItemWireV1.parse(wire)
+  #expect(evidence.device.status == .unavailable)
+  #expect(evidence.objectType.status == .unavailable)
+  #expect(evidence.isDataless.status == .unavailable)
+  #expect(evidence.immediatePrivateReclaimBytes.status == .unavailable)
+}
+
+@Test
+func shortKernelItemBufferRejectsClaimedButAbsentField() {
+  var raw = Data(repeating: 0, count: 24)
+  raw.store(UInt32(raw.count), at: 0)
+  raw.store(UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_device(), at: 4)
+  var wire = Data(repeating: 0, count: ItemWireV1.size)
+  var written = 0
+  let result = wire.withUnsafeMutableBytes { output in
+    raw.withUnsafeBytes { input in
+      dp_parse_item_buffer(
+        input.bindMemory(to: UInt8.self).baseAddress,
+        input.count,
+        output.bindMemory(to: UInt8.self).baseAddress,
+        output.count,
+        &written
+      )
+    }
+  }
+  let error = errno
+  #expect(result == -1)
+  #expect(error == EPROTO)
+  #expect(written == 0)
+}
+
+@Test
 func volumeCapabilitiesRespectValidityMasks() {
   let returned = ReturnedAttributeMasks(
     common: 0,
@@ -241,6 +300,40 @@ func absentIdentifierNeverAuthorizesLocalTraversal() throws {
 }
 
 @Test
+func providerBoundRegularFilesNeverReceiveDescentDecisions() throws {
+  let regular = try providerItemEvidence(
+    isDataless: false,
+    isSyncRoot: true,
+    objectType: 1
+  )
+  for inherited in [false, true] {
+    let decision = FileProviderBoundaryProbe.decideBoundary(
+      item: regular,
+      identityDisposition: .confirmedProvider,
+      inheritedProviderBoundary: inherited
+    )
+    #expect(decision.traversal == .doNotDescendNonDirectory)
+    #expect(decision.handling == .reportOnly)
+  }
+}
+
+@Test
+func unavailableObjectTypeNeverReceivesDescentDecision() throws {
+  let item = try providerItemEvidence(
+    isDataless: false,
+    isSyncRoot: true,
+    includeObjectType: false
+  )
+  let decision = FileProviderBoundaryProbe.decideBoundary(
+    item: item,
+    identityDisposition: .confirmedProvider,
+    inheritedProviderBoundary: true
+  )
+  #expect(decision.traversal == .doNotDescendUnverifiedItemType)
+  #expect(decision.handling == .reportOnly)
+}
+
+@Test
 func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }
@@ -265,7 +358,7 @@ func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
     return
   }
   #expect(evidence.identityDisposition == .identifierAbsent)
-  #expect(evidence.traversal == .doNotDescendUnverifiedProviderOwnership)
+  #expect(evidence.traversal == .doNotDescendNonDirectory)
   #expect(reads.value >= 10)
 }
 
@@ -376,6 +469,89 @@ func boundProviderProbeDetectsReplacementAcrossFoundationOperations() throws {
 }
 
 @Test
+func boundProviderProbeRejectsDatalessToMaterializedTransitionOnSameObject() throws {
+  let outcome = try contentTransitionOutcome(fromDataless: true, toDataless: false)
+  #expect(
+    outcome
+      == .rejected(
+        .contentStateMismatch(
+          stage: .postflight,
+          expectedDataless: true,
+          observedDataless: false
+        )
+      )
+  )
+  #expect(outcome.traversal == .doNotDescendUnverifiedContentState)
+}
+
+@Test
+func boundProviderProbeRejectsMaterializedToDatalessTransitionOnSameObject() throws {
+  let outcome = try contentTransitionOutcome(fromDataless: false, toDataless: true)
+  #expect(
+    outcome
+      == .rejected(
+        .contentStateMismatch(
+          stage: .postflight,
+          expectedDataless: false,
+          observedDataless: true
+        )
+      )
+  )
+  #expect(outcome.traversal == .doNotDescendUnverifiedContentState)
+}
+
+@Test
+func boundProviderProbeUsesStablePostflightBoundaryEvidence() throws {
+  let fixture = try BoundProbeFixture(isDirectory: true)
+  defer { fixture.close() }
+  let before = try providerItemEvidence(isDataless: false, isSyncRoot: false)
+  let after = try providerItemEvidence(isDataless: false, isSyncRoot: true)
+  let sequence = LockedEvidenceSequence([before, before, after, after])
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in completion(.identifierAbsent) },
+    makeMetadataCoordinator: { ImmediateMetadataCoordinator() },
+    readItem: { _, _, _ in sequence.next() }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  guard case .evidence(let evidence) = outcome else {
+    Issue.record("expected stable postflight evidence, got \(outcome)")
+    return
+  }
+  #expect(evidence.traversal == .descendMetadataOnlyProviderBoundary)
+  #expect(sequence.remaining == 0)
+}
+
+@Test
+func unavailableRealDeviceIdentityFailsClosed() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let evidence = try providerItemEvidence(isDataless: false, includeDevice: false)
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in completion(.identifierAbsent) },
+    makeMetadataCoordinator: { ImmediateMetadataCoordinator() },
+    readItem: { _, _, _ in .known(evidence) }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  guard case .rejected(.failed(let stage, let status, _, _)) = outcome else {
+    Issue.record("expected unavailable identity rejection, got \(outcome)")
+    return
+  }
+  #expect(stage == .preflight)
+  #expect(status == .unavailable)
+  #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
 func liveTempRootProbeAndCloneEvidenceWhenAvailable() throws {
   let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
   let manager = FileManager.default
@@ -472,6 +648,49 @@ private func validWire() -> Data {
   return data
 }
 
+private func providerItemEvidence(
+  isDataless: Bool,
+  isSyncRoot: Bool = false,
+  objectType: UInt32 = 2,
+  includeDevice: Bool = true,
+  includeObjectType: Bool = true
+) throws -> ItemStorageEvidence {
+  var wire = validWire()
+  var common =
+    UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_flags() | dp_attr_common_file_id()
+  if includeDevice { common |= dp_attr_common_device() }
+  if includeObjectType { common |= dp_attr_common_object_type() }
+  wire.store(common, at: 4)
+  wire.store(objectType, at: 32)
+  wire.store(isDataless ? dp_flag_dataless() : UInt32(0), at: 36)
+  var extendedFlags = dp_flag_may_share_blocks()
+  if isSyncRoot { extendedFlags |= dp_flag_sync_root() }
+  wire.store(extendedFlags, at: 84)
+  return try ItemWireV1.parse(wire)
+}
+
+private func contentTransitionOutcome(
+  fromDataless: Bool,
+  toDataless: Bool
+) throws -> FileProviderProbeOutcome {
+  let fixture = try BoundProbeFixture(isDirectory: true)
+  defer { fixture.close() }
+  let before = try providerItemEvidence(isDataless: fromDataless)
+  let after = try providerItemEvidence(isDataless: toDataless)
+  let sequence = LockedEvidenceSequence([before, before, after, after])
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in completion(.identifierAbsent) },
+    makeMetadataCoordinator: { ImmediateMetadataCoordinator() },
+    readItem: { _, _, _ in sequence.next() }
+  )
+  return FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+}
+
 extension Data {
   fileprivate mutating func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
     var littleEndian = value.littleEndian
@@ -500,6 +719,24 @@ private final class LockedFlag: @unchecked Sendable {
 
   func set() {
     lock.withLock { storage = true }
+  }
+}
+
+private final class LockedEvidenceSequence: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [ItemStorageEvidence]
+
+  init(_ values: [ItemStorageEvidence]) { self.values = values }
+
+  var remaining: Int { lock.withLock { values.count } }
+
+  func next() -> Capability<ItemStorageEvidence> {
+    lock.withLock {
+      guard !values.isEmpty else {
+        return Capability(status: .inconsistent, detail: "item evidence fixture exhausted")
+      }
+      return .known(values.removeFirst())
+    }
   }
 }
 
@@ -535,13 +772,18 @@ private struct BoundProbeFixture {
   let parentFD: Int32
   let rawName = Data("item".utf8)
 
-  init() throws {
+  init(isDirectory: Bool = false) throws {
     root = FileManager.default.temporaryDirectory.appendingPathComponent(
       UUID().uuidString,
       isDirectory: true
     )
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-    try Data([1]).write(to: root.appendingPathComponent("item"))
+    let item = root.appendingPathComponent("item", isDirectory: isDirectory)
+    if isDirectory {
+      try FileManager.default.createDirectory(at: item, withIntermediateDirectories: false)
+    } else {
+      try Data([1]).write(to: item)
+    }
     parentFD = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
     guard parentFD >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
   }

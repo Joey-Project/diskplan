@@ -12,15 +12,28 @@ cd "$repo_root"
 swift test --filter DiskplanMacOSTests
 swift run diskplan-macos-probe --self-test
 
+fixture_hook_present=0
+
 if [[ ${DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT:-} == "" ]]; then
   echo "file-provider-fixture: not-available (set DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT on India-mac-mini-m4-hoteng)"
-  exit 0
-fi
-
-if [[ ! -d ${DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT} ]]; then
+elif [[ ! -d ${DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT} ]]; then
   echo "file-provider-fixture: configured root is not a directory" >&2
   exit 1
+else
+  echo "file-provider-fixture: hook-present, controlled extension callback oracle not implemented"
+  fixture_hook_present=1
 fi
 
-echo "file-provider-fixture: hook-present, controlled extension callback oracle not implemented"
-exit 77
+if [[ ${DISKPLAN_APFS_VOLUME_GROUP_FIXTURE_ROOT:-} == "" ]]; then
+  echo "apfs-volume-group-fixture: not-available (set DISKPLAN_APFS_VOLUME_GROUP_FIXTURE_ROOT on India-mac-mini-m4-hoteng)"
+elif [[ ! -d ${DISKPLAN_APFS_VOLUME_GROUP_FIXTURE_ROOT} ]]; then
+  echo "apfs-volume-group-fixture: configured root is not a directory" >&2
+  exit 1
+else
+  echo "apfs-volume-group-fixture: hook-present, cross-volume real-device oracle not implemented"
+  fixture_hook_present=1
+fi
+
+if ((fixture_hook_present)); then
+  exit 77
+fi

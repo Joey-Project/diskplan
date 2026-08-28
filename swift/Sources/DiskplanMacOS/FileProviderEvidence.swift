@@ -5,6 +5,9 @@ import Darwin
 public enum TraversalDecision: String, Equatable, Sendable {
   case descendMetadataOnlyProviderBoundary
   case doNotDescendDataless
+  case doNotDescendNonDirectory
+  case doNotDescendUnverifiedItemType
+  case doNotDescendUnverifiedContentState
   case doNotDescendUnverifiedProviderOwnership
 }
 
@@ -57,6 +60,17 @@ public enum FileProviderProbeRejection: Error, Equatable, Sendable {
     expected: FileObjectIdentity,
     observed: FileObjectIdentity
   )
+  case contentStateUnavailable(
+    stage: FileProviderProbeStage,
+    status: CapabilityStatus,
+    detail: String?,
+    errorCode: Int32?
+  )
+  case contentStateMismatch(
+    stage: FileProviderProbeStage,
+    expectedDataless: Bool,
+    observedDataless: Bool
+  )
   case timedOut(stage: FileProviderProbeStage)
 }
 
@@ -78,6 +92,8 @@ public enum FileProviderProbeOutcome: Equatable, Sendable {
   public var traversal: TraversalDecision {
     switch self {
     case .evidence(let evidence): evidence.traversal
+    case .rejected(.contentStateMismatch), .rejected(.contentStateUnavailable):
+      .doNotDescendUnverifiedContentState
     case .rejected: .doNotDescendUnverifiedProviderOwnership
     }
   }
@@ -103,9 +119,31 @@ struct FileProviderProbeOperations: Sendable {
       @escaping @Sendable (ProviderIdentityOperationResult) -> Void
     ) -> Void
   typealias MetadataFactory = @Sendable () -> any FileProviderMetadataCoordinating
+  typealias ItemReader =
+    @Sendable (Int32, Data, NoMaterializationPolicy) -> Capability<ItemStorageEvidence>
 
   let startIdentity: IdentityStarter
   let makeMetadataCoordinator: MetadataFactory
+  let readItem: ItemReader
+
+  init(
+    startIdentity: @escaping IdentityStarter,
+    makeMetadataCoordinator: @escaping MetadataFactory,
+    readItem: @escaping ItemReader = FileProviderProbeOperations.productionItemReader
+  ) {
+    self.startIdentity = startIdentity
+    self.makeMetadataCoordinator = makeMetadataCoordinator
+    self.readItem = readItem
+  }
+
+  private static let productionItemReader: ItemReader = {
+    parentFileDescriptor, rawName, policy in
+    ItemProbe().probe(
+      parentFileDescriptor: parentFileDescriptor,
+      rawName: rawName,
+      policy: policy
+    )
+  }
 
   static let production = Self(
     startIdentity: { url, completion in
@@ -153,7 +191,8 @@ struct FileProviderProbeOperations: Sendable {
         }
       }
     },
-    makeMetadataCoordinator: { FoundationMetadataCoordinator() }
+    makeMetadataCoordinator: { FoundationMetadataCoordinator() },
+    readItem: productionItemReader
   )
 }
 
@@ -279,6 +318,12 @@ private struct DerivedSlot: Sendable {
   let parentURL: URL
 }
 
+private struct ProbedItem: Sendable {
+  let evidence: ItemStorageEvidence
+  let identity: FileObjectIdentity
+  let isDataless: Bool
+}
+
 public struct FileProviderBoundaryProbe: Sendable {
   private let operations: FileProviderProbeOperations
 
@@ -314,7 +359,7 @@ public struct FileProviderBoundaryProbe: Sendable {
     let derived = deriveAndValidateSlot(
       heldParentFileDescriptor: parentFileDescriptor,
       rawName: rawName,
-      expected: before.identity,
+      expected: before,
       isDirectory: before.evidence.objectType.value == .directory,
       policy: livePolicy,
       stage: .derivedPathPreflight
@@ -347,11 +392,18 @@ public struct FileProviderBoundaryProbe: Sendable {
         )
       )
     }
+    if let mismatch = contentStateMismatch(
+      expected: before,
+      observed: after,
+      stage: .postflight
+    ) {
+      return .rejected(mismatch)
+    }
 
     let derivedPostflight = validateDerivedSlot(
       slot,
       rawName: rawName,
-      expected: before.identity,
+      expected: after,
       policy: livePolicy,
       stage: .derivedPathPostflight
     )
@@ -363,7 +415,7 @@ public struct FileProviderBoundaryProbe: Sendable {
     case .success(let result):
       let disposition = identityDisposition(result.identity)
       let decision = Self.decideBoundary(
-        item: before.evidence,
+        item: after.evidence,
         identityDisposition: disposition,
         inheritedProviderBoundary: inheritedProviderBoundary
       )
@@ -391,7 +443,16 @@ public struct FileProviderBoundaryProbe: Sendable {
     identityDisposition: ProviderIdentityDisposition,
     inheritedProviderBoundary: Bool = false
   ) -> (traversal: TraversalDecision, handling: ProviderHandling) {
-    if item.isDataless.value == true, item.objectType.value == .directory {
+    guard let objectType = item.objectType.value else {
+      return (.doNotDescendUnverifiedItemType, .reportOnly)
+    }
+    guard objectType == .directory else {
+      return (.doNotDescendNonDirectory, .reportOnly)
+    }
+    guard let isDataless = item.isDataless.value else {
+      return (.doNotDescendUnverifiedContentState, .reportOnly)
+    }
+    if isDataless {
       return (.doNotDescendDataless, .reportOnly)
     }
     let providerBound =
@@ -470,31 +531,60 @@ public struct FileProviderBoundaryProbe: Sendable {
     policy: NoMaterializationPolicy,
     stage: FileProviderProbeStage
   ) -> Result<
-    (evidence: ItemStorageEvidence, identity: FileObjectIdentity), FileProviderProbeRejection
+    ProbedItem, FileProviderProbeRejection
   > {
-    let result = ItemProbe().probe(
-      parentFileDescriptor: parentFileDescriptor,
-      rawName: rawName,
-      policy: policy
-    )
+    let result = operations.readItem(parentFileDescriptor, rawName, policy)
     guard let evidence = result.value else {
       return .failure(rejection(for: result, stage: stage))
     }
-    guard let device = evidence.device.value,
-      let fileID = evidence.fileID.value,
-      let objectType = evidence.objectType.value
-    else {
+    guard let device = evidence.device.value else {
       return .failure(
         .failed(
           stage: stage,
-          status: .inconsistent,
-          detail: "device, file ID, and object type are required for URL binding",
-          errorCode: nil
+          status: requiredFieldStatus(evidence.device.status),
+          detail: evidence.device.detail ?? "real device identity is required for URL binding",
+          errorCode: evidence.device.errorCode
+        )
+      )
+    }
+    guard let fileID = evidence.fileID.value else {
+      return .failure(
+        .failed(
+          stage: stage,
+          status: requiredFieldStatus(evidence.fileID.status),
+          detail: evidence.fileID.detail ?? "file ID is required for URL binding",
+          errorCode: evidence.fileID.errorCode
+        )
+      )
+    }
+    guard let objectType = evidence.objectType.value else {
+      return .failure(
+        .failed(
+          stage: stage,
+          status: requiredFieldStatus(evidence.objectType.status),
+          detail: evidence.objectType.detail ?? "object type is required for URL binding",
+          errorCode: evidence.objectType.errorCode
+        )
+      )
+    }
+    guard let isDataless = evidence.isDataless.value else {
+      let status =
+        evidence.isDataless.status == .known ? .inconsistent : evidence.isDataless.status
+      return .failure(
+        .contentStateUnavailable(
+          stage: stage,
+          status: status,
+          detail: evidence.isDataless.detail ?? "dataless state is required for safe probing",
+          errorCode: evidence.isDataless.errorCode
         )
       )
     }
     return .success(
-      (evidence, FileObjectIdentity(device: device, fileID: fileID, objectType: objectType))
+      ProbedItem(
+        evidence: evidence,
+        identity: FileObjectIdentity(device: device, fileID: fileID, objectType: objectType),
+        isDataless: isDataless
+      )
     )
   }
 
@@ -519,7 +609,7 @@ public struct FileProviderBoundaryProbe: Sendable {
   private func deriveAndValidateSlot(
     heldParentFileDescriptor: Int32,
     rawName: Data,
-    expected: FileObjectIdentity,
+    expected: ProbedItem,
     isDirectory: Bool,
     policy: NoMaterializationPolicy,
     stage: FileProviderProbeStage
@@ -558,7 +648,7 @@ public struct FileProviderBoundaryProbe: Sendable {
   private func validateDerivedSlot(
     _ slot: DerivedSlot,
     rawName: Data,
-    expected: FileObjectIdentity,
+    expected: ProbedItem,
     policy: NoMaterializationPolicy,
     stage: FileProviderProbeStage
   ) -> Result<Void, FileProviderProbeRejection> {
@@ -577,12 +667,36 @@ public struct FileProviderBoundaryProbe: Sendable {
       stage: stage
     )
     guard case .success(let observed) = result else { return .failure(result.failure!) }
-    guard observed.identity == expected else {
+    guard observed.identity == expected.identity else {
       return .failure(
-        .identityMismatch(stage: stage, expected: expected, observed: observed.identity)
+        .identityMismatch(stage: stage, expected: expected.identity, observed: observed.identity)
       )
     }
+    if let mismatch = contentStateMismatch(
+      expected: expected,
+      observed: observed,
+      stage: stage
+    ) {
+      return .failure(mismatch)
+    }
     return .success(())
+  }
+
+  private func contentStateMismatch(
+    expected: ProbedItem,
+    observed: ProbedItem,
+    stage: FileProviderProbeStage
+  ) -> FileProviderProbeRejection? {
+    guard expected.isDataless != observed.isDataless else { return nil }
+    return .contentStateMismatch(
+      stage: stage,
+      expectedDataless: expected.isDataless,
+      observedDataless: observed.isDataless
+    )
+  }
+
+  private func requiredFieldStatus(_ status: CapabilityStatus) -> CapabilityStatus {
+    status == .known ? .inconsistent : status
   }
 
   private func policyRejection(
