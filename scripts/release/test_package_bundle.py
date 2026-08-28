@@ -32,8 +32,13 @@ def load_module(name: str, path: Path) -> ModuleType:
 
 
 packager = load_module("diskplan_test_packager", SCRIPT_DIR / "package_bundle.py")
+sys.modules["package_bundle"] = packager
 source_manifest = load_module(
     "diskplan_test_source_manifest", SCRIPT_DIR / "source_manifest.py"
+)
+protocol_contract_fixture = load_module(
+    "diskplan_test_protocol_contract_fixture",
+    SCRIPT_DIR / "rewrite_protocol_contract_fixture.py",
 )
 
 
@@ -78,7 +83,7 @@ def make_test_bundle(parent: Path, reverse: bool = False) -> Path:
         "optional_capabilities": [],
         "product_version": "0.1.0",
         "protocol_major": 1,
-        "protocol_minor": 3,
+        "protocol_minor": 4,
         "release_gate_macos": "26.0",
         "required_capabilities": ["framing-v1"],
         "source_revision": "0" * 40,
@@ -168,6 +173,86 @@ class VersionMetadataTests(unittest.TestCase):
             directories.stdout.decode("ascii").splitlines(),
             packager.bundle_directories(expected_files),
         )
+
+    def test_protocol_contract_fixture_rewrites_only_exact_bound_assets(self) -> None:
+        repository_root = SCRIPT_DIR.parent.parent
+        source = repository_root / "release/bundle-contract.json"
+        expected_contract = json.loads(source.read_text(encoding="ascii"))
+        for artifact in expected_contract["artifacts"]:
+            if artifact["bundle_path"] in protocol_contract_fixture.PROTOCOL_ASSETS:
+                artifact["compatibility_version"] = "protocol-2.4"
+        expected_bytes = packager.canonical_compact_json(expected_contract)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "bundle-contract.json"
+            protocol_contract_fixture.rewrite_contract(
+                source,
+                output,
+                "1.4",
+                "2.4",
+            )
+            self.assertEqual(output.read_bytes(), expected_bytes)
+            artifacts, _excluded = packager.load_bundle_contract(output)
+            rewritten = {
+                item.bundle_path
+                for item in artifacts
+                if item.compatibility_version == "protocol-2.4"
+            }
+            self.assertEqual(rewritten, set(protocol_contract_fixture.PROTOCOL_ASSETS))
+
+    def test_protocol_contract_fixture_rejects_same_count_path_drift(self) -> None:
+        repository_root = SCRIPT_DIR.parent.parent
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.json"
+            output = root / "output.json"
+            contract = json.loads(
+                (repository_root / "release/bundle-contract.json").read_text(
+                    encoding="ascii"
+                )
+            )
+            by_path = {item["bundle_path"]: item for item in contract["artifacts"]}
+            by_path["protocol.json"]["compatibility_version"] = "local-install-v1"
+            by_path["release-common.sh"]["compatibility_version"] = "protocol-1.4"
+            source.write_bytes(packager.canonical_compact_json(contract))
+            with self.assertRaisesRegex(
+                ValueError,
+                "protocol-bound bundle asset metadata mismatch: protocol.json",
+            ):
+                protocol_contract_fixture.rewrite_contract(
+                    source,
+                    output,
+                    "1.4",
+                    "2.4",
+                )
+            self.assertFalse(output.exists())
+
+    def test_protocol_contract_fixture_rejects_noncanonical_numeric_protocol_asset(
+        self,
+    ) -> None:
+        repository_root = SCRIPT_DIR.parent.parent
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.json"
+            output = root / "output.json"
+            contract = json.loads(
+                (repository_root / "release/bundle-contract.json").read_text(
+                    encoding="ascii"
+                )
+            )
+            by_path = {item["bundle_path"]: item for item in contract["artifacts"]}
+            by_path["release-common.sh"]["compatibility_version"] = "protocol-01.4"
+            source.write_bytes(packager.canonical_compact_json(contract))
+            with self.assertRaisesRegex(
+                ValueError,
+                "unexpected protocol-bound bundle asset: release-common.sh",
+            ):
+                protocol_contract_fixture.rewrite_contract(
+                    source,
+                    output,
+                    "1.4",
+                    "2.4",
+                )
+            self.assertFalse(output.exists())
 
 
 class SourceManifestTests(unittest.TestCase):
@@ -461,8 +546,11 @@ class DeterministicGzipTests(unittest.TestCase):
                     os.close(directory_fd)
         self.assertEqual(archives[0], archives[1])
         self.assertEqual(
-            packager.digest(archives[0]),
-            "43ebcb691de29cba425a9b33937d24d0cacc94b5074909d3cda659201adb79a1",
+            [packager.digest(archive) for archive in archives],
+            [
+                "5bce31c2eb91417c4354d3a82d18062a397fe07b5345234c22e741f8e14391c2",
+                "5bce31c2eb91417c4354d3a82d18062a397fe07b5345234c22e741f8e14391c2",
+            ],
         )
         self.assertEqual(archives[0][:10], packager.GZIP_HEADER)
         self.assertEqual(archives[0][4:8], b"\x00\x00\x00\x00")
@@ -587,14 +675,14 @@ class PackagingAssetsTests(unittest.TestCase):
                     "component": component,
                     "product_version": "0.1.0",
                     "protocol_major": 1,
-                    "protocol_minor": 3,
+                    "protocol_minor": 4,
                 }
 
             helper = {
                 "component": "diskplan-fs-helper",
                 "product_version": "0.1.0",
                 "protocol_major": 1,
-                "protocol_minor": 3,
+                "protocol_minor": 4,
                 "helper_abi": 1,
             }
             with (
@@ -615,11 +703,30 @@ class PackagingAssetsTests(unittest.TestCase):
                 self.assertIsNotNone(manifest_member)
                 manifest = json.load(manifest_member)
             artifact_paths = [item["path"] for item in manifest["artifacts"]]
+            artifact_compatibility = {
+                item["path"]: item["compatibility_version"]
+                for item in manifest["artifacts"]
+            }
             self.assertIn("rules/builtin-v1.json", artifact_paths)
             self.assertIn("rules/user-policy-default-v1.json", artifact_paths)
             self.assertIn("proto/diskplan/v1/ipc.proto", artifact_paths)
             self.assertIn("proto/fixtures/canonical-binary-v1/evidence.bin", artifact_paths)
+            runtime_fixture_paths = {
+                "proto/fixtures/runtime-v1.4/README.md",
+                "proto/fixtures/runtime-v1.4/codex-scope-action.frames.hex",
+                "proto/fixtures/runtime-v1.4/empty-batch-dry-run.frames.hex",
+                "proto/fixtures/runtime-v1.4/fixtures.json",
+                "proto/fixtures/runtime-v1.4/force-action-execution.frames.hex",
+                "proto/fixtures/runtime-v1.4/git-evidence-action.frames.hex",
+                "proto/fixtures/runtime-v1.4/version-survivor-action.frames.hex",
+            }
+            self.assertTrue(runtime_fixture_paths.issubset(artifact_paths))
+            self.assertEqual(
+                {artifact_compatibility[path] for path in runtime_fixture_paths},
+                {"runtime-v1.4"},
+            )
             self.assertIn("runtime-capabilities.json", artifact_paths)
+            self.assertEqual(manifest["protocol_minor"], 4)
             self.assertEqual(
                 manifest["optional_capabilities"],
                 [

@@ -85,6 +85,13 @@ diskplan_expected_files() {
         proto/fixtures/canonical-binary-v1/evidence.bin \
         proto/fixtures/canonical-binary-v1/evidence.json \
         proto/fixtures/canonical-binary-v1/evidence.sha256 \
+        proto/fixtures/runtime-v1.4/README.md \
+        proto/fixtures/runtime-v1.4/codex-scope-action.frames.hex \
+        proto/fixtures/runtime-v1.4/empty-batch-dry-run.frames.hex \
+        proto/fixtures/runtime-v1.4/fixtures.json \
+        proto/fixtures/runtime-v1.4/force-action-execution.frames.hex \
+        proto/fixtures/runtime-v1.4/git-evidence-action.frames.hex \
+        proto/fixtures/runtime-v1.4/version-survivor-action.frames.hex \
         proto/fixtures/scan-stream-v1.3/README.md \
         proto/fixtures/scan-stream-v1.3/fixtures.json \
         proto/fixtures/scan-stream-v1.3/multi-finalized.frames.hex \
@@ -108,6 +115,7 @@ diskplan_expected_directories() {
         proto/fixtures \
         proto/diskplan/v1 \
         proto/fixtures/canonical-binary-v1 \
+        proto/fixtures/runtime-v1.4 \
         proto/fixtures/scan-stream-v1.3
 }
 
@@ -119,18 +127,25 @@ diskplan_expected_artifact_contract() {
         $'diskplan-engine\t0755\texecutable\tproduct-v1' \
         $'diskplan-fs-helper\t0755\texecutable\tfilesystem-helper-v1' \
         $'install.sh\t0755\tlifecycle-script\tlocal-install-v1' \
-        $'proto/diskplan/v1/ipc.proto\t0644\tprotocol-schema\tprotocol-1.3' \
+        $'proto/diskplan/v1/ipc.proto\t0644\tprotocol-schema\tprotocol-1.4' \
         $'proto/fixtures/canonical-binary-v1/evidence.bin\t0644\tcompatibility-fixture\tcanonical-binary-v1' \
         $'proto/fixtures/canonical-binary-v1/evidence.json\t0644\tcompatibility-fixture\tcanonical-binary-v1' \
         $'proto/fixtures/canonical-binary-v1/evidence.sha256\t0644\tcompatibility-fixture\tcanonical-binary-v1' \
+        $'proto/fixtures/runtime-v1.4/README.md\t0644\tcompatibility-fixture-documentation\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/codex-scope-action.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/empty-batch-dry-run.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/fixtures.json\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/force-action-execution.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/git-evidence-action.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/version-survivor-action.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
         $'proto/fixtures/scan-stream-v1.3/README.md\t0644\tcompatibility-fixture-documentation\tscan-stream-v1.3' \
         $'proto/fixtures/scan-stream-v1.3/fixtures.json\t0644\tcompatibility-fixture\tscan-stream-v1.3' \
         $'proto/fixtures/scan-stream-v1.3/multi-finalized.frames.hex\t0644\tcompatibility-fixture\tscan-stream-v1.3' \
         $'proto/fixtures/scan-stream-v1.3/single-ready.frames.hex\t0644\tcompatibility-fixture\tscan-stream-v1.3' \
         $'proto/fixtures/scan-stream-v1.3/zero-ready.frames.hex\t0644\tcompatibility-fixture\tscan-stream-v1.3' \
         $'proto/toolchain.lock\t0644\tprotocol-toolchain-lock\tprotocol-toolchain-v1' \
-        $'protocol-version\t0644\tprotocol-version\tprotocol-1.3' \
-        $'protocol.json\t0644\tprotocol-metadata\tprotocol-1.3' \
+        $'protocol-version\t0644\tprotocol-version\tprotocol-1.4' \
+        $'protocol.json\t0644\tprotocol-metadata\tprotocol-1.4' \
         $'release-common.sh\t0644\tlifecycle-library\tlocal-install-v1' \
         $'rules/builtin-v1.json\t0644\tdeclarative-rules\tdiskplan.rules.v1' \
         $'rules/user-policy-default-v1.json\t0644\tdefault-policy\tdiskplan.user-policy.v1' \
@@ -165,7 +180,7 @@ diskplan_verify_bundle() {
 
     local manifest_key_count capability_key_count
     manifest_key_count="$(/usr/bin/plutil -convert xml1 -o - "${bundle}/manifest.json" | /usr/bin/grep -c '<key>')" || diskplan_die "manifest schema cannot be enumerated"
-    [[ "${manifest_key_count}" == "151" ]] || diskplan_die "manifest contains missing or unknown fields"
+    [[ "${manifest_key_count}" == "193" ]] || diskplan_die "manifest contains missing or unknown fields"
     capability_key_count="$(/usr/bin/plutil -convert xml1 -o - "${bundle}/runtime-capabilities.json" | /usr/bin/grep -c '<key>')" || diskplan_die "runtime capability schema cannot be enumerated"
     [[ "${capability_key_count}" == "18" ]] || diskplan_die "runtime capability manifest contains missing or unknown fields"
 

@@ -265,15 +265,19 @@ make_fixture_bundle() {
     local major="$2"
     local output="$3"
     local fixture="${TEST_ROOT}/fixture-${version}-${major}"
-    local minor
+    local minor source_major source_minor
     mkdir "${fixture}"
     /usr/bin/printf '%s\n' "${version}" > "${fixture}/VERSION"
     /bin/cp "${REPO_ROOT}/release/protocol.json" "${fixture}/protocol.json"
+    source_major="$(/usr/bin/plutil -extract protocol_major raw -o - "${fixture}/protocol.json")"
+    source_minor="$(/usr/bin/plutil -extract protocol_minor raw -o - "${fixture}/protocol.json")"
     /usr/bin/plutil -replace protocol_major -integer "${major}" "${fixture}/protocol.json"
     minor="$(/usr/bin/plutil -extract protocol_minor raw -o - "${fixture}/protocol.json")"
-    /usr/bin/sed \
-        "s/\"compatibility_version\":\"protocol-1.3\"/\"compatibility_version\":\"protocol-${major}.${minor}\"/g" \
-        "${REPO_ROOT}/release/bundle-contract.json" > "${fixture}/bundle-contract.json"
+    python3 "${SCRIPT_DIR}/rewrite_protocol_contract_fixture.py" \
+        --source "${REPO_ROOT}/release/bundle-contract.json" \
+        --output "${fixture}/bundle-contract.json" \
+        --source-version "${source_major}.${source_minor}" \
+        --target-version "${major}.${minor}"
     build_identity_binary "${fixture}/diskplan" diskplan "${version}" "${major}" "${minor}"
     build_identity_binary "${fixture}/diskplan-engine" diskplan-engine "${version}" "${major}" "${minor}"
     build_fs_helper "${fixture}/diskplan-fs-helper" "${version}" "${major}" "${minor}"
