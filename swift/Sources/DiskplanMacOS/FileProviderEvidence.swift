@@ -275,13 +275,15 @@ final class DeadlineResultBox<Value: Sendable>: @unchecked Sendable {
   }
 }
 
-private struct OperationDeadline: Sendable {
+struct OperationDeadline: Sendable {
   let dispatchTime: DispatchTime
 
-  init(timeout: Duration) {
+  init(
+    timeout: Duration,
+    nowUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+  ) {
     let nanoseconds = Self.nanoseconds(timeout)
-    let now = DispatchTime.now().uptimeNanoseconds
-    let (sum, overflow) = now.addingReportingOverflow(nanoseconds)
+    let (sum, overflow) = nowUptimeNanoseconds.addingReportingOverflow(nanoseconds)
     dispatchTime = DispatchTime(uptimeNanoseconds: overflow ? UInt64.max : sum)
   }
 
