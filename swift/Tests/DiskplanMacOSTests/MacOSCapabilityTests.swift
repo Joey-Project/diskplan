@@ -379,6 +379,21 @@ func boundProviderProbeTypesIdentityTimeoutWithoutMetadataWork() throws {
 }
 
 @Test
+func deadlineResultBoxDiscardsCompletionAfterTimeoutBeforeCloseLock() {
+  let box = DeadlineResultBox<Int>()
+  let callbackRan = LockedFlag()
+  let result = box.wait(until: .now()) {
+    callbackRan.set()
+    box.complete(42)
+  }
+  #expect(callbackRan.value)
+  #expect(result == nil)
+
+  box.complete(43)
+  #expect(box.wait(until: .now()) == nil)
+}
+
+@Test
 func boundProviderProbeReturnsMetadataUnavailableWithoutInProcessCoordination() throws {
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }

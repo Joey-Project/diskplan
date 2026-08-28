@@ -93,9 +93,11 @@ provider-bound evidence permits metadata-only descent but never changes report-o
   that evidence separately.
 
 Identity lookup has one monotonic deadline, including subsecond durations. Its heap-owned
-completion box closes to late callback writes. No metadata accessor or background coordination
-task is spawned, and the identity deadline is not represented as control over unrelated,
-unkillable in-process work.
+completion box closes to late callback writes. Once the semaphore reports timeout, the timeout
+path atomically closes and discards any value, including a callback that completes after the
+deadline but acquires the box lock before the timeout thread. A post-deadline result can never
+turn timeout into success. No metadata accessor or background coordination task is spawned, and
+the identity deadline is not represented as control over unrelated, unkillable in-process work.
 
 The India-host script hooks deliberately report the controlled extension fixture and true APFS
 volume-group identity fixture as not available until those fixtures exist. The latter must prove

@@ -195,7 +195,7 @@ struct FileProviderProbeOperations: Sendable {
   )
 }
 
-private final class DeadlineResultBox<Value: Sendable>: @unchecked Sendable {
+final class DeadlineResultBox<Value: Sendable>: @unchecked Sendable {
   private let lock = NSLock()
   private let semaphore = DispatchSemaphore(value: 0)
   private var accepting = true
@@ -210,18 +210,22 @@ private final class DeadlineResultBox<Value: Sendable>: @unchecked Sendable {
     if accepted { semaphore.signal() }
   }
 
-  func wait(until deadline: DispatchTime) -> Value? {
+  func wait(
+    until deadline: DispatchTime,
+    onTimedOutBeforeClose: (() -> Void)? = nil
+  ) -> Value? {
     if semaphore.wait(timeout: deadline) == .success {
-      return lock.withLock { value }
+      return lock.withLock {
+        accepting = false
+        return value
+      }
     }
-    return closeAndTake()
-  }
-
-  func closeAndTake() -> Value? {
+    onTimedOutBeforeClose?()
     lock.withLock {
       accepting = false
-      return value
+      value = nil
     }
+    return nil
   }
 }
 
