@@ -42,6 +42,11 @@ superseded_by:
   and the scan deadline with explicit partial coverage.
 - [x] Bind complete resolved raw scope, budgets, and collector configuration into
   scan provenance.
+- [x] Revalidate provider/dataless/sync-root, byte-credit, and sharing-topology
+  evidence after provider probing before accepting traversal or exact credit.
+- [x] Preserve typed File Provider rejection outcomes through scan coverage.
+- [x] Reject duplicate root IDs before scope freeze and retain actual root bindings
+  in traversal frames.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [ ] Integrate scanner evidence into the versioned IPC workstream.
 
@@ -54,7 +59,7 @@ superseded_by:
 
 ## Handoff
 
-- Phase: Phase 1 frozen-review repair complete and validated.
+- Phase: Phase 1 second frozen-review repair complete and validated.
 - Next step: repeat independent frozen-range review, then prepare PR delivery.
 - Blocker: none for the scanner slice. The authoritative directory packed-attribute
   parser fix is integrated from foundation head
@@ -96,3 +101,15 @@ superseded_by:
   CLI self-test; unavailable controlled fixtures remain reported as unavailable.
 - Strict Swift format lint, `git diff --check`, CI journal tests (17 tests), both
   journal validators, `bash -n`, and ShellCheck pass for the final repair range.
+- The second frozen review identified stale provider postflight state, collapsed
+  typed provider rejections, and duplicate root-ID aliasing. The follow-up compares
+  the complete policy-relevant item snapshot, maps every provider rejection into a
+  typed observation and coverage outcome, rejects duplicate IDs before scope
+  freeze, and retains the actual root binding in each frame. Focused scanner tests
+  pass all 30 tests.
+- After the second frozen-review repair, the complete Swift suite passes all 78
+  tests and the explicit Swift build with automatic dependency resolution disabled
+  succeeds. The macOS capability gate again passes 32 focused tests plus the CLI
+  self-test, with controlled fixtures explicitly unavailable on this local host.
+- Strict Swift format lint, `git diff --check`, CI journal tests (17 tests), both
+  journal validators, `bash -n`, and ShellCheck pass for the second repair range.

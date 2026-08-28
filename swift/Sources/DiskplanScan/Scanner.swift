@@ -40,6 +40,7 @@ public struct ScanResult: Equatable, Sendable {
 
 private struct DirectoryFrame {
   let directory: BoundDirectory
+  let rootBinding: RootBinding
   let path: RawPath
   let identity: ObjectIdentity
   let names: [RawPathComponent]
@@ -183,7 +184,7 @@ public final class DeterministicScanner {
               aggregateBytes: .lowerBoundZero,
               coverage: Coverage(
                 completeness: .partial,
-                reasons: [.providerMetadataOnly]
+                reasons: coverageReasons(for: root.providerBoundary)
               ).merging(closeCoverage),
               entriesObserved: 0,
               directoriesClosed: 0
@@ -220,6 +221,7 @@ public final class DeterministicScanner {
           stack = [
             DirectoryFrame(
               directory: root.directory,
+              rootBinding: root.binding,
               path: RawPath(rootID: root.binding.rootID),
               identity: root.binding.identity,
               names: enumeration.names,
@@ -234,8 +236,10 @@ public final class DeterministicScanner {
               aggregate: .lowerBoundZero,
               storageTopology: .unknown,
               coverage: enumeration.coverage.merging(
-                root.providerBoundary.isProviderManaged
-                  ? Coverage(completeness: .partial, reasons: [.providerMetadataOnly]) : .complete
+                Coverage(
+                  completeness: .complete,
+                  reasons: coverageReasons(for: root.providerBoundary)
+                )
               )
             )
           ]
@@ -244,14 +248,17 @@ public final class DeterministicScanner {
           let closeCoverage = coverage(for: filesystem.close(root.directory))
           rootFailures.append((request.rootID, failure.erasingValue()))
           globalCoverage = globalCoverage.merging(
-            Coverage(completeness: .partial, reasons: [coverageReason(failure)])
+            Coverage(completeness: .partial, reasons: coverageReasons(failure))
               .merging(closeCoverage)
           )
         }
       case let failure:
         rootFailures.append((request.rootID, failure.erasingValue()))
         globalCoverage = globalCoverage.merging(
-          Coverage(completeness: .partial, reasons: [coverageReason(failure)])
+          Coverage(
+            completeness: .partial,
+            reasons: coverageReasons(failure) + [.providerStateUnverified]
+          )
         )
       }
     }
@@ -284,9 +291,10 @@ public final class DeterministicScanner {
       if item.identity.device != stack[0].identity.device {
         nodeCoverage = Coverage(completeness: .partial, reasons: [.mountBoundary])
       }
-      if providerBoundary.isProviderManaged {
+      let providerCoverageReasons = coverageReasons(for: providerBoundary)
+      if !providerCoverageReasons.isEmpty {
         nodeCoverage = nodeCoverage.merging(
-          Coverage(completeness: .partial, reasons: [.providerMetadataOnly])
+          Coverage(completeness: .partial, reasons: providerCoverageReasons)
         )
       }
       let retainedCoverage =
@@ -352,6 +360,7 @@ public final class DeterministicScanner {
           stack.append(
             DirectoryFrame(
               directory: directory,
+              rootBinding: stack[frameIndex].rootBinding,
               path: path,
               identity: item.identity,
               names: enumeration.names,
@@ -373,20 +382,20 @@ public final class DeterministicScanner {
           let closeCoverage = coverage(for: filesystem.close(directory))
           stack[frameIndex].aggregate = .adding(stack[frameIndex].aggregate, item.bytes)
           stack[frameIndex].coverage = stack[frameIndex].coverage.merging(
-            Coverage(completeness: .partial, reasons: [coverageReason(failure)])
+            Coverage(completeness: .partial, reasons: coverageReasons(failure))
               .merging(closeCoverage)
           )
         }
       case let failure:
         stack[frameIndex].aggregate = .adding(stack[frameIndex].aggregate, item.bytes)
         stack[frameIndex].coverage = stack[frameIndex].coverage.merging(
-          Coverage(completeness: .partial, reasons: [coverageReason(failure)])
+          Coverage(completeness: .partial, reasons: coverageReasons(failure))
         )
       }
     case let failure:
       let coverage = Coverage(
         completeness: .partial,
-        reasons: [coverageReason(failure), .providerStateUnverified]
+        reasons: coverageReasons(failure) + [.providerStateUnverified]
       )
       let node = ScannedNode(
         path: path,
@@ -411,10 +420,9 @@ public final class DeterministicScanner {
     directoriesInCurrentRoot += 1
     totalDirectories += 1
     if stack.isEmpty {
-      let binding = bindingForCompletedRoot(frame)
       completedRoots.append(
         RootScanResult(
-          binding: binding,
+          binding: frame.rootBinding,
           providerBoundary: frame.rootProviderBoundary,
           aggregateBytes: frame.aggregate,
           coverage: frame.coverage.merging(forcedCoverage),
@@ -444,16 +452,6 @@ public final class DeterministicScanner {
     }
   }
 
-  private func bindingForCompletedRoot(_ frame: DirectoryFrame) -> RootBinding {
-    let root = scope.roots.first { $0.rootID == frame.path.rootID }!
-    return RootBinding(
-      resolverVersion: scope.resolverVersion,
-      rootID: root.rootID,
-      rawAbsolutePath: root.rawAbsolutePath,
-      identity: frame.identity
-    )
-  }
-
   private func finalizeOpenRoot() {
     guard !stack.isEmpty else { return }
     let rootFrame = stack[0]
@@ -466,7 +464,7 @@ public final class DeterministicScanner {
     coverage = coverage.merging(closeOpenDirectories())
     completedRoots.append(
       RootScanResult(
-        binding: bindingForCompletedRoot(rootFrame),
+        binding: rootFrame.rootBinding,
         providerBoundary: rootFrame.rootProviderBoundary,
         aggregateBytes: aggregate,
         coverage: coverage,
@@ -541,7 +539,7 @@ public final class DeterministicScanner {
     for observation: Observation<DirectoryCloseEvidence>
   ) -> Coverage {
     guard observation.value == nil else { return .complete }
-    return Coverage(completeness: .partial, reasons: [coverageReason(observation)])
+    return Coverage(completeness: .partial, reasons: coverageReasons(observation))
   }
 
   private func addingSaturated(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
@@ -549,16 +547,28 @@ public final class DeterministicScanner {
     return overflow ? UInt64.max : sum
   }
 
-  private func coverageReason<Value>(_ observation: Observation<Value>) -> CoverageReason {
+  private func coverageReasons<Value>(_ observation: Observation<Value>) -> [CoverageReason] {
     switch observation {
-    case .known: .collectorFailed
-    case .absent: .missing
-    case .unknown: .collectorFailed
-    case .unreadable: .permissionDenied
-    case .failed(_, let code) where code == ESTALE: .identityMismatch
-    case .failed(_, let code) where code == EAGAIN: .accessPolicyChanged
-    case .failed(_, let code) where code == ENODATA: .providerStateUnverified
-    case .failed: .collectorFailed
+    case .known: [.collectorFailed]
+    case .absent: [.missing]
+    case .unknown: [.collectorFailed]
+    case .unreadable: [.permissionDenied]
+    case .failed(_, let code) where code == ESTALE: [.identityMismatch]
+    case .failed(_, let code) where code == EAGAIN: [.accessPolicyChanged]
+    case .failed(_, let code) where code == EBUSY:
+      [.providerStateUnverified, .unstableDuringScan]
+    case .failed(_, let code) where code == ETIMEDOUT:
+      [.providerStateUnverified, .timedOut]
+    case .failed(_, let code) where code == ENODATA: [.providerStateUnverified]
+    case .failed: [.collectorFailed]
+    }
+  }
+
+  private func coverageReasons(for boundary: ProviderBoundary) -> [CoverageReason] {
+    switch boundary {
+    case .localOrUnindicated: []
+    case .metadataOnly: [.providerMetadataOnly]
+    case .rejected, .unverified: [.providerStateUnverified]
     }
   }
 

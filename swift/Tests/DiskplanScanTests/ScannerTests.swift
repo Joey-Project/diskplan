@@ -1,7 +1,8 @@
 import Darwin
-import DiskplanMacOS
 import Foundation
 import Testing
+
+@testable import DiskplanMacOS
 @testable import DiskplanScan
 
 private struct FakeNode: Sendable {
@@ -235,6 +236,22 @@ private final class LockedPolicyGate: @unchecked Sendable {
   var callCount: Int { lock.withLock { calls } }
 }
 
+private final class LockedItemEvidenceSequence: @unchecked Sendable {
+  private let lock = NSLock()
+  private let values: [ItemStorageEvidence]
+  private var index = 0
+
+  init(_ values: [ItemStorageEvidence]) { self.values = values }
+
+  func read() -> Capability<ItemStorageEvidence> {
+    lock.withLock {
+      let value = values[min(index, values.count - 1)]
+      index += 1
+      return .known(value)
+    }
+  }
+}
+
 private final class CapturingSink: ScanNodeSink, @unchecked Sendable {
   private let lock = NSLock()
   private var stored: [ScanNodeEvent] = []
@@ -250,6 +267,79 @@ private let fakeAccessPolicy = AccessPolicyEvidence(
   mode: UInt32(S_IFDIR | S_IRWXU),
   flags: 0
 )
+
+private func replacingItemEvidence(
+  _ item: ItemStorageEvidence,
+  logicalBytes: Capability<UInt64>? = nil,
+  sharing: SharingEvidence? = nil,
+  isDataless: Capability<Bool>? = nil,
+  isSyncRoot: Capability<Bool>? = nil
+) -> ItemStorageEvidence {
+  ItemStorageEvidence(
+    returnedAttributes: item.returnedAttributes,
+    device: item.device,
+    objectType: item.objectType,
+    fileID: item.fileID,
+    linkCount: item.linkCount,
+    logicalBytes: logicalBytes ?? item.logicalBytes,
+    nominalAllocatedBytes: item.nominalAllocatedBytes,
+    immediatePrivateReclaimBytes: item.immediatePrivateReclaimBytes,
+    sharing: sharing ?? item.sharing,
+    vfsFlags: item.vfsFlags,
+    isDataless: isDataless ?? item.isDataless,
+    isSyncRoot: isSyncRoot ?? item.isSyncRoot,
+    providerHiddenFootprint: item.providerHiddenFootprint,
+    snapshotAttributedBytes: item.snapshotAttributedBytes
+  )
+}
+
+private func confirmedProviderEvidence() -> FileProviderProbeOutcome {
+  .evidence(
+    FileProviderEvidence(
+      identity: .known(
+        ProviderIdentity(itemIdentifier: "fixture-item", domainIdentifier: "fixture-domain")
+      ),
+      identityDisposition: .confirmedProvider,
+      providerCapabilities: .unavailable("fixture"),
+      promisedMetadata: .unavailable("fixture"),
+      traversal: .descendMetadataOnlyProviderBoundary,
+      handling: .reportOnly,
+      hiddenBackingBytes: .unavailable("fixture"),
+      controlledNonMaterializationAcceptance: .unavailable("fixture")
+    )
+  )
+}
+
+private func fixtureItemEvidence() -> ItemStorageEvidence {
+  ItemStorageEvidence(
+    returnedAttributes: ReturnedAttributeMasks(
+      common: 0,
+      volume: 0,
+      directory: 0,
+      file: 0,
+      extended: 0
+    ),
+    device: .known(1),
+    objectType: .known(.directory),
+    fileID: .known(1),
+    linkCount: .known(1),
+    logicalBytes: .known(1),
+    nominalAllocatedBytes: .known(1),
+    immediatePrivateReclaimBytes: .known(1),
+    sharing: SharingEvidence(
+      mayShareBlocks: .known(false),
+      sharesAllBlocks: .known(false),
+      cloneID: .known(0),
+      cloneRefcount: .known(1),
+      conditionalGroupReclaimBytes: .unavailable("fixture")
+    ),
+    vfsFlags: .known(0),
+    isDataless: .known(false),
+    isSyncRoot: .known(false),
+    providerHiddenFootprint: .unavailable("fixture"),
+    snapshotAttributedBytes: .unavailable("fixture")
+  )
+}
 
 private func boundedEnumeration(
   _ names: [RawPathComponent],
@@ -295,7 +385,7 @@ private func directory(
 }
 
 private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) -> ScanResult {
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 1,
     profile: .deep,
     roots: [filesystem.request],
@@ -405,7 +495,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
       directoryPath.appending(childName): file(3, bytes: 1),
     ]
   )
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 1,
     profile: .deep,
     roots: [fs.request],
@@ -421,7 +511,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   #expect(partial.coverage.reasons.contains(.userFinalizedPartial))
 }
 
-@Test func providerBoundaryIsMetadataOnlyAndNeverOpened() {
+@Test func rejectedProviderBoundaryIsUnverifiedAndNeverOpened() {
   let provider = component("provider")
   let child = component("cloud")
   let root = RawPath(rootID: "root")
@@ -436,7 +526,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   )
   let result = run(fs)
   #expect(fs.openedPaths == 0)
-  #expect(result.coverage.reasons.contains(.providerMetadataOnly))
+  #expect(result.coverage.reasons.contains(.providerStateUnverified))
   #expect(result.progress.entriesObserved == 1)
 }
 
@@ -480,7 +570,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     providerEvidence: .known(evidence)
   )
   let fs = FakeFilesystem(rootChildren: [provider], nodes: [root.appending(provider): node])
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 1,
     profile: .deep,
     roots: [fs.request],
@@ -573,7 +663,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
         (root.appending($0.element), file(UInt64($0.offset + 2), bytes: UInt64($0.offset + 1)))
       })
   )
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 1,
     profile: .deep,
     roots: [fs.request],
@@ -592,7 +682,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let name = component("a")
   let root = RawPath(rootID: "root")
   let fs = FakeFilesystem(rootChildren: [name], nodes: [root.appending(name): file(2, bytes: 1)])
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 1,
     profile: .deep,
     roots: [fs.request],
@@ -610,7 +700,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let name = component("a")
   let root = RawPath(rootID: "root")
   let fs = FakeFilesystem(rootChildren: [name], nodes: [root.appending(name): file(2, bytes: 1)])
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 1, profile: .deep, roots: [fs.request],
     budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 1),
     maximumDurationNanoseconds: nil
@@ -634,7 +724,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let root = RawPath(rootID: "root")
   let partialFS = FakeFilesystem(
     rootChildren: [child], nodes: [root.appending(child): file(2, bytes: 1)])
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 1,
     profile: .deep,
     roots: [partialFS.request],
@@ -651,7 +741,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
 
   let cancelFS = FakeFilesystem(
     rootChildren: [child], nodes: [root.appending(child): file(2, bytes: 1)])
-  let cancelScope = ResolvedScanScope(
+  let cancelScope = try! ResolvedScanScope(
     resolverVersion: 1,
     profile: .deep,
     roots: [cancelFS.request],
@@ -687,13 +777,34 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
 
 @Test func profileResolverIsVersionedAndContainsNoProviderNameRules() {
   let home = ScanRootRequest(rootID: "home", rawAbsolutePath: Data("/Users/test".utf8))
-  let scope = ScanRootResolver().resolve(
+  let scope = try! ScanRootResolver().resolve(
     profile: .standard,
     environment: ScanEnvironment(homeRoot: home)
   )
   #expect(scope.resolverVersion == 1)
   #expect(scope.roots == [home])
   #expect(scope.budget.maximumEntriesPerRoot == 2_000_000)
+}
+
+@Test func duplicateRootIDsAreRejectedBeforeScopeFreeze() {
+  let first = ScanRootRequest(rootID: "duplicate", rawAbsolutePath: Data("/first".utf8))
+  let second = ScanRootRequest(rootID: "duplicate", rawAbsolutePath: Data("/second".utf8))
+  #expect(throws: ScanScopeValidationError.duplicateRootID("duplicate")) {
+    try ResolvedScanScope(
+      resolverVersion: 1,
+      profile: .deep,
+      roots: [first, second],
+      budget: StructuralBudget(maximumEntriesPerRoot: 1, maximumDepth: 1),
+      maximumDurationNanoseconds: nil
+    )
+  }
+  #expect(throws: ScanScopeValidationError.duplicateRootID("duplicate")) {
+    try ScanRootResolver().resolve(
+      profile: .deep,
+      environment: ScanEnvironment(),
+      explicitRoots: [first, second]
+    )
+  }
 }
 
 @Test func enumerationBudgetRetainsCanonicalNamesAcrossPermutations() {
@@ -754,7 +865,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     maximumEntriesPerDirectory: 5,
     maximumPendingNameBytes: 128
   )
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 9,
     profile: .deep,
     roots: [fs.request, unstarted],
@@ -785,7 +896,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let child = component("child")
   let root = RawPath(rootID: "root")
   let fs = FakeFilesystem(rootChildren: [child], nodes: [root.appending(child): file(2, bytes: 1)])
-  let scope = ScanRootResolver().resolve(
+  let scope = try! ScanRootResolver().resolve(
     profile: .quick,
     environment: ScanEnvironment(adapterRoots: [fs.request])
   )
@@ -937,6 +1048,156 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   #expect(bindGate.callCount == 1)
 }
 
+@Test func providerPostflightRejectsChangedPolicyStateAndExactByteCredit() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("diskplan-provider-state-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  let rawRoot = rootURL.withUnsafeFileSystemRepresentation {
+    Data(bytes: $0!, count: strlen($0!))
+  }
+  let before = fixtureItemEvidence()
+  let changedSharing = SharingEvidence(
+    mayShareBlocks: before.sharing.mayShareBlocks,
+    sharesAllBlocks: before.sharing.sharesAllBlocks,
+    cloneID: before.sharing.cloneID,
+    cloneRefcount: .known(2),
+    conditionalGroupReclaimBytes: before.sharing.conditionalGroupReclaimBytes
+  )
+  let mutations = [
+    replacingItemEvidence(before, logicalBytes: .known(2)),
+    replacingItemEvidence(before, sharing: changedSharing),
+    replacingItemEvidence(before, isSyncRoot: .known(true)),
+  ]
+
+  for (index, after) in mutations.enumerated() {
+    let items = LockedItemEvidenceSequence([before, after])
+    let filesystem = DarwinScanFilesystem(
+      policy: policy,
+      pathAccessValidator: { .known(policy) },
+      itemEvidenceReader: { _, _, _ in items.read() },
+      providerEvidenceReader: { _, _, _, _ in confirmedProviderEvidence() }
+    )
+    let scope = try ResolvedScanScope(
+      resolverVersion: 1,
+      profile: .deep,
+      roots: [ScanRootRequest(rootID: "mutation-\(index)", rawAbsolutePath: rawRoot)],
+      budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 1),
+      maximumDurationNanoseconds: nil
+    )
+    let result = DeterministicScanner(
+      filesystem: filesystem,
+      scope: scope,
+      clock: FixedClock(times: [100])
+    ).advance(maximumEntries: 1)
+    guard case .failed(_, let code) = result.rootFailures.first?.observation else {
+      Issue.record("policy-relevant provider postflight mutation was not rejected")
+      continue
+    }
+    #expect(code == EBUSY)
+    #expect(result.coverage.reasons.contains(.unstableDuringScan))
+    #expect(result.coverage.reasons.contains(.providerStateUnverified))
+    #expect(result.progress.entriesObserved == 0)
+  }
+}
+
+@Test func providerProbeRejectionsRemainTypedThroughObservationAndCoverage() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-provider-rejection-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  let rawRoot = rootURL.withUnsafeFileSystemRepresentation {
+    Data(bytes: $0!, count: strlen($0!))
+  }
+  let item = fixtureItemEvidence()
+  let expected = FileObjectIdentity(device: 1, fileID: 1, objectType: .directory)
+  let observed = FileObjectIdentity(device: 1, fileID: 2, objectType: .directory)
+
+  func scan(
+    _ rejection: FileProviderProbeRejection,
+    rootID: String
+  ) throws -> ScanResult {
+    let filesystem = DarwinScanFilesystem(
+      policy: policy,
+      pathAccessValidator: { .known(policy) },
+      itemEvidenceReader: { _, _, _ in .known(item) },
+      providerEvidenceReader: { _, _, _, _ in .rejected(rejection) }
+    )
+    let scope = try ResolvedScanScope(
+      resolverVersion: 1,
+      profile: .deep,
+      roots: [ScanRootRequest(rootID: rootID, rawAbsolutePath: rawRoot)],
+      budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 1),
+      maximumDurationNanoseconds: nil
+    )
+    return DeterministicScanner(
+      filesystem: filesystem,
+      scope: scope,
+      clock: FixedClock(times: [100])
+    ).advance(maximumEntries: 1)
+  }
+
+  let missing = try scan(.missing(stage: .preflight), rootID: "missing")
+  guard case .absent = missing.rootFailures.first?.observation else {
+    Issue.record("provider missing rejection was collapsed")
+    return
+  }
+  #expect(missing.coverage.reasons.contains(.missing))
+
+  let unreadable = try scan(
+    .unreadable(stage: .derivedPathPreflight, errorCode: EACCES),
+    rootID: "unreadable"
+  )
+  guard case .unreadable(_, let unreadableCode) = unreadable.rootFailures.first?.observation else {
+    Issue.record("provider unreadable rejection was collapsed")
+    return
+  }
+  #expect(unreadableCode == EACCES)
+  #expect(unreadable.coverage.reasons.contains(.permissionDenied))
+
+  let identity = try scan(
+    .identityMismatch(stage: .postflight, expected: expected, observed: observed),
+    rootID: "identity"
+  )
+  guard case .failed(_, let identityCode) = identity.rootFailures.first?.observation else {
+    Issue.record("provider identity rejection was collapsed")
+    return
+  }
+  #expect(identityCode == ESTALE)
+  #expect(identity.coverage.reasons.contains(.identityMismatch))
+
+  let content = try scan(
+    .contentStateMismatch(
+      stage: .postflight,
+      expectedDataless: false,
+      observedDataless: true
+    ),
+    rootID: "content"
+  )
+  guard case .failed(_, let contentCode) = content.rootFailures.first?.observation else {
+    Issue.record("provider content-state rejection was collapsed")
+    return
+  }
+  #expect(contentCode == EBUSY)
+  #expect(content.coverage.reasons.contains(.unstableDuringScan))
+
+  let timeout = try scan(.timedOut(stage: .identityLookup), rootID: "timeout")
+  guard case .failed(_, let timeoutCode) = timeout.rootFailures.first?.observation else {
+    Issue.record("provider timeout rejection was collapsed")
+    return
+  }
+  #expect(timeoutCode == ETIMEDOUT)
+  #expect(timeout.coverage.reasons.contains(.timedOut))
+
+  for result in [missing, unreadable, identity, content, timeout] {
+    #expect(result.coverage.reasons.contains(.providerStateUnverified))
+    #expect(result.progress.entriesObserved == 0)
+  }
+}
+
 @Test func darwinDirectoryUsesRealDeviceIdentityAndRevalidatesParentSlotAtClose() throws {
   let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
   let rootURL = FileManager.default.temporaryDirectory
@@ -1037,7 +1298,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     Data(bytes: $0!, count: strlen($0!))
   }
   let request = ScanRootRequest(rootID: "darwin", rawAbsolutePath: rawRoot)
-  let scope = ResolvedScanScope(
+  let scope = try! ResolvedScanScope(
     resolverVersion: 1,
     profile: .deep,
     roots: [request],

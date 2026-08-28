@@ -40,6 +40,30 @@ private struct SlotSeal: Equatable, Sendable {
   let times: FilesystemTimeEvidence
 }
 
+private struct PolicyRelevantItemState: Equatable, Sendable {
+  let identity: ObjectIdentity
+  let linkCount: Capability<UInt32>
+  let logicalBytes: Capability<UInt64>
+  let nominalAllocatedBytes: Capability<UInt64>
+  let immediatePrivateReclaimBytes: Capability<UInt64>
+  let sharing: SharingEvidence
+  let vfsFlags: Capability<UInt32>
+  let isDataless: Capability<Bool>
+  let isSyncRoot: Capability<Bool>
+  let providerHiddenFootprint: Capability<UInt64>
+  let snapshotAttributedBytes: Capability<UInt64>
+
+  var providerState: ProviderPolicyState {
+    ProviderPolicyState(vfsFlags: vfsFlags, isDataless: isDataless, isSyncRoot: isSyncRoot)
+  }
+}
+
+private struct ProviderPolicyState: Equatable, Sendable {
+  let vfsFlags: Capability<UInt32>
+  let isDataless: Capability<Bool>
+  let isSyncRoot: Capability<Bool>
+}
+
 public struct EnumerationLimits: Equatable, Sendable {
   public let maximumNames: UInt64
   public let maximumNameBytes: UInt64
@@ -158,16 +182,33 @@ public protocol ScanFilesystem: Sendable {
 
 public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
   private let policy: NoMaterializationPolicy
-  private let itemProbe = ItemProbe()
   private let descriptorIdentityProbe = FileDescriptorIdentityProbe()
-  private let providerProbe = FileProviderBoundaryProbe()
   private let pathAccessValidator: @Sendable () -> Capability<NoMaterializationPolicy>
   private let monotonicNow: @Sendable () -> UInt64
+  private let itemEvidenceReader:
+    @Sendable (Int32, Data, NoMaterializationPolicy) -> Capability<ItemStorageEvidence>
+  private let providerEvidenceReader:
+    @Sendable (Int32, Data, NoMaterializationPolicy, Bool) -> FileProviderProbeOutcome
 
   public init(policy: NoMaterializationPolicy) {
     self.policy = policy
     pathAccessValidator = { policy.revalidateLive() }
     monotonicNow = { DispatchTime.now().uptimeNanoseconds }
+    itemEvidenceReader = { parent, name, livePolicy in
+      ItemProbe().probe(
+        parentFileDescriptor: parent,
+        rawName: name,
+        policy: livePolicy
+      )
+    }
+    providerEvidenceReader = { parent, name, livePolicy, inheritedBoundary in
+      FileProviderBoundaryProbe().probe(
+        parentFileDescriptor: parent,
+        rawName: name,
+        policy: livePolicy,
+        inheritedProviderBoundary: inheritedBoundary
+      )
+    }
   }
 
   init(
@@ -175,11 +216,34 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     pathAccessValidator: @escaping @Sendable () -> Capability<NoMaterializationPolicy>,
     monotonicNow: @escaping @Sendable () -> UInt64 = {
       DispatchTime.now().uptimeNanoseconds
-    }
+    },
+    itemEvidenceReader:
+      @escaping @Sendable (
+        Int32, Data, NoMaterializationPolicy
+      ) -> Capability<ItemStorageEvidence> = { parent, name, livePolicy in
+        ItemProbe().probe(
+          parentFileDescriptor: parent,
+          rawName: name,
+          policy: livePolicy
+        )
+      },
+    providerEvidenceReader:
+      @escaping @Sendable (
+        Int32, Data, NoMaterializationPolicy, Bool
+      ) -> FileProviderProbeOutcome = { parent, name, livePolicy, inheritedBoundary in
+        FileProviderBoundaryProbe().probe(
+          parentFileDescriptor: parent,
+          rawName: name,
+          policy: livePolicy,
+          inheritedProviderBoundary: inheritedBoundary
+        )
+      }
   ) {
     self.policy = policy
     self.pathAccessValidator = pathAccessValidator
     self.monotonicNow = monotonicNow
+    self.itemEvidenceReader = itemEvidenceReader
+    self.providerEvidenceReader = providerEvidenceReader
   }
 
   public func bindRoot(
@@ -365,11 +429,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
   ) -> Observation<InspectedObject> {
     let before = statSlotSeal(parent: parent, name: name)
     guard let beforeSeal = before.value else { return before.erasingValue() }
-    let beforeCapability = itemProbe.probe(
-      parentFileDescriptor: parent.rawValue,
-      rawName: name.bytes,
-      policy: policy
-    )
+    let beforeCapability = itemEvidenceReader(parent.rawValue, name.bytes, policy)
     guard let beforeItem = beforeCapability.value else {
       return observation(beforeCapability, operation: "inspect item", as: InspectedObject.self)
     }
@@ -382,11 +442,11 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
       inheritedProviderBoundary || beforeItem.isDataless.value == true
       || beforeItem.isSyncRoot.value == true
     if requiresAuthoritativeProviderEvidence || hasProviderHint {
-      let outcome = providerProbe.probe(
-        parentFileDescriptor: parent.rawValue,
-        rawName: name.bytes,
-        policy: policy,
-        inheritedProviderBoundary: inheritedProviderBoundary
+      let outcome = providerEvidenceReader(
+        parent.rawValue,
+        name.bytes,
+        policy,
+        inheritedProviderBoundary
       )
       switch outcome {
       case .evidence(let evidence):
@@ -400,8 +460,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         }
         providerEvidence = .known(providerScanEvidence(evidence))
       case .rejected(let rejection):
-        boundary = .rejected(reason: String(describing: rejection))
-        providerEvidence = .failed(reason: String(describing: rejection), errorCode: nil)
+        return providerRejectionObservation(rejection)
       }
     } else {
       boundary = .localOrUnindicated
@@ -409,11 +468,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         reason: "provider proof inherited from established local ancestry"
       )
     }
-    let afterCapability = itemProbe.probe(
-      parentFileDescriptor: parent.rawValue,
-      rawName: name.bytes,
-      policy: policy
-    )
+    let afterCapability = itemEvidenceReader(parent.rawValue, name.bytes, policy)
     guard let afterItem = afterCapability.value else {
       return observation(afterCapability, operation: "reinspect item", as: InspectedObject.self)
     }
@@ -423,6 +478,15 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     }
     guard beforeIdentity == afterIdentity else {
       return .failed(reason: "object identity changed during item inspection", errorCode: ESTALE)
+    }
+    let beforeState = policyRelevantState(beforeItem, identity: beforeIdentity)
+    let afterState = policyRelevantState(afterItem, identity: afterIdentity)
+    guard beforeState == afterState else {
+      let reason =
+        beforeState.providerState == afterState.providerState
+        ? "byte or storage-topology evidence changed during provider inspection"
+        : "provider, dataless, or sync-root state changed during provider inspection"
+      return .failed(reason: reason, errorCode: EBUSY)
     }
     let after = statSlotSeal(parent: parent, name: name)
     guard let afterSeal = after.value else { return after.erasingValue() }
@@ -509,10 +573,10 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         errorCode: ESTALE
       )
     }
-    let slotCapability = itemProbe.probe(
-      parentFileDescriptor: directory.slotBinding.parent.rawValue,
-      rawName: directory.slotBinding.name.bytes,
-      policy: policy
+    let slotCapability = itemEvidenceReader(
+      directory.slotBinding.parent.rawValue,
+      directory.slotBinding.name.bytes,
+      policy
     )
     guard let slotItem = slotCapability.value else {
       return observation(
@@ -626,6 +690,98 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     return .known(
       ObjectIdentity(device: device, fileID: fileID, objectType: scanType(objectType))
     )
+  }
+
+  private func policyRelevantState(
+    _ item: ItemStorageEvidence,
+    identity: ObjectIdentity
+  ) -> PolicyRelevantItemState {
+    PolicyRelevantItemState(
+      identity: identity,
+      linkCount: item.linkCount,
+      logicalBytes: item.logicalBytes,
+      nominalAllocatedBytes: item.nominalAllocatedBytes,
+      immediatePrivateReclaimBytes: item.immediatePrivateReclaimBytes,
+      sharing: item.sharing,
+      vfsFlags: item.vfsFlags,
+      isDataless: item.isDataless,
+      isSyncRoot: item.isSyncRoot,
+      providerHiddenFootprint: item.providerHiddenFootprint,
+      snapshotAttributedBytes: item.snapshotAttributedBytes
+    )
+  }
+
+  private func providerRejectionObservation(
+    _ rejection: FileProviderProbeRejection
+  ) -> Observation<InspectedObject> {
+    switch rejection {
+    case .policyUnavailable(let status, let detail, let code):
+      return providerStatusObservation(
+        status: status,
+        reason: detail ?? "provider probe policy unavailable",
+        errorCode: code
+      )
+    case .rawNameUnavailable:
+      return .unknown(reason: "provider probe cannot represent the raw item name")
+    case .missing(let stage):
+      return .absent(reason: "provider probe item missing at \(stage.rawValue)")
+    case .unreadable(let stage, let code):
+      return .unreadable(
+        reason: "provider probe item unreadable at \(stage.rawValue)",
+        errorCode: code
+      )
+    case .failed(let stage, let status, let detail, let code):
+      return providerStatusObservation(
+        status: status,
+        reason: detail ?? "provider probe failed at \(stage.rawValue)",
+        errorCode: code
+      )
+    case .identityMismatch(let stage, _, _):
+      return .failed(
+        reason: "provider probe item identity changed at \(stage.rawValue)",
+        errorCode: ESTALE
+      )
+    case .parentIdentityMismatch(let stage, _, _):
+      return .failed(
+        reason: "provider probe parent identity changed at \(stage.rawValue)",
+        errorCode: ESTALE
+      )
+    case .contentStateUnavailable(let stage, let status, let detail, let code):
+      return providerStatusObservation(
+        status: status,
+        reason: detail ?? "provider content state unavailable at \(stage.rawValue)",
+        errorCode: code
+      )
+    case .contentStateMismatch(let stage, _, _):
+      return .failed(
+        reason: "provider content state changed at \(stage.rawValue)",
+        errorCode: EBUSY
+      )
+    case .timedOut(let stage):
+      return .failed(
+        reason: "provider probe timed out at \(stage.rawValue)",
+        errorCode: ETIMEDOUT
+      )
+    }
+  }
+
+  private func providerStatusObservation(
+    status: CapabilityStatus,
+    reason: String,
+    errorCode: Int32?
+  ) -> Observation<InspectedObject> {
+    if status == .permissionDenied || errorCode == EACCES || errorCode == EPERM {
+      return .unreadable(reason: reason, errorCode: errorCode)
+    }
+    if errorCode == ENOENT { return .absent(reason: reason) }
+    switch status {
+    case .unsupported, .unavailable:
+      return .unknown(reason: reason)
+    case .known, .failed, .inconsistent:
+      return .failed(reason: reason, errorCode: errorCode)
+    case .permissionDenied:
+      return .unreadable(reason: reason, errorCode: errorCode)
+    }
   }
 
   private func pathAccessGate(operation: String) -> Capability<NoMaterializationPolicy> {

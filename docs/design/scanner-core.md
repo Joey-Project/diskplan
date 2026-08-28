@@ -23,6 +23,13 @@ object type for one descriptor-relative directory slot. The walker:
 7. retains the parent-slot descriptor, raw name, identity, and access-policy seal
    until the directory closes, then revalidates the open descriptor and parent slot.
 
+An authoritative provider probe is bracketed by complete policy-relevant item
+snapshots. The postflight must match provider flags, dataless/sync-root state,
+logical and allocation evidence, private-reclaim credit, link count, clone/sharing
+topology, and unavailable-state evidence before either traversal or exact byte
+credit is accepted. A mismatch is typed as unstable, provider-unverified evidence;
+the stale boundary and byte snapshot are never returned as known.
+
 `ItemProbe`, root descriptors, child descriptors, mount comparisons, and close
 revalidation all use the same real-device, file-ID, and object-type namespace.
 Ordinary `st_dev` is never compared with an `FSOPT_RETURN_REALDEV` identity.
@@ -52,7 +59,9 @@ never opened or treated as `localOrUnindicated`.
   partial/report-only evidence, and propagate the provider boundary to descendants.
   Provider item/domain identity, promised metadata, hidden-byte unavailability, and
   controlled non-materialization acceptance remain typed rather than being reduced
-  to a Boolean boundary flag.
+  to a Boolean boundary flag. Probe rejection is not converted into a known
+  rejected node: missing, unreadable, identity/content mismatch, unavailable state,
+  and timeout remain distinct `Observation` variants and coverage reasons.
 - Mount boundaries and symbolic links are reported but never traversed.
 
 Closed directories are aggregated incrementally, so the scanner need not retain the
@@ -76,7 +85,10 @@ are explicit partial coverage; they can never produce a complete root.
 profiles with the structural budgets accepted in the project design. Explicit
 maximum duration is optional; when it fires, the result is `partial` with
 `timed_out` coverage. Structural budget exhaustion likewise cannot yield a complete
-machine state.
+machine state. Root IDs are unique provenance keys: both direct scope construction
+and profile resolution reject duplicates before `ResolvedScanScope` is frozen.
+Traversal frames retain the actual bound `RootBinding`; completion never recovers a
+binding by looking up a possibly aliased display/path ID.
 
 `ScanSession` is an actor-controlled batch scanner. It records a deterministic,
 monotonic transcript for start, advance, pause, checkpoint, provisional snapshot,

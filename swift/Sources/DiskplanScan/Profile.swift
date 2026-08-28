@@ -40,6 +40,10 @@ public struct ScanRootRequest: Equatable, Sendable {
   }
 }
 
+public enum ScanScopeValidationError: Error, Equatable, Sendable {
+  case duplicateRootID(String)
+}
+
 public struct ScanEnvironment: Equatable, Sendable {
   public let adapterRoots: [ScanRootRequest]
   public let homeRoot: ScanRootRequest?
@@ -75,7 +79,11 @@ public struct ResolvedScanScope: Equatable, Sendable {
     roots: [ScanRootRequest],
     budget: StructuralBudget,
     maximumDurationNanoseconds: UInt64?
-  ) {
+  ) throws {
+    var seenRootIDs = Set<String>()
+    for root in roots where !seenRootIDs.insert(root.rootID).inserted {
+      throw ScanScopeValidationError.duplicateRootID(root.rootID)
+    }
     self.resolverVersion = resolverVersion
     self.profile = profile
     self.roots = roots
@@ -94,7 +102,7 @@ public struct ScanRootResolver: Sendable {
     environment: ScanEnvironment,
     explicitRoots: [ScanRootRequest] = [],
     maximumDurationNanoseconds: UInt64? = nil
-  ) -> ResolvedScanScope {
+  ) throws -> ResolvedScanScope {
     let roots: [ScanRootRequest]
     let budget: StructuralBudget
     switch profile {
@@ -119,14 +127,13 @@ public struct ScanRootResolver: Sendable {
         maximumPendingNameBytes: 64 * 1_024 * 1_024
       )
     }
-    var seen = Set<String>()
     let canonical = roots.sorted {
       if $0.rawAbsolutePath != $1.rawAbsolutePath {
         return $0.rawAbsolutePath.lexicographicallyPrecedes($1.rawAbsolutePath)
       }
       return $0.rootID < $1.rootID
-    }.filter { seen.insert($0.rootID).inserted }
-    return ResolvedScanScope(
+    }
+    return try ResolvedScanScope(
       resolverVersion: Self.version,
       profile: profile,
       roots: canonical,
