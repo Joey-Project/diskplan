@@ -224,7 +224,9 @@ def validate_process_group(
     except OSError as error:
         return validate_exited_session_contract(error, expected, observer, deadline)
     if pgid != expected:
-        raise RuntimeError("acceptance command did not create its promised process group")
+        raise RuntimeError(
+            "acceptance command did not create its promised process group"
+        )
 
     try:
         session_id = os.getsid(expected)
@@ -392,7 +394,9 @@ def linux_process_group_has_live_members(
             except FileNotFoundError:
                 continue
             except OSError as error:
-                raise RuntimeError("cannot inspect Linux process-group member") from error
+                raise RuntimeError(
+                    "cannot inspect Linux process-group member"
+                ) from error
             if len(stat_data) > 4096:
                 raise RuntimeError("Linux process stat exceeded its byte limit")
             command_end = stat_data.rfind(b")")
@@ -439,7 +443,9 @@ def terminate_process_group(
     cleanup.term_sent = send_group_signal(pgid, signal.SIGTERM) or cleanup.term_sent
     grace_deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
     while time.monotonic() < grace_deadline:
-        time.sleep(min(GROUP_QUIESCENCE_POLL_SECONDS, grace_deadline - time.monotonic()))
+        time.sleep(
+            min(GROUP_QUIESCENCE_POLL_SECONDS, grace_deadline - time.monotonic())
+        )
     cleanup.kill_attempted = True
     cleanup.kill_sent = send_group_signal(pgid, signal.SIGKILL) or cleanup.kill_sent
 
@@ -503,7 +509,9 @@ def main() -> int:
     if os.name != "posix":
         raise RuntimeError("bounded acceptance commands require POSIX")
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
-        raise RuntimeError("bounded acceptance requires default waitable SIGCHLD semantics")
+        raise RuntimeError(
+            "bounded acceptance requires default waitable SIGCHLD semantics"
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
