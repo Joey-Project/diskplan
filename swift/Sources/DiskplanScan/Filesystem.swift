@@ -171,7 +171,8 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     guard let item = capability.value else {
       return observation(capability, operation: "inspect item", as: InspectedObject.self)
     }
-    guard let fileID = item.fileID.value, let objectType = item.objectType.value
+    guard let device = item.device.value, let fileID = item.fileID.value,
+      let objectType = item.objectType.value
     else { return .unknown(reason: "filesystem did not return stable object identity") }
     let after = statSlotSeal(parent: parent, name: name)
     guard let afterSeal = after.value else { return after.erasingValue() }
@@ -181,8 +182,12 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     guard beforeSeal.accessPolicy == afterSeal.accessPolicy else {
       return .failed(reason: "access policy changed during item inspection", errorCode: EAGAIN)
     }
-    let identity = afterSeal.identity
-    guard fileID == identity.fileID, scanType(objectType) == identity.objectType else {
+    let identity = ObjectIdentity(
+      device: device,
+      fileID: fileID,
+      objectType: scanType(objectType)
+    )
+    guard identity == afterSeal.identity else {
       return .failed(reason: "filesystem probes disagreed on object identity", errorCode: ESTALE)
     }
     let boundary: ProviderBoundary
@@ -201,7 +206,9 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         switch evidence.traversal {
         case .descendMetadataOnlyProviderBoundary:
           boundary = .metadataOnly(reason: evidence.traversal.rawValue)
-        case .doNotDescendDataless, .doNotDescendUnverifiedProviderOwnership:
+        case .doNotDescendDataless, .doNotDescendNonDirectory,
+          .doNotDescendUnverifiedItemType, .doNotDescendUnverifiedContentState,
+          .doNotDescendUnverifiedProviderOwnership:
           boundary = .rejected(reason: evidence.traversal.rawValue)
         }
         providerEvidence = .known(providerScanEvidence(evidence))

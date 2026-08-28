@@ -653,17 +653,7 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     clock: FixedClock(times: [100])
   )
   let result = scanner.advance(maximumEntries: 10)
-  if result.progress.entriesObserved == 0 {
-    let failure = try #require(result.rootFailures.first?.observation)
-    guard case .failed(_, let errorCode) = failure else {
-      Issue.record("Darwin probe failure did not preserve its typed state")
-      return
-    }
-    // Phase 0 currently rejects a validity-mask-sized getattrlistat response. Keep
-    // that live gate explicit until the authoritative shim fix is integrated.
-    #expect(errorCode == EPROTO)
-    return
-  }
+  #expect(result.rootFailures.isEmpty)
   #expect(result.progress.entriesObserved == 1)
   #expect(result.progress.retainedNodes.first?.path.components == [RawPathComponent(rawName)])
 }

@@ -31,8 +31,8 @@ superseded_by:
 - [x] Add actor scan control, checkpoints, provisional snapshots, partial finalization, and transcripts.
 - [x] Add a bounded process-activity collector abstraction and normalized `lsof -nP -F0` parser.
 - [x] Add deterministic fake-filesystem and controlled temporary-root tests.
-- [ ] Re-run the live Darwin temporary-root path after the authoritative Phase 0
-  validity-mask/returned-length shim fix is integrated.
+- [ ] Re-run the live Darwin temporary-root path after the authoritative directory
+  packed-attribute parser fix is integrated.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [ ] Integrate scanner evidence into the versioned IPC workstream.
 
@@ -45,20 +45,28 @@ superseded_by:
 
 ## Handoff
 
-- Phase: local Phase 1 implementation.
-- Next step: integrate the exact reviewed Phase 0 shim follow-up, re-run the live
+- Phase: Phase 1 integration against reviewed Phase 0 probes.
+- Next step: integrate the exact frozen directory parser fix, re-run the live
   Darwin path, then complete full Swift gates and independent review.
-- Blocker: the current Phase 0 C shim returns typed `EPROTO` when `getattrlistat`
-  reports a validity-mask-sized response shorter than its fixed packed buffer. The
-  scanner does not bypass or relax that authoritative probe.
+- Blocker: reviewed Phase 0 head `784cad41c7ff647c41258bed5d486f7df8e5addb`
+  passes its 29 focused macOS tests and CLI self-test, but the controlled scanner
+  root still receives typed `EPROTO` while probing a directory slot. Directory
+  `getattrlistat` results can omit invalid file attributes under
+  `FSOPT_PACK_INVAL_ATTRS`; the authoritative parser fix and a live directory probe
+  test belong to the macOS capability layer. The scanner does not bypass or relax
+  that probe.
 
 ## Evidence
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Scanner contract: `docs/design/scanner-core.md`.
-- Focused `DiskplanScanTests` passed 21 tests covering raw invalid UTF-8 names,
-  enumeration permutations, missing/mismatch/unreadable and access-policy-change
-  distinctions, symlink/mount/provider boundaries, provider evidence propagation,
-  budgets/timeouts, aggregation, top-K versus the complete event stream, control
-  transcripts, a typed lsof parser, and the controlled Darwin temporary root's typed
-  live-gate failure.
+- Before Phase 0 integration, focused `DiskplanScanTests` passed 21 tests covering
+  raw invalid UTF-8 names, enumeration permutations, missing/mismatch/unreadable and
+  access-policy-change distinctions, symlink/mount/provider boundaries, provider
+  evidence propagation, budgets/timeouts, aggregation, top-K versus the complete
+  event stream, control transcripts, a typed lsof parser, and the controlled Darwin
+  temporary root's typed live-gate failure.
+- After integrating Phase 0, focused `DiskplanMacOSTests` pass 29 tests and
+  `diskplan-macos-probe --self-test` succeeds. Focused `DiskplanScanTests` pass 20
+  tests; the sole failure is the intentionally strict controlled-directory live
+  gate described above.
