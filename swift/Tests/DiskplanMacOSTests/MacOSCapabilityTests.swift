@@ -367,15 +367,19 @@ func unavailableObjectTypeNeverReceivesDescentDecision() throws {
 
 @Test
 func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
+  let deadline = OperationDeadline(
+    timeout: .milliseconds(100),
+    nowUptimeNanoseconds: 1_000
+  )
+  #expect(deadline.dispatchTime.uptimeNanoseconds == 100_001_000)
+
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }
   let reads = LockedCounter()
   let policy = try injectedPolicy(counter: reads)
   let operations = FileProviderProbeOperations(
     startIdentity: { _, completion in
-      DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(5)) {
-        completion(.identifierAbsent)
-      }
+      completion(.identifierAbsent)
     }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
