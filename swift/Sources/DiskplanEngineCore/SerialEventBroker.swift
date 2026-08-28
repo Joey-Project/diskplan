@@ -14,12 +14,42 @@ private enum PendingOutput: @unchecked Sendable {
     requestID: UInt64,
     scanSessionID: String,
     body: Diskplan_V1_EngineEvent.OneOf_Body,
-    telemetry: Bool
+    telemetry: Bool,
+    writeAcknowledgement: BrokerWriteAcknowledgement?
   )
 
   var isTelemetry: Bool {
-    if case .event(_, _, _, let telemetry) = self { return telemetry }
+    if case .event(_, _, _, let telemetry, _) = self { return telemetry }
     return false
+  }
+
+  var writeAcknowledgement: BrokerWriteAcknowledgement? {
+    if case .event(_, _, _, _, let acknowledgement) = self { return acknowledgement }
+    return nil
+  }
+}
+
+private final class BrokerWriteAcknowledgement: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var result: Result<Void, EventBrokerError>?
+
+  func resolve(_ result: Result<Void, EventBrokerError>) {
+    condition.lock()
+    guard self.result == nil else {
+      condition.unlock()
+      return
+    }
+    self.result = result
+    condition.broadcast()
+    condition.unlock()
+  }
+
+  func wait() throws {
+    condition.lock()
+    while result == nil { condition.wait() }
+    let result = self.result!
+    condition.unlock()
+    try result.get()
   }
 }
 
@@ -74,10 +104,30 @@ final class SerialEventBroker: @unchecked Sendable {
         requestID: requestID,
         scanSessionID: scanSessionID,
         body: body,
-        telemetry: false
+        telemetry: false,
+        writeAcknowledgement: nil
       ),
       semantic: true
     )
+  }
+
+  func sendSemanticAwaitingWrite(
+    requestID: UInt64,
+    scanSessionID: String = "",
+    body: Diskplan_V1_EngineEvent.OneOf_Body
+  ) throws {
+    let acknowledgement = BrokerWriteAcknowledgement()
+    try enqueue(
+      .event(
+        requestID: requestID,
+        scanSessionID: scanSessionID,
+        body: body,
+        telemetry: false,
+        writeAcknowledgement: acknowledgement
+      ),
+      semantic: true
+    )
+    try acknowledgement.wait()
   }
 
   func sendProgress(
@@ -94,7 +144,8 @@ final class SerialEventBroker: @unchecked Sendable {
         requestID: 0,
         scanSessionID: scanSessionID,
         body: .scanProgress(progress),
-        telemetry: true
+        telemetry: true,
+        writeAcknowledgement: nil
       )
     } else {
       pending.append(
@@ -102,7 +153,8 @@ final class SerialEventBroker: @unchecked Sendable {
           requestID: 0,
           scanSessionID: scanSessionID,
           body: .scanProgress(progress),
-          telemetry: true
+          telemetry: true,
+          writeAcknowledgement: nil
         ))
     }
     condition.signal()
@@ -152,15 +204,22 @@ final class SerialEventBroker: @unchecked Sendable {
 
       do {
         try writer(serialized(output))
+        output.writeAcknowledgement?.resolve(.success(()))
       } catch {
+        let outputFailure = EventBrokerError.outputFailed(String(describing: error))
         condition.lock()
-        failure = .outputFailed(String(describing: error))
+        failure = outputFailure
+        let pendingAcknowledgements = pending.compactMap(\.writeAcknowledgement)
         pending.removeAll()
         semanticCount = 0
         closing = true
         finished = true
         condition.broadcast()
         condition.unlock()
+        output.writeAcknowledgement?.resolve(.failure(outputFailure))
+        for acknowledgement in pendingAcknowledgements {
+          acknowledgement.resolve(.failure(outputFailure))
+        }
         return
       }
     }
@@ -172,7 +231,7 @@ final class SerialEventBroker: @unchecked Sendable {
     case .envelope(let sequence, let body):
       envelope.sequence = sequence
       envelope.body = body
-    case .event(let requestID, let scanSessionID, let body, _):
+    case .event(let requestID, let scanSessionID, let body, _, _):
       let sequence = nextEventSequence
       guard sequence != 0 else {
         throw EventBrokerError.outputFailed("event sequence space exhausted")

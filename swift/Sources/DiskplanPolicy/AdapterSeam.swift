@@ -148,7 +148,8 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
 
     let boundIdentityAndAccess: GateResult
     let namespaceAccessComplete = namespaceSeals.allSatisfy { seal in
-      if case .known = seal.accessPolicy, case .known = seal.aclDigest,
+      if seal.trustedNamespace != .unverified,
+        case .known = seal.accessPolicy, case .known = seal.aclDigest,
         case .known = seal.mountIdentity
       {
         return true
