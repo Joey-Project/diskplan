@@ -119,54 +119,86 @@ func itemShimRequestsRealDeviceForObjectIdentity() {
 }
 
 @Test
-func shortKernelItemBufferPreservesUnavailableReturnedMasks() throws {
-  var raw = Data(repeating: 0, count: 24)
-  raw.store(UInt32(raw.count), at: 0)
-  raw.store(UInt32(ATTR_CMN_RETURNED_ATTRS), at: 4)
-  var wire = Data(repeating: 0, count: ItemWireV1.size)
-  var written = 0
-  let result = wire.withUnsafeMutableBytes { output in
-    raw.withUnsafeBytes { input in
-      dp_parse_item_buffer(
-        input.bindMemory(to: UInt8.self).baseAddress,
-        input.count,
-        output.bindMemory(to: UInt8.self).baseAddress,
-        output.count,
-        &written
-      )
-    }
-  }
-  #expect(result == 0)
-  #expect(written == ItemWireV1.size)
-  let evidence = try ItemWireV1.parse(wire)
-  #expect(evidence.device.status == .unavailable)
-  #expect(evidence.objectType.status == .unavailable)
-  #expect(evidence.isDataless.status == .unavailable)
-  #expect(evidence.immediatePrivateReclaimBytes.status == .unavailable)
+func packedDirectoryKernelItemBufferOmitsFileGroupWithoutShiftingExtendedFields() throws {
+  let parsed = parseKernelItemBuffer(packedKernelItemBuffer(objectType: 2, directoryLayout: true))
+  #expect(parsed.result == 0)
+  #expect(parsed.written == ItemWireV1.size)
+  let evidence = try ItemWireV1.parse(parsed.wire)
+  #expect(evidence.objectType.value == .directory)
+  #expect(evidence.logicalBytes.status == .unavailable)
+  #expect(evidence.nominalAllocatedBytes.status == .unavailable)
+  #expect(evidence.immediatePrivateReclaimBytes.value == 20)
+  #expect(evidence.sharing.cloneID.value == 3)
+  #expect(evidence.sharing.cloneRefcount.value == 2)
 }
 
 @Test
-func shortKernelItemBufferRejectsClaimedButAbsentField() {
-  var raw = Data(repeating: 0, count: 24)
+func packedInvalidAttributesRemainUnavailableWithoutShiftingLaterValues() throws {
+  let common =
+    UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_device()
+    | dp_attr_common_object_type() | dp_attr_common_file_id()
+  let parsed = parseKernelItemBuffer(
+    packedKernelItemBuffer(
+      objectType: 1,
+      returnedCommon: common,
+      returnedFile: dp_attr_file_total_size(),
+      returnedExtended: dp_attr_extended_clone_id()
+    )
+  )
+  #expect(parsed.result == 0)
+  let evidence = try ItemWireV1.parse(parsed.wire)
+  #expect(evidence.objectType.value == .regular)
+  #expect(evidence.isDataless.status == .unavailable)
+  #expect(evidence.linkCount.status == .unavailable)
+  #expect(evidence.logicalBytes.value == 100)
+  #expect(evidence.nominalAllocatedBytes.status == .unavailable)
+  #expect(evidence.immediatePrivateReclaimBytes.status == .unavailable)
+  #expect(evidence.sharing.cloneID.value == 3)
+  #expect(evidence.isSyncRoot.status == .unavailable)
+  #expect(evidence.sharing.cloneRefcount.status == .unavailable)
+}
+
+@Test
+func missingObjectTypeRemainsUnavailableWhilePackedShapeStaysParseable() throws {
+  let common =
+    UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_device()
+    | dp_attr_common_flags() | dp_attr_common_file_id()
+  let parsed = parseKernelItemBuffer(
+    packedKernelItemBuffer(objectType: 1, returnedCommon: common, returnedFile: 0)
+  )
+  #expect(parsed.result == 0)
+  let evidence = try ItemWireV1.parse(parsed.wire)
+  #expect(evidence.device.status == .known)
+  #expect(evidence.objectType.status == .unavailable)
+  #expect(evidence.fileID.status == .known)
+  #expect(evidence.logicalBytes.status == .unavailable)
+}
+
+@Test
+func shortPackedKernelItemBufferFailsClosedEvenWhenTrailingAttributeIsInvalid() {
+  var raw = packedKernelItemBuffer(
+    objectType: 1,
+    returnedExtended: dp_attr_extended_clone_id()
+  )
+  raw.removeLast()
   raw.store(UInt32(raw.count), at: 0)
-  raw.store(UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_device(), at: 4)
-  var wire = Data(repeating: 0, count: ItemWireV1.size)
-  var written = 0
-  let result = wire.withUnsafeMutableBytes { output in
-    raw.withUnsafeBytes { input in
-      dp_parse_item_buffer(
-        input.bindMemory(to: UInt8.self).baseAddress,
-        input.count,
-        output.bindMemory(to: UInt8.self).baseAddress,
-        output.count,
-        &written
-      )
-    }
-  }
-  let error = errno
-  #expect(result == -1)
-  #expect(error == EPROTO)
-  #expect(written == 0)
+  let parsed = parseKernelItemBuffer(raw)
+  #expect(parsed.result == -1)
+  #expect(parsed.error == EPROTO)
+  #expect(parsed.written == 0)
+}
+
+@Test
+func packedDirectoryRejectsImpossibleReturnedFileAttributes() {
+  let raw = packedKernelItemBuffer(
+    objectType: 2,
+    returnedFile: dp_attr_file_total_size(),
+    directoryLayout: true
+  )
+  let parsed = parseKernelItemBuffer(raw)
+  #expect(parsed.result == -1)
+  #expect(parsed.error == EPROTO)
+  #expect(parsed.written == 0)
 }
 
 @Test
@@ -666,12 +698,16 @@ func liveTempRootProbeAndCloneEvidenceWhenAvailable() throws {
 }
 
 @Test
-func liveItemProbeDoesNotFollowSymlinksOrEscapeItsParent() throws {
+func liveItemProbeParsesDirectoryRegularAndSymlinkWithoutEscapingParent() throws {
   let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
   let manager = FileManager.default
   let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
   try manager.createDirectory(at: root, withIntermediateDirectories: false)
   defer { try? manager.removeItem(at: root) }
+  try manager.createDirectory(
+    at: root.appendingPathComponent("directory", isDirectory: true),
+    withIntermediateDirectories: false
+  )
   try Data([1]).write(to: root.appendingPathComponent("target"))
   try manager.createSymbolicLink(
     at: root.appendingPathComponent("link"),
@@ -681,9 +717,18 @@ func liveItemProbeDoesNotFollowSymlinksOrEscapeItsParent() throws {
   let fd = try #require(parentFD >= 0 ? parentFD : nil)
   defer { close(fd) }
   let probe = ItemProbe()
+  let directory = try #require(
+    probe.probe(parentFileDescriptor: fd, rawName: Data("directory".utf8), policy: policy).value
+  )
+  let regular = try #require(
+    probe.probe(parentFileDescriptor: fd, rawName: Data("target".utf8), policy: policy).value
+  )
   let link = try #require(
     probe.probe(parentFileDescriptor: fd, rawName: Data("link".utf8), policy: policy).value
   )
+  #expect(directory.objectType.value == .directory)
+  #expect(directory.logicalBytes.status == .unavailable)
+  #expect(regular.objectType.value == .regular)
   #expect(link.objectType.value == .symbolicLink)
   let escape = probe.probe(
     parentFileDescriptor: fd,
@@ -692,6 +737,77 @@ func liveItemProbeDoesNotFollowSymlinksOrEscapeItsParent() throws {
   )
   #expect(escape.status == .failed)
   #expect(escape.errorCode == EINVAL)
+}
+
+private func packedKernelItemBuffer(
+  objectType: UInt32,
+  returnedCommon: UInt32? = nil,
+  returnedFile: UInt32? = nil,
+  returnedExtended: UInt32? = nil,
+  directoryLayout: Bool = false
+) -> Data {
+  let common =
+    returnedCommon
+    ?? (UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_device()
+      | dp_attr_common_object_type() | dp_attr_common_flags() | dp_attr_common_file_id())
+  let file =
+    returnedFile
+    ?? (directoryLayout
+      ? 0
+      : dp_attr_file_link_count() | dp_attr_file_total_size()
+        | dp_attr_file_allocated_size())
+  let extended =
+    returnedExtended
+    ?? (dp_attr_extended_private_size() | dp_attr_extended_clone_id()
+      | dp_attr_extended_flags() | dp_attr_extended_clone_refcount())
+  let size = directoryLayout ? 72 : 92
+  var data = Data(repeating: 0, count: size)
+  data.store(UInt32(size), at: 0)
+  data.store(common, at: 4)
+  data.store(file, at: 16)
+  data.store(extended, at: 20)
+  data.store(UInt32(15), at: 24)
+  data.store(objectType, at: 28)
+  data.store(dp_flag_dataless(), at: 32)
+  data.store(UInt64(42), at: 36)
+
+  var cursor = 44
+  if !directoryLayout {
+    data.store(UInt32(1), at: cursor)
+    cursor += 4
+    data.store(UInt64(100), at: cursor)
+    cursor += 8
+    data.store(UInt64(80), at: cursor)
+    cursor += 8
+  }
+  data.store(UInt64(20), at: cursor)
+  cursor += 8
+  data.store(UInt64(3), at: cursor)
+  cursor += 8
+  data.store(dp_flag_sync_root(), at: cursor)
+  cursor += 8
+  data.store(UInt32(2), at: cursor)
+  return data
+}
+
+private func parseKernelItemBuffer(_ raw: Data) -> (
+  result: Int32, error: Int32, written: Int, wire: Data
+) {
+  var wire = Data(repeating: 0, count: ItemWireV1.size)
+  var written = 999
+  errno = 0
+  let result = wire.withUnsafeMutableBytes { output in
+    raw.withUnsafeBytes { input in
+      dp_parse_item_buffer(
+        input.bindMemory(to: UInt8.self).baseAddress,
+        input.count,
+        output.bindMemory(to: UInt8.self).baseAddress,
+        output.count,
+        &written
+      )
+    }
+  }
+  return (result, errno, written, wire)
 }
 
 private func validWire() -> Data {

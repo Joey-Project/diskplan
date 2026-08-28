@@ -9,23 +9,26 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
+#include <sys/vnode.h>
 #include <unistd.h>
 
-typedef struct __attribute__((packed, aligned(4))) {
-    uint32_t length;
-    attribute_set_t returned;
-    dev_t device;
-    fsobj_type_t object_type;
-    uint32_t flags;
-    uint64_t file_id;
-    uint32_t link_count;
-    off_t total_size;
-    off_t allocated_size;
-    off_t private_size;
-    uint64_t clone_id;
-    uint64_t extended_flags;
-    uint32_t clone_refcount;
-} dp_kernel_item_buffer;
+enum {
+    DP_ITEM_RAW_HEADER_SIZE = sizeof(uint32_t) + sizeof(attribute_set_t),
+    DP_ITEM_RAW_COMMON_SIZE = sizeof(dev_t) + sizeof(fsobj_type_t) +
+                              sizeof(uint32_t) + sizeof(uint64_t),
+    DP_ITEM_RAW_FILE_SIZE = sizeof(uint32_t) + sizeof(off_t) + sizeof(off_t),
+    DP_ITEM_RAW_EXTENDED_SIZE = sizeof(off_t) + sizeof(uint64_t) +
+                                sizeof(uint64_t) + sizeof(uint32_t),
+    DP_ITEM_RAW_DIRECTORY_SIZE = DP_ITEM_RAW_HEADER_SIZE +
+                                 DP_ITEM_RAW_COMMON_SIZE +
+                                 DP_ITEM_RAW_EXTENDED_SIZE,
+    DP_ITEM_RAW_MAX_SIZE = DP_ITEM_RAW_DIRECTORY_SIZE + DP_ITEM_RAW_FILE_SIZE,
+};
+
+_Static_assert(sizeof(dev_t) == sizeof(uint32_t), "unexpected Darwin dev_t size");
+_Static_assert(sizeof(fsobj_type_t) == sizeof(uint32_t),
+               "unexpected Darwin object type size");
+_Static_assert(sizeof(off_t) == sizeof(uint64_t), "unexpected Darwin off_t size");
 
 typedef struct __attribute__((packed, aligned(4))) {
     uint32_t length;
@@ -48,6 +51,18 @@ static void dp_store_u32(uint8_t *wire, size_t offset, uint32_t value) {
 
 static void dp_store_u64(uint8_t *wire, size_t offset, uint64_t value) {
     memcpy(wire + offset, &value, sizeof(value));
+}
+
+static int dp_read_packed_field(const uint8_t *raw, size_t raw_length,
+                                size_t *cursor, void *value,
+                                size_t value_size) {
+    if (*cursor > raw_length || value_size > raw_length - *cursor) {
+        errno = EPROTO;
+        return -1;
+    }
+    memcpy(value, raw + *cursor, value_size);
+    *cursor += value_size;
+    return 0;
 }
 
 static int dp_read_claimed_field(const uint8_t *raw, size_t raw_length,
@@ -84,8 +99,13 @@ uint64_t dp_item_probe_options(void) {
 int dp_parse_item_buffer(const uint8_t *raw, size_t raw_capacity,
                          uint8_t *wire, size_t wire_capacity,
                          size_t *wire_length) {
-    const size_t returned_end = offsetof(dp_kernel_item_buffer, device);
-    if (raw == NULL || wire == NULL || wire_length == NULL ||
+    const size_t returned_end = DP_ITEM_RAW_HEADER_SIZE;
+    if (wire_length == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *wire_length = 0;
+    if (raw == NULL || wire == NULL ||
         raw_capacity < returned_end || wire_capacity < DP_ITEM_WIRE_V1_SIZE) {
         errno = EINVAL;
         return -1;
@@ -99,8 +119,7 @@ int dp_parse_item_buffer(const uint8_t *raw, size_t raw_capacity,
     }
 
     attribute_set_t returned = {0};
-    memcpy(&returned, raw + offsetof(dp_kernel_item_buffer, returned),
-           sizeof(returned));
+    memcpy(&returned, raw + sizeof(uint32_t), sizeof(returned));
     const uint32_t requested_common =
         ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_DEVID | ATTR_CMN_OBJTYPE |
         ATTR_CMN_FLAGS | ATTR_CMN_FILEID;
@@ -129,30 +148,59 @@ int dp_parse_item_buffer(const uint8_t *raw, size_t raw_capacity,
     uint64_t clone_id = 0;
     uint64_t extended_flags = 0;
     uint32_t clone_refcount = 0;
+    size_t cursor = returned_end;
 
-#define DP_READ_FIELD(group, bit, field, value)                                  \
+#define DP_READ_PACKED(value)                                                     \
     do {                                                                          \
-        if (dp_read_claimed_field(raw, raw_length,                                \
-                                  offsetof(dp_kernel_item_buffer, field),         \
-                                  &(value), sizeof(value),                         \
-                                  (returned.group & (bit)) != 0) != 0) {           \
+        if (dp_read_packed_field(raw, raw_length, &cursor, &(value),              \
+                                 sizeof(value)) != 0) {                            \
             return -1;                                                            \
         }                                                                         \
     } while (0)
 
-    DP_READ_FIELD(commonattr, ATTR_CMN_DEVID, device, device);
-    DP_READ_FIELD(commonattr, ATTR_CMN_OBJTYPE, object_type, object_type);
-    DP_READ_FIELD(commonattr, ATTR_CMN_FLAGS, flags, flags);
-    DP_READ_FIELD(commonattr, ATTR_CMN_FILEID, file_id, file_id);
-    DP_READ_FIELD(fileattr, ATTR_FILE_LINKCOUNT, link_count, link_count);
-    DP_READ_FIELD(fileattr, ATTR_FILE_TOTALSIZE, total_size, total_size);
-    DP_READ_FIELD(fileattr, ATTR_FILE_ALLOCSIZE, allocated_size, allocated_size);
-    DP_READ_FIELD(forkattr, ATTR_CMNEXT_PRIVATESIZE, private_size, private_size);
-    DP_READ_FIELD(forkattr, ATTR_CMNEXT_CLONEID, clone_id, clone_id);
-    DP_READ_FIELD(forkattr, ATTR_CMNEXT_EXT_FLAGS, extended_flags, extended_flags);
-    DP_READ_FIELD(forkattr, ATTR_CMNEXT_CLONE_REFCNT, clone_refcount, clone_refcount);
+    /*
+     * FSOPT_PACK_INVAL_ATTRS reserves every requested common and extended
+     * slot, even when its returned bit is clear. Darwin omits the complete
+     * file-attribute group for directories, so later extended fields must be
+     * read from a type-dependent cursor rather than fixed struct offsets.
+     */
+    DP_READ_PACKED(device);
+    DP_READ_PACKED(object_type);
+    DP_READ_PACKED(flags);
+    DP_READ_PACKED(file_id);
 
-#undef DP_READ_FIELD
+    int has_file_layout;
+    if ((returned.commonattr & ATTR_CMN_OBJTYPE) != 0) {
+        has_file_layout = object_type != VDIR;
+    } else if (raw_length == DP_ITEM_RAW_DIRECTORY_SIZE) {
+        has_file_layout = 0;
+    } else if (raw_length == DP_ITEM_RAW_MAX_SIZE) {
+        has_file_layout = 1;
+    } else {
+        errno = EPROTO;
+        return -1;
+    }
+
+    if (!has_file_layout && returned.fileattr != 0) {
+        errno = EPROTO;
+        return -1;
+    }
+    if (has_file_layout) {
+        DP_READ_PACKED(link_count);
+        DP_READ_PACKED(total_size);
+        DP_READ_PACKED(allocated_size);
+    }
+    DP_READ_PACKED(private_size);
+    DP_READ_PACKED(clone_id);
+    DP_READ_PACKED(extended_flags);
+    DP_READ_PACKED(clone_refcount);
+
+#undef DP_READ_PACKED
+
+    if (cursor != raw_length) {
+        errno = EPROTO;
+        return -1;
+    }
 
     memset(wire, 0, DP_ITEM_WIRE_V1_SIZE);
     dp_store_u32(wire, 0, DP_ITEM_WIRE_V1_SIZE);
@@ -221,7 +269,7 @@ int dp_probe_item_at(int parent_fd, const uint8_t *name, size_t name_length,
     attributes.forkattr = ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_CLONEID |
                           ATTR_CMNEXT_EXT_FLAGS | ATTR_CMNEXT_CLONE_REFCNT;
 
-    uint8_t raw[sizeof(dp_kernel_item_buffer)] = {0};
+    uint8_t raw[DP_ITEM_RAW_MAX_SIZE] = {0};
     unsigned long options = (unsigned long)dp_item_probe_options();
     if (getattrlistat(parent_fd, component, &attributes, &raw, sizeof(raw), options) != 0) {
         return -1;
