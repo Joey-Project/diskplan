@@ -27,7 +27,10 @@ where
     let mut state = AppState::default();
     loop {
         terminal
-            .draw(|frame| render(frame, &state))
+            .draw(|frame| {
+                state.resize_plan_layout(frame.area().width, frame.area().height);
+                render(frame, &state);
+            })
             .map_err(io::Error::other)?;
         if state.should_exit() {
             return Ok(state);
