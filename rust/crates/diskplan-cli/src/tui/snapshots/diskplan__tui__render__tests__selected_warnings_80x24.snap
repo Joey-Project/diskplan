@@ -1,0 +1,28 @@
+---
+source: rust/crates/diskplan-cli/src/tui/render.rs
+expression: selected_snapshot
+---
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ diskplan Immutable plan  •  Paused                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Plan-first • Selected Actions ───────────────────────────────────────────────┐
+│Plan plan-runtime-0001 • 1 staged                                             │
+│Local selection only; apply review is not execution authorization.            │
+│WAIVER waiver-force for action action-cache-1 • user accepted the engine-issu…│
+│FORCE required for action action-cache-1 • immutable flag requires engine-app…│
+│PATH RACE residual for action action-cache-1 • pathname occupant may change a…│
+│Overlay revision 2 • digest 5f74581d8b0859968a6d392e70f06919770a0ef3df30b9626…│
+│action-cache-1 • Remove protected cache • staged • waiver waiver-force: user …│
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────
+j/k move  Enter/l expand  h collapse  Space stage  p plan  / filter  ? help
+immutable engine plan ready

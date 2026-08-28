@@ -31,3 +31,4 @@ sha2 = "0.11.0"
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "=1.47.1", features = ["macros", "rt", "sync", "time"] }
+unicode-width = "=0.2.2"
