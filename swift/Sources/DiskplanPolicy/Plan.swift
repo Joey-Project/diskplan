@@ -990,6 +990,17 @@ public struct ActionDisplayMetrics: Equatable, Sendable {
     self.cleanupCost = cleanupCost
     self.canonicalRawPath = canonicalRawPath
   }
+
+  fileprivate func replacingTier(_ tier: RecommendationTier) -> Self {
+    Self(
+      tier: tier,
+      immediateReclaimBytes: immediateReclaimBytes,
+      inactiveDurationSeconds: inactiveDurationSeconds,
+      rebuildCost: rebuildCost,
+      cleanupCost: cleanupCost,
+      canonicalRawPath: canonicalRawPath
+    )
+  }
 }
 
 public struct ActionPrototype: Equatable, Sendable {
@@ -1401,6 +1412,9 @@ public struct ActionDefinition: Equatable, Sendable {
     evaluation: PolicyEvaluation,
     displayMetrics: ActionDisplayMetrics
   ) -> Self {
+    let displayMetrics = displayMetrics.replacingTier(
+      authoritativeTier(evaluation: evaluation, prototype: prototype)
+    )
     let lineage = ActionLineageID(
       digest: PolicyBindings.digest(kind: "action-lineage") { encoder in
         encodePrototype(prototype, into: &encoder)
@@ -1427,6 +1441,36 @@ public struct ActionDefinition: Equatable, Sendable {
       evaluation: evaluation,
       displayMetrics: displayMetrics
     )
+  }
+
+  private static func authoritativeTier(
+    evaluation: PolicyEvaluation,
+    prototype: ActionPrototype
+  ) -> RecommendationTier {
+    switch evaluation.stageability {
+    case .blocked:
+      return .blocked
+    case .requiresConsents:
+      return evaluation.recommendation == .likelyRebuildable ? .rebuildable : .review
+    case .stageable:
+      break
+    }
+    if case .genericRemove(let contract) = prototype.adapterContract,
+      contract.forceRequirement == .requiresForceWithWarning
+    {
+      return .review
+    }
+    switch evaluation.recommendation {
+    case .safeToClean:
+      return .safe
+    case .likelyRebuildable:
+      return .rebuildable
+    case .needsSemanticReview:
+      return .review
+    case .safeAfterExit, .managedByProvider, .keep, .scanIncomplete,
+      .classificationConflict:
+      return .blocked
+    }
   }
 
   private static func encodePrototype(
@@ -1879,8 +1923,8 @@ public struct ImmutablePlan: Equatable, Sendable {
         break
       }
       let overlappingGitEvidence = gitEvidenceSnapshots.filter {
-        namespaceMutationAffects(
-          action.prototype.namespaceBinding, evidence: $0.namespaceBinding)
+        namespacesMayOverlap(
+          action.prototype.namespaceBinding, $0.namespaceBinding)
       }
       guard !overlappingGitEvidence.isEmpty else { continue }
       guard case .completeReleaseSetRemove(let release) = action.prototype.adapterContract,
@@ -2583,12 +2627,22 @@ public enum DecisionOverlayValidator {
     _ selectedActions: [ActionDefinition],
     plan: ImmutablePlan
   ) throws {
+    let gitEvidence = plan.evidenceSnapshots.filter(\.hasGitWorktreeScope)
     for action in selectedActions {
       switch action.prototype.adapterContract {
       case .completeReleaseSetRemove:
         continue
-      default:
+      case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges:
         break
+      default:
+        guard
+          !gitEvidence.contains(where: {
+            namespacesMayOverlap(
+              action.prototype.namespaceBinding, $0.namespaceBinding)
+          })
+        else {
+          throw PolicyModelError.invalidActionContract
+        }
       }
       let affectedEvidence = plan.evidenceSnapshots.filter {
         namespaceMutationAffects(

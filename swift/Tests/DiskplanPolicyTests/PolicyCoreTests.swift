@@ -888,7 +888,7 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
     administrativeDirectoryIdentity: ObjectIdentity(
       device: 1, object: 702, generation: .known(1), type: .directory),
     commonDirectoryIdentity: ObjectIdentity(
-      device: 1, object: 703, generation: .known(1), type: .directory),
+      device: 1, object: 702, generation: .known(1), type: .directory),
     registrationID: digest(75),
     metadataDigest: digest(77)
   )
@@ -937,6 +937,20 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
 
   let invalidFacts = [
     gitWorktreeEvidence(worktreeObject: 2),
+    gitWorktreeEvidence(
+      registration: .known(
+        try GitWorktreeRegistrationEvidence(
+          registeredWorktreeIdentity: ObjectIdentity(
+            device: 1, object: 1, generation: .known(1), type: .directory),
+          administrativeDirectoryIdentity: ObjectIdentity(
+            device: 1, object: 700, generation: .known(1), type: .directory),
+          commonDirectoryIdentity: ObjectIdentity(
+            device: 1, object: 701, generation: .known(1), type: .directory),
+          registrationID: digest(75),
+          metadataDigest: digest(74)
+        )
+      )
+    ),
     gitWorktreeEvidence(linkage: .known(.linked(registrationID: digest(75)))),
     gitWorktreeEvidence(
       sparseCheckout: .known(.enabled(configurationDigest: digest(76)))),
@@ -1123,7 +1137,7 @@ func planRejectsCrossSnapshotGitContractDowngrades() throws {
       localChanges: .present(changeSetDigest: digest(60)))
   )
   let aliasEvidence = snapshot(
-    candidateID: "alias", path: "tree/worktree", object: 20)
+    candidateID: "alias", path: "tree/alias", object: 20)
   let alias = try makeAction(evidence: aliasEvidence)
   #expect(throws: PolicyModelError.invalidActionContract) {
     try makePlan(
@@ -1140,6 +1154,34 @@ func planRejectsCrossSnapshotGitContractDowngrades() throws {
       evidence: [ancestorEvidence, dirtyGitEvidence]
     )
   }
+
+  let nestedEvidence = snapshot(
+    candidateID: "nested", path: "tree/worktree/cache", object: 22)
+  let nested = try makeAction(evidence: nestedEvidence)
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try makePlan(
+      actions: [nested],
+      evidence: [nestedEvidence, dirtyGitEvidence]
+    )
+  }
+
+  let disjointEvidence = snapshot(
+    candidateID: "disjoint", path: "tree/other", object: 23)
+  let disjoint = try makeAction(evidence: disjointEvidence)
+  let disjointPlan = try makePlan(
+    actions: [disjoint],
+    evidence: [disjointEvidence, dirtyGitEvidence]
+  )
+  let disjointOverlay = DecisionOverlay.create(
+    plan: disjointPlan,
+    selectedActionIDs: [disjoint.id],
+    waiverConsents: [],
+    userNotes: []
+  )
+  #expect(
+    try DecisionOverlayValidator.validate(disjointOverlay, against: disjointPlan)
+      .executionSteps.map(\.action) == [disjoint]
+  )
 }
 
 @Test
@@ -2132,6 +2174,66 @@ func displayOrderIsSeparateFromCanonicalActionIDOrder() throws {
   #expect(ActionOrdering.canonical([unknown, known]).map(\.id) == [known.id, unknown.id].sorted())
 }
 
+@Test
+func displayTierIsDerivedFromFinalSafetyAndRejectsForgedPlanMetrics() throws {
+  let safeEvidence = snapshot(candidateID: "safe", path: "z-safe", object: 1)
+  let safe = try makeAction(evidence: safeEvidence)
+  #expect(safe.displayMetrics.tier == .safe)
+
+  let forceEvidence = snapshot(
+    candidateID: "force", path: "a-force", object: 2,
+    forceRequirement: .requiresForceWithWarning
+  )
+  let force = try makeAction(evidence: forceEvidence)
+  #expect(force.evaluation.stageability == .stageable)
+  #expect(force.displayMetrics.tier == .review)
+
+  let providerEvidence = snapshot(
+    candidateID: "provider", path: "0-provider", object: 3,
+    targetProviderState: .fileProviderManaged
+  )
+  let provider = try makeAction(evidence: providerEvidence)
+  #expect(provider.evaluation.recommendation == .managedByProvider)
+  #expect(provider.evaluation.stageability == .blocked)
+  #expect(provider.displayMetrics.tier == .blocked)
+
+  let blockedEvidence = snapshot(
+    candidateID: "blocked", path: "00-blocked", object: 4,
+    explicitProtection: .known(.protected)
+  )
+  let blocked = try makeAction(evidence: blockedEvidence)
+  #expect(blocked.evaluation.stageability == .blocked)
+  #expect(blocked.displayMetrics.tier == .blocked)
+
+  #expect(
+    ActionOrdering.display([provider, force, safe]).map(\.id)
+      == [safe.id, force.id, provider.id]
+  )
+
+  let forgedTier = ActionDisplayMetrics(
+    tier: .safe,
+    immediateReclaimBytes: blocked.displayMetrics.immediateReclaimBytes,
+    inactiveDurationSeconds: blocked.displayMetrics.inactiveDurationSeconds,
+    rebuildCost: blocked.displayMetrics.rebuildCost,
+    cleanupCost: blocked.displayMetrics.cleanupCost,
+    canonicalRawPath: blocked.displayMetrics.canonicalRawPath
+  )
+  let forgedBlocked = ActionDefinition(
+    lineageID: blocked.lineageID,
+    id: blocked.id,
+    prototype: blocked.prototype,
+    evidence: blocked.evidence,
+    globalFactsHash: blocked.globalFactsHash,
+    prerequisiteLineageIDs: blocked.prerequisiteLineageIDs,
+    prerequisiteActionIDs: blocked.prerequisiteActionIDs,
+    evaluation: blocked.evaluation,
+    displayMetrics: forgedTier
+  )
+  #expect(throws: PolicyModelError.invalidActionBinding(blocked.id)) {
+    try makePlan(actions: [forgedBlocked], evidence: [blockedEvidence])
+  }
+}
+
 private func claim(
   _ facet: ClassificationFacet,
   _ value: String,
@@ -2239,7 +2341,7 @@ private func gitWorktreeEvidence(
     ),
     commonDirectoryIdentity: ObjectIdentity(
       device: 1,
-      object: 701,
+      object: 700,
       generation: .known(1),
       type: .directory
     ),
@@ -2438,10 +2540,11 @@ private func genericPrototype(_ evidence: FrozenEvidenceSnapshot) throws -> Acti
 
 private func metrics(
   path: String,
-  immediate: KnownOrUnknown<UInt64> = .known(1)
+  immediate: KnownOrUnknown<UInt64> = .known(1),
+  tier: RecommendationTier = .safe
 ) -> ActionDisplayMetrics {
   ActionDisplayMetrics(
-    tier: .safe,
+    tier: tier,
     immediateReclaimBytes: immediate,
     inactiveDurationSeconds: .known(10),
     rebuildCost: .known(1),

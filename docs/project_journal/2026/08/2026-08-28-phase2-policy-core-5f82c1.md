@@ -57,11 +57,12 @@ superseded_by:
   worktree registration/root identity, administrative and common directory identity,
   registration/metadata digests, linked-worktree and sparse-checkout state, nested
   repositories, submodules, trusted-exclusive namespace, and post-quarantine coverage. V1
-  execution requires an ordinary worktree with sparse checkout disabled; linked, sparse,
-  target-mismatched, absent, unknown, unreadable, or failed evidence stays report-only. Dirty
-  work requires a separate explicit discard action prerequisite whose typed clean successor
-  preserves HEAD identity and becomes the remove action's JIT content baseline. Action-aware
-  policy records the prerequisite discharge before action hashing.
+  execution requires an ordinary worktree with sparse checkout disabled and exact equality
+  between administrative and common directory identity; linked, sparse, identity-mismatched,
+  absent, unknown, unreadable, or failed evidence stays report-only. Dirty work requires a
+  separate explicit discard action prerequisite whose typed clean successor preserves HEAD
+  identity and becomes the remove action's JIT content baseline. Action-aware policy records
+  the prerequisite discharge before action hashing.
 - Complete-release actions bind the exact verified release graph, owner topology, actions,
   candidates, and bytes; plans reject empty, duplicate, or mismatched action bindings. Bound
   owners are mandatory prerequisites for consent validation. A closed composite execution
@@ -76,6 +77,11 @@ superseded_by:
   frozen corpus and reject unauthorized alias or ancestor effects. Duplicate-survivor consent
   protects every plan-declared survivor namespace even when the declaring duplicate is not
   selected.
+- Git-scope dominance uses symmetric path/identity overlap for non-Git actions at plan and
+  overlay boundaries, blocking nested children, ancestors, and aliases while preserving
+  directional non-Git survivor checks and allowing disjoint targets. Display tiers are derived
+  from final action-aware policy and force-warning semantics; recomputation rejects forged
+  safe labels for blocked or review-required actions.
 
 ## Task List
 
@@ -100,6 +106,8 @@ superseded_by:
   discharge, composite release steps, terminal namespace exclusivity, and survivor invariants.
 - [x] Bind Git worktree registration and administrative metadata plus linked/sparse typed
   facts, and fail closed outside the exact ordinary, sparse-disabled v1 execution predicate.
+- [x] Close full-range review findings for symmetric Git dominance, ordinary admin/common
+  metadata consistency, and authoritative display tiers.
 
 ## Handoff
 
@@ -114,8 +122,8 @@ superseded_by:
 - Policy contract: `docs/design/policy-core.md`.
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
-  overlay consent binding; the latest focused run passed all 43 tests.
-- The final full local `swift test --package-path swift` run passed all 71 tests, including
-  all 43 focused policy tests.
+  overlay consent binding; the latest focused run passed all 44 tests.
+- The final full local `swift test --package-path swift` run passed all 72 tests, including
+  all 44 focused policy tests.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.

@@ -454,6 +454,8 @@ extension GitWorktreeEvidence {
       case .known = indexDigest,
       case .known(let registration) = registration,
       registration.registeredWorktreeIdentity == targetIdentity,
+      registration.administrativeDirectoryIdentity
+        == registration.commonDirectoryIdentity,
       linkage == .known(.ordinary),
       sparseCheckout == .known(.disabled),
       nestedRepositories == .known(.none),

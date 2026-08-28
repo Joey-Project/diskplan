@@ -149,10 +149,12 @@ administrative-directory and common-directory identities, registration/metadata 
 linked-worktree state, sparse-checkout state, absence of nested repositories and submodules,
 trusted-exclusive namespace, and complete post-quarantine coverage. The v1 executable
 predicate is intentionally closed to an exact registration, an ordinary worktree, and
-disabled sparse checkout. Known linked worktrees, known enabled sparse checkout, and any
-absent, unknown, unreadable, failed, or target-mismatched registration fact remain report-only
-until a specialized adapter proves their additional cleanup and coverage semantics. All such
-typed facts remain in evidence, lineage, action, and plan hashes. Dirty local work is
+disabled sparse checkout; an ordinary registration must also prove that its administrative
+directory identity exactly equals its common-directory identity. Known linked worktrees,
+known enabled sparse checkout, mismatched administrative/common identity, and any absent,
+unknown, unreadable, failed, or target-mismatched registration fact remain report-only until
+a specialized adapter proves their additional cleanup and coverage semantics. All such typed
+facts remain in evidence, lineage, action, and plan hashes. Dirty local work is
 represented by a separate discard-local-changes action and exact waiver. Its typed
 postcondition seals a clean successor HEAD/index/content baseline, preserves HEAD identity,
 and becomes the dependent remove action's JIT baseline. The remove's action-aware evaluation
@@ -200,8 +202,13 @@ replacement. Duplicate-survivor consent requires one plan-consistent survivor an
 direct or ancestor deletion of its namespace. A selected terminal mutation, including a Git
 discard transition, is checked directionally against the complete frozen evidence corpus; it
 cannot mutate an alias or descendant snapshot whose independent seven-gate evidence was not
-authorized. Git-specific evidence dominates non-Git adapters across the whole plan, so a
-second generic snapshot cannot downgrade quarantine or local-work contracts. Display order is
-separate from canonical action order: UI metrics use typed known/unknown lexicographic
-ordering. Plan hashing uses ActionID-byte order; validated execution steps use deterministic
-topological order with ActionID-byte tie breaking.
+authorized. Git-specific evidence uses symmetric absolute-path and identity overlap to
+dominate every non-Git adapter across the whole plan and at overlay validation, including a
+generic child nested below the worktree; a second generic snapshot therefore cannot downgrade
+discard consent or quarantine. Directional mutation checks remain in place for non-Git
+survivor semantics, and disjoint namespaces remain independent. Display order is separate
+from canonical action order: policy core derives the tier from final action-aware
+stageability/recommendation and force-warning semantics, while callers provide only the other
+typed known/unknown metrics. Recomputed plans reject forged tiers. Plan hashing uses
+ActionID-byte order; validated execution steps use deterministic topological order with
+ActionID-byte tie breaking.
