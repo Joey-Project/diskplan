@@ -11,17 +11,20 @@ object type for one descriptor-relative directory slot. The walker:
 
 1. revalidates the live process no-materialization policy immediately before every
    root/parent open, descriptor-relative path inspection, child open, and `readdir`;
-2. requires every configured root to pass the authoritative File Provider boundary
-   probe before the root itself is opened; absent or unavailable provider identity
-   does not become local evidence;
-3. binds each accepted root to an open directory descriptor and stable identity;
-4. enumerates raw directory-entry bytes into a bounded lexicographic retention set;
-5. inspects children relative to the held parent descriptor without following
+2. requires every configured parent-slot root to pass the authoritative File Provider
+   boundary probe before the root itself is opened; absent or unavailable provider
+   identity does not become local evidence;
+3. accepts the exact canonical raw path `/` as the filesystem namespace root only
+   after the same live policy gate, opens it with no-follow directory semantics, and
+   binds identity, filesystem times, and access policy to that held descriptor;
+4. binds each accepted root to an open directory descriptor and stable identity;
+5. enumerates raw directory-entry bytes into a bounded lexicographic retention set;
+6. inspects children relative to the held parent descriptor without following
    symbolic links, then binds real identity, access policy, and all filesystem
    times to one event-only descriptor (`O_SYMLINK` for the link object itself);
-6. opens a child directory relative to that same descriptor and compares all three
+7. opens a child directory relative to that same descriptor and compares all three
    identity fields before enumeration; and
-7. retains the parent-slot descriptor, raw name, identity, and access-policy seal
+8. retains the namespace binding, identity, and access-policy seal
    until the directory closes, then revalidates the open descriptor and parent slot.
 
 An authoritative provider probe is bracketed by complete policy-relevant item
@@ -61,6 +64,13 @@ The production backend never constructs descendant paths; only the configured ro
 parent path is path-opened to establish the descriptor-relative root slot. A root
 with unproved provider ownership is retained in provenance and root failures but is
 never opened or treated as `localOrUnindicated`.
+The exact filesystem root `/` is the sole parentless exception: it is not a File
+Provider item slot, so close-time identity and access policy are revalidated on the
+same held descriptor. Empty, relative, NUL-containing, trailing-separator,
+duplicate-separator, `.`-component, and `..`-component aliases are rejected before
+any policy check or filesystem touch. Provider ownership beneath `/` is still
+resolved from item evidence and the authoritative boundary probe; the exception
+does not make descendants local by path convention.
 
 ## Evidence model
 
@@ -112,6 +122,9 @@ machine state. Root IDs are unique provenance keys: both direct scope constructi
 and profile resolution reject duplicates before `ResolvedScanScope` is frozen.
 Traversal frames retain the actual bound `RootBinding`; completion never recovers a
 binding by looking up a possibly aliased display/path ID.
+Full-audit may therefore resolve the exact raw path `/`. Distinct root IDs remain
+distinct provenance entries even when they bind the same exact raw root; duplicate
+root IDs remain invalid.
 
 `ScanSession` is an actor-controlled batch scanner. It records a deterministic,
 monotonic transcript for start, advance, pause, checkpoint, provisional snapshot,

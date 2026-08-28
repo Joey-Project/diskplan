@@ -93,12 +93,15 @@ public struct DirectoryEnumeration: Equatable, Sendable {
   }
 }
 
+public enum DirectoryNamespaceBinding: Equatable, Sendable {
+  case parentSlot(parent: DirectoryHandle, name: RawPathComponent, ownsParent: Bool)
+  case canonicalFilesystemRoot
+}
+
 public struct DirectorySlotBinding: Equatable, Sendable {
-  public let parent: DirectoryHandle
-  public let name: RawPathComponent
+  public let namespace: DirectoryNamespaceBinding
   public let expectedIdentity: ObjectIdentity
   public let expectedAccessPolicy: AccessPolicyEvidence
-  public let ownsParent: Bool
 
   public init(
     parent: DirectoryHandle,
@@ -107,11 +110,18 @@ public struct DirectorySlotBinding: Equatable, Sendable {
     expectedAccessPolicy: AccessPolicyEvidence,
     ownsParent: Bool
   ) {
-    self.parent = parent
-    self.name = name
+    namespace = .parentSlot(parent: parent, name: name, ownsParent: ownsParent)
     self.expectedIdentity = expectedIdentity
     self.expectedAccessPolicy = expectedAccessPolicy
-    self.ownsParent = ownsParent
+  }
+
+  public init(
+    canonicalFilesystemRootIdentity: ObjectIdentity,
+    expectedAccessPolicy: AccessPolicyEvidence
+  ) {
+    namespace = .canonicalFilesystemRoot
+    expectedIdentity = canonicalFilesystemRootIdentity
+    self.expectedAccessPolicy = expectedAccessPolicy
   }
 }
 
@@ -184,6 +194,46 @@ public protocol ScanFilesystem: Sendable {
   func close(_ directory: BoundDirectory) -> DirectoryCloseEvidence
 }
 
+private enum ParsedRootPath {
+  case canonicalFilesystemRoot
+  case parentSlot(parentPath: Data, rawName: Data)
+}
+
+private enum RootPathValidationError: Error {
+  case malformed
+}
+
+private func parseCanonicalRootPath(_ rawPath: Data) throws -> ParsedRootPath {
+  let separator = UInt8(ascii: "/")
+  guard !rawPath.isEmpty, rawPath.first == separator, !rawPath.contains(0) else {
+    throw RootPathValidationError.malformed
+  }
+  if rawPath == Data([separator]) { return .canonicalFilesystemRoot }
+  guard rawPath.last != separator else { throw RootPathValidationError.malformed }
+  let components = rawPath.dropFirst().split(separator: separator, omittingEmptySubsequences: false)
+  guard !components.isEmpty,
+    components.allSatisfy({ !$0.isEmpty && $0 != Data(".".utf8) && $0 != Data("..".utf8) }),
+    let finalSeparator = rawPath.lastIndex(of: separator)
+  else {
+    throw RootPathValidationError.malformed
+  }
+  let parentPath =
+    finalSeparator == rawPath.startIndex
+    ? Data([separator]) : Data(rawPath[..<finalSeparator])
+  let rawName = Data(rawPath[rawPath.index(after: finalSeparator)...])
+  return .parentSlot(parentPath: parentPath, rawName: rawName)
+}
+
+private func openRawDirectory(_ rawPath: Data) -> Int32 {
+  var bytes = Array(rawPath) + [0]
+  return bytes.withUnsafeMutableBytes { raw in
+    open(
+      raw.bindMemory(to: CChar.self).baseAddress!,
+      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    )
+  }
+}
+
 public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
   private let policy: NoMaterializationPolicy
   private let descriptorIdentityProbe = FileDescriptorIdentityProbe()
@@ -194,6 +244,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
   private let providerEvidenceReader:
     @Sendable (Int32, Data, NoMaterializationPolicy, Bool) -> FileProviderProbeOutcome
   private let slotSealOpener: (@Sendable (Int32, Data) -> Int32)?
+  private let rootDirectoryOpener: @Sendable (Data) -> Int32
 
   public init(policy: NoMaterializationPolicy) {
     self.policy = policy
@@ -215,6 +266,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
       )
     }
     slotSealOpener = nil
+    rootDirectoryOpener = openRawDirectory
   }
 
   init(
@@ -244,7 +296,8 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
           inheritedProviderBoundary: inheritedBoundary
         )
       },
-    slotSealOpener: (@Sendable (Int32, Data) -> Int32)? = nil
+    slotSealOpener: (@Sendable (Int32, Data) -> Int32)? = nil,
+    rootDirectoryOpener: @escaping @Sendable (Data) -> Int32 = openRawDirectory
   ) {
     self.policy = policy
     self.pathAccessValidator = pathAccessValidator
@@ -252,32 +305,25 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     self.itemEvidenceReader = itemEvidenceReader
     self.providerEvidenceReader = providerEvidenceReader
     self.slotSealOpener = slotSealOpener
+    self.rootDirectoryOpener = rootDirectoryOpener
   }
 
   public func bindRoot(
     _ request: ScanRootRequest,
     resolverVersion: UInt32
   ) -> Observation<BoundScanRoot> {
-    guard !request.rawAbsolutePath.isEmpty, request.rawAbsolutePath.first == UInt8(ascii: "/"),
-      !request.rawAbsolutePath.contains(0)
-    else {
-      return .failed(reason: "root path is not an absolute raw filesystem path", errorCode: nil)
+    let parsed: ParsedRootPath
+    do {
+      parsed = try parseCanonicalRootPath(request.rawAbsolutePath)
+    } catch {
+      return .failed(reason: "root path is not a canonical absolute raw path", errorCode: EINVAL)
     }
-    guard request.rawAbsolutePath != Data("/".utf8),
-      request.rawAbsolutePath.last != UInt8(ascii: "/"),
-      let separator = request.rawAbsolutePath.lastIndex(of: UInt8(ascii: "/"))
-    else {
-      return .failed(
-        reason: "configured root has no authoritative parent-slot provider proof",
-        errorCode: ENODATA
-      )
+    if case .canonicalFilesystemRoot = parsed {
+      return bindCanonicalFilesystemRoot(request, resolverVersion: resolverVersion)
     }
-    let rawName = Data(request.rawAbsolutePath[request.rawAbsolutePath.index(after: separator)...])
-    guard !rawName.isEmpty, rawName != Data(".".utf8), rawName != Data("..".utf8) else {
-      return .failed(reason: "root path has an invalid final component", errorCode: EINVAL)
+    guard case .parentSlot(let parentPath, let rawName) = parsed else {
+      preconditionFailure("all parsed root path variants are handled")
     }
-    var parentPath = Data(request.rawAbsolutePath[..<separator])
-    if parentPath.isEmpty { parentPath = Data("/".utf8) }
     let parentGate = pathAccessGate(operation: "open scan root parent")
     guard parentGate.value != nil else {
       return observation(
@@ -372,6 +418,61 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         providerEvidence: item.providerEvidence,
         filesystemTimes: item.filesystemTimes,
         accessPolicy: item.accessPolicy
+      )
+    )
+  }
+
+  private func bindCanonicalFilesystemRoot(
+    _ request: ScanRootRequest,
+    resolverVersion: UInt32
+  ) -> Observation<BoundScanRoot> {
+    let gate = pathAccessGate(operation: "open canonical filesystem root")
+    guard let livePolicy = gate.value else {
+      return observation(
+        gate,
+        operation: "open canonical filesystem root",
+        as: BoundScanRoot.self
+      )
+    }
+    let fd = rootDirectoryOpener(request.rawAbsolutePath)
+    guard fd >= 0 else {
+      return posixObservation(errno, operation: "open canonical filesystem root")
+    }
+    let seal = descriptorSeal(
+      fileDescriptor: fd,
+      expectedIdentity: nil,
+      policy: livePolicy,
+      operation: "bind canonical filesystem root"
+    )
+    guard let observedSeal = seal.value else {
+      Darwin.close(fd)
+      return seal.erasingValue()
+    }
+    guard observedSeal.identity.objectType == .directory else {
+      Darwin.close(fd)
+      return .failed(reason: "canonical filesystem root is not a directory", errorCode: ENOTDIR)
+    }
+    return .known(
+      BoundScanRoot(
+        binding: RootBinding(
+          resolverVersion: resolverVersion,
+          rootID: request.rootID,
+          rawAbsolutePath: request.rawAbsolutePath,
+          identity: observedSeal.identity
+        ),
+        directory: BoundDirectory(
+          handle: DirectoryHandle(rawValue: fd),
+          slotBinding: DirectorySlotBinding(
+            canonicalFilesystemRootIdentity: observedSeal.identity,
+            expectedAccessPolicy: observedSeal.accessPolicy
+          )
+        ),
+        providerBoundary: .localOrUnindicated,
+        providerEvidence: .unknown(
+          reason: "canonical filesystem root is outside File Provider item namespaces"
+        ),
+        filesystemTimes: observedSeal.times,
+        accessPolicy: .known(observedSeal.accessPolicy)
       )
     )
   }
@@ -582,8 +683,10 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
   public func close(_ directory: BoundDirectory) -> DirectoryCloseEvidence {
     defer {
       Darwin.close(directory.handle.rawValue)
-      if directory.slotBinding.ownsParent {
-        Darwin.close(directory.slotBinding.parent.rawValue)
+      if case .parentSlot(let parent, _, let ownsParent) = directory.slotBinding.namespace,
+        ownsParent
+      {
+        Darwin.close(parent.rawValue)
       }
     }
     let identityBeforePolicy = closeIdentity(directory)
@@ -662,9 +765,12 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         errorCode: ESTALE
       )
     }
+    guard case .parentSlot(let parent, let name, _) = directory.slotBinding.namespace else {
+      return .known(observedDescriptorIdentity)
+    }
     let slotCapability = itemEvidenceReader(
-      directory.slotBinding.parent.rawValue,
-      directory.slotBinding.name.bytes,
+      parent.rawValue,
+      name.bytes,
       policy
     )
     guard let slotItem = slotCapability.value else {
@@ -690,11 +796,37 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
   private func closeAccessPolicy(
     _ directory: BoundDirectory
   ) -> DirectoryCloseEvidence {
-    let boundSeal = statSlotSeal(
-      parent: directory.slotBinding.parent,
-      name: directory.slotBinding.name,
-      expectedIdentity: directory.slotBinding.expectedIdentity
-    )
+    let boundSeal: Observation<SlotSeal>
+    switch directory.slotBinding.namespace {
+    case .parentSlot(let parent, let name, _):
+      boundSeal = statSlotSeal(
+        parent: parent,
+        name: name,
+        expectedIdentity: directory.slotBinding.expectedIdentity
+      )
+    case .canonicalFilesystemRoot:
+      let gate = pathAccessGate(operation: "revalidate canonical filesystem root access policy")
+      guard let livePolicy = gate.value else {
+        return DirectoryCloseEvidence(
+          identity: observation(
+            gate,
+            operation: "revalidate canonical filesystem root access policy",
+            as: ObjectIdentity.self
+          ),
+          accessPolicy: observation(
+            gate,
+            operation: "revalidate canonical filesystem root access policy",
+            as: AccessPolicyEvidence.self
+          )
+        )
+      }
+      boundSeal = descriptorSeal(
+        fileDescriptor: directory.handle.rawValue,
+        expectedIdentity: directory.slotBinding.expectedIdentity,
+        policy: livePolicy,
+        operation: "revalidate canonical filesystem root"
+      )
+    }
     guard let observedSeal = boundSeal.value else {
       return DirectoryCloseEvidence(
         identity: boundSeal.erasingValue(),
@@ -745,8 +877,22 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
       return posixObservation(code, operation: operation)
     }
     defer { Darwin.close(fd) }
-    let identityCapability = descriptorIdentityProbe.probe(
+    return descriptorSeal(
       fileDescriptor: fd,
+      expectedIdentity: expectedIdentity,
+      policy: livePolicy,
+      operation: operation
+    )
+  }
+
+  private func descriptorSeal(
+    fileDescriptor: Int32,
+    expectedIdentity: ObjectIdentity?,
+    policy livePolicy: NoMaterializationPolicy,
+    operation: String
+  ) -> Observation<SlotSeal> {
+    let identityCapability = descriptorIdentityProbe.probe(
+      fileDescriptor: fileDescriptor,
       policy: livePolicy
     )
     guard let descriptorIdentity = identityCapability.value else {
@@ -757,14 +903,14 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
       )
     }
     let observedIdentity = objectIdentity(descriptorIdentity)
-    guard observedIdentity == expectedIdentity else {
+    guard expectedIdentity == nil || observedIdentity == expectedIdentity else {
       return .failed(
         reason: "item identity changed before descriptor-bound policy and times",
         errorCode: ESTALE
       )
     }
     var value = stat()
-    guard fstat(fd, &value) == 0 else {
+    guard fstat(fileDescriptor, &value) == 0 else {
       return posixObservation(errno, operation: "read descriptor-bound item policy and times")
     }
     return .known(
