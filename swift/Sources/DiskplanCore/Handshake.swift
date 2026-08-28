@@ -1,7 +1,7 @@
 import DiskplanProto
 
 public let protocolMajor: UInt32 = 1
-public let protocolMinor: UInt32 = 1
+public let protocolMinor: UInt32 = 2
 
 public enum HandshakeResult: Equatable {
     case accepted(Diskplan_V1_HelloAccepted)
@@ -17,7 +17,7 @@ public enum Handshake {
         var hello = Diskplan_V1_Hello()
         hello.version = version
         hello.requiredCapabilities = ["framing-v1"]
-        hello.optionalCapabilities = ["canonical-binary-v1", "plan-bootstrap"]
+        hello.optionalCapabilities = ["canonical-binary-v1", "plan-bootstrap", "scan-control-v1"]
         hello.implementation = "diskplan-swift-engine"
         return hello
     }

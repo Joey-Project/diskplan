@@ -1,0 +1,28 @@
+---
+source: rust/crates/diskplan-cli/src/tui/render.rs
+expression: "snapshot(&state, 80, 24)"
+---
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ diskplan Provisional plan  •  ProvisionalPlanReady                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Plan-first summary ──────────────────────────────────────────────────────────┐
+│phase0-provisional-0001 • 11 actions                                          │
+│Immediate 1.2 GiB • Shared unlock 256.0 MiB                                   │
+│                                                                              │
+│Ready • 8 actions                                                             │
+│1.0 GiB immediate • 0 B shared • ready                                        │
+│Conditional • 3 actions                                                       │
+│256.0 MiB immediate • 256.0 MiB shared • needs complete release set           │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────
+q cancel  r resume + invalidate  ? help
+provisional plan ready
