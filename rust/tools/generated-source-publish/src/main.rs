@@ -61,75 +61,190 @@ struct ProvisionalStage {
     identity: Option<Identity>,
 }
 
-// Rename and unlink safety relies on this explicit namespace precondition, not on
-// treating a pathname stat as an object-identity binding. The directory must be
-// owned by this effective user, deny group/other writes, have no extended ACL,
-// and remain under Diskplan's cooperative exclusive flock for the whole run.
-struct DirectoryLease {
+struct DirectorySeal {
     handle: File,
     display_path: PathBuf,
+    name_from_parent: Option<CString>,
     identity: Identity,
     access: AccessState,
 }
 
-impl Drop for DirectoryLease {
+// Rename and unlink safety relies on this explicit namespace precondition, not on
+// treating a pathname stat as an object-identity binding. Every directory from
+// the descriptor-open repository root through the destination parent must be
+// owned by this effective user, deny group/other writes, and have no extended
+// ACL. A repository-wide cooperative flock is held for the whole run.
+struct RepositoryLease {
+    requested_path: PathBuf,
+    root: DirectorySeal,
+}
+
+impl Drop for RepositoryLease {
     fn drop(&mut self) {
         unsafe {
-            libc::flock(self.handle.as_raw_fd(), libc::LOCK_UN);
+            libc::flock(self.root.handle.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
 
-impl DirectoryLease {
+impl RepositoryLease {
     fn acquire(path: &Path) -> Result<Self, String> {
-        let handle = File::open(path).map_err(|error| {
+        let canonical_path = fs::canonicalize(path).map_err(|error| {
             format!(
-                "failed to open destination directory {}: {error}",
+                "failed to canonicalize repository root {}: {error}",
                 path.display()
             )
         })?;
-        validate_open_directory(&handle, path)?;
-        let (identity, access) = inspect_open_directory(&handle, path)?;
-        enforce_trusted_directory_policy(path, &access)?;
+        let handle = open_directory_path(&canonical_path)?;
+        validate_open_directory(&handle, &canonical_path)?;
+        let (identity, access) = inspect_open_directory(&handle, &canonical_path)?;
+        enforce_trusted_directory_policy(&canonical_path, &access)?;
         let result = unsafe { libc::flock(handle.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if result == -1 {
             return Err(format!(
-                "destination directory is not cooperatively exclusive at {}: {}",
-                path.display(),
+                "repository namespace is not cooperatively exclusive at {}: {}",
+                canonical_path.display(),
                 std::io::Error::last_os_error()
             ));
         }
         let lease = Self {
-            handle,
-            display_path: path.to_path_buf(),
-            identity,
-            access,
+            requested_path: path.to_path_buf(),
+            root: DirectorySeal {
+                handle,
+                display_path: canonical_path,
+                name_from_parent: None,
+                identity,
+                access,
+            },
+        };
+        lease.validate_root()?;
+        Ok(lease)
+    }
+
+    fn validate_root(&self) -> Result<(), String> {
+        validate_directory_seal(&self.root, "repository root")?;
+        validate_open_directory(&self.root.handle, &self.root.display_path)
+    }
+
+    fn destination_parent(&self, destination: &Path) -> Result<PathBuf, String> {
+        let requested_parent = validate_destination(&self.requested_path, destination)?;
+        let relative = requested_parent
+            .strip_prefix(&self.requested_path)
+            .map_err(|_| {
+                format!(
+                    "destination parent is outside requested repository root {}: {}",
+                    self.requested_path.display(),
+                    requested_parent.display()
+                )
+            })?;
+        Ok(self.root.display_path.join(relative))
+    }
+}
+
+struct DirectoryLease {
+    repository: Arc<RepositoryLease>,
+    descendants: Vec<DirectorySeal>,
+}
+
+impl DirectoryLease {
+    fn acquire(repository: Arc<RepositoryLease>, path: &Path) -> Result<Self, String> {
+        repository.validate_root()?;
+        let relative = path
+            .strip_prefix(&repository.root.display_path)
+            .map_err(|_| {
+                format!(
+                    "destination parent is outside repository root {}: {}",
+                    repository.root.display_path.display(),
+                    path.display()
+                )
+            })?;
+        let mut descendants = Vec::new();
+        let mut current_path = repository.root.display_path.clone();
+        let mut parent_fd = repository.root.handle.as_raw_fd();
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                return Err(format!(
+                    "destination parent contains a non-normal component: {}",
+                    path.display()
+                ));
+            };
+            let name = path_component_cstring(component)?;
+            current_path.push(component);
+            let handle = open_directory_at(parent_fd, &name, &current_path)?;
+            validate_open_directory(&handle, &current_path)?;
+            let (identity, access) = inspect_open_directory(&handle, &current_path)?;
+            enforce_trusted_directory_policy(&current_path, &access)?;
+            descendants.push(DirectorySeal {
+                handle,
+                display_path: current_path.clone(),
+                name_from_parent: Some(name),
+                identity,
+                access,
+            });
+            parent_fd = descendants
+                .last()
+                .expect("just appended directory seal")
+                .handle
+                .as_raw_fd();
+        }
+        let lease = Self {
+            repository,
+            descendants,
         };
         lease.validate_exclusive_namespace()?;
         Ok(lease)
     }
 
+    fn final_seal(&self) -> &DirectorySeal {
+        self.descendants.last().unwrap_or(&self.repository.root)
+    }
+
     fn fd(&self) -> RawFd {
-        self.handle.as_raw_fd()
+        self.final_seal().handle.as_raw_fd()
+    }
+
+    fn display_path(&self) -> &Path {
+        &self.final_seal().display_path
+    }
+
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.final_seal().handle.sync_all()
     }
 
     fn validate_exclusive_namespace(&self) -> Result<(), String> {
-        let (identity, access) = inspect_open_directory(&self.handle, &self.display_path)?;
-        if identity != self.identity {
-            return Err(format!(
-                "exclusive destination directory identity changed at {}: expected {:?}, found {identity:?}",
-                self.display_path.display(),
-                self.identity
-            ));
+        self.repository.validate_root()?;
+        let mut parent = &self.repository.root;
+        for descendant in &self.descendants {
+            validate_directory_seal(descendant, "destination ancestor")?;
+            let name = descendant.name_from_parent.as_ref().ok_or_else(|| {
+                "internal error: destination ancestor lacks its parent-relative name".to_owned()
+            })?;
+            let reopened =
+                open_directory_at(parent.handle.as_raw_fd(), name, &descendant.display_path)
+                    .map_err(|error| {
+                        format!(
+                            "destination directory chain is missing or unreadable at {}: {error}",
+                            descendant.display_path.display()
+                        )
+                    })?;
+            let (identity, access) = inspect_open_directory(&reopened, &descendant.display_path)?;
+            if identity != descendant.identity {
+                return Err(format!(
+                    "destination directory chain identity mismatched at {}: expected {:?}, found {identity:?}",
+                    descendant.display_path.display(),
+                    descendant.identity
+                ));
+            }
+            if access != descendant.access {
+                return Err(format!(
+                    "destination directory chain access policy mismatched at {}: expected {:?}, found {access:?}",
+                    descendant.display_path.display(),
+                    descendant.access
+                ));
+            }
+            parent = descendant;
         }
-        if access != self.access {
-            return Err(format!(
-                "exclusive destination directory access policy changed at {}: expected {:?}, found {access:?}",
-                self.display_path.display(),
-                self.access
-            ));
-        }
-        enforce_trusted_directory_policy(&self.display_path, &access)
+        Ok(())
     }
 }
 
@@ -148,8 +263,9 @@ struct Target {
 impl Target {
     #[cfg(test)]
     fn prepare(repo_root: &Path, source: &Path, destination: &Path) -> Result<Self, String> {
-        let parent = validate_destination(repo_root, destination)?;
-        let directory = Arc::new(DirectoryLease::acquire(&parent)?);
+        let repository = Arc::new(RepositoryLease::acquire(repo_root)?);
+        let parent = repository.destination_parent(destination)?;
+        let directory = Arc::new(DirectoryLease::acquire(repository, &parent)?);
         Self::prepare_with_directory(source, destination, directory)
     }
 
@@ -267,7 +383,7 @@ impl Target {
                 self.display_path.display()
             ));
         }
-        self.directory.handle.sync_all().map_err(|error| {
+        self.directory.sync_all().map_err(|error| {
             format!(
                 "failed to fsync destination directory {}: {error}",
                 self.display_path.display()
@@ -365,7 +481,7 @@ impl Target {
                 "rollback backup",
             )?;
         }
-        let post_publish = self.directory.handle.sync_all().map_err(|error| {
+        let post_publish = self.directory.sync_all().map_err(|error| {
             format!(
                 "failed to fsync published directory for {}: {error}",
                 self.display_path.display()
@@ -452,7 +568,7 @@ impl Target {
                 )
             })?,
         }
-        self.directory.handle.sync_all().map_err(|error| {
+        self.directory.sync_all().map_err(|error| {
             format!(
                 "failed to fsync rollback directory for {}: {error}",
                 self.display_path.display()
@@ -496,7 +612,7 @@ impl Target {
                 )
             })?;
         }
-        self.directory.handle.sync_all().map_err(|error| {
+        self.directory.sync_all().map_err(|error| {
             format!(
                 "failed to fsync completed destination directory for {}: {error}",
                 self.display_path.display()
@@ -523,7 +639,7 @@ impl Target {
                         format!(
                             "failed to duplicate provisional stage handle for cleanup at {}: {error}; recovery path: {}",
                             self.display_path.display(),
-                            slot_display_path(&self.directory.display_path, stage_name).display()
+                            slot_display_path(self.directory.display_path(), stage_name).display()
                         )
                     })?,
                     &self.display_path,
@@ -532,7 +648,7 @@ impl Target {
                     format!(
                         "failed to seal provisional stage for cleanup at {}: {error}; recovery path: {}",
                         self.display_path.display(),
-                        slot_display_path(&self.directory.display_path, stage_name).display()
+                        slot_display_path(self.directory.display_path(), stage_name).display()
                     )
                 })?;
                 if provisional
@@ -542,7 +658,7 @@ impl Target {
                     return Err(format!(
                         "provisional stage identity changed before cleanup at {}; recovery path: {}",
                         self.display_path.display(),
-                        slot_display_path(&self.directory.display_path, stage_name).display()
+                        slot_display_path(self.directory.display_path(), stage_name).display()
                     ));
                 }
                 &provisional_seal
@@ -550,7 +666,7 @@ impl Target {
                 return Err(format!(
                     "stage exists without a held descriptor seal at {}; recovery path: {}",
                     self.display_path.display(),
-                    slot_display_path(&self.directory.display_path, stage_name).display()
+                    slot_display_path(self.directory.display_path(), stage_name).display()
                 ));
             };
             quarantine_and_delete_sealed_slot(
@@ -560,7 +676,7 @@ impl Target {
                 "staged generated source",
                 staged,
             )?;
-            self.directory.handle.sync_all().map_err(|error| {
+            self.directory.sync_all().map_err(|error| {
                 format!(
                     "failed to fsync discarded stage directory for {}: {error}",
                     self.display_path.display()
@@ -689,6 +805,12 @@ fn validate_destination(repo_root: &Path, destination: &Path) -> Result<PathBuf,
             repo_root.display()
         ));
     }
+    if !destination.is_absolute() {
+        return Err(format!(
+            "destination is not absolute: {}",
+            destination.display()
+        ));
+    }
     let relative = destination.strip_prefix(repo_root).map_err(|_| {
         format!(
             "destination is outside repository root {}: {}",
@@ -696,27 +818,6 @@ fn validate_destination(repo_root: &Path, destination: &Path) -> Result<PathBuf,
             destination.display()
         )
     })?;
-    let repo_root = fs::canonicalize(repo_root).map_err(|error| {
-        format!(
-            "failed to canonicalize repository root {}: {error}",
-            repo_root.display()
-        )
-    })?;
-    let repo_handle = File::open(&repo_root).map_err(|error| {
-        format!(
-            "failed to open repository root {}: {error}",
-            repo_root.display()
-        )
-    })?;
-    validate_open_directory(&repo_handle, &repo_root)?;
-    let (_, repo_access) = inspect_open_directory(&repo_handle, &repo_root)?;
-    enforce_trusted_directory_policy(&repo_root, &repo_access)?;
-    if !destination.is_absolute() {
-        return Err(format!(
-            "destination is not absolute: {}",
-            destination.display()
-        ));
-    }
     if relative
         .components()
         .any(|component| !matches!(component, Component::Normal(_)))
@@ -733,7 +834,7 @@ fn validate_destination(repo_root: &Path, destination: &Path) -> Result<PathBuf,
             destination.display()
         )
     })?;
-    let mut current = repo_root;
+    let mut current = repo_root.to_path_buf();
     for component in parent_relative.components() {
         let Component::Normal(component) = component else {
             return Err(format!(
@@ -742,20 +843,73 @@ fn validate_destination(repo_root: &Path, destination: &Path) -> Result<PathBuf,
             ));
         };
         current.push(component);
-        let metadata = fs::symlink_metadata(&current).map_err(|error| {
-            format!(
-                "destination directory unavailable at {}: {error}",
-                current.display()
-            )
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-            return Err(format!(
-                "destination directory is not a real directory: {}",
-                current.display()
-            ));
-        }
     }
     Ok(current)
+}
+
+fn open_directory_path(path: &Path) -> Result<File, String> {
+    let path_cstring = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        format!(
+            "directory path contains an interior NUL byte: {}",
+            path.display()
+        )
+    })?;
+    let fd = unsafe {
+        libc::open(
+            path_cstring.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd == -1 {
+        return Err(format!(
+            "failed to descriptor-open directory without following symlinks at {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn open_directory_at(
+    parent_fd: RawFd,
+    name: &CString,
+    display_path: &Path,
+) -> Result<File, String> {
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd == -1 {
+        return Err(format!(
+            "failed to descriptor-open destination directory component without following symlinks at {}: {}",
+            display_path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn validate_directory_seal(seal: &DirectorySeal, role: &str) -> Result<(), String> {
+    let (identity, access) = inspect_open_directory(&seal.handle, &seal.display_path)?;
+    if identity != seal.identity {
+        return Err(format!(
+            "{role} descriptor identity changed at {}: expected {:?}, found {identity:?}",
+            seal.display_path.display(),
+            seal.identity
+        ));
+    }
+    if access != seal.access {
+        return Err(format!(
+            "{role} descriptor access policy changed at {}: expected {:?}, found {access:?}",
+            seal.display_path.display(),
+            seal.access
+        ));
+    }
+    enforce_trusted_directory_policy(&seal.display_path, &access)?;
+    validate_open_directory(&seal.handle, &seal.display_path)
 }
 
 fn validate_open_directory(directory: &File, expected: &Path) -> Result<(), String> {
@@ -1125,7 +1279,7 @@ fn quarantine_and_delete_sealed_slot(
     // (identity, exact bytes, and selected access policy) and then unlinked.
     directory.validate_exclusive_namespace()?;
     let quarantine_name = create_quarantine_name(name)?;
-    let quarantine_path = slot_display_path(&directory.display_path, &quarantine_name);
+    let quarantine_path = slot_display_path(directory.display_path(), &quarantine_name);
     rename_slot(directory.fd(), name, &quarantine_name, RENAME_EXCL).map_err(|error| {
         format!(
             "failed to move {role} into a unique quarantine slot at {}: {error}; no file was deleted; recovery path remains: {}",
@@ -1307,6 +1461,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
         .split_first()
         .ok_or_else(|| "missing command".to_owned())?;
     let (repo_root, pairs) = parse_pairs(remainder)?;
+    let repository = Arc::new(RepositoryLease::acquire(&repo_root)?);
     let mut targets = Vec::new();
     let mut directories: Vec<(PathBuf, Arc<DirectoryLease>)> = Vec::new();
     for (source, destination) in pairs {
@@ -1316,13 +1471,13 @@ fn run(arguments: &[String]) -> Result<(), String> {
         {
             return Err(format!("duplicate destination: {}", destination.display()));
         }
-        let parent = validate_destination(&repo_root, &destination)?;
+        let parent = repository.destination_parent(&destination)?;
         let directory = if let Some((_, directory)) =
             directories.iter().find(|(existing, _)| existing == &parent)
         {
             Arc::clone(directory)
         } else {
-            let directory = Arc::new(DirectoryLease::acquire(&parent)?);
+            let directory = Arc::new(DirectoryLease::acquire(Arc::clone(&repository), &parent)?);
             directories.push((parent, Arc::clone(&directory)));
             directory
         };
@@ -1516,7 +1671,7 @@ mod tests {
             linked_directory.join("output").display().to_string(),
         ])
         .expect_err("reject directory symlink");
-        assert!(error.contains("not a real directory"), "{error}");
+        assert!(error.contains("without following symlinks"), "{error}");
         assert!(!real_directory.join("output").exists());
     }
 
@@ -1688,10 +1843,27 @@ mod tests {
         fs::write(&second_source, b"new rust").expect("write second source");
         fs::write(&first_destination, b"old swift").expect("write first destination");
 
+        let repository = Arc::new(RepositoryLease::acquire(root.path()).expect("acquire repo"));
+        let first_parent = repository
+            .destination_parent(&first_destination)
+            .expect("first parent");
+        let second_parent = repository
+            .destination_parent(&second_destination)
+            .expect("second parent");
+        let first_directory = Arc::new(
+            DirectoryLease::acquire(Arc::clone(&repository), &first_parent)
+                .expect("acquire first directory"),
+        );
+        let second_directory = Arc::new(
+            DirectoryLease::acquire(Arc::clone(&repository), &second_parent)
+                .expect("acquire second directory"),
+        );
         let mut first =
-            Target::prepare(root.path(), &first_source, &first_destination).expect("prepare first");
-        let mut second = Target::prepare(root.path(), &second_source, &second_destination)
-            .expect("prepare second");
+            Target::prepare_with_directory(&first_source, &first_destination, first_directory)
+                .expect("prepare first");
+        let mut second =
+            Target::prepare_with_directory(&second_source, &second_destination, second_directory)
+                .expect("prepare second");
         first.stage().expect("stage first");
         second.stage().expect("stage second");
         first.publish().expect("publish first");
@@ -1856,6 +2028,103 @@ mod tests {
         assert_eq!(
             fs::read(&backup).expect("read protected backup"),
             b"old bytes"
+        );
+    }
+
+    #[test]
+    fn group_writable_intermediate_ancestor_is_rejected() {
+        let root = tempfile::tempdir().expect("create root");
+        let ancestor = root.path().join("shared");
+        let directory = ancestor.join("generated");
+        fs::create_dir_all(&directory).expect("create nested directory");
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o775))
+            .expect("make ancestor group writable");
+        let source = root.path().join("source");
+        let destination = directory.join("output");
+        fs::write(&source, b"generated").expect("write source");
+
+        let error = Target::prepare(root.path(), &source, &destination)
+            .err()
+            .expect("reject writable intermediate ancestor");
+
+        assert!(error.contains("permits group or other writes"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn replaced_intermediate_ancestor_is_detected_before_staging() {
+        let root = tempfile::tempdir().expect("create root");
+        let ancestor = root.path().join("ancestor");
+        let directory = ancestor.join("generated");
+        fs::create_dir_all(&directory).expect("create original directory chain");
+        let source = root.path().join("source");
+        let destination = directory.join("output");
+        fs::write(&source, b"new bytes").expect("write source");
+        fs::write(&destination, b"old bytes").expect("write original destination");
+        let mut target =
+            Target::prepare(root.path(), &source, &destination).expect("prepare target");
+
+        let parked_ancestor = root.path().join("parked-ancestor");
+        fs::rename(&ancestor, &parked_ancestor).expect("detach original ancestor");
+        fs::create_dir_all(&directory).expect("create attacker-visible replacement chain");
+        fs::write(&destination, b"attacker bytes").expect("write replacement destination");
+
+        let error = target
+            .stage()
+            .expect_err("detect replaced intermediate ancestor");
+
+        assert!(
+            error.contains("destination directory identity changed"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("read attacker-visible replacement"),
+            b"attacker bytes"
+        );
+        assert_eq!(
+            fs::read(parked_ancestor.join("generated/output"))
+                .expect("read detached original destination"),
+            b"old bytes"
+        );
+        let replacement_entries: Vec<_> = fs::read_dir(&directory)
+            .expect("read replacement directory")
+            .map(|entry| entry.expect("read entry").file_name())
+            .collect();
+        assert_eq!(replacement_entries, [std::ffi::OsString::from("output")]);
+    }
+
+    #[test]
+    fn replaced_final_parent_is_not_used_for_verification() {
+        let root = tempfile::tempdir().expect("create root");
+        let ancestor = root.path().join("ancestor");
+        let directory = ancestor.join("generated");
+        fs::create_dir_all(&directory).expect("create original directory chain");
+        let source = root.path().join("source");
+        let destination = directory.join("output");
+        fs::write(&source, b"tracked bytes").expect("write source");
+        fs::write(&destination, b"tracked bytes").expect("write original destination");
+        let target = Target::prepare(root.path(), &source, &destination).expect("prepare target");
+
+        let parked_directory = ancestor.join("parked-generated");
+        fs::rename(&directory, &parked_directory).expect("detach original final parent");
+        fs::create_dir(&directory).expect("create attacker-visible replacement parent");
+        fs::write(&destination, b"tracked bytes").expect("write matching attacker destination");
+
+        let error = target
+            .verify()
+            .expect_err("reject matching bytes through replacement parent");
+
+        assert!(
+            error.contains("destination directory identity changed"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("read attacker-visible destination"),
+            b"tracked bytes"
+        );
+        assert_eq!(
+            fs::read(parked_directory.join("output")).expect("read detached destination"),
+            b"tracked bytes"
         );
     }
 }
