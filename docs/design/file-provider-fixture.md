@@ -219,8 +219,10 @@ predecessor records are recursively flattened, terminal failures are pruned only
 completion is merged, duplicates must agree, and the complete cohort is capped at 64 operations.
 When a prepared or authoritatively failed leaf still carries active predecessors, successor
 publication also carries that non-active leaf as an exact merge tombstone. Recovery prunes the
-tombstone only after the old leaf has successfully merged, so a gate-durable/leaf-overwrite crash
-cannot turn a valid predecessor chain into an unrelated-operation mismatch.
+tombstone neither during the old-leaf merge nor during later successor gate publication. It is
+pruned only after a read observes the gate and per-kind leaf durably sharing the successor operation
+ID, so repeated gate-durable/leaf-overwrite crashes cannot turn a valid predecessor chain into an
+unrelated-operation mismatch.
 This also keeps a timed-out PlugInKit removal from an older run from later unregistering the shared
 extension path after a newer run starts. Unrelated operation UUIDs remain a typed mismatch.
 
