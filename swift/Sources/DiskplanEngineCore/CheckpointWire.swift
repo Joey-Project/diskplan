@@ -2,7 +2,7 @@ import CryptoKit
 import DiskplanProto
 import Foundation
 
-enum CheckpointWireEncodingError: Error, Equatable, CustomStringConvertible {
+package enum CheckpointWireEncodingError: Error, Equatable, CustomStringConvertible {
   case checkpointPayloadTooLarge(actual: Int, maximum: Int)
   case manifestTooLarge(actual: Int, maximum: Int)
   case nodeRecordTooLarge(actual: Int, maximum: Int)
@@ -11,7 +11,7 @@ enum CheckpointWireEncodingError: Error, Equatable, CustomStringConvertible {
   case retainedNodePayloadTooLarge(actual: UInt64, maximum: UInt64)
   case countOverflow(field: String)
 
-  var description: String {
+  package var description: String {
     switch self {
     case .checkpointPayloadTooLarge(let actual, let maximum):
       return "checkpoint payload is \(actual) bytes; maximum is \(maximum)"
@@ -31,27 +31,36 @@ enum CheckpointWireEncodingError: Error, Equatable, CustomStringConvertible {
   }
 }
 
-struct EncodedCheckpointWire {
-  let checkpointPayload: Data
-  let chunks: [Diskplan_V1_ScanCheckpointChunk]
-  let manifest: Diskplan_V1_ScanCheckpointManifest
+package struct EncodedCheckpointWire {
+  package let checkpointPayload: Data
+  package let chunks: [Diskplan_V1_ScanCheckpointChunk]
+  package let manifest: Diskplan_V1_ScanCheckpointManifest
 }
 
-enum CheckpointWireEncoder {
-  static let manifestVersion: UInt32 = 1
-  static let maximumCheckpointPayloadBytes = 4 * 1_024 * 1_024
-  static let maximumChunkPayloadBytes = 4 * 1_024 * 1_024
-  static let maximumManifestEncodedBytes = 2 * 1_024 * 1_024
-  static let maximumRetainedNodeCount = 10_000
-  static let maximumRetainedNodePayloadBytes: UInt64 = 768 * 1_024 * 1_024
+package enum CheckpointWireEncoder {
+  package static let manifestVersion: UInt32 = 1
+  package static let maximumCheckpointPayloadBytes = 4 * 1_024 * 1_024
+  package static let maximumChunkPayloadBytes = 4 * 1_024 * 1_024
+  package static let maximumManifestEncodedBytes = 2 * 1_024 * 1_024
+  package static let maximumRetainedNodeCount = 10_000
+  package static let maximumRetainedNodePayloadBytes: UInt64 = 768 * 1_024 * 1_024
 
   private static let finalDigestDomain = Data("diskplan/scan-checkpoint-final/v1\0".utf8)
   private static let checkpointDigestDomain = Data(
     "diskplan/scan-checkpoint-evidence/v1\0".utf8)
 
-  static func encode(
-    _ checkpointWithRetainedNodes: Diskplan_V1_ScanCheckpointEvidence
+  package static func encode(
+    _ checkpointWithRetainedNodes: Diskplan_V1_ScanCheckpointEvidence,
+    chunkPayloadTargetBytes: Int = maximumChunkPayloadBytes
   ) throws -> EncodedCheckpointWire {
+    guard chunkPayloadTargetBytes > 0,
+      chunkPayloadTargetBytes <= maximumChunkPayloadBytes
+    else {
+      throw CheckpointWireEncodingError.nodeRecordTooLarge(
+        actual: chunkPayloadTargetBytes,
+        maximum: maximumChunkPayloadBytes
+      )
+    }
     let retainedNodes = checkpointWithRetainedNodes.retainedNodes
     guard retainedNodes.count <= maximumRetainedNodeCount else {
       throw CheckpointWireEncodingError.retainedNodeCountExceedsProtocolMaximum(
@@ -75,7 +84,10 @@ enum CheckpointWireEncoder {
       )
     }
 
-    let chunkPayloads = try chunkedNodePayloads(retainedNodes)
+    let chunkPayloads = try chunkedNodePayloads(
+      retainedNodes,
+      chunkPayloadTargetBytes: chunkPayloadTargetBytes
+    )
     var descriptors: [Diskplan_V1_ScanCheckpointChunkDescriptor] = []
     var chunks: [Diskplan_V1_ScanCheckpointChunk] = []
     descriptors.reserveCapacity(chunkPayloads.count)
@@ -167,7 +179,8 @@ enum CheckpointWireEncoder {
   }
 
   private static func chunkedNodePayloads(
-    _ nodes: [Diskplan_V1_ScannedNodeEvidence]
+    _ nodes: [Diskplan_V1_ScannedNodeEvidence],
+    chunkPayloadTargetBytes: Int
   ) throws -> [(payload: Data, nodeCount: UInt32)] {
     var result: [(Data, UInt32)] = []
     var payload = Data()
@@ -181,14 +194,14 @@ enum CheckpointWireEncoder {
       var record = Data()
       appendBigEndian(encodedCount, to: &record)
       record.append(encoded)
-      guard record.count <= maximumChunkPayloadBytes else {
+      guard record.count <= chunkPayloadTargetBytes else {
         throw CheckpointWireEncodingError.nodeRecordTooLarge(
           actual: record.count,
-          maximum: maximumChunkPayloadBytes
+          maximum: chunkPayloadTargetBytes
         )
       }
 
-      if !payload.isEmpty && payload.count + record.count > maximumChunkPayloadBytes {
+      if !payload.isEmpty && payload.count + record.count > chunkPayloadTargetBytes {
         result.append((payload, nodeCount))
         payload = Data()
         nodeCount = 0

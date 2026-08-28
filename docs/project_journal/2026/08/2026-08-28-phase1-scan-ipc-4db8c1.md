@@ -46,6 +46,12 @@ superseded_by:
   rejection of lexical aliases.
 - [x] Validate finite O(1) inbound control admission and priority EOF shutdown
   under a control flood.
+- [x] Author immediate descriptor-open access-policy sealing and bounded
+  cancellation-tail shutdown repairs with regression coverage.
+- [x] Author reproducible protocol 1.3 zero/single/multi-chunk golden fixture
+  sources plus exact Swift/Rust validation and negative cases.
+- [x] Generate the checked-in protocol 1.3 frame vectors and run the follow-up
+  dynamic gates after the test slot is released.
 
 ## Current State
 
@@ -73,19 +79,24 @@ superseded_by:
 - `ScanFinalized` ends the scan worker but not the engine session. The Rust TUI
   retains that checkpoint and does not enable `q` exit on the earlier terminal
   state-change event.
+- Shutdown now drains frames while concurrently waiting for the child. After a
+  cancelled finalization, only the unique contiguous `ScanCancelled` tail is
+  accepted before clean EOF; all other extra or malformed frames remain errors.
+- The Swift-authority fixture specification and generator cover zero-, single-,
+  and multi-chunk ready/finalized streams. The checked-in exact frames match the
+  authority and pass independent Swift and Rust semantic validation.
 - The Phase 1 stream contains evidence only. Candidate classification, reclaim
   estimates, actions, and immutable plan production remain later-phase work.
 
 ## Handoff
 
-- Phase: signed IPC follow-up checkpoint
-  `f7809e0bfc6a83ef21b76a6e1b4683fb66e4b005` and frozen scanner-core head
-  `3e964586df9bcf56f07b7d021d580aacc8ad9351` are integrated and validated.
-- Next step: freeze the signed no-ff merge commit and hand its exact range to
-  independent review.
+- Phase: frozen integrated advisory follow-up on signed head
+  `65d77cfb3566dd5f1f382cf0ad7fc65730b29f3f`.
+- Next step: freeze the signed clean repair checkpoint and hand its exact range
+  to the next frozen review lane.
 - Follow-up: controlled File Provider and APFS volume-group fixtures remain in
   the India acceptance lane; the local capability gate reports them unavailable.
-- Blocker: none for the integrated Phase 1 checkpoint.
+- Blocker: none.
 
 ## Evidence
 
@@ -118,3 +129,16 @@ superseded_by:
   rejection, lexical-alias setup rejection, and exact `/` setup admission.
 - `scripts/test-macos-capabilities.sh` passed 32 focused macOS tests plus the
   probe self-test after scanner-core integration.
+- The frozen-review follow-up passes 48 focused scanner tests, 2 Swift and 2
+  Rust protocol 1.3 golden-vector tests, 2 Rust shutdown-tail unit tests, and the
+  Swift-authority fixture reproduction check.
+- The complete Swift suite passes all 109 tests. The Rust workspace passes 86
+  ordinary tests, with 10 process cases intentionally ignored by that invocation.
+- `scripts/test-cross-language.sh` passes all 10 Swift/Rust process cases,
+  including cancel-finalize-q shutdown with the terminal tail left in the
+  capacity-one decoder, plus the canonical Swift-authority fixture.
+- `scripts/test-macos-capabilities.sh` again passes 32 focused macOS tests plus
+  the probe self-test; controlled File Provider and APFS volume-group fixtures
+  remain unavailable locally and reserved for India.
+- `scripts/proto-codegen.sh check`, `scripts/protocol13-fixtures.sh check`, Rust
+  format/check/clippy, strict Swift format lint, Bash syntax, and ShellCheck pass.

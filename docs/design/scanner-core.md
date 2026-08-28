@@ -84,8 +84,11 @@ descendants local by path convention.
   and conditional reclaim uncertainty as independent typed observations.
 - Filesystem atime, mtime, ctime, and birthtime stay separate advisory metadata;
   the scanner never synthesizes a `last_used_at`. UID, GID, mode, and flags form a
-  separate access-policy seal. Pre/post access-policy changes are unstable scan
-  evidence, while timestamp changes alone are not treated as object replacement.
+  separate access-policy seal. Every non-root root descriptor and child-directory
+  descriptor must match the inspection-time access-policy seal immediately after
+  open and before its first enumeration, then match again at close. Pre/post
+  access-policy changes are unstable scan evidence, while timestamp changes alone
+  are not treated as object replacement.
 - File Provider boundaries come from the system probes, never provider-name or path
   exclusion tables. Dataless/rejected boundaries stop traversal. Positively
   provider-bound materialized directories may be enumerated metadata-only, remain

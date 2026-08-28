@@ -640,6 +640,61 @@ fn rust_client_cancels_scan_with_final_evidence_and_keeps_session_ready() {
 
 #[test]
 #[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn shutdown_drains_cancelled_terminal_tail_after_finalized_evidence() {
+    let engine = required_engine_path();
+    let fixture = TempDir::new().unwrap();
+    for index in 0..900 {
+        fs::write(fixture.path().join(format!("tail-{index:04}")), b"evidence").unwrap();
+    }
+    let mut session = EngineSession::connect(&engine).unwrap();
+    session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 210,
+            profile: "standard".into(),
+            roots: vec![EngineSession::scan_root(
+                "shutdown-tail-fixture",
+                fixture.path().as_os_str().as_bytes().to_vec(),
+            )],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    session
+        .send_scan_control(211, ScanControlKind::CancelScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut session, |event| event.request_id == 210),
+        210,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    assert_control_accepted(
+        read_until_event(&mut session, |event| {
+            event.request_id == 211
+                && matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
+        }),
+        211,
+        ScanControlKind::CancelScan,
+        ScanState::Cancelling,
+    );
+    let finalized = read_until_event(&mut session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    let Some(engine_event::Body::ScanFinalized(finalized)) = finalized.body else {
+        unreachable!();
+    };
+    assert_eq!(
+        finalized.checkpoint.unwrap().machine_state,
+        ScanMachineState::Cancelled as i32
+    );
+
+    // Deliberately leave ScanCancelled in the capacity-one decoder and close stdin as q does.
+    // Shutdown must validate that single ordered terminal tail frame while waiting for clean EOF.
+    session.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
 fn swift_engine_orders_root_failures_deterministically() {
     let engine = required_engine_path();
     let fixture = TempDir::new().unwrap();
@@ -1037,7 +1092,10 @@ fn frame_flood_is_backpressured_and_sigkill_cleanup_remains_bounded() {
     let error = session
         .shutdown()
         .expect_err("the queued flood frame must be reported during shutdown");
-    assert!(matches!(error, ClientError::ExtraFrameAfterShutdown));
+    assert!(
+        matches!(error, ClientError::ExtraFrameAfterShutdown),
+        "unexpected shutdown error: {error:?}"
+    );
     let elapsed = started.elapsed();
     assert!(
         fs::read_to_string(&term_seen).is_ok_and(|value| value == "t"),
@@ -1073,7 +1131,10 @@ fn handshake_helper_rejects_trailing_bytes_and_extra_frames_on_shutdown() {
     );
     let (_root, path) = fake_engine_script(&extra_frame_body);
     let error = handshake_with_engine(&path).expect_err("extra frame must fail shutdown");
-    assert!(matches!(error, ClientError::ExtraFrameAfterShutdown));
+    assert!(
+        matches!(error, ClientError::ExtraFrameAfterShutdown),
+        "unexpected shutdown error: {error:?}"
+    );
 }
 
 #[test]

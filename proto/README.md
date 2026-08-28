@@ -33,6 +33,18 @@ detects that source mismatch without treating it as an access-boundary error.
 exact canonical bytes, and its domain-separated SHA-256 digest. Canonical
 bindings are deliberately independent of Protobuf serialization.
 
+`proto/fixtures/scan-stream-v1.3` contains the human-readable source and exact
+framing-v1 protobuf vectors for zero-, single-, and multi-chunk checkpoint
+streams. The vectors cover both ready and finalized terminals. Swift authors
+them; Swift and Rust independently decode, validate, and byte-for-byte
+re-encode every frame, then exercise truncation and mismatched count, digest,
+and frontier mutations.
+
+```sh
+scripts/protocol13-fixtures.sh check
+scripts/protocol13-fixtures.sh generate
+```
+
 ## `canonical-binary-v1` evidence skeleton
 
 The first skeleton is intentionally small, closed, and strict. Its fixed field
@@ -165,6 +177,13 @@ checkpoint and enables `q` exit only after `ScanFinalized` has arrived, rather
 than treating the preceding terminal state-change event as final evidence.
 Cancelled scans follow the same rule: `ScanCancelled` reports status but does
 not close the driver; a subsequent explicit `q` exits the verified session.
+If `q` closes stdin immediately after cancelled `ScanFinalized`, the Rust
+session concurrently drains stdout while waiting for or terminating the child.
+It accepts exactly the next contiguous `ScanCancelled` tail event for that
+cancelled finalization, continues through an explicit clean EOF, and rejects a
+duplicate, wrong-state, out-of-order, malformed, or otherwise extra frame.
+This bounded concurrent drain prevents the capacity-one decoder from blocking
+the child before exit without weakening shutdown frame validation.
 
 A rejected `StartScanRequest` carries both the broad `ControlRejectCode` and,
 when rejection occurred while validating or constructing the scan, a stable

@@ -1906,6 +1906,141 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   }
 }
 
+@Test func childDirectoryRejectsAccessPolicyChangeBeforeFirstEnumeration() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-open-policy-seal-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  let childURL = rootURL.appendingPathComponent("child", isDirectory: true)
+  try FileManager.default.createDirectory(at: childURL, withIntermediateDirectories: false)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: childURL.path)
+  let parentFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(parentFD >= 0 ? parentFD : nil)
+  defer { close(fd) }
+  let parent = DirectoryHandle(rawValue: fd)
+  let name = component("child")
+  let filesystem = DarwinScanFilesystem(policy: policy)
+  let inspected = try #require(
+    filesystem.inspect(
+      parent: parent,
+      name: name,
+      inheritedProviderBoundary: false,
+      requiresAuthoritativeProviderEvidence: false
+    ).value
+  )
+  let expectedPolicy = try #require(inspected.accessPolicy.value)
+  #expect(chmod(childURL.path, mode_t(0o500)) == 0)
+
+  let opened = filesystem.openDirectory(
+    parent: parent,
+    name: name,
+    expectedIdentity: inspected.identity,
+    expectedAccessPolicy: expectedPolicy
+  )
+  guard case .failed(_, let code) = opened else {
+    Issue.record("child directory accepted a changed access-policy seal before enumeration")
+    return
+  }
+  #expect(code == EAGAIN)
+}
+
+@Test func nonRootBindingRejectsAccessPolicyChangeDuringDescriptorOpen() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-root-open-policy-seal-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: rootURL.path)
+  let rawPath = try #require(rootURL.path.data(using: .utf8))
+  let filesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { .known(policy) },
+    providerEvidenceReader: { _, _, _, _ in confirmedProviderEvidence() },
+    directorySlotOpener: { parentFD, name in
+      var bytes = Array(name) + [0]
+      let changed = bytes.withUnsafeMutableBytes { raw in
+        fchmodat(parentFD, raw.bindMemory(to: CChar.self).baseAddress!, mode_t(0o500), 0)
+      }
+      guard changed == 0 else { return -1 }
+      return openDirectorySlot(parentFD: parentFD, name: name)
+    }
+  )
+
+  let bound = filesystem.bindRoot(
+    ScanRootRequest(rootID: "policy-race", rawAbsolutePath: rawPath),
+    resolverVersion: 1
+  )
+  guard case .failed(_, let code) = bound else {
+    Issue.record("non-root binding accepted a changed access-policy seal")
+    return
+  }
+  #expect(code == EAGAIN)
+}
+
+@Test func descriptorOpenTreatsTimestampChangeAsAdvisory() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-open-time-advisory-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  let childURL = rootURL.appendingPathComponent("child", isDirectory: true)
+  try FileManager.default.createDirectory(at: childURL, withIntermediateDirectories: false)
+  let parentFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(parentFD >= 0 ? parentFD : nil)
+  defer { close(fd) }
+  let parent = DirectoryHandle(rawValue: fd)
+  let name = component("child")
+  let baseline = DarwinScanFilesystem(policy: policy)
+  let inspected = try #require(
+    baseline.inspect(
+      parent: parent,
+      name: name,
+      inheritedProviderBoundary: false,
+      requiresAuthoritativeProviderEvidence: false
+    ).value
+  )
+  let expectedPolicy = try #require(inspected.accessPolicy.value)
+  let changingTimes = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { .known(policy) },
+    directorySlotOpener: { parentFD, name in
+      let opened = openDirectorySlot(parentFD: parentFD, name: name)
+      guard opened >= 0 else { return opened }
+      let times = [
+        timespec(tv_sec: 1_700_000_001, tv_nsec: 0),
+        timespec(tv_sec: 1_700_000_002, tv_nsec: 0),
+      ]
+      let changed = times.withUnsafeBufferPointer { futimens(opened, $0.baseAddress!) }
+      guard changed == 0 else {
+        let code = errno
+        close(opened)
+        errno = code
+        return -1
+      }
+      return opened
+    }
+  )
+  let directory = try #require(
+    changingTimes.openDirectory(
+      parent: parent,
+      name: name,
+      expectedIdentity: inspected.identity,
+      expectedAccessPolicy: expectedPolicy
+    ).value
+  )
+  let closeEvidence = changingTimes.close(directory)
+  #expect(closeEvidence.identity.value == inspected.identity)
+  #expect(closeEvidence.accessPolicy.value == expectedPolicy)
+}
+
 @Test func closeAccessPolicyObservationIsBracketedByParentSlotIdentity() throws {
   let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
   let rootURL = FileManager.default.temporaryDirectory

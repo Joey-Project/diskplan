@@ -31,6 +31,8 @@ DISKPLAN_ENGINE_BIN="${ENGINE_BIN}" cargo test --locked -p diskplan --test engin
 DISKPLAN_ENGINE_BIN="${ENGINE_BIN}" cargo test --locked -p diskplan --test engine_integration \
     rust_client_cancels_scan_with_final_evidence_and_keeps_session_ready -- --ignored --exact
 DISKPLAN_ENGINE_BIN="${ENGINE_BIN}" cargo test --locked -p diskplan --test engine_integration \
+    shutdown_drains_cancelled_terminal_tail_after_finalized_evidence -- --ignored --exact
+DISKPLAN_ENGINE_BIN="${ENGINE_BIN}" cargo test --locked -p diskplan --test engine_integration \
     swift_engine_orders_root_failures_deterministically -- --ignored --exact
 DISKPLAN_ENGINE_BIN="${ENGINE_BIN}" cargo test --locked -p diskplan --test engine_integration \
     swift_engine_malformed_embedding_consumes_request_id -- --ignored --exact

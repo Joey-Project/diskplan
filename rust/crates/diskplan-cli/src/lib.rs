@@ -129,6 +129,8 @@ pub struct EngineSession {
     scan_session_id: Option<String>,
     last_scan_request_id: u64,
     checkpoint_accumulator: Option<CheckpointAccumulator>,
+    finalized_machine_state: Option<i32>,
+    scan_cancelled_seen: bool,
     process_group_id: u32,
     reaper: SyncSender<Child>,
 }
@@ -181,6 +183,8 @@ impl EngineSession {
             scan_session_id: None,
             last_scan_request_id: 0,
             checkpoint_accumulator: None,
+            finalized_machine_state: None,
+            scan_cancelled_seen: false,
             process_group_id,
             reaper,
         };
@@ -277,6 +281,13 @@ impl EngineSession {
         timeout: Duration,
     ) -> Result<EngineEvent, ClientError> {
         let envelope = self.read_envelope_with_timeout("engine event", timeout)?;
+        self.accept_engine_event_envelope(envelope)
+    }
+
+    fn accept_engine_event_envelope(
+        &mut self,
+        envelope: Envelope,
+    ) -> Result<EngineEvent, ClientError> {
         let Some(envelope::Body::EngineEvent(mut event)) = envelope.body else {
             return Err(ClientError::UnexpectedResponse {
                 phase: "engine event",
@@ -303,6 +314,16 @@ impl EngineSession {
         self.validate_event_provenance(&event)?;
         self.validate_checkpoint_event(&mut event)?;
         self.last_event_sequence = event.event_sequence;
+        match event.body.as_ref() {
+            Some(engine_event::Body::ScanFinalized(finalized)) => {
+                self.finalized_machine_state = finalized
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.machine_state);
+            }
+            Some(engine_event::Body::ScanCancelled(_)) => self.scan_cancelled_seen = true,
+            _ => {}
+        }
         Ok(event)
     }
 
@@ -582,10 +603,15 @@ impl EngineSession {
 
     pub fn shutdown(mut self) -> Result<(), ClientError> {
         self.stdin.take();
-        let status = self.wait_or_terminate();
-        let drain = self.drain_stdout();
+        let mut clean_eof = false;
+        let mut tail_error = None;
+        let status = self.wait_or_terminate_draining(&mut clean_eof, &mut tail_error);
+        let drain = self.drain_stdout_to_clean_eof(&mut clean_eof, &mut tail_error);
         let status = status?;
         drain?;
+        if let Some(error) = tail_error {
+            return Err(error);
+        }
         match status {
             status if status.success() => Ok(()),
             status => Err(ClientError::EngineFailure {
@@ -719,6 +745,80 @@ impl EngineSession {
         })
     }
 
+    fn wait_or_terminate_draining(
+        &mut self,
+        clean_eof: &mut bool,
+        tail_error: &mut Option<ClientError>,
+    ) -> Result<ExitStatus, ClientError> {
+        if let Ok(Some(status)) =
+            self.wait_for_exit_while_draining(SHUTDOWN_GRACE, clean_eof, tail_error)
+        {
+            return self.finish_reaped_child(status);
+        }
+
+        let _ = signal_process_group(self.process_group_id, "-TERM");
+        if let Ok(Some(status)) =
+            self.wait_for_exit_while_draining(SHUTDOWN_GRACE, clean_eof, tail_error)
+        {
+            return self.finish_reaped_child(status);
+        }
+
+        let _ = signal_process_group(self.process_group_id, "-KILL");
+        if let Ok(Some(status)) =
+            self.wait_for_exit_while_draining(SHUTDOWN_GRACE, clean_eof, tail_error)
+        {
+            return self.finish_reaped_child(status);
+        }
+
+        let _ = self.child_mut()?.kill();
+        if let Ok(Some(status)) =
+            self.wait_for_exit_while_draining(SHUTDOWN_GRACE, clean_eof, tail_error)
+        {
+            return self.finish_reaped_child(status);
+        }
+
+        let child_process_id = self.handoff_live_child()?;
+        let _ = terminate_remaining_process_group(self.process_group_id);
+        Err(ClientError::CleanupIncomplete {
+            child_process_id,
+            process_group_id: self.process_group_id,
+            timeout: SHUTDOWN_GRACE,
+        })
+    }
+
+    fn wait_for_exit_while_draining(
+        &mut self,
+        timeout: Duration,
+        clean_eof: &mut bool,
+        tail_error: &mut Option<ClientError>,
+    ) -> Result<Option<ExitStatus>, io::Error> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.child_mut()?.try_wait()? {
+                return Ok(Some(status));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            if *clean_eof {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let poll = remaining.min(Duration::from_millis(5));
+            match self.frames.recv_timeout(poll) {
+                Ok(frame) => self.accept_shutdown_frame(frame, clean_eof, tail_error),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    *clean_eof = true;
+                    if tail_error.is_none() {
+                        *tail_error = Some(ClientError::DecoderDisconnected);
+                    }
+                }
+            }
+        }
+    }
+
     fn finish_reaped_child(&mut self, status: ExitStatus) -> Result<ExitStatus, ClientError> {
         // try_wait already reaped the process, so releasing this handle cannot abandon a
         // live direct child even if descendant process-group cleanup fails afterwards.
@@ -756,16 +856,70 @@ impl EngineSession {
         }
     }
 
-    fn drain_stdout(&mut self) -> Result<(), ClientError> {
-        match self.frames.recv_timeout(SHUTDOWN_DRAIN_TIMEOUT) {
-            Ok(Ok(Some(_))) => Err(ClientError::ExtraFrameAfterShutdown),
-            Ok(Ok(None)) => Ok(()),
-            Ok(Err(error)) => Err(ClientError::Frame(error)),
-            Err(RecvTimeoutError::Disconnected) => Err(ClientError::DecoderDisconnected),
-            Err(RecvTimeoutError::Timeout) => Err(ClientError::Timeout {
-                phase: "shutdown stdout drain",
-                timeout: SHUTDOWN_DRAIN_TIMEOUT,
-            }),
+    fn drain_stdout_to_clean_eof(
+        &mut self,
+        clean_eof: &mut bool,
+        tail_error: &mut Option<ClientError>,
+    ) -> Result<(), ClientError> {
+        let deadline = Instant::now() + SHUTDOWN_DRAIN_TIMEOUT;
+        while !*clean_eof {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ClientError::Timeout {
+                    phase: "shutdown stdout drain",
+                    timeout: SHUTDOWN_DRAIN_TIMEOUT,
+                });
+            }
+            match self.frames.recv_timeout(remaining) {
+                Ok(frame) => self.accept_shutdown_frame(frame, clean_eof, tail_error),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(ClientError::DecoderDisconnected);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(ClientError::Timeout {
+                        phase: "shutdown stdout drain",
+                        timeout: SHUTDOWN_DRAIN_TIMEOUT,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn accept_shutdown_frame(
+        &mut self,
+        frame: FrameResult,
+        clean_eof: &mut bool,
+        tail_error: &mut Option<ClientError>,
+    ) {
+        match frame {
+            Ok(Some(payload)) if tail_error.is_none() => {
+                if let Err(error) = self.accept_shutdown_tail_payload(&payload) {
+                    *tail_error = Some(error);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => *clean_eof = true,
+            Err(error) if tail_error.is_none() => *tail_error = Some(ClientError::Frame(error)),
+            Err(_) => {}
+        }
+    }
+
+    fn accept_shutdown_tail_payload(&mut self, payload: &[u8]) -> Result<(), ClientError> {
+        let cancelled_was_seen = self.scan_cancelled_seen;
+        let envelope = Envelope::decode(payload)?;
+        if !matches!(envelope.body, Some(envelope::Body::EngineEvent(_))) {
+            return Err(ClientError::ExtraFrameAfterShutdown);
+        }
+        let event = self.accept_engine_event_envelope(envelope)?;
+        let allowed_cancelled_tail = self.finalized_machine_state
+            == Some(diskplan_proto::diskplan::v1::ScanMachineState::Cancelled as i32)
+            && !cancelled_was_seen
+            && matches!(event.body, Some(engine_event::Body::ScanCancelled(_)));
+        if allowed_cancelled_tail {
+            Ok(())
+        } else {
+            Err(ClientError::ExtraFrameAfterShutdown)
         }
     }
 }
@@ -981,6 +1135,9 @@ impl Drop for EngineSession {
 #[cfg(test)]
 mod event_sequence_tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
     use diskplan_proto::diskplan::v1::{
         ControlAccepted, CoverageEvidence, RawPath, ScanCheckpointReady, ScanMachineState,
         ScanProgress, ScanState,
@@ -1010,6 +1167,8 @@ mod event_sequence_tests {
             scan_session_id: None,
             last_scan_request_id: 0,
             checkpoint_accumulator: None,
+            finalized_machine_state: None,
+            scan_cancelled_seen: false,
             process_group_id: 0,
             reaper,
         }
@@ -1111,6 +1270,115 @@ mod event_sequence_tests {
             scan_session_id: "scan-a".into(),
             body: Some(body),
         }
+    }
+
+    fn protocol13_frames(name: &str) -> Vec<Vec<u8>> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../proto/fixtures/scan-stream-v1.3")
+            .join(format!("{name}.frames.hex"));
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| hex::decode(line).unwrap())
+            .collect()
+    }
+
+    fn fixture_payload(frame: &[u8]) -> Result<&[u8], ClientError> {
+        let length_bytes: [u8; 4] = frame
+            .get(..4)
+            .ok_or_else(|| invalid_checkpoint("truncated golden frame prefix"))?
+            .try_into()
+            .expect("the checked slice has exactly four bytes");
+        let length = u32::from_be_bytes(length_bytes) as usize;
+        let payload = frame
+            .get(4..)
+            .ok_or_else(|| invalid_checkpoint("truncated golden frame payload"))?;
+        if payload.len() != length {
+            return Err(invalid_checkpoint("golden frame length mismatch"));
+        }
+        Ok(payload)
+    }
+
+    fn validate_protocol13_fixture(frames: &[Vec<u8>]) -> Result<(), ClientError> {
+        let mut session = session_with_events([]);
+        session.scan_session_id = Some("fixture-session".into());
+        for frame in frames {
+            let payload = fixture_payload(frame)?;
+            let envelope = Envelope::decode(payload)?;
+            if envelope.encode_to_vec() != payload {
+                return Err(invalid_checkpoint("golden envelope is not canonical"));
+            }
+            session.accept_engine_event_envelope(envelope)?;
+        }
+        Ok(())
+    }
+
+    fn mutate_terminal_manifest(
+        frames: &mut [Vec<u8>],
+        mutation: impl FnOnce(&mut ScanCheckpointManifest),
+    ) {
+        let terminal = frames.last_mut().unwrap();
+        let mut envelope = Envelope::decode(fixture_payload(terminal).unwrap()).unwrap();
+        let Some(envelope::Body::EngineEvent(event)) = envelope.body.as_mut() else {
+            panic!("fixture terminal omitted engine event");
+        };
+        match event.body.as_mut() {
+            Some(engine_event::Body::ScanCheckpointReady(ready)) => {
+                mutation(ready.manifest.as_mut().unwrap());
+            }
+            Some(engine_event::Body::ScanFinalized(finalized)) => {
+                mutation(finalized.manifest.as_mut().unwrap());
+            }
+            _ => panic!("fixture terminal omitted checkpoint manifest"),
+        }
+        let payload = envelope.encode_to_vec();
+        terminal.clear();
+        terminal.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        terminal.extend_from_slice(&payload);
+    }
+
+    #[test]
+    fn protocol13_golden_frames_decode_validate_and_reencode_exactly() {
+        for name in ["zero-ready", "single-ready", "multi-finalized"] {
+            validate_protocol13_fixture(&protocol13_frames(name)).unwrap();
+        }
+    }
+
+    #[test]
+    fn protocol13_golden_frames_reject_truncation_count_hash_and_frontier_mutations() {
+        let original = protocol13_frames("multi-finalized");
+
+        let mut truncated = original.clone();
+        truncated[0].pop();
+        assert!(matches!(
+            validate_protocol13_fixture(&truncated),
+            Err(ClientError::InvalidCheckpointStream(_))
+        ));
+
+        let mut count = original.clone();
+        mutate_terminal_manifest(&mut count, |manifest| manifest.chunk_count += 1);
+        assert!(matches!(
+            validate_protocol13_fixture(&count),
+            Err(ClientError::InvalidCheckpointStream(_))
+        ));
+
+        let mut hash = original.clone();
+        mutate_terminal_manifest(&mut hash, |manifest| {
+            manifest.final_evidence_sha256[0] ^= 0xff
+        });
+        assert!(matches!(
+            validate_protocol13_fixture(&hash),
+            Err(ClientError::InvalidCheckpointStream(_))
+        ));
+
+        let mut frontier = original;
+        mutate_terminal_manifest(&mut frontier, |manifest| {
+            manifest.frontier.as_mut().unwrap().retained_nodes += 1;
+        });
+        assert!(matches!(
+            validate_protocol13_fixture(&frontier),
+            Err(ClientError::InvalidCheckpointStream(_))
+        ));
     }
 
     #[test]
@@ -1228,6 +1496,59 @@ mod event_sequence_tests {
     }
 
     #[test]
+    fn shutdown_tail_accepts_one_ordered_cancellation_after_cancelled_finalization() {
+        let mut session = session_with_events([]);
+        session.scan_session_id = Some("scan-a".into());
+        session.last_event_sequence = 10;
+        session.finalized_machine_state = Some(ScanMachineState::Cancelled as i32);
+        let payload = Envelope {
+            sequence: 11,
+            body: Some(envelope::Body::EngineEvent(natural_event(
+                11,
+                engine_event::Body::ScanCancelled(Default::default()),
+            ))),
+        }
+        .encode_to_vec();
+
+        session.accept_shutdown_tail_payload(&payload).unwrap();
+        assert!(session.scan_cancelled_seen);
+        assert_eq!(session.last_event_sequence, 11);
+
+        let duplicate = Envelope {
+            sequence: 12,
+            body: Some(envelope::Body::EngineEvent(natural_event(
+                12,
+                engine_event::Body::ScanCancelled(Default::default()),
+            ))),
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            session.accept_shutdown_tail_payload(&duplicate),
+            Err(ClientError::ExtraFrameAfterShutdown)
+        ));
+    }
+
+    #[test]
+    fn shutdown_tail_rejects_cancellation_without_cancelled_finalization() {
+        let mut session = session_with_events([]);
+        session.scan_session_id = Some("scan-a".into());
+        session.finalized_machine_state = Some(ScanMachineState::Complete as i32);
+        let payload = Envelope {
+            sequence: 1,
+            body: Some(envelope::Body::EngineEvent(natural_event(
+                1,
+                engine_event::Body::ScanCancelled(Default::default()),
+            ))),
+        }
+        .encode_to_vec();
+
+        assert!(matches!(
+            session.accept_shutdown_tail_payload(&payload),
+            Err(ClientError::ExtraFrameAfterShutdown)
+        ));
+    }
+
+    #[test]
     fn sequence_exhaustion_rejects_a_repeated_u64_max_event() {
         let repeated = Envelope {
             sequence: u64::MAX,
@@ -1251,6 +1572,8 @@ mod event_sequence_tests {
             scan_session_id: None,
             last_scan_request_id: 0,
             checkpoint_accumulator: None,
+            finalized_machine_state: None,
+            scan_cancelled_seen: false,
             process_group_id: 0,
             reaper,
         };
@@ -1565,6 +1888,8 @@ mod cleanup_tests {
             scan_session_id: None,
             last_scan_request_id: 0,
             checkpoint_accumulator: None,
+            finalized_machine_state: None,
+            scan_cancelled_seen: false,
             process_group_id: NONEXISTENT_PROCESS_GROUP,
             reaper,
         }

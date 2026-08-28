@@ -64,6 +64,11 @@ let package = Package(
             path: "swift/Tools/DiskplanFixtureGenerator"
         ),
         .executableTarget(
+            name: "DiskplanProtocolFixtureGenerator",
+            dependencies: ["DiskplanEngineCore", "DiskplanProto"],
+            path: "swift/Tools/DiskplanProtocolFixtureGenerator"
+        ),
+        .executableTarget(
             name: "DiskplanMacOSProbe",
             dependencies: ["DiskplanMacOS"],
             path: "swift/Tools/DiskplanMacOSProbe"

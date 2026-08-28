@@ -213,6 +213,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     @Sendable (Int32, Data, NoMaterializationPolicy) -> Capability<ItemStorageEvidence>
   private let providerEvidenceReader:
     @Sendable (Int32, Data, NoMaterializationPolicy, Bool) -> FileProviderProbeOutcome
+  private let directorySlotOpener: (@Sendable (Int32, Data) -> Int32)?
   private let slotSealOpener: (@Sendable (Int32, Data) -> Int32)?
   private let rootDirectoryOpener: @Sendable (Data) -> Int32
 
@@ -235,6 +236,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         inheritedProviderBoundary: inheritedBoundary
       )
     }
+    directorySlotOpener = nil
     slotSealOpener = nil
     rootDirectoryOpener = openRawDirectory
   }
@@ -266,6 +268,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
           inheritedProviderBoundary: inheritedBoundary
         )
       },
+    directorySlotOpener: (@Sendable (Int32, Data) -> Int32)? = nil,
     slotSealOpener: (@Sendable (Int32, Data) -> Int32)? = nil,
     rootDirectoryOpener: @escaping @Sendable (Data) -> Int32 = openRawDirectory
   ) {
@@ -274,6 +277,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     self.monotonicNow = monotonicNow
     self.itemEvidenceReader = itemEvidenceReader
     self.providerEvidenceReader = providerEvidenceReader
+    self.directorySlotOpener = directorySlotOpener
     self.slotSealOpener = slotSealOpener
     self.rootDirectoryOpener = rootDirectoryOpener
   }
@@ -335,35 +339,40 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
       return .failed(reason: "scan root access policy is unavailable", errorCode: ENODATA)
     }
     let pathGate = pathAccessGate(operation: "open scan root")
-    guard pathGate.value != nil else {
+    guard let livePolicy = pathGate.value else {
       Darwin.close(parentFD)
       return observation(pathGate, operation: "open scan root", as: BoundScanRoot.self)
     }
-    let fd = withNullTerminated(rawName) {
-      openat(parentFD, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-    }
+    let fd =
+      if let directorySlotOpener {
+        directorySlotOpener(parentFD, rawName)
+      } else {
+        withNullTerminated(rawName) {
+          openat(parentFD, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+      }
     guard fd >= 0 else {
       let code = errno
       Darwin.close(parentFD)
       return posixObservation(code, operation: "open scan root")
     }
-    let descriptorIdentity = descriptorIdentityProbe.probe(fileDescriptor: fd, policy: policy)
-    guard let identity = descriptorIdentity.value else {
+    let openedSealObservation = descriptorSeal(
+      fileDescriptor: fd,
+      expectedIdentity: item.identity,
+      policy: livePolicy,
+      operation: "bind scan root descriptor"
+    )
+    guard let openedSeal = openedSealObservation.value else {
       Darwin.close(fd)
       Darwin.close(parentFD)
-      return observation(
-        descriptorIdentity,
-        operation: "probe scan root descriptor identity",
-        as: BoundScanRoot.self
-      )
+      return openedSealObservation.erasingValue()
     }
-    let scanIdentity = objectIdentity(identity)
-    guard scanIdentity == item.identity else {
+    guard openedSeal.accessPolicy == expectedAccessPolicy else {
       Darwin.close(fd)
       Darwin.close(parentFD)
       return .failed(
-        reason: "scan root identity changed between parent-slot proof and open",
-        errorCode: ESTALE
+        reason: "scan root access policy changed between inspection and open",
+        errorCode: EAGAIN
       )
     }
     return .known(
@@ -372,14 +381,14 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
           resolverVersion: resolverVersion,
           rootID: request.rootID,
           rawAbsolutePath: request.rawAbsolutePath,
-          identity: scanIdentity
+          identity: openedSeal.identity
         ),
         directory: BoundDirectory(
           handle: DirectoryHandle(rawValue: fd),
           slotBinding: DirectorySlotBinding(
             parent: parent,
             name: RawPathComponent(rawName),
-            expectedIdentity: scanIdentity,
+            expectedIdentity: openedSeal.identity,
             expectedAccessPolicy: expectedAccessPolicy,
             ownsParent: true
           )
@@ -615,26 +624,34 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     expectedAccessPolicy: AccessPolicyEvidence
   ) -> Observation<BoundDirectory> {
     let gate = pathAccessGate(operation: "open child directory")
-    guard gate.value != nil else {
+    guard let livePolicy = gate.value else {
       return observation(gate, operation: "open child directory", as: BoundDirectory.self)
     }
-    let fd = withNullTerminated(name.bytes) {
-      openat(parent.rawValue, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-    }
+    let fd =
+      if let directorySlotOpener {
+        directorySlotOpener(parent.rawValue, name.bytes)
+      } else {
+        withNullTerminated(name.bytes) {
+          openat(parent.rawValue, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+      }
     guard fd >= 0 else { return posixObservation(errno, operation: "open child directory") }
-    let actualCapability = descriptorIdentityProbe.probe(fileDescriptor: fd, policy: policy)
-    guard let actual = actualCapability.value else {
+    let openedSeal = descriptorSeal(
+      fileDescriptor: fd,
+      expectedIdentity: expectedIdentity,
+      policy: livePolicy,
+      operation: "bind child directory descriptor"
+    )
+    guard let actual = openedSeal.value else {
       Darwin.close(fd)
-      return observation(
-        actualCapability,
-        operation: "probe child directory descriptor identity",
-        as: BoundDirectory.self
-      )
+      return openedSeal.erasingValue()
     }
-    guard objectIdentity(actual) == expectedIdentity else {
+    guard actual.accessPolicy == expectedAccessPolicy else {
       Darwin.close(fd)
       return .failed(
-        reason: "object identity changed between inspection and open", errorCode: ESTALE)
+        reason: "directory access policy changed between inspection and open",
+        errorCode: EAGAIN
+      )
     }
     return .known(
       BoundDirectory(

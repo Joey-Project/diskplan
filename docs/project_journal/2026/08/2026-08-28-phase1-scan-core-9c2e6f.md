@@ -208,3 +208,10 @@ superseded_by:
   tests, all 9 Swift/Rust process cases plus the canonical fixture, and 32 macOS
   capability tests plus the probe self-test. Controlled File Provider and APFS
   volume-group fixtures remain unavailable locally and reserved for India.
+- The integrated advisory follow-up protects access policy, not advisory time
+  metadata, across the remaining open-to-first-enumeration gap. Non-root root and
+  child-directory descriptors now bind identity plus UID/GID/mode/flags immediately
+  after open and retain the independent close seal. Static regression sources cover
+  an open-time mode change at both layers and a timestamp-only transition that must
+  remain admissible. All 48 focused scanner tests and the complete 109-test Swift
+  suite pass; the integrated Rust, cross-language, and macOS gates also remain green.

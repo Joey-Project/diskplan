@@ -1,0 +1,23 @@
+{
+  "schema": "scan-stream-v1.3",
+  "cases": [
+    {
+      "name": "zero-ready",
+      "terminal": "ready",
+      "chunk_payload_target_bytes": 4194304,
+      "node_components_hex": []
+    },
+    {
+      "name": "single-ready",
+      "terminal": "ready",
+      "chunk_payload_target_bytes": 4194304,
+      "node_components_hex": [["ff1b7f"]]
+    },
+    {
+      "name": "multi-finalized",
+      "terminal": "finalized",
+      "chunk_payload_target_bytes": 96,
+      "node_components_hex": [["61ff"], ["621b"], ["637f"]]
+    }
+  ]
+}
