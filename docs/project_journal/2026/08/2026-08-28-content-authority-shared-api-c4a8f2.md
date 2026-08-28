@@ -113,12 +113,41 @@ superseded_by:
   rejection, the shared authority compile/use test, and all 72 DiskplanScan tests
   pass. A fresh build and the full Swift suite pass all 459 tests with no timeout
   or unexpected failure.
+- A later required full-parallel macOS 26 run exposed a second capture-liveness
+  weakness: zero-output and semantic compiler processes exited with confirmed
+  group quiescence, but both drain tasks could remain unstarted on the saturated
+  global dispatch executor. The empty output plus timed-out drains therefore did
+  not identify an inherited writer. The replacement keeps each FIFO path until
+  teardown for bounded exact-path ownership diagnostics, starts stdout and stderr
+  drains on dedicated threads, and requires both start acknowledgements before
+  releasing the compiler wrapper. The parent no longer opens either capture
+  writer: the wrapper opens both private FIFO writer endpoints with `O_CLOEXEC`,
+  redirects them to stdout and stderr, acknowledges readiness over a separate
+  control socket, and only then receives permission to fork and execute the
+  compiler. This removes both global-executor starvation and the pre-exec
+  fork-inheritance window from the protected capture-writer ownership property.
+- A test-only C shim creates a deterministic fork-only child in the exact
+  immediately-before-spawn hook. Eight concurrent harness executions prove that
+  those unrelated children cannot inherit capture writers; 32 zero-output
+  launches, retained-writer and silent-descendant cases, setup failure, and
+  wrapper handshake failure retain bounded cleanup coverage. Failure-only owner
+  diagnostics use direct `posix_spawn`, bounded regular-file output, and bounded
+  TERM/KILL cleanup without Foundation `Process` or the shared dispatch executor.
+- Post-fix gates pass on Apple Swift 6.3.3: the fork-only ownership regression,
+  supervisor stress, four semantic compile-fail fixtures, infrastructure
+  classifier negatives, and shared-authority cross-target compile/use test each
+  pass their focused gate. The unsandboxed read-only host-probe full-parallel
+  Swift suite passes all 460 tests in 10.544 seconds. No compiler wrapper,
+  retained-writer helper, fork-only child, capture directory, or diagnostic file
+  remains after the run. The outer sandbox cannot apply SwiftPM's nested manifest
+  sandbox on this host, so the accepted repository host-probe shape remains the
+  authoritative local full-suite result.
 
 ## Next Steps
 
 1. Land and push the signed follow-up without manually rerunning CI.
-2. Let the required macOS 26 PR lane validate the same atomic endpoint and
-   process-group contract.
+2. Let the required macOS 26 PR lane validate the dedicated-drain handshake and
+   parent-writer-free capture contract under the full parallel suite.
 
 ## Evidence
 

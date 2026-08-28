@@ -1,3 +1,4 @@
+import CDiskplanTestSupport
 import Darwin
 import DiskplanScan
 import Dispatch
@@ -155,11 +156,18 @@ private enum CompileProcessGroupQuiescence: String, Sendable {
 
 private final class CompileDrainRecorder: @unchecked Sendable {
   private let lock = NSLock()
+  private var started = false
   private var completion: CompileDrainCompletion?
+
+  func recordStarted() {
+    lock.withLock { started = true }
+  }
 
   func record(_ completion: CompileDrainCompletion) {
     lock.withLock { self.completion = completion }
   }
+
+  var didStart: Bool { lock.withLock { started } }
 
   var snapshot: CompileDrainCompletion {
     lock.withLock { completion ?? .readError("drain completed without a terminal state") }
@@ -175,6 +183,9 @@ private struct CompileProcessResult: Sendable {
   let stderr: CompileOutputSnapshot
   let stdoutDrain: CompileDrainCompletion
   let stderrDrain: CompileDrainCompletion
+  let stdoutDrainStarted: Bool
+  let stderrDrainStarted: Bool
+  let captureOwnership: String
   let processGroupCleanup: CompileProcessGroupCleanup
   let processGroupQuiescence: CompileProcessGroupQuiescence
 
@@ -184,6 +195,8 @@ private struct CompileProcessResult: Sendable {
       + "status=\(terminationStatus.map { String($0) } ?? "none") "
       + "stdoutTruncated=\(stdout.truncated) stderrTruncated=\(stderr.truncated) "
       + "stdoutDrain=\(stdoutDrain.report) stderrDrain=\(stderrDrain.report) "
+      + "stdoutDrainStarted=\(stdoutDrainStarted) stderrDrainStarted=\(stderrDrainStarted) "
+      + "captureOwnership=\(String(reflecting: captureOwnership)) "
       + "processGroupCleanup=\(processGroupCleanup.rawValue) "
       + "processGroupQuiescence=\(processGroupQuiescence.rawValue) "
       + "stdout=\(String(reflecting: stdout.text)) stderr=\(String(reflecting: stderr.text))"
@@ -192,8 +205,10 @@ private struct CompileProcessResult: Sendable {
 
 private final class AtomicCaptureChannel: @unchecked Sendable {
   let reader: FileHandle
+  let fifoPath: String
+  private let directoryPath: String
   private let lock = NSLock()
-  private var childWriter: Int32?
+  private var readerActivated = false
 
   init(endpointCreated: () throws -> Void) throws {
     var directoryTemplate = Array(
@@ -220,30 +235,16 @@ private final class AtomicCaptureChannel: @unchecked Sendable {
       throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
 
+    try endpointCreated()
     var readerDescriptor = fifoPath.withCString {
       Darwin.open($0, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
     }
     guard readerDescriptor >= 0 else {
       throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
-    var writerDescriptor: Int32 = -1
     do {
       try endpointCreated()
-      writerDescriptor = fifoPath.withCString {
-        Darwin.open($0, O_WRONLY | O_CLOEXEC)
-      }
-      guard writerDescriptor >= 0 else {
-        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-      }
-      try endpointCreated()
-      let readerFlags = Darwin.fcntl(readerDescriptor, F_GETFL)
-      guard readerFlags >= 0,
-        Darwin.fcntl(readerDescriptor, F_SETFL, readerFlags & ~O_NONBLOCK) == 0
-      else {
-        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-      }
     } catch {
-      if writerDescriptor >= 0 { Darwin.close(writerDescriptor) }
       Darwin.close(readerDescriptor)
       throw error
     }
@@ -251,64 +252,156 @@ private final class AtomicCaptureChannel: @unchecked Sendable {
       let duplicated = Darwin.fcntl(readerDescriptor, F_DUPFD_CLOEXEC, STDERR_FILENO + 1)
       guard duplicated >= 0 else {
         let failure = errno
-        Darwin.close(writerDescriptor)
         Darwin.close(readerDescriptor)
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure))
       }
       Darwin.close(readerDescriptor)
       readerDescriptor = duplicated
     }
-    if writerDescriptor < STDERR_FILENO + 1 {
-      let duplicated = Darwin.fcntl(writerDescriptor, F_DUPFD_CLOEXEC, STDERR_FILENO + 1)
-      guard duplicated >= 0 else {
-        let failure = errno
-        Darwin.close(writerDescriptor)
-        Darwin.close(readerDescriptor)
-        throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure))
-      }
-      Darwin.close(writerDescriptor)
-      writerDescriptor = duplicated
-    }
-    let unlinkStatus = fifoPath.withCString(Darwin.unlink)
-    guard unlinkStatus == 0 else {
-      let failure = errno
-      Darwin.close(writerDescriptor)
-      Darwin.close(readerDescriptor)
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure))
-    }
-    let rmdirStatus = directoryPath.withCString(Darwin.rmdir)
-    guard rmdirStatus == 0 else {
-      let failure = errno
-      Darwin.close(writerDescriptor)
-      Darwin.close(readerDescriptor)
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure))
-    }
     cleanupRequired = false
+    self.directoryPath = directoryPath
+    self.fifoPath = fifoPath
     reader = FileHandle(fileDescriptor: readerDescriptor, closeOnDealloc: true)
-    childWriter = writerDescriptor
   }
 
   deinit {
-    closeChildWriter()
     try? reader.close()
+    _ = fifoPath.withCString(Darwin.unlink)
+    _ = directoryPath.withCString(Darwin.rmdir)
   }
 
-  var writerDescriptor: Int32 {
-    lock.withLock {
-      precondition(childWriter != nil, "capture writer already closed")
-      return childWriter!
+  func activateReader() throws {
+    try lock.withLock {
+      precondition(!readerActivated, "capture reader already activated")
+      let descriptor = reader.fileDescriptor
+      let readerFlags = Darwin.fcntl(descriptor, F_GETFL)
+      guard readerFlags >= 0,
+        Darwin.fcntl(descriptor, F_SETFL, readerFlags & ~O_NONBLOCK) == 0
+      else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+      }
+      readerActivated = true
     }
   }
 
-  func closeChildWriter() {
+  func closeReader() { try? reader.close() }
+}
+
+private final class CompileCaptureControl: @unchecked Sendable {
+  static let childDescriptor: Int32 = 3
+
+  private let lock = NSLock()
+  private var parentDescriptor: Int32?
+  private var childSourceDescriptor: Int32?
+
+  init() throws {
+    // The control pair carries two exact bytes and never carries captured output.
+    // Its endpoints may be inherited across a concurrent fork, but capture EOF
+    // cannot depend on them because the test runner never owns a FIFO writer.
+    var descriptors: [Int32] = [-1, -1]
+    guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    do {
+      var noSignal: Int32 = 1
+      guard
+        Darwin.setsockopt(
+          descriptors[0], SOL_SOCKET, SO_NOSIGPIPE, &noSignal,
+          socklen_t(MemoryLayout.size(ofValue: noSignal))) == 0
+      else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+      }
+      for index in descriptors.indices {
+        let duplicated = Darwin.fcntl(descriptors[index], F_DUPFD_CLOEXEC, 10)
+        guard duplicated >= 0 else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        Darwin.close(descriptors[index])
+        descriptors[index] = duplicated
+      }
+    } catch {
+      for descriptor in descriptors where descriptor >= 0 { Darwin.close(descriptor) }
+      throw error
+    }
+    parentDescriptor = descriptors[0]
+    childSourceDescriptor = descriptors[1]
+  }
+
+  deinit {
+    closeParent()
+    closeChildSource()
+  }
+
+  var childSource: Int32 {
+    lock.withLock {
+      precondition(childSourceDescriptor != nil, "capture control child source already closed")
+      return childSourceDescriptor!
+    }
+  }
+
+  func closeChildSource() {
     let descriptor = lock.withLock { () -> Int32? in
-      defer { childWriter = nil }
-      return childWriter
+      defer { childSourceDescriptor = nil }
+      return childSourceDescriptor
     }
     if let descriptor { Darwin.close(descriptor) }
   }
 
-  func closeReader() { try? reader.close() }
+  func closeParent() {
+    let descriptor = lock.withLock { () -> Int32? in
+      defer { parentDescriptor = nil }
+      return parentDescriptor
+    }
+    if let descriptor { Darwin.close(descriptor) }
+  }
+
+  func waitForWriterReady(timeoutMilliseconds: Int32) throws {
+    let descriptor = try lock.withLock { () throws -> Int32 in
+      guard let parentDescriptor else {
+        throw compileProcessFailure("capture-control-closed", EBADF)
+      }
+      return parentDescriptor
+    }
+    var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN | POLLHUP), revents: 0)
+    let deadline = DispatchTime.now() + .milliseconds(Int(timeoutMilliseconds))
+    while true {
+      let now = DispatchTime.now().uptimeNanoseconds
+      guard now < deadline.uptimeNanoseconds else {
+        throw compileProcessFailure("capture-control-ready-timeout", ETIMEDOUT)
+      }
+      let remainingNanoseconds = deadline.uptimeNanoseconds - now
+      let remainingMilliseconds = min(
+        UInt64(Int32.max), (remainingNanoseconds + 999_999) / 1_000_000)
+      let result = Darwin.poll(&pollDescriptor, 1, Int32(remainingMilliseconds))
+      if result == -1, errno == EINTR { continue }
+      guard result > 0 else {
+        throw compileProcessFailure(
+          result == 0 ? "capture-control-ready-timeout" : "capture-control-ready-poll",
+          result == 0 ? ETIMEDOUT : errno
+        )
+      }
+      var ready: UInt8 = 0
+      let count = Darwin.read(descriptor, &ready, 1)
+      guard count == 1, ready == 0x52 else {
+        throw compileProcessFailure("capture-control-ready-frame", EPROTO)
+      }
+      return
+    }
+  }
+
+  func grantExecution() throws {
+    let descriptor = try lock.withLock { () throws -> Int32 in
+      guard let parentDescriptor else {
+        throw compileProcessFailure("capture-control-closed", EBADF)
+      }
+      return parentDescriptor
+    }
+    var grant: UInt8 = 0x47
+    while Darwin.write(descriptor, &grant, 1) == -1 {
+      if errno == EINTR { continue }
+      throw compileProcessFailure("capture-control-grant", errno)
+    }
+  }
 }
 
 private enum ExpectedAccessFailure: Sendable {
@@ -392,6 +485,9 @@ private func compileFailRejection(
   if result.stdout.truncated || result.stderr.truncated {
     return "compiler output was truncated"
   }
+  guard result.stdoutDrainStarted, result.stderrDrainStarted else {
+    return "compiler output drains did not start"
+  }
   guard result.stdoutDrain == .eof, result.stderrDrain == .eof else {
     return "compiler output did not drain to EOF"
   }
@@ -425,11 +521,15 @@ private func startDrain(
   reader: FileHandle,
   capture: BoundedDiagnosticCapture,
   recorder: CompileDrainRecorder,
-  group: DispatchGroup
-) {
+  group: DispatchGroup,
+  name: String
+) -> DispatchSemaphore {
+  let started = DispatchSemaphore(value: 0)
   group.enter()
-  DispatchQueue.global().async {
+  let thread = Thread {
     defer { group.leave() }
+    recorder.recordStarted()
+    started.signal()
     do {
       while let chunk = try reader.read(upToCount: 4 * 1_024),
         !chunk.isEmpty
@@ -441,10 +541,67 @@ private func startDrain(
       recorder.record(.readError(String(reflecting: error)))
     }
   }
+  thread.name = name
+  thread.qualityOfService = .userInitiated
+  thread.start()
+  return started
 }
 
 private func drainCompleted(_ group: DispatchGroup, within deadline: DispatchTime) -> Bool {
   group.wait(timeout: deadline) == .success
+}
+
+private func boundedCaptureOwnershipDiagnostic(paths: [String]) -> String {
+  var outputTemplate = Array(
+    (NSTemporaryDirectory() + "diskplan-capture-owners.XXXXXX").utf8CString)
+  let descriptor = outputTemplate.withUnsafeMutableBufferPointer {
+    Darwin.mkstemp($0.baseAddress!)
+  }
+  guard descriptor >= 0 else { return "lsofOutputCreateFailed(errno=\(errno))" }
+  _ = outputTemplate.withUnsafeMutableBufferPointer { Darwin.unlink($0.baseAddress!) }
+  defer { Darwin.close(descriptor) }
+  guard Darwin.fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+    return "lsofOutputCloexecFailed(errno=\(errno))"
+  }
+
+  let processID: pid_t
+  do {
+    processID = try spawnOwnershipDiagnostic(
+      arguments: ["-nP", "-F0pcfDino", "--"] + paths,
+      outputDescriptor: descriptor
+    )
+  } catch {
+    return "lsofLaunchFailed(\(String(reflecting: error)))"
+  }
+  let initialWait = waitForCompileChild(processID, until: .now() + .seconds(2))
+  let waitStatus: Int32
+  switch initialWait {
+  case .exited(let status):
+    waitStatus = status
+  case .failed(let code):
+    return "lsofWaitFailed(errno=\(code))"
+  case .timedOut:
+    let forced = forceStopCompileChild(processID)
+    guard let status = forced.waitStatus else {
+      return "lsofTimedOut(\(forced.report))"
+    }
+    waitStatus = status
+  }
+
+  guard Darwin.lseek(descriptor, 0, SEEK_SET) == 0 else {
+    return "lsofOutputSeekFailed(errno=\(errno))"
+  }
+  var retained = [UInt8](repeating: 0, count: 16 * 1_024 + 1)
+  let count = retained.withUnsafeMutableBytes {
+    Darwin.read(descriptor, $0.baseAddress, $0.count)
+  }
+  guard count >= 0 else { return "lsofOutputReadFailed(errno=\(errno))" }
+  let truncated = count > 16 * 1_024
+  let boundedCount = min(Int(count), 16 * 1_024)
+  let termination = decodedCompileTermination(waitStatus)
+  return "lsofTermination=\(termination.reason.rawValue) status="
+    + "\(termination.status.map(String.init) ?? "none") truncated=\(truncated) output="
+    + String(reflecting: String(decoding: retained.prefix(boundedCount), as: UTF8.self))
 }
 
 private func emptyCompileProcessResult(setupError: String) -> CompileProcessResult {
@@ -457,6 +614,9 @@ private func emptyCompileProcessResult(setupError: String) -> CompileProcessResu
     stderr: CompileOutputSnapshot(text: "", truncated: false),
     stdoutDrain: .readError("stdout capture was not started"),
     stderrDrain: .readError("stderr capture was not started"),
+    stdoutDrainStarted: false,
+    stderrDrainStarted: false,
+    captureOwnership: "notRequested",
     processGroupCleanup: .notRequired,
     processGroupQuiescence: .notStarted
   )
@@ -470,15 +630,94 @@ private func compileProcessFailure(_ operation: String, _ code: Int32) -> NSErro
   )
 }
 
+private func spawnOwnershipDiagnostic(
+  arguments: [String],
+  outputDescriptor: Int32
+) throws -> pid_t {
+  let command = ["/usr/sbin/lsof"] + arguments
+  var allocations: [UnsafeMutablePointer<CChar>] = []
+  defer { for allocation in allocations { Darwin.free(allocation) } }
+  for argument in command {
+    guard let allocation = argument.withCString({ Darwin.strdup($0) }) else {
+      throw compileProcessFailure("lsof-allocate-argv", ENOMEM)
+    }
+    allocations.append(allocation)
+  }
+  var argv = allocations.map(Optional.some)
+  argv.append(nil)
+
+  var environmentAllocations: [UnsafeMutablePointer<CChar>] = []
+  defer { for allocation in environmentAllocations { Darwin.free(allocation) } }
+  for entry in ProcessInfo.processInfo.environment.map({ "\($0.key)=\($0.value)" }).sorted() {
+    guard let allocation = entry.withCString({ Darwin.strdup($0) }) else {
+      throw compileProcessFailure("lsof-allocate-environment", ENOMEM)
+    }
+    environmentAllocations.append(allocation)
+  }
+  var environment = environmentAllocations.map(Optional.some)
+  environment.append(nil)
+
+  var fileActions: posix_spawn_file_actions_t?
+  var status = posix_spawn_file_actions_init(&fileActions)
+  guard status == 0 else { throw compileProcessFailure("lsof-file-actions-init", status) }
+  defer { _ = posix_spawn_file_actions_destroy(&fileActions) }
+  status = "/dev/null".withCString {
+    posix_spawn_file_actions_addopen(&fileActions, STDIN_FILENO, $0, O_RDONLY, 0)
+  }
+  guard status == 0 else { throw compileProcessFailure("lsof-file-actions-stdin", status) }
+  status = posix_spawn_file_actions_adddup2(&fileActions, outputDescriptor, STDOUT_FILENO)
+  guard status == 0 else { throw compileProcessFailure("lsof-file-actions-stdout", status) }
+  status = posix_spawn_file_actions_adddup2(&fileActions, outputDescriptor, STDERR_FILENO)
+  guard status == 0 else { throw compileProcessFailure("lsof-file-actions-stderr", status) }
+  status = posix_spawn_file_actions_addclose(&fileActions, outputDescriptor)
+  guard status == 0 else { throw compileProcessFailure("lsof-file-actions-close", status) }
+
+  var attributes: posix_spawnattr_t?
+  status = posix_spawnattr_init(&attributes)
+  guard status == 0 else { throw compileProcessFailure("lsof-attributes-init", status) }
+  defer { _ = posix_spawnattr_destroy(&attributes) }
+  status = posix_spawnattr_setpgroup(&attributes, 0)
+  guard status == 0 else { throw compileProcessFailure("lsof-attributes-pgroup", status) }
+  status = posix_spawnattr_setflags(
+    &attributes,
+    Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
+  )
+  guard status == 0 else { throw compileProcessFailure("lsof-attributes-flags", status) }
+
+  var processID = pid_t()
+  status = argv.withUnsafeMutableBufferPointer { argvBuffer in
+    environment.withUnsafeMutableBufferPointer { environmentBuffer in
+      posix_spawn(
+        &processID,
+        allocations[0],
+        &fileActions,
+        &attributes,
+        argvBuffer.baseAddress!,
+        environmentBuffer.baseAddress!
+      )
+    }
+  }
+  guard status == 0 else { throw compileProcessFailure("lsof-posix-spawn", status) }
+  return processID
+}
+
 private func spawnIsolatedProcess(
   isolatedExec: URL,
   executable: String,
   arguments: [String],
   launcherExecutable: String,
-  stdoutWriter: Int32,
-  stderrWriter: Int32
+  controlSource: Int32,
+  stdoutFIFO: String,
+  stderrFIFO: String
 ) throws -> pid_t {
-  let command = [launcherExecutable, isolatedExec.path, executable] + arguments
+  let command =
+    [
+      launcherExecutable, isolatedExec.path,
+      "--capture-control-fd", String(CompileCaptureControl.childDescriptor),
+      "--stdout-fifo", stdoutFIFO,
+      "--stderr-fifo", stderrFIFO,
+      "--", executable,
+    ] + arguments
   var allocations: [UnsafeMutablePointer<CChar>] = []
   defer {
     for allocation in allocations { Darwin.free(allocation) }
@@ -514,14 +753,19 @@ private func spawnIsolatedProcess(
     posix_spawn_file_actions_addopen(&fileActions, STDIN_FILENO, $0, O_RDONLY, 0)
   }
   guard status == 0 else { throw compileProcessFailure("file-actions-stdin", status) }
-  status = posix_spawn_file_actions_adddup2(&fileActions, stdoutWriter, STDOUT_FILENO)
+  status = "/dev/null".withCString {
+    posix_spawn_file_actions_addopen(&fileActions, STDOUT_FILENO, $0, O_WRONLY, 0)
+  }
   guard status == 0 else { throw compileProcessFailure("file-actions-stdout", status) }
-  status = posix_spawn_file_actions_adddup2(&fileActions, stderrWriter, STDERR_FILENO)
+  status = "/dev/null".withCString {
+    posix_spawn_file_actions_addopen(&fileActions, STDERR_FILENO, $0, O_WRONLY, 0)
+  }
   guard status == 0 else { throw compileProcessFailure("file-actions-stderr", status) }
-  status = posix_spawn_file_actions_addclose(&fileActions, stdoutWriter)
-  guard status == 0 else { throw compileProcessFailure("file-actions-close-stdout", status) }
-  status = posix_spawn_file_actions_addclose(&fileActions, stderrWriter)
-  guard status == 0 else { throw compileProcessFailure("file-actions-close-stderr", status) }
+  status = posix_spawn_file_actions_adddup2(
+    &fileActions, controlSource, CompileCaptureControl.childDescriptor)
+  guard status == 0 else { throw compileProcessFailure("file-actions-control", status) }
+  status = posix_spawn_file_actions_addclose(&fileActions, controlSource)
+  guard status == 0 else { throw compileProcessFailure("file-actions-close-control", status) }
 
   var attributes: posix_spawnattr_t?
   status = posix_spawnattr_init(&attributes)
@@ -578,6 +822,75 @@ private func waitForCompileChild(
   }
 }
 
+private struct ForcedCompileCleanup {
+  let cleanup: CompileProcessGroupCleanup
+  let waitStatus: Int32?
+  let report: String
+}
+
+private func signalCompileChild(_ processID: pid_t, signal: Int32) -> String {
+  if Darwin.kill(-processID, signal) == 0 { return "group-sent" }
+  let groupError = errno
+  if Darwin.kill(processID, signal) == 0 {
+    return "pid-sent(group-errno=\(groupError))"
+  }
+  return "signal-failed(group-errno=\(groupError),pid-errno=\(errno))"
+}
+
+private func forceStopCompileChild(_ processID: pid_t) -> ForcedCompileCleanup {
+  switch waitForCompileChild(processID, until: .now()) {
+  case .exited(let status):
+    return ForcedCompileCleanup(
+      cleanup: .notRequired, waitStatus: status, report: "already-reaped")
+  case .failed(let code):
+    return ForcedCompileCleanup(
+      cleanup: .notRequired, waitStatus: nil, report: "initial-wait-failed(errno=\(code))")
+  case .timedOut:
+    break
+  }
+
+  let termReport = signalCompileChild(processID, signal: SIGTERM)
+  switch waitForCompileChild(processID, until: .now() + .milliseconds(250)) {
+  case .exited(let status):
+    return ForcedCompileCleanup(
+      cleanup: .termSent,
+      waitStatus: status,
+      report: "term=\(termReport),reaped-after-term"
+    )
+  case .failed(let code):
+    return ForcedCompileCleanup(
+      cleanup: .termSent,
+      waitStatus: nil,
+      report: "term=\(termReport),wait-after-term-failed(errno=\(code))"
+    )
+  case .timedOut:
+    break
+  }
+
+  let killReport = signalCompileChild(processID, signal: SIGKILL)
+  switch waitForCompileChild(processID, until: .now() + .seconds(2)) {
+  case .exited(let status):
+    return ForcedCompileCleanup(
+      cleanup: .killSent,
+      waitStatus: status,
+      report: "term=\(termReport),kill=\(killReport),reaped-after-kill"
+    )
+  case .failed(let code):
+    return ForcedCompileCleanup(
+      cleanup: .killSent,
+      waitStatus: nil,
+      report:
+        "term=\(termReport),kill=\(killReport),wait-after-kill-failed(errno=\(code))"
+    )
+  case .timedOut:
+    return ForcedCompileCleanup(
+      cleanup: .killSent,
+      waitStatus: nil,
+      report: "term=\(termReport),kill=\(killReport),unreaped-residual-pid=\(processID)"
+    )
+  }
+}
+
 private func decodedCompileTermination(
   _ waitStatus: Int32?
 ) -> (reason: CompileTerminationReason, status: Int32?) {
@@ -597,13 +910,17 @@ private func runIsolatedProcess(
   postExitDrainGrace: DispatchTimeInterval = .milliseconds(250),
   termGrace: DispatchTimeInterval = .milliseconds(250),
   finalDrainGrace: DispatchTimeInterval = .seconds(2),
-  endpointCreated: () throws -> Void = {}
+  endpointCreated: () throws -> Void = {},
+  beforeSpawn: () throws -> Void = {}
 ) -> CompileProcessResult {
   let stdoutChannel: AtomicCaptureChannel
   let stderrChannel: AtomicCaptureChannel
+  let captureControl: CompileCaptureControl
   do {
     stdoutChannel = try AtomicCaptureChannel(endpointCreated: endpointCreated)
     stderrChannel = try AtomicCaptureChannel(endpointCreated: endpointCreated)
+    captureControl = try CompileCaptureControl()
+    try beforeSpawn()
   } catch {
     return emptyCompileProcessResult(setupError: String(reflecting: error))
   }
@@ -614,18 +931,6 @@ private func runIsolatedProcess(
   let stderrDrain = DispatchGroup()
   let stdoutDrainRecorder = CompileDrainRecorder()
   let stderrDrainRecorder = CompileDrainRecorder()
-  startDrain(
-    reader: stdoutChannel.reader,
-    capture: stdout,
-    recorder: stdoutDrainRecorder,
-    group: stdoutDrain
-  )
-  startDrain(
-    reader: stderrChannel.reader,
-    capture: stderr,
-    recorder: stderrDrainRecorder,
-    group: stderrDrain
-  )
   let processID: pid_t
   do {
     processID = try spawnIsolatedProcess(
@@ -633,24 +938,53 @@ private func runIsolatedProcess(
       executable: executable,
       arguments: arguments,
       launcherExecutable: launcherExecutable,
-      stdoutWriter: stdoutChannel.writerDescriptor,
-      stderrWriter: stderrChannel.writerDescriptor
+      controlSource: captureControl.childSource,
+      stdoutFIFO: stdoutChannel.fifoPath,
+      stderrFIFO: stderrChannel.fifoPath
     )
   } catch {
-    stdoutChannel.closeChildWriter()
-    stderrChannel.closeChildWriter()
-    var stdoutFinished = drainCompleted(stdoutDrain, within: .now() + .seconds(1))
-    var stderrFinished = drainCompleted(stderrDrain, within: .now() + .seconds(1))
-    if !stdoutFinished {
-      stdoutChannel.closeReader()
-      stdoutFinished = drainCompleted(stdoutDrain, within: .now() + .seconds(1))
+    captureControl.closeChildSource()
+    captureControl.closeParent()
+    stdoutChannel.closeReader()
+    stderrChannel.closeReader()
+    return emptyCompileProcessResult(setupError: String(reflecting: error))
+  }
+  captureControl.closeChildSource()
+
+  do {
+    try captureControl.waitForWriterReady(timeoutMilliseconds: 2_000)
+    try stdoutChannel.activateReader()
+    try stderrChannel.activateReader()
+    let stdoutStarted = startDrain(
+      reader: stdoutChannel.reader,
+      capture: stdout,
+      recorder: stdoutDrainRecorder,
+      group: stdoutDrain,
+      name: "diskplan-compile-stdout"
+    )
+    let stderrStarted = startDrain(
+      reader: stderrChannel.reader,
+      capture: stderr,
+      recorder: stderrDrainRecorder,
+      group: stderrDrain,
+      name: "diskplan-compile-stderr"
+    )
+    guard stdoutStarted.wait(timeout: .now() + .seconds(2)) == .success,
+      stderrStarted.wait(timeout: .now() + .seconds(2)) == .success
+    else {
+      throw compileProcessFailure("capture-drain-start-timeout", ETIMEDOUT)
     }
-    if !stderrFinished {
-      stderrChannel.closeReader()
-      stderrFinished = drainCompleted(stderrDrain, within: .now() + .seconds(1))
-    }
+    try captureControl.grantExecution()
+    captureControl.closeParent()
+  } catch {
+    captureControl.closeParent()
+    let forcedCleanup = forceStopCompileChild(processID)
+    stdoutChannel.closeReader()
+    stderrChannel.closeReader()
+    let stdoutFinished = drainCompleted(stdoutDrain, within: .now() + .seconds(1))
+    let stderrFinished = drainCompleted(stderrDrain, within: .now() + .seconds(1))
     return CompileProcessResult(
-      setupError: String(reflecting: error),
+      setupError: String(reflecting: error) + "; cleanup=" + forcedCleanup.report,
       timedOut: false,
       terminationReason: .unavailable,
       terminationStatus: nil,
@@ -658,15 +992,13 @@ private func runIsolatedProcess(
       stderr: stderr.snapshot,
       stdoutDrain: stdoutFinished ? stdoutDrainRecorder.snapshot : .timedOut,
       stderrDrain: stderrFinished ? stderrDrainRecorder.snapshot : .timedOut,
-      processGroupCleanup: .notRequired,
+      stdoutDrainStarted: stdoutDrainRecorder.didStart,
+      stderrDrainStarted: stderrDrainRecorder.didStart,
+      captureOwnership: "notRequested",
+      processGroupCleanup: forcedCleanup.cleanup,
       processGroupQuiescence: .notStarted
     )
   }
-
-  // The child receives only dup2-created descriptors 1 and 2. The parent closes
-  // both child endpoints immediately after posix_spawn returns successfully.
-  stdoutChannel.closeChildWriter()
-  stderrChannel.closeChildWriter()
 
   var timedOut = false
   var cleanup: CompileProcessGroupCleanup = .notRequired
@@ -719,6 +1051,10 @@ private func runIsolatedProcess(
   if !stderrFinished {
     stderrFinished = drainCompleted(stderrDrain, within: .now() + finalDrainGrace)
   }
+  let captureOwnership =
+    stdoutFinished && stderrFinished
+    ? "notRequested"
+    : boundedCaptureOwnershipDiagnostic(paths: [stdoutChannel.fifoPath, stderrChannel.fifoPath])
   if !stdoutFinished { stdoutChannel.closeReader() }
   if !stderrFinished { stderrChannel.closeReader() }
   if !stdoutFinished { _ = drainCompleted(stdoutDrain, within: .now() + .seconds(1)) }
@@ -748,6 +1084,9 @@ private func runIsolatedProcess(
     stderr: stderr.snapshot,
     stdoutDrain: stdoutFinished ? stdoutDrainRecorder.snapshot : .timedOut,
     stderrDrain: stderrFinished ? stderrDrainRecorder.snapshot : .timedOut,
+    stdoutDrainStarted: stdoutDrainRecorder.didStart,
+    stderrDrainStarted: stderrDrainRecorder.didStart,
+    captureOwnership: captureOwnership,
     processGroupCleanup: cleanup,
     processGroupQuiescence: quiescence
   )
@@ -771,6 +1110,45 @@ private func typecheckForbiddenFixture(
   )
 }
 
+private final class ForkOnlyChildren: @unchecked Sendable {
+  private let lock = NSLock()
+  private var processIDs: [pid_t] = []
+
+  func spawn() throws {
+    let processID = diskplan_test_fork_and_pause()
+    guard processID >= 0 else {
+      throw compileProcessFailure("fork-only-child", errno)
+    }
+    if processID == 0 {
+      while true { _ = Darwin.pause() }
+    }
+    lock.withLock { processIDs.append(processID) }
+  }
+
+  func stopAndReap() {
+    let identifiers = lock.withLock { () -> [pid_t] in
+      defer { processIDs.removeAll(keepingCapacity: false) }
+      return processIDs
+    }
+    for processID in identifiers { _ = Darwin.kill(processID, SIGKILL) }
+    for processID in identifiers {
+      var status: Int32 = 0
+      while Darwin.waitpid(processID, &status, 0) == -1, errno == EINTR {}
+    }
+  }
+}
+
+private final class CompileProcessResults: @unchecked Sendable {
+  private let lock = NSLock()
+  private var results: [CompileProcessResult] = []
+
+  func append(_ result: CompileProcessResult) {
+    lock.withLock { results.append(result) }
+  }
+
+  var snapshot: [CompileProcessResult] { lock.withLock { results } }
+}
+
 @Test func compileFailClassifierRejectsInfrastructureFailures() {
   let expectation = forbiddenSurfaceExpectations[0]
   let diagnostic =
@@ -787,6 +1165,8 @@ private func typecheckForbiddenFixture(
     stderrTruncated: Bool = false,
     stdoutDrain: CompileDrainCompletion = .eof,
     stderrDrain: CompileDrainCompletion = .eof,
+    stdoutDrainStarted: Bool = true,
+    stderrDrainStarted: Bool = true,
     processGroupQuiescence: CompileProcessGroupQuiescence = .confirmed
   ) -> CompileProcessResult {
     CompileProcessResult(
@@ -798,6 +1178,9 @@ private func typecheckForbiddenFixture(
       stderr: CompileOutputSnapshot(text: stderr, truncated: stderrTruncated),
       stdoutDrain: stdoutDrain,
       stderrDrain: stderrDrain,
+      stdoutDrainStarted: stdoutDrainStarted,
+      stderrDrainStarted: stderrDrainStarted,
+      captureOwnership: "notRequested",
       processGroupCleanup: .notRequired,
       processGroupQuiescence: processGroupQuiescence
     )
@@ -867,6 +1250,11 @@ private func typecheckForbiddenFixture(
     ) != nil)
   #expect(
     compileFailRejection(
+      result: result(stdoutDrainStarted: false),
+      expectation: expectation
+    ) != nil)
+  #expect(
+    compileFailRejection(
       result: result(stderrDrain: .timedOut),
       expectation: expectation
     ) != nil)
@@ -918,6 +1306,8 @@ private func typecheckForbiddenFixture(
       && unrelatedSpawnResult.terminationStatus == 0
       && unrelatedSpawnResult.stdout.text.isEmpty
       && unrelatedSpawnResult.stderr.text.isEmpty
+      && unrelatedSpawnResult.stdoutDrainStarted
+      && unrelatedSpawnResult.stderrDrainStarted
       && unrelatedSpawnResult.stdoutDrain == .eof
       && unrelatedSpawnResult.stderrDrain == .eof
       && unrelatedSpawnResult.processGroupCleanup == .notRequired
@@ -939,6 +1329,7 @@ private func typecheckForbiddenFixture(
       result.setupError == nil && !result.timedOut
         && result.terminationReason == .exit && result.terminationStatus == 0
         && result.stdout.text.isEmpty && result.stderr.text.isEmpty
+        && result.stdoutDrainStarted && result.stderrDrainStarted
         && result.stdoutDrain == .eof && result.stderrDrain == .eof
         && result.processGroupCleanup == .notRequired
         && result.processGroupQuiescence == .confirmed,
@@ -959,6 +1350,7 @@ private func typecheckForbiddenFixture(
     heldWriterResult.setupError == nil && !heldWriterResult.timedOut
       && heldWriterResult.terminationReason == .exit && heldWriterResult.terminationStatus == 0
       && heldWriterResult.stdout.text.isEmpty && heldWriterResult.stderr.text.isEmpty
+      && heldWriterResult.stdoutDrainStarted && heldWriterResult.stderrDrainStarted
       && heldWriterResult.stdoutDrain == .eof && heldWriterResult.stderrDrain == .eof
       && heldWriterResult.processGroupCleanup == .notRequired
       && heldWriterResult.processGroupQuiescence == .confirmed,
@@ -980,6 +1372,8 @@ private func typecheckForbiddenFixture(
       && silentDescendantResult.terminationStatus == 0
       && silentDescendantResult.stdout.text.isEmpty
       && silentDescendantResult.stderr.text.isEmpty
+      && silentDescendantResult.stdoutDrainStarted
+      && silentDescendantResult.stderrDrainStarted
       && silentDescendantResult.stdoutDrain == .eof
       && silentDescendantResult.stderrDrain == .eof
       && silentDescendantResult.processGroupCleanup == .notRequired
@@ -998,10 +1392,26 @@ private func typecheckForbiddenFixture(
       && setupFailureResult.terminationReason == .unavailable
       && setupFailureResult.terminationStatus == nil
       && setupFailureResult.stdout.text.isEmpty && setupFailureResult.stderr.text.isEmpty
-      && setupFailureResult.stdoutDrain == .eof && setupFailureResult.stderrDrain == .eof
+      && !setupFailureResult.stdoutDrainStarted && !setupFailureResult.stderrDrainStarted
       && setupFailureResult.processGroupCleanup == .notRequired
       && setupFailureResult.processGroupQuiescence == .notStarted,
     "Partial launch cleanup did not close both capture writers: \(setupFailureResult.report)"
+  )
+
+  let handshakeFailureResult = runIsolatedProcess(
+    isolatedExec: isolatedExec,
+    executable: "/usr/bin/true",
+    arguments: [],
+    launcherExecutable: "/usr/bin/true"
+  )
+  #expect(
+    handshakeFailureResult.setupError != nil && !handshakeFailureResult.timedOut
+      && handshakeFailureResult.terminationReason == .unavailable
+      && handshakeFailureResult.terminationStatus == nil
+      && !handshakeFailureResult.stdoutDrainStarted
+      && !handshakeFailureResult.stderrDrainStarted
+      && handshakeFailureResult.processGroupQuiescence == .notStarted,
+    "A launcher that skipped the capture handshake was accepted: \(handshakeFailureResult.report)"
   )
 }
 
@@ -1033,6 +1443,43 @@ private func typecheckForbiddenFixture(
     #expect(
       rejection == nil,
       "Forbidden fixture did not prove the expected semantic rejection: \(expectation.fixtureName): \(rejection ?? "accepted"); \(result.report)"
+    )
+  }
+}
+
+@Test func concurrentForkOnlyChildrenCannotInheritCaptureWriters() throws {
+  let root = try #require(repositoryRoot())
+  let isolatedExec = root.appendingPathComponent(
+    "fixtures/CompileFail/ContentAuthority/isolated_exec.py")
+  let results = CompileProcessResults()
+
+  DispatchQueue.concurrentPerform(iterations: 8) { _ in
+    let children = ForkOnlyChildren()
+    defer { children.stopAndReap() }
+    results.append(
+      runIsolatedProcess(
+        isolatedExec: isolatedExec,
+        executable: "/usr/bin/true",
+        arguments: [],
+        leaderTimeout: .seconds(2),
+        postExitDrainGrace: .milliseconds(100),
+        termGrace: .milliseconds(100),
+        finalDrainGrace: .seconds(1),
+        beforeSpawn: { try children.spawn() }
+      ))
+  }
+
+  let snapshot = results.snapshot
+  #expect(snapshot.count == 8)
+  for result in snapshot {
+    #expect(
+      result.setupError == nil && !result.timedOut
+        && result.terminationReason == .exit && result.terminationStatus == 0
+        && result.stdout.text.isEmpty && result.stderr.text.isEmpty
+        && result.stdoutDrainStarted && result.stderrDrainStarted
+        && result.stdoutDrain == .eof && result.stderrDrain == .eof
+        && result.processGroupQuiescence == .confirmed,
+      "A concurrent fork-only child inherited a capture writer: \(result.report)"
     )
   }
 }
