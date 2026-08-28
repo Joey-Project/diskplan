@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import resource
 import select
 import selectors
 import signal
@@ -656,6 +657,7 @@ def main() -> int:
         os.fsync(descriptor)
         os.close(descriptor)
 
+    usage = child_resource_usage()
     report = {
         "cleanup": asdict(cleanup),
         "elapsed_millis": int((time.monotonic() - started) * 1000),
@@ -669,11 +671,25 @@ def main() -> int:
         "output_bytes": retained_bytes,
         "output_sha256": retained.hexdigest(),
         "process_group_verified": process_group_verified,
+        "resource_usage": usage,
         "result": result,
         "termination_signal": termination_signal,
     }
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return exit_code
+
+
+def child_resource_usage() -> dict[str, int]:
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    resident = int(usage.ru_maxrss)
+    if sys.platform.startswith("linux"):
+        resident *= 1024
+    return {
+        "max_resident_bytes": max(resident, 0),
+        "swap_operations": max(int(usage.ru_nswap), 0),
+        "user_cpu_millis": max(int(usage.ru_utime * 1000), 0),
+        "system_cpu_millis": max(int(usage.ru_stime * 1000), 0),
+    }
 
 
 if __name__ == "__main__":
