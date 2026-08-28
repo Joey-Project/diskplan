@@ -129,10 +129,11 @@ func forceWarningPrecedesTheMutationAndAuditFailureIsNonfatal() async throws {
   let authorization = try await makeAuthorization(plan: plan, overlay: overlay)
   let events = RecordingEventSink()
   let adapter = RecordingMutationAdapter(eventSink: events)
+  let auditSink = AlwaysFailingAuditSink()
   let coordinator = BestEffortApplyCoordinator(
     adapter: adapter,
     eventSink: events,
-    auditSink: AlwaysFailingAuditSink(),
+    auditSink: auditSink,
     clock: { 202 }
   )
 
@@ -143,8 +144,9 @@ func forceWarningPrecedesTheMutationAndAuditFailureIsNonfatal() async throws {
   let mutationIndex = transcript.firstIndex(of: .adapterObservedMutation(action.id))
 
   #expect(report.unitOutcomes.first?.status == .succeeded)
-  #expect(!report.auditFailures.isEmpty)
+  #expect(report.auditFailures.count == 1)
   #expect(report.auditFailures.allSatisfy { $0.errno == ENOSPC })
+  #expect(await auditSink.recordCount == 1)
   #expect(warningIndex != nil)
   #expect(mutationIndex != nil)
   if let warningIndex, let mutationIndex { #expect(warningIndex < mutationIndex) }
@@ -991,7 +993,12 @@ private actor RecordingEventSink: ExecutionEventSink {
 }
 
 private actor AlwaysFailingAuditSink: ExecutionAuditSink {
-  func record(_: ExecutionEvent) async throws { throw POSIXError(.ENOSPC) }
+  private(set) var recordCount = 0
+
+  func record(_: ExecutionEvent, epochID _: String) async throws {
+    recordCount += 1
+    throw POSIXError(.ENOSPC)
+  }
 }
 
 private func makeAuthorization(
