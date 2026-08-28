@@ -1,7 +1,7 @@
 ---
 id: 20260827-41f0a2
 title: Phase 0 Shared Foundation
-status: active
+status: completed
 created: 2026-08-27
 updated: 2026-08-28
 branch: wip/phase0-foundation
@@ -22,7 +22,8 @@ superseded_by:
 - Base commit：`0ee3ed5555fec42ffc5e9b8e718024fcbb686d71`。
 - Branch：`wip/phase0-foundation`，位于 linked worktree。
 - Toolchain preflight：Swift 6.3.3、Rust 1.95.0、Protobuf 35.1，target 为 `arm64-apple-macosx26.0`。
-- Shared foundation implementation and Tier 1 validation are complete. The first frozen-range review found four process/publisher issues, fixed in signed commit `b6a26faa5191e1c8872f63380f3a14d818be8296`. A second full-range review found five follow-up race, cleanup, ACL, and source-binding issues. A third review found one remaining ancestor-chain trust gap. All fixes are included in this branch and await fresh full-range review before the pull request.
+- The shared foundation is complete on the target-branch view. It provides the Swift/Rust workspaces, versioned IPC, canonical evidence binding, bounded process supervision, and hardened generated-source tooling; scanner, macOS probes, and TUI behavior remain in later workstreams.
+- The first frozen-range review found four process/publisher issues, fixed in signed commit `b6a26faa5191e1c8872f63380f3a14d818be8296`. A second full-range review found five follow-up race, cleanup, ACL, and source-binding issues. A third review found one remaining ancestor-chain trust gap. The final full-range review through `d165c560297c1f0eb0198eb59284445ac0ae3b30` returned `No findings.`.
 - The Swift engine remains the evidence authority. Rust exposes only strict canonical verification and a supervised live IPC session.
 
 ## Task List
@@ -31,12 +32,12 @@ superseded_by:
 - [x] 定义 versioned Protobuf envelopes 和 length-delimited stdio handshake。
 - [x] 建立 deterministic canonical binding 与跨语言 golden vectors。
 - [x] 添加 Swift/Rust unit、compatibility 和 smoke tests。
-- [ ] 完成本地 delivery gate、独立 review 和 PR readiness。
+- [x] 完成本地 delivery gate、独立 review 和 PR readiness。
 
 ## Handoff
 
-- Phase：Phase 0 foundation delivery gate。
-- Next step：冻结新的 `base_sha..head_sha`，完成 fresh independent review 和 PR readiness。
+- Phase：Phase 0 shared foundation complete。
+- Next step：在独立 workstreams 中实现 macOS APFS/File Provider capability probes 与最小 Ratatui frontend shell。
 - Blockers：当前没有已知 blocker。
 
 ## Evidence
