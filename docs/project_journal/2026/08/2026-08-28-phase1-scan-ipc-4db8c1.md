@@ -78,15 +78,14 @@ superseded_by:
 
 ## Handoff
 
-- Phase: two IPC advisory follow-ups are implemented and validated on top of signed
-  checkpoint `12bf91e76b8d9aa2efc643f08fbc91e44cd486f2`.
-- Next step: freeze a signed IPC follow-up checkpoint, then integrate the frozen
-  scanner-core head and repeat the full gate on the combined implementation.
-- Follow-up: replace scanner core's private parser with the shared
-  `CanonicalScanRootPath` during scanner-head integration so both call sites
-  retain one lexical contract.
-- Blocker: no product or design blocker is known; scanner-core integration is a
-  separate authorized checkpoint after this commit.
+- Phase: signed IPC follow-up checkpoint
+  `f7809e0bfc6a83ef21b76a6e1b4683fb66e4b005` and frozen scanner-core head
+  `3e964586df9bcf56f07b7d021d580aacc8ad9351` are integrated and validated.
+- Next step: freeze the signed no-ff merge commit and hand its exact range to
+  independent review.
+- Follow-up: controlled File Provider and APFS volume-group fixtures remain in
+  the India acceptance lane; the local capability gate reports them unavailable.
+- Blocker: none for the integrated Phase 1 checkpoint.
 
 ## Evidence
 
@@ -102,7 +101,7 @@ superseded_by:
 - Cross-language cases are authored for pause, resume, checkpoint, provisional
   evidence, deterministic root failures, typed setup rejection, partial
   finalization, cancellation, and post-finalization session reuse.
-- `swift test --disable-automatic-resolution`: 100 tests passed.
+- `swift test --disable-automatic-resolution`: 104 tests passed.
 - `cargo test --locked --workspace`: 82 tests passed, 9 cross-language tests
   intentionally ignored by the ordinary workspace invocation.
 - `scripts/test-cross-language.sh`: 9 ignored-process cases passed and the
@@ -117,3 +116,5 @@ superseded_by:
 - Follow-up tests passed for canonical raw-root parity, finite 10,000-request
   flood admission, FIFO drain order, priority EOF stop, typed Rust capacity
   rejection, lexical-alias setup rejection, and exact `/` setup admission.
+- `scripts/test-macos-capabilities.sh` passed 32 focused macOS tests plus the
+  probe self-test after scanner-core integration.

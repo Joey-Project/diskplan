@@ -163,8 +163,9 @@ private final class FakeFilesystem: ScanFilesystem, @unchecked Sendable {
     let path = lock.withLock { handles[directory.handle.rawValue] }
     lock.withLock {
       if handles.removeValue(forKey: directory.handle.rawValue) != nil { closedHandles += 1 }
-      if directory.slotBinding.ownsParent,
-        handles.removeValue(forKey: directory.slotBinding.parent.rawValue) != nil
+      if case .parentSlot(let parent, _, let ownsParent) = directory.slotBinding.namespace,
+        ownsParent,
+        handles.removeValue(forKey: parent.rawValue) != nil
       {
         closedHandles += 1
       }
@@ -232,6 +233,55 @@ private final class LockedPolicyGate: @unchecked Sendable {
   }
 
   var callCount: Int { lock.withLock { calls } }
+}
+
+private final class LockedRootOpener: @unchecked Sendable {
+  private let lock = NSLock()
+  private let openBody: @Sendable (Data) -> Int32
+  private var calls = 0
+  private var policyWasValidated = false
+
+  init(
+    policyGate: LockedPolicyGate? = nil,
+    openBody: @escaping @Sendable (Data) -> Int32 = openDirectoryForTest
+  ) {
+    self.openBody = openBody
+    self.policyGate = policyGate
+  }
+
+  private let policyGate: LockedPolicyGate?
+
+  func open(_ path: Data) -> Int32 {
+    lock.withLock {
+      calls += 1
+      if let policyGate { policyWasValidated = policyGate.callCount > 0 }
+    }
+    return openBody(path)
+  }
+
+  var callCount: Int { lock.withLock { calls } }
+  var observedValidatedPolicy: Bool { lock.withLock { policyWasValidated } }
+}
+
+private func openDirectoryForTest(_ rawPath: Data) -> Int32 {
+  var terminated = Array(rawPath) + [0]
+  return terminated.withUnsafeMutableBytes { raw in
+    open(
+      raw.bindMemory(to: CChar.self).baseAddress!,
+      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    )
+  }
+}
+
+private func accessPolicyForTest(_ fileDescriptor: Int32) -> AccessPolicyEvidence? {
+  var value = stat()
+  guard fstat(fileDescriptor, &value) == 0 else { return nil }
+  return AccessPolicyEvidence(
+    ownerUserID: value.st_uid,
+    ownerGroupID: value.st_gid,
+    mode: UInt32(value.st_mode),
+    flags: value.st_flags
+  )
 }
 
 private final class LockedItemEvidenceSequence: @unchecked Sendable {
@@ -966,6 +1016,159 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   #expect(scope.budget.maximumEntriesPerRoot == 2_000_000)
 }
 
+@Test func fullAuditResolverPreservesCanonicalFilesystemRootsAndDistinctRootIDs() throws {
+  let later = ScanRootRequest(rootID: "volume-z", rawAbsolutePath: Data("/".utf8))
+  let earlier = ScanRootRequest(rootID: "volume-a", rawAbsolutePath: Data("/".utf8))
+  let scope = try ScanRootResolver().resolve(
+    profile: .fullAudit,
+    environment: ScanEnvironment(visibleLocalWritableVolumes: [later, earlier])
+  )
+  #expect(scope.roots == [earlier, later])
+  #expect(scope.budget.maximumEntriesPerRoot == 100_000_000)
+  #expect(scope.budget.maximumDepth == 128)
+}
+
+@Test func canonicalFilesystemRootBindsAfterPolicyValidationAndClosesStable() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let policyGate = LockedPolicyGate(policy: policy)
+  let opener = LockedRootOpener(policyGate: policyGate)
+  let filesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { policyGate.validate() },
+    rootDirectoryOpener: { opener.open($0) }
+  )
+  let request = ScanRootRequest(rootID: "system-root", rawAbsolutePath: Data("/".utf8))
+  let root = try #require(filesystem.bindRoot(request, resolverVersion: 1).value)
+  #expect(policyGate.callCount >= 1)
+  #expect(opener.callCount == 1)
+  #expect(opener.observedValidatedPolicy)
+  #expect(root.binding.rawAbsolutePath == Data("/".utf8))
+  #expect(root.binding.identity.objectType == .directory)
+  #expect(root.directory.slotBinding.namespace == .canonicalFilesystemRoot)
+  #expect(root.providerBoundary == .localOrUnindicated)
+  let closeEvidence = filesystem.close(root.directory)
+  #expect(closeEvidence.identity.value == root.binding.identity)
+  #expect(closeEvidence.accessPolicy.value == root.accessPolicy.value)
+}
+
+@Test func canonicalFilesystemRootIsNotTouchedWhenLivePolicyValidationFails() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let policyGate = LockedPolicyGate(policy: policy, failingCall: 1)
+  let opener = LockedRootOpener(openBody: { _ in
+    errno = EIO
+    return -1
+  })
+  let filesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { policyGate.validate() },
+    rootDirectoryOpener: { opener.open($0) }
+  )
+  let result = filesystem.bindRoot(
+    ScanRootRequest(rootID: "blocked-root", rawAbsolutePath: Data("/".utf8)),
+    resolverVersion: 1
+  )
+  #expect(result.value == nil)
+  #expect(policyGate.callCount == 1)
+  #expect(opener.callCount == 0)
+}
+
+@Test func malformedAndAliasRootPathsFailBeforePolicyOrFilesystemTouch() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let policyGate = LockedPolicyGate(policy: policy)
+  let opener = LockedRootOpener(openBody: { _ in
+    errno = EIO
+    return -1
+  })
+  let filesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { policyGate.validate() },
+    rootDirectoryOpener: { opener.open($0) }
+  )
+  let invalidPaths = [
+    Data(), Data("relative".utf8), Data("//".utf8), Data("/tmp/".utf8),
+    Data("/tmp//child".utf8), Data("/tmp/./child".utf8), Data("/tmp/../child".utf8),
+    Data([UInt8(ascii: "/"), 0]),
+  ]
+  for (index, path) in invalidPaths.enumerated() {
+    let result = filesystem.bindRoot(
+      ScanRootRequest(rootID: "invalid-\(index)", rawAbsolutePath: path),
+      resolverVersion: 1
+    )
+    guard case .failed(_, let code) = result else {
+      Issue.record("malformed root path was accepted")
+      continue
+    }
+    #expect(code == EINVAL)
+  }
+  #expect(policyGate.callCount == 0)
+  #expect(opener.callCount == 0)
+}
+
+@Test func canonicalFilesystemRootRefusesIdentityAndAccessPolicyChangesAtClose() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("diskplan-direct-root-close-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+
+  func openBoundDirectory() throws -> (Int32, ObjectIdentity, AccessPolicyEvidence) {
+    let fd = rootURL.withUnsafeFileSystemRepresentation {
+      open($0!, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    }
+    let opened = try #require(fd >= 0 ? fd : nil)
+    let identity = try #require(
+      FileDescriptorIdentityProbe().probe(fileDescriptor: opened, policy: policy).value
+    )
+    let accessPolicy = try #require(accessPolicyForTest(opened))
+    return (
+      opened,
+      ObjectIdentity(
+        device: identity.device,
+        fileID: identity.fileID,
+        objectType: .directory
+      ),
+      accessPolicy
+    )
+  }
+
+  let filesystem = DarwinScanFilesystem(policy: policy)
+  let (replacementFD, actualIdentity, accessPolicy) = try openBoundDirectory()
+  let mismatched = BoundDirectory(
+    handle: DirectoryHandle(rawValue: replacementFD),
+    slotBinding: DirectorySlotBinding(
+      canonicalFilesystemRootIdentity: ObjectIdentity(
+        device: actualIdentity.device,
+        fileID: actualIdentity.fileID &+ 1,
+        objectType: actualIdentity.objectType
+      ),
+      expectedAccessPolicy: accessPolicy
+    )
+  )
+  let replacementEvidence = filesystem.close(mismatched)
+  guard case .failed(_, let replacementCode) = replacementEvidence.identity else {
+    Issue.record("canonical root identity mismatch was accepted")
+    return
+  }
+  #expect(replacementCode == ESTALE)
+
+  let (policyFD, stableIdentity, originalPolicy) = try openBoundDirectory()
+  #expect(fchmod(policyFD, mode_t(S_IRUSR | S_IXUSR)) == 0)
+  let changedPolicy = BoundDirectory(
+    handle: DirectoryHandle(rawValue: policyFD),
+    slotBinding: DirectorySlotBinding(
+      canonicalFilesystemRootIdentity: stableIdentity,
+      expectedAccessPolicy: originalPolicy
+    )
+  )
+  let policyEvidence = filesystem.close(changedPolicy)
+  #expect(policyEvidence.identity.value == stableIdentity)
+  guard case .failed(_, let policyCode) = policyEvidence.accessPolicy else {
+    Issue.record("canonical root access-policy mutation was accepted")
+    return
+  }
+  #expect(policyCode == EAGAIN)
+}
+
 @Test func duplicateRootIDsAreRejectedBeforeScopeFreeze() {
   let first = ScanRootRequest(rootID: "duplicate", rawAbsolutePath: Data("/first".utf8))
   let second = ScanRootRequest(rootID: "duplicate", rawAbsolutePath: Data("/second".utf8))
@@ -1111,32 +1314,6 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   #expect(result.state == .partial)
   #expect(fs.enumerationCalls == 0)
   #expect(result.roots[0].coverage.reasons == [.notRequestedByProfile])
-}
-
-@Test func malformedAndAliasRootPathsFailBeforePolicyOrFilesystemTouch() throws {
-  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
-  let policyGate = LockedPolicyGate(policy: policy)
-  let filesystem = DarwinScanFilesystem(
-    policy: policy,
-    pathAccessValidator: { policyGate.validate() }
-  )
-  let invalidPaths = [
-    Data(), Data("relative".utf8), Data("//".utf8), Data("/tmp/".utf8),
-    Data("/tmp//child".utf8), Data("/tmp/./child".utf8),
-    Data("/tmp/../child".utf8), Data([UInt8(ascii: "/"), 0]),
-  ]
-  for (index, path) in invalidPaths.enumerated() {
-    let result = filesystem.bindRoot(
-      ScanRootRequest(rootID: "invalid-\(index)", rawAbsolutePath: path),
-      resolverVersion: 1
-    )
-    guard case .failed(_, let code) = result else {
-      Issue.record("malformed root path was accepted")
-      continue
-    }
-    #expect(code == EINVAL)
-  }
-  #expect(policyGate.callCount == 0)
 }
 
 @Test func darwinReaddirIsGatedAndEnumerationDeadlineIsInternal() throws {

@@ -62,6 +62,8 @@ superseded_by:
 - [x] Classify temporary symlink or non-directory close-slot replacements as
   `ESTALE` identity/type mismatches.
 - [x] Preserve active-frame provider, mount, and frontier coverage on cancellation.
+- [x] Accept exact canonical `/` full-audit roots through a descriptor-bound root
+  namespace contract while rejecting raw path aliases before any filesystem touch.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [x] Integrate scanner evidence into the versioned IPC workstream.
 
@@ -74,8 +76,8 @@ superseded_by:
 
 ## Handoff
 
-- Phase: Phase 1 sixth frozen-review repair complete and locally validated.
-- Next step: repeat independent frozen-range review, then prepare PR delivery.
+- Phase: scanner core is integrated with the validated protocol 1.3 IPC slice.
+- Next step: freeze the signed combined head for independent frozen-range review.
 - Blocker: none for the scanner slice. The authoritative directory packed-attribute
   parser fix is integrated from foundation head
   `e2135d9c708d5515c3cd5b6f965908d60a4ed44b`; the scanner keeps the live gate strict
@@ -183,3 +185,26 @@ superseded_by:
 - Strict Swift format lint on both changed Swift files, `git diff --check`, CI
   journal tests (6 tests), the repository journal validator, and the bundled
   project-journal validator pass for the sixth repair range.
+- The full-audit integration seam exposed that the Darwin backend required every
+  root to have a parent slot and therefore rejected `/`. The repair adds a distinct
+  canonical-filesystem-root namespace binding: live materialization policy is
+  validated before the no-follow root open, identity/times/access policy are bound
+  to the held descriptor, and identity plus access policy are independently
+  revalidated at close. Non-canonical raw aliases remain rejected before path access,
+  while distinct root IDs retain their existing provenance semantics.
+- Focused `DiskplanScanTests` pass all 45 tests, including canonical `/`, full-audit
+  resolution, policy-before-open ordering, malformed/trailing/duplicate separator
+  rejection, and descriptor-root identity/access-policy changes.
+- The complete Swift build succeeds and the full suite passes all 93 tests.
+  `scripts/test-macos-capabilities.sh`
+  passes 32 macOS probe tests plus the probe self-test; controlled File Provider and
+  APFS volume-group fixtures are not configured on this host and remain reserved for
+  the India acceptance lane. Swift 6.3 strict format lint, `git diff --check`, six CI
+  journal unit tests, and both repository journal validators pass.
+- The combined integration replaces the scanner-private root parser with shared
+  `CanonicalScanRootPath.parse` while preserving the exact `/` descriptor
+  namespace, identity/access-policy close seal, and provider-boundary behavior.
+  Integrated gates pass 45 focused scanner tests, 104 full Swift tests, 82 Rust
+  tests, all 9 Swift/Rust process cases plus the canonical fixture, and 32 macOS
+  capability tests plus the probe self-test. Controlled File Provider and APFS
+  volume-group fixtures remain unavailable locally and reserved for India.
