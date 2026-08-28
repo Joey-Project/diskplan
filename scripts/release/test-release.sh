@@ -263,13 +263,15 @@ make_fixture_bundle() {
     local major="$2"
     local output="$3"
     local fixture="${TEST_ROOT}/fixture-${version}-${major}"
+    local minor
     mkdir "${fixture}"
     /usr/bin/printf '%s\n' "${version}" > "${fixture}/VERSION"
     /bin/cp "${REPO_ROOT}/release/protocol.json" "${fixture}/protocol.json"
     /usr/bin/plutil -replace protocol_major -integer "${major}" "${fixture}/protocol.json"
-    build_identity_binary "${fixture}/diskplan" diskplan "${version}" "${major}" 2
-    build_identity_binary "${fixture}/diskplan-engine" diskplan-engine "${version}" "${major}" 2
-    build_fs_helper "${fixture}/diskplan-fs-helper" "${version}" "${major}" 2
+    minor="$(/usr/bin/plutil -extract protocol_minor raw -o - "${fixture}/protocol.json")"
+    build_identity_binary "${fixture}/diskplan" diskplan "${version}" "${major}" "${minor}"
+    build_identity_binary "${fixture}/diskplan-engine" diskplan-engine "${version}" "${major}" "${minor}"
+    build_fs_helper "${fixture}/diskplan-fs-helper" "${version}" "${major}" "${minor}"
     mkdir "${output}"
     python3 "${SCRIPT_DIR}/package_bundle.py" \
         --frontend "${fixture}/diskplan" \
@@ -312,9 +314,12 @@ readonly SKEW_ROOT="${TEST_ROOT}/component-skew"
 mkdir "${SKEW_ROOT}" "${SKEW_ROOT}/output"
 /usr/bin/printf '%s\n' 0.4.0 > "${SKEW_ROOT}/VERSION"
 /bin/cp "${REPO_ROOT}/release/protocol.json" "${SKEW_ROOT}/protocol.json"
-build_identity_binary "${SKEW_ROOT}/diskplan" diskplan 0.4.0 1 2
-build_identity_binary "${SKEW_ROOT}/diskplan-engine" diskplan-engine 0.4.1 1 2
-build_fs_helper "${SKEW_ROOT}/diskplan-fs-helper" 0.4.0 1 2
+SKEW_PROTOCOL_MAJOR="$(/usr/bin/plutil -extract protocol_major raw -o - "${SKEW_ROOT}/protocol.json")"
+SKEW_PROTOCOL_MINOR="$(/usr/bin/plutil -extract protocol_minor raw -o - "${SKEW_ROOT}/protocol.json")"
+readonly SKEW_PROTOCOL_MAJOR SKEW_PROTOCOL_MINOR
+build_identity_binary "${SKEW_ROOT}/diskplan" diskplan 0.4.0 "${SKEW_PROTOCOL_MAJOR}" "${SKEW_PROTOCOL_MINOR}"
+build_identity_binary "${SKEW_ROOT}/diskplan-engine" diskplan-engine 0.4.1 "${SKEW_PROTOCOL_MAJOR}" "${SKEW_PROTOCOL_MINOR}"
+build_fs_helper "${SKEW_ROOT}/diskplan-fs-helper" 0.4.0 "${SKEW_PROTOCOL_MAJOR}" "${SKEW_PROTOCOL_MINOR}"
 if python3 "${SCRIPT_DIR}/package_bundle.py" \
     --frontend "${SKEW_ROOT}/diskplan" \
     --engine "${SKEW_ROOT}/diskplan-engine" \

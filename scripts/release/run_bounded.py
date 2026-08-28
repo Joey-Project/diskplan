@@ -210,12 +210,47 @@ def normalize_exit_code(return_code: int) -> int:
     return 128 - return_code if return_code < 0 else return_code
 
 
-def validate_process_group(process: subprocess.Popen[bytes]) -> int:
-    pgid = os.getpgid(process.pid)
-    session_id = os.getsid(process.pid)
-    if pgid != process.pid or session_id != process.pid:
+def validate_process_group(
+    process: subprocess.Popen[bytes],
+    observer: LeaderExitObserver,
+    deadline: float,
+) -> int:
+    """Validate PID == PGID == SID without rejecting an already-exited leader."""
+
+    expected = process.pid
+    try:
+        pgid = os.getpgid(expected)
+    except OSError as error:
+        return validate_exited_session_contract(error, expected, observer, deadline)
+    if pgid != expected:
+        raise RuntimeError("acceptance command did not create its promised process group")
+
+    try:
+        session_id = os.getsid(expected)
+    except OSError as error:
+        return validate_exited_session_contract(error, expected, observer, deadline)
+    if session_id != expected:
         raise RuntimeError("acceptance command did not create its promised session")
     return pgid
+
+
+def validate_exited_session_contract(
+    error: OSError,
+    expected: int,
+    observer: LeaderExitObserver,
+    deadline: float,
+) -> int:
+    if error.errno != errno.ESRCH:
+        raise error
+    if not observer.wait_until(deadline):
+        raise RuntimeError(
+            "acceptance leader disappeared before session validation without a verified exit"
+        ) from error
+
+    # Popen returning with start_new_session=True proves that setsid(2) succeeded
+    # before exec. Keeping that direct child unreaped fences its PID and therefore
+    # the promised equal PGID while descendant quiescence is inspected.
+    return expected
 
 
 def send_group_signal(pgid: int, signal_number: int) -> bool:
@@ -485,6 +520,7 @@ def main() -> int:
     observer: Optional[LeaderExitObserver] = None
     pgid: Optional[int] = None
     selector: Optional[selectors.BaseSelector] = None
+    deadline = started + args.timeout_seconds
 
     try:
         with SignalController() as signals:
@@ -507,13 +543,12 @@ def main() -> int:
                 # Retaining the unreaped child makes this numeric identity safe
                 # even if validation itself reports a platform invariant error.
                 pgid = process.pid
-                pgid = validate_process_group(process)
+                pgid = validate_process_group(process, observer, deadline)
                 process_group_verified = True
                 os.set_blocking(process.stdout.fileno(), False)
                 selector = selectors.DefaultSelector()
                 selector.register(process.stdout, selectors.EVENT_READ, "output")
                 selector.register(signals.descriptor, selectors.EVENT_READ, "signal")
-                deadline = started + args.timeout_seconds
                 pipe_eof = False
 
                 while True:

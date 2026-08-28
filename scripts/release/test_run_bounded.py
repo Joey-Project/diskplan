@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import errno
+import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -12,10 +15,25 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any, Sequence
+from unittest import mock
 
 
 RUNNER = Path(__file__).with_name("run_bounded.py")
+
+
+def load_module(name: str, path: Path) -> ModuleType:
+    specification = importlib.util.spec_from_file_location(name, path)
+    if specification is None or specification.loader is None:
+        raise RuntimeError(f"cannot load test module: {path}")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+runner = load_module("diskplan_test_run_bounded", RUNNER)
 
 
 @unittest.skipUnless(
@@ -90,6 +108,68 @@ class RunBoundedTests(unittest.TestCase):
         self.assertEqual(report["result"], "passed")
         self.assertFalse(report["cleanup"]["attempted"])
         self.assertTrue(report["cleanup"]["quiescent"])
+
+    def test_immediate_exit_repeatedly_preserves_the_identity_fence(self) -> None:
+        true_path = shutil.which("true")
+        self.assertIsNotNone(true_path)
+        assert true_path is not None
+
+        for iteration in range(16):
+            with self.subTest(iteration=iteration):
+                completed, report, output = self.invoke([true_path])
+                self.assertEqual(completed.returncode, 0)
+                self.assertEqual(report["result"], "passed")
+                self.assertTrue(report["process_group_verified"])
+                self.assertTrue(report["cleanup"]["quiescent"])
+                self.assertEqual(output, b"")
+
+    def test_verified_fast_exit_closes_the_getpgid_and_getsid_esrch_windows(self) -> None:
+        expected = 4242
+        deadline = time.monotonic() + 1
+        process = SimpleNamespace(pid=expected)
+
+        for failed_call in ("getpgid", "getsid"):
+            with self.subTest(failed_call=failed_call):
+                observer = mock.Mock()
+                observer.wait_until.return_value = True
+                getpgid = (
+                    mock.Mock(side_effect=ProcessLookupError(errno.ESRCH, "exited"))
+                    if failed_call == "getpgid"
+                    else mock.Mock(return_value=expected)
+                )
+                getsid = mock.Mock(
+                    side_effect=ProcessLookupError(errno.ESRCH, "exited")
+                )
+                with mock.patch.object(runner.os, "getpgid", getpgid):
+                    with mock.patch.object(runner.os, "getsid", getsid):
+                        self.assertEqual(
+                            runner.validate_process_group(process, observer, deadline),
+                            expected,
+                        )
+                observer.wait_until.assert_called_once_with(deadline)
+
+    def test_unverified_or_non_esrch_session_lookup_still_fails_closed(self) -> None:
+        expected = 4242
+        deadline = time.monotonic() + 1
+        process = SimpleNamespace(pid=expected)
+
+        observer = mock.Mock()
+        observer.wait_until.return_value = False
+        with mock.patch.object(
+            runner.os,
+            "getpgid",
+            side_effect=ProcessLookupError(errno.ESRCH, "exited"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "without a verified exit"):
+                runner.validate_process_group(process, observer, deadline)
+
+        with mock.patch.object(
+            runner.os,
+            "getpgid",
+            side_effect=PermissionError(errno.EPERM, "denied"),
+        ):
+            with self.assertRaises(PermissionError):
+                runner.validate_process_group(process, observer, deadline)
 
     def test_successful_leader_forces_lingering_group_quiescent(self) -> None:
         completed, report, _output = self.invoke(
