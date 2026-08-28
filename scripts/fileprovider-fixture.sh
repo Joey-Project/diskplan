@@ -35,8 +35,15 @@ if [[ $lifecycle_capability_valid != 1 ]]; then
     -- "$0" "$@"
 fi
 project="$repo_root/fixtures/FileProviderAcceptance/DiskplanFileProviderFixture.xcodeproj"
-derived="$repo_root/.codex-tmp/fileprovider-fixture-derived"
-packages="$repo_root/.codex-tmp/fileprovider-fixture-packages"
+derived="${DISKPLAN_FILEPROVIDER_DERIVED_DIR:-$repo_root/.codex-tmp/fileprovider-fixture-derived}"
+packages="${DISKPLAN_FILEPROVIDER_PACKAGES_DIR:-$repo_root/.codex-tmp/fileprovider-fixture-packages}"
+build_log="${DISKPLAN_FILEPROVIDER_BUILD_LOG:-$repo_root/.codex-tmp/fileprovider-fixture-signed-build.log}"
+for scratch_path in "$derived" "$packages" "$build_log"; do
+  if [[ $scratch_path != /* || $scratch_path == / ]]; then
+    echo '{"status":"blocked","reason":"invalid-build-scratch-path"}' >&2
+    exit 64
+  fi
+done
 app="$derived/Build/Products/Release/DiskplanFileProviderFixture.app"
 host="$app/Contents/MacOS/DiskplanFileProviderFixture"
 appex="$app/Contents/PlugIns/DiskplanFileProviderFixtureExtension.appex"
@@ -149,8 +156,7 @@ build_signed() {
     echo '{"status":"blocked","reason":"signing-identity","team":"XCTTZ89923"}' >&2
     exit 78
   fi
-  mkdir -p "$repo_root/.codex-tmp"
-  build_log="$repo_root/.codex-tmp/fileprovider-fixture-signed-build.log"
+  mkdir -p "$(dirname "$build_log")"
   provisioning=()
   if [[ ${DISKPLAN_ALLOW_PROVISIONING_UPDATES:-0} == 1 ]]; then
     provisioning=(-allowProvisioningUpdates)
@@ -263,6 +269,15 @@ accept() {
   run_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
   manifest=$($host manifest-path --run-id "$run_id")
   complete=0
+  json_escape() {
+    local value=$1
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '%s' "$value"
+  }
   report_recovery() {
     if ((complete == 0)); then
       retained_manifest=$manifest
@@ -274,10 +289,16 @@ accept() {
       fi
       if [[ -f $retained_manifest && ! -L $retained_manifest ]]; then
         echo "fixture did not complete; retained manifest: $retained_manifest" >&2
-        echo "recover with: scripts/fileprovider-fixture.sh recover '$retained_manifest'" >&2
+        printf 'recover with: DISKPLAN_FILEPROVIDER_DERIVED_DIR=%q scripts/fileprovider-fixture.sh recover %q\n' \
+          "$derived" "$retained_manifest" >&2
+        printf '{"derived_dir":"%s","event":"file_provider_recovery","lifecycle_completion":"incomplete","recovery_kind":"manifest","recovery_locator":"%s","status":"recovery_required"}\n' \
+          "$(json_escape "$derived")" "$(json_escape "$retained_manifest")"
       else
         echo "fixture prepare did not publish a recoverable manifest for run: $run_id" >&2
-        echo "recover with: scripts/fileprovider-fixture.sh recover-unpublished '$run_id'" >&2
+        printf 'recover with: DISKPLAN_FILEPROVIDER_DERIVED_DIR=%q scripts/fileprovider-fixture.sh recover-unpublished %q\n' \
+          "$derived" "$run_id" >&2
+        printf '{"derived_dir":"%s","event":"file_provider_recovery","lifecycle_completion":"incomplete","recovery_kind":"run_id","recovery_locator":"%s","status":"recovery_required"}\n' \
+          "$(json_escape "$derived")" "$(json_escape "$run_id")"
       fi
     fi
   }
@@ -303,7 +324,7 @@ accept() {
   "$host" cleanup --manifest "$manifest"
   complete=1
   trap - EXIT
-  echo '{"status":"accepted","fixture":"file-provider-probe-level","scanner_acceptance":"not-run"}'
+  echo '{"event":"file_provider_acceptance","fixture":"file-provider-probe-level","lifecycle_completion":"complete","scanner_acceptance":"not-run","status":"accepted"}'
 }
 
 command=$1

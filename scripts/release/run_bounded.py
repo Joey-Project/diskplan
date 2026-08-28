@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import resource
 import select
 import selectors
 import signal
@@ -223,7 +224,9 @@ def validate_process_group(
     except OSError as error:
         return validate_exited_session_contract(error, expected, observer, deadline)
     if pgid != expected:
-        raise RuntimeError("acceptance command did not create its promised process group")
+        raise RuntimeError(
+            "acceptance command did not create its promised process group"
+        )
 
     try:
         session_id = os.getsid(expected)
@@ -391,7 +394,9 @@ def linux_process_group_has_live_members(
             except FileNotFoundError:
                 continue
             except OSError as error:
-                raise RuntimeError("cannot inspect Linux process-group member") from error
+                raise RuntimeError(
+                    "cannot inspect Linux process-group member"
+                ) from error
             if len(stat_data) > 4096:
                 raise RuntimeError("Linux process stat exceeded its byte limit")
             command_end = stat_data.rfind(b")")
@@ -438,7 +443,9 @@ def terminate_process_group(
     cleanup.term_sent = send_group_signal(pgid, signal.SIGTERM) or cleanup.term_sent
     grace_deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
     while time.monotonic() < grace_deadline:
-        time.sleep(min(GROUP_QUIESCENCE_POLL_SECONDS, grace_deadline - time.monotonic()))
+        time.sleep(
+            min(GROUP_QUIESCENCE_POLL_SECONDS, grace_deadline - time.monotonic())
+        )
     cleanup.kill_attempted = True
     cleanup.kill_sent = send_group_signal(pgid, signal.SIGKILL) or cleanup.kill_sent
 
@@ -502,7 +509,9 @@ def main() -> int:
     if os.name != "posix":
         raise RuntimeError("bounded acceptance commands require POSIX")
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
-        raise RuntimeError("bounded acceptance requires default waitable SIGCHLD semantics")
+        raise RuntimeError(
+            "bounded acceptance requires default waitable SIGCHLD semantics"
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -656,6 +665,7 @@ def main() -> int:
         os.fsync(descriptor)
         os.close(descriptor)
 
+    usage = child_resource_usage()
     report = {
         "cleanup": asdict(cleanup),
         "elapsed_millis": int((time.monotonic() - started) * 1000),
@@ -669,11 +679,25 @@ def main() -> int:
         "output_bytes": retained_bytes,
         "output_sha256": retained.hexdigest(),
         "process_group_verified": process_group_verified,
+        "resource_usage": usage,
         "result": result,
         "termination_signal": termination_signal,
     }
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return exit_code
+
+
+def child_resource_usage() -> dict[str, int]:
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    resident = int(usage.ru_maxrss)
+    if sys.platform.startswith("linux"):
+        resident *= 1024
+    return {
+        "max_resident_bytes": max(resident, 0),
+        "swap_operations": max(int(usage.ru_nswap), 0),
+        "user_cpu_millis": max(int(usage.ru_utime * 1000), 0),
+        "system_cpu_millis": max(int(usage.ru_stime * 1000), 0),
+    }
 
 
 if __name__ == "__main__":
