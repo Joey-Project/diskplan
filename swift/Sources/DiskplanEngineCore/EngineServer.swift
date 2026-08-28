@@ -4,10 +4,24 @@ import Foundation
 import SwiftProtobuf
 
 public enum EngineServer {
+  /// Runs the production engine with the Swift runtime authority installed.
   public static func run(
     input: FileHandle = .standardInput,
-    output: FileHandle = .standardOutput,
-    runtimeHandler: (any RuntimeBusinessHandler)? = nil
+    output: FileHandle = .standardOutput
+  ) throws {
+    try run(
+      input: input,
+      output: output,
+      runtimeHandler: RuntimeSessionController()
+    )
+  }
+
+  /// Runs with an explicitly supplied handler. Passing `nil` is reserved for
+  /// scan-only compatibility and transport tests.
+  public static func run(
+    input: FileHandle,
+    output: FileHandle,
+    runtimeHandler: (any RuntimeBusinessHandler)?
   ) throws {
     let runtimeCapabilities =
       runtimeHandler.map {
@@ -83,7 +97,25 @@ public enum EngineServer {
     runtimeHandler: (any RuntimeBusinessHandler)?
   ) throws {
     let broker = SerialEventBroker(output: output)
-    let coordinator = ScanCoordinator(broker: broker)
+    let scanAuthority = runtimeHandler as? any RuntimeScanAuthority
+    let authoritySessionFactory: ScanCoordinator.AuthoritySessionFactory?
+    let finalizedReceiptSink: ScanCoordinator.FinalizedReceiptSink?
+    if let scanAuthority {
+      authoritySessionFactory = { scope, scanSessionID in
+        scanAuthority.makeAuthoritySession(scope: scope, scanSessionID: scanSessionID)
+      }
+      finalizedReceiptSink = { receipt in
+        scanAuthority.publishFinalizedReceipt(receipt)
+      }
+    } else {
+      authoritySessionFactory = nil
+      finalizedReceiptSink = nil
+    }
+    let coordinator = ScanCoordinator(
+      broker: broker,
+      authoritySessionFactory: authoritySessionFactory,
+      finalizedReceiptSink: finalizedReceiptSink
+    )
     let runtimeSessionID = Data(UUID().uuidString.lowercased().utf8)
     let runtimeAuthority = RuntimeBusinessAuthorityState()
     var requestIDHighWaterMark: UInt64 = 0

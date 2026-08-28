@@ -702,6 +702,398 @@ import Testing
   #expect(throws: EventBrokerError.self) { try broker.finish() }
 }
 
+@Test func controllerPublishesFinalReceiptOnlyAfterFinalWriterAcknowledges() throws {
+  let result = authorityScanResult()
+  let session = seededAuthoritySession(result: result)
+  let controller = RuntimeSessionController()
+  let writerGate = AuthorityTestGate()
+  let writerEntered = AuthorityTestFlag()
+  let publicationFinished = AuthorityTestFlag()
+  let broker = SerialEventBroker(semanticCapacity: 1) { data in
+    if isScanFinalizedBrokerPayload(data) {
+      writerEntered.set()
+      writerGate.wait()
+    }
+  }
+  let coordinator = ScanCoordinator(
+    broker: broker,
+    authoritySession: session,
+    finalizedReceiptSink: controller.publishFinalizedReceipt
+  )
+  Thread {
+    coordinator.publishFinalizedAuthorityResult(
+      result,
+      state: .finished,
+      reason: "receipt acknowledgement fixture"
+    )
+    publicationFinished.set()
+  }.start()
+  defer { writerGate.open() }
+  #expect(writerEntered.wait(timeout: 1.0))
+  #expect(controller.finalizedReceiptCountForTesting() == 0)
+
+  writerGate.open()
+  #expect(publicationFinished.wait(timeout: 1.0))
+  #expect(controller.finalizedReceiptCountForTesting() == 1)
+  try broker.finish()
+}
+
+@Test func controllerNeverPublishesReceiptWhenFinalWriterFails() throws {
+  let result = authorityScanResult()
+  let session = seededAuthoritySession(result: result)
+  let controller = RuntimeSessionController()
+  let broker = SerialEventBroker(semanticCapacity: 1) { data in
+    if isScanFinalizedBrokerPayload(data) { throw AuthorityTestWriterFailure.failed }
+  }
+  let coordinator = ScanCoordinator(
+    broker: broker,
+    authoritySession: session,
+    finalizedReceiptSink: controller.publishFinalizedReceipt
+  )
+  coordinator.publishFinalizedAuthorityResult(
+    result,
+    state: .finished,
+    reason: "receipt writer failure fixture"
+  )
+
+  #expect(controller.finalizedReceiptCountForTesting() == 0)
+  #expect(throws: EventBrokerError.self) { try broker.finish() }
+}
+
+@Test func controllerBuildsExactFinalReceiptAndAppliesEmptySafePreset() throws {
+  let result = authorityScanResult()
+  let session = seededAuthoritySession(result: result)
+  try session.finalize(result)
+  let controller = RuntimeSessionController()
+  let finalEvidence = Data(repeating: 0x41, count: 32)
+  let checkpointID = Data(finalEvidence.map { String(format: "%02x", $0) }.joined().utf8)
+  controller.publishFinalizedReceipt(
+    RuntimeFinalizedScanReceipt(
+      scanSessionID: Data("scan-session".utf8),
+      checkpointID: checkpointID,
+      finalEvidenceSHA256: finalEvidence,
+      checkpointEvidenceSHA256: Data(repeating: 0x42, count: 32),
+      isPartial: false,
+      authoritySession: session
+    ))
+
+  let output = AuthorityTestOutput()
+  let broker = SerialEventBroker { output.append($0) }
+  let authority = RuntimeBusinessAuthorityState()
+  var build = Diskplan_V1_BuildPlanRequest()
+  build.requestID = 1
+  build.scanSessionID.value = Data("scan-session".utf8)
+  build.scanCheckpointID.value = checkpointID
+  build.scanEvidenceSha256.value = finalEvidence
+  build.agentMode = .off
+  #expect(authority.claim(.buildPlan(build))?.code == nil)
+  try controller.handle(
+    .buildPlan(build),
+    responder: RuntimeBusinessResponder(
+      broker: broker,
+      request: .buildPlan(build),
+      runtimeSessionID: Data("runtime-session".utf8),
+      authority: authority
+    )
+  )
+
+  let planEvents = output.runtimeEvents()
+  guard case .planProjection(let planProjection)? = planEvents.last?.body else {
+    Issue.record("expected terminal plan projection")
+    return
+  }
+  #expect(planProjection.manifest.scanSessionID.value == Data("scan-session".utf8))
+  #expect(planProjection.manifest.scanCheckpointID.value == checkpointID)
+  #expect(planProjection.manifest.evidenceSha256.value == finalEvidence)
+  #expect(planProjection.manifest.actionCount == 0)
+
+  var preset = Diskplan_V1_ApplyBatchSelectionPresetEdit()
+  preset.preset = .safeStageableWithoutWaiver
+  var edit = Diskplan_V1_DecisionOverlayEdit()
+  edit.kind = .applyBatchSelectionPreset
+  edit.edit = .applyBatchSelectionPreset(preset)
+  var request = Diskplan_V1_DecisionOverlayEditRequest()
+  request.requestID = 2
+  request.projectionID = planProjection.manifest.projectionID
+  request.baseRevision = 0
+  request.edits = [edit]
+  #expect(authority.claim(.editDecisionOverlay(request))?.code == nil)
+  try controller.handle(
+    .editDecisionOverlay(request),
+    responder: RuntimeBusinessResponder(
+      broker: broker,
+      request: .editDecisionOverlay(request),
+      runtimeSessionID: Data("runtime-session".utf8),
+      authority: authority
+    )
+  )
+  try broker.finish()
+
+  guard case .decisionOverlayAcknowledged(let overlay)? = output.runtimeEvents().last?.body
+  else {
+    Issue.record("expected decision overlay acknowledgement")
+    return
+  }
+  #expect(overlay.revision == 1)
+  #expect(overlay.selectedActionIds.isEmpty)
+  #expect(overlay.acknowledgedWaivers.isEmpty)
+}
+
+@Test func controllerSafePresetKeepsOnlyThePrerequisiteClosedStageableSubset() throws {
+  let blocked = try runtimeActionID(0x11)
+  let middle = try runtimeActionID(0x22)
+  let leaf = try runtimeActionID(0x33)
+  let independent = try runtimeActionID(0x44)
+
+  let selected = RuntimeOverlayEditor.prerequisiteClosedSelection(
+    stageableActionIDs: [middle, leaf, independent],
+    prerequisitesByActionID: [
+      middle: [blocked],
+      leaf: [middle],
+      independent: [],
+    ]
+  )
+
+  #expect(selected == Set([independent]))
+}
+
+@Test func controllerConsentEventIdentifierPreservesOpaqueBytesAndEnforcesTheWireLimit() {
+  let nonUTF8 = Data([0xff, 0x00, 0x80])
+  let alternate = Data([0xff, 0x00, 0x81])
+
+  let binding = RuntimePlanIdentifiers.consentEventIDBinding(nonUTF8)
+  #expect(binding != nil)
+  #expect(binding != RuntimePlanIdentifiers.consentEventIDBinding(alternate))
+  #expect(RuntimePlanIdentifiers.consentEventIDBinding(Data()) == nil)
+  #expect(RuntimePlanIdentifiers.consentEventIDBinding(Data(repeating: 0xaa, count: 256)) != nil)
+  #expect(RuntimePlanIdentifiers.consentEventIDBinding(Data(repeating: 0xaa, count: 257)) == nil)
+}
+
+@Test func controllerRawRelativePathBindingPreservesComponentBoundaries() {
+  let first = RuntimePlanDomainProjector.rawRelativePathBinding([
+    Data("a".utf8), Data("bc".utf8),
+  ])
+  let second = RuntimePlanDomainProjector.rawRelativePathBinding([
+    Data("ab".utf8), Data("c".utf8),
+  ])
+
+  #expect(first != second)
+}
+
+@Test func controllerNamespaceBindingCoversEveryProtectedNamespaceDimension() throws {
+  let baseline = try runtimeNamespaceBinding(
+    generation: .known(1),
+    trustedNamespace: .ownerPrivate,
+    providerBoundary: .known(.local),
+    accessPolicy: .known("uid=501;mode=0700")
+  )
+  let changedGeneration = try runtimeNamespaceBinding(
+    generation: .known(2),
+    trustedNamespace: .ownerPrivate,
+    providerBoundary: .known(.local),
+    accessPolicy: .known("uid=501;mode=0700")
+  )
+  let changedProvider = try runtimeNamespaceBinding(
+    generation: .known(1),
+    trustedNamespace: .ownerPrivate,
+    providerBoundary: .known(.fileProviderManaged),
+    accessPolicy: .known("uid=501;mode=0700")
+  )
+  let changedTrust = try runtimeNamespaceBinding(
+    generation: .known(1),
+    trustedNamespace: .explicitlyTrustedUserNamespace,
+    providerBoundary: .known(.local),
+    accessPolicy: .known("uid=501;mode=0700")
+  )
+  let unreadable = try runtimeNamespaceBinding(
+    generation: .known(1),
+    trustedNamespace: .ownerPrivate,
+    providerBoundary: .known(.local),
+    accessPolicy: .unreadable(.init(code: "EACCES", collector: "namespace"))
+  )
+  let failed = try runtimeNamespaceBinding(
+    generation: .known(1),
+    trustedNamespace: .ownerPrivate,
+    providerBoundary: .known(.local),
+    accessPolicy: .failed(.init(code: "EACCES", collector: "namespace"))
+  )
+  let baselineDigest = RuntimePlanDomainProjector.protectedNamespaceBinding(baseline)
+
+  #expect(
+    baselineDigest
+      != RuntimePlanDomainProjector.protectedNamespaceBinding(changedGeneration))
+  #expect(
+    baselineDigest != RuntimePlanDomainProjector.protectedNamespaceBinding(changedProvider))
+  #expect(baselineDigest != RuntimePlanDomainProjector.protectedNamespaceBinding(changedTrust))
+  #expect(
+    RuntimePlanDomainProjector.protectedNamespaceBinding(unreadable)
+      != RuntimePlanDomainProjector.protectedNamespaceBinding(failed))
+}
+
+@Test func controllerDisplayPathIncludesTheRawRootAndEscapesFormatCharacters() {
+  #expect(
+    RuntimePlanDomainProjector.displayPath(
+      root: Data("/Users/example/Library/Caches".utf8),
+      components: [Data("diskplan".utf8)]
+    ) == "/Users/example/Library/Caches/diskplan"
+  )
+  let deceptive = RuntimePlanDomainProjector.displayPath(
+    root: Data("/Users/example".utf8),
+    components: [Data("left\u{202e}right".utf8)]
+  )
+  #expect(!deceptive.contains("\u{202e}"))
+  #expect(deceptive.hasPrefix("\\x2f"))
+}
+
+@Test func controllerRejectsDuplicateAndMixedBatchOverlayEditsBeforeMutation() {
+  var notes = Diskplan_V1_ReplaceNotesEdit()
+  notes.userNotes = ["first"]
+  var notesEdit = Diskplan_V1_DecisionOverlayEdit()
+  notesEdit.kind = .replaceNotes
+  notesEdit.edit = .replaceNotes(notes)
+  #expect(throws: RuntimeOverlayEditRejection.self) {
+    try RuntimeOverlayEditor.validateEditSet([notesEdit, notesEdit])
+  }
+
+  var stage = Diskplan_V1_StageActionEdit()
+  stage.actionID.value = Data(repeating: 0x45, count: 32)
+  var stageEdit = Diskplan_V1_DecisionOverlayEdit()
+  stageEdit.kind = .stageAction
+  stageEdit.edit = .stageAction(stage)
+  var unstageEdit = Diskplan_V1_DecisionOverlayEdit()
+  unstageEdit.kind = .unstageAction
+  unstageEdit.edit = .unstageAction(stage)
+  #expect(throws: RuntimeOverlayEditRejection.self) {
+    try RuntimeOverlayEditor.validateEditSet([stageEdit, unstageEdit])
+  }
+
+  var waiver = Diskplan_V1_AllowWaiverEdit()
+  waiver.actionID.value = Data(repeating: 0x46, count: 32)
+  waiver.waiverID.value = Data("waiver".utf8)
+  waiver.reason = "reviewed"
+  waiver.consentEventID.value = Data([0xff])
+  var waiverEdit = Diskplan_V1_DecisionOverlayEdit()
+  waiverEdit.kind = .allowWaiver
+  waiverEdit.edit = .allowWaiver(waiver)
+  #expect(throws: RuntimeOverlayEditRejection.self) {
+    try RuntimeOverlayEditor.validateEditSet([waiverEdit, waiverEdit])
+  }
+
+  var preset = Diskplan_V1_ApplyBatchSelectionPresetEdit()
+  preset.preset = .safeStageableWithoutWaiver
+  var presetEdit = Diskplan_V1_DecisionOverlayEdit()
+  presetEdit.kind = .applyBatchSelectionPreset
+  presetEdit.edit = .applyBatchSelectionPreset(preset)
+  #expect(throws: RuntimeOverlayEditRejection.self) {
+    try RuntimeOverlayEditor.validateEditSet([presetEdit, notesEdit])
+  }
+}
+
+@Test func controllerProjectsExactImmutablePlanLineageAndPrerequisiteActionIDs() throws {
+  let facts = try runtimeProjectionGlobalFacts()
+  let firstEvidence = try runtimeProjectionEvidence(
+    candidateID: "first",
+    path: "first",
+    object: 101,
+    facts: facts
+  )
+  let secondEvidence = try runtimeProjectionEvidence(
+    candidateID: "second",
+    path: "second",
+    object: 102,
+    facts: facts
+  )
+  let first = try runtimeProjectionAction(evidence: firstEvidence, facts: facts)
+  let second = try runtimeProjectionAction(
+    evidence: secondEvidence,
+    facts: facts,
+    prerequisites: [first]
+  )
+  let plan = try ImmutablePlan(
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1",
+    globalFacts: facts,
+    evidenceSnapshots: [firstEvidence, secondEvidence],
+    actions: [first, second],
+    releaseGraphBundle: nil
+  )
+  let result = RuntimePolicyAuthorityResult(
+    plan: plan,
+    items: [],
+    rejectedCandidates: [],
+    releaseOwnerIndex: RuntimeReleaseOwnerIndex(
+      owners: [],
+      allocationGroups: [],
+      dependencyCompleteByCandidate: [:],
+      overlaps: [],
+      overlappingCandidateIDs: []
+    ),
+    releaseGraph: nil,
+    releaseGraphFailure: nil
+  )
+  let projected = try RuntimePlanDomainProjector.project(result).compactMap {
+    record -> Diskplan_V1_PlanActionProjection? in
+    guard case .action(let action)? = record.body else { return nil }
+    return action
+  }
+  let projectedByID = Dictionary(
+    uniqueKeysWithValues: projected.map { ($0.actionID.value, $0) }
+  )
+
+  #expect(projectedByID.count == plan.actions.count)
+  for action in plan.actions {
+    let row = try #require(projectedByID[action.id.digest.bytes])
+    #expect(row.actionLineageID.value == action.lineageID.digest.bytes)
+    #expect(
+      Set(row.prerequisites.map(\.actionID.value))
+        == Set(action.prerequisiteActionIDs.map(\.digest.bytes)))
+  }
+}
+
+@Test func controllerRejectsPartialReceiptWithoutExplicitAllowance() throws {
+  let result = authorityScanResult(state: .partial)
+  let session = seededAuthoritySession(result: result)
+  try session.finalize(result)
+  let controller = RuntimeSessionController()
+  let finalEvidence = Data(repeating: 0x51, count: 32)
+  let checkpointID = Data(finalEvidence.map { String(format: "%02x", $0) }.joined().utf8)
+  controller.publishFinalizedReceipt(
+    RuntimeFinalizedScanReceipt(
+      scanSessionID: Data("partial-session".utf8),
+      checkpointID: checkpointID,
+      finalEvidenceSHA256: finalEvidence,
+      checkpointEvidenceSHA256: Data(repeating: 0x52, count: 32),
+      isPartial: true,
+      authoritySession: session
+    ))
+  let output = AuthorityTestOutput()
+  let broker = SerialEventBroker { output.append($0) }
+  let authority = RuntimeBusinessAuthorityState()
+  var build = Diskplan_V1_BuildPlanRequest()
+  build.requestID = 1
+  build.scanSessionID.value = Data("partial-session".utf8)
+  build.scanCheckpointID.value = checkpointID
+  build.scanEvidenceSha256.value = finalEvidence
+  build.agentMode = .off
+  #expect(authority.claim(.buildPlan(build))?.code == nil)
+  try controller.handle(
+    .buildPlan(build),
+    responder: RuntimeBusinessResponder(
+      broker: broker,
+      request: .buildPlan(build),
+      runtimeSessionID: Data("runtime-session".utf8),
+      authority: authority
+    )
+  )
+  try broker.finish()
+
+  guard case .runtimeRejected(let rejection)? = output.runtimeEvents().last?.body else {
+    Issue.record("expected typed partial-evidence rejection")
+    return
+  }
+  #expect(rejection.code == .invalidState)
+}
+
 @Test func equalCloneIDsOnDifferentDevicesRemainSeparateAllocationGroups() throws {
   let accumulator = BoundedAuthorityEvidenceAccumulator()
   for (rootID, directoryObject, fileObject, device) in [
@@ -1455,6 +1847,168 @@ private func hardlinkAliasPlan(
   )
 }
 
+private func runtimeActionID(_ byte: UInt8) throws -> ActionID {
+  ActionID(digest: try PolicyDigest(bytes: Data(repeating: byte, count: 32)))
+}
+
+private func runtimeNamespaceBinding(
+  generation: DiskplanPolicy.Observation<UInt64>,
+  trustedNamespace: TrustedNamespace,
+  providerBoundary: DiskplanPolicy.Observation<ProviderState>,
+  accessPolicy: DiskplanPolicy.Observation<String>
+) throws -> ProtectedNamespaceBinding {
+  let rootIdentity = ObjectIdentity(
+    device: 1,
+    object: 2,
+    generation: generation,
+    type: .directory
+  )
+  let targetIdentity = ObjectIdentity(
+    device: 1,
+    object: 3,
+    generation: .known(1),
+    type: .directory
+  )
+  let rootSeal = NamespaceSealEvidence(
+    trustedNamespace: trustedNamespace,
+    accessPolicy: accessPolicy,
+    aclDigest: .absent,
+    providerBoundary: providerBoundary,
+    mountIdentity: .known("mount-1")
+  )
+  return try ProtectedNamespaceBinding(
+    rawRoot: RawRootPath(absoluteBytes: Data("/Users/example/Library/Caches".utf8)),
+    rootIdentity: rootIdentity,
+    rootSeal: rootSeal,
+    targetPath: RawTargetPath(components: [Data("diskplan".utf8)]),
+    targetIdentity: targetIdentity,
+    parentChain: []
+  )
+}
+
+private func runtimeProjectionGlobalFacts() throws -> FrozenGlobalFacts {
+  FrozenGlobalFacts(
+    captureID: runtimePolicyDigest(0x90),
+    profile: "standard",
+    configuration: Data("runtime-projection-test".utf8),
+    coverage: [
+      GlobalCoverageFact(
+        rawRoot: try RawRootPath(absoluteBytes: Data("/fixture/root".utf8)),
+        coverage: .complete,
+        reasons: ["complete"]
+      )
+    ],
+    semanticReferenceTimeSeconds: 100,
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1"
+  )
+}
+
+private func runtimeProjectionEvidence(
+  candidateID: String,
+  path: String,
+  object: UInt64,
+  facts: FrozenGlobalFacts
+) throws -> FrozenEvidenceSnapshot {
+  let targetPath = try RawTargetPath(components: [Data(path.utf8)])
+  let targetIdentity = ObjectIdentity(
+    device: 1,
+    object: object,
+    generation: .known(1),
+    type: .directory
+  )
+  let seal = NamespaceSealEvidence(
+    trustedNamespace: .ownerPrivate,
+    accessPolicy: .known("uid=501;mode=0700"),
+    aclDigest: .known(runtimePolicyDigest(0x91)),
+    providerBoundary: .known(.local),
+    mountIdentity: .known("mount-1")
+  )
+  let namespace = try ProtectedNamespaceBinding(
+    rawRoot: RawRootPath(absoluteBytes: Data("/fixture/root".utf8)),
+    rootIdentity: ObjectIdentity(
+      device: 1,
+      object: 900,
+      generation: .known(1),
+      type: .directory
+    ),
+    rootSeal: seal,
+    targetPath: targetPath,
+    targetIdentity: targetIdentity,
+    parentChain: []
+  )
+  let claims = ClassificationFacet.allCases.map { facet in
+    ClassificationClaim(
+      facet: facet,
+      value: "known-\(facet.rawValue)",
+      source: .genericFallback,
+      evidenceKey: "runtime-projection-\(facet.rawValue)"
+    )
+  }
+  return try FrozenEvidenceSnapshot(
+    captureID: facts.captureID,
+    globalFactsHash: facts.globalFactsHash,
+    candidateID: candidateID,
+    namespaceBinding: namespace,
+    identity: .known(targetIdentity),
+    coverage: .complete,
+    collectorStatus: .known(.complete),
+    activity: .known(.inactive),
+    explicitProtection: .known(.notProtected),
+    providerState: .known(.local),
+    recoverability: .known(.recoverable),
+    recoverabilityReviewFacts: [],
+    dependencyState: .known(.complete),
+    semanticReviewFacts: [],
+    accessPolicy: .known("uid=501;mode=0700"),
+    contentProtection: .known(.requiredDigest(runtimePolicyDigest(0x92))),
+    aclDigest: .known(runtimePolicyDigest(0x93)),
+    targetMountIdentity: .known("mount-1"),
+    removalForceRequirement: .known(.notRequired),
+    quarantineCapability: .known(true),
+    gitWorktree: nil,
+    adapterScope: .genericRemove,
+    additionalAdapterScopes: [],
+    classificationClaims: claims,
+    semanticReferenceTimeSeconds: facts.semanticReferenceTimeSeconds,
+    policyVersion: facts.policyVersion,
+    schemaVersion: facts.schemaVersion
+  )
+}
+
+private func runtimeProjectionAction(
+  evidence: FrozenEvidenceSnapshot,
+  facts: FrozenGlobalFacts,
+  prerequisites: [ActionDefinition] = []
+) throws -> ActionDefinition {
+  var canonicalRawPath = Data()
+  for (index, component) in evidence.namespaceBinding.targetPath.components.enumerated() {
+    if index > 0 { canonicalRawPath.append(47) }
+    canonicalRawPath.append(component)
+  }
+  let evaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(evidence: evidence, globalFacts: facts)
+  )
+  return try ActionDefinition.build(
+    prototype: ActionPrototype.build(request: .genericRemove, evidence: evidence),
+    evidence: evidence,
+    globalFacts: facts,
+    prerequisites: prerequisites,
+    evaluation: evaluation,
+    displayMetrics: ActionDisplayMetrics(
+      immediateReclaimBytes: .known(1),
+      inactiveDurationSeconds: .known(10),
+      rebuildCost: .known(1),
+      cleanupCost: .known(1),
+      canonicalRawPath: canonicalRawPath
+    )
+  )
+}
+
+private func runtimePolicyDigest(_ byte: UInt8) -> PolicyDigest {
+  try! PolicyDigest(bytes: Data(repeating: byte, count: 32))
+}
+
 private func cloneAliasTopology(cloneID: UInt64, refcount: UInt32) -> StorageTopologyEvidence {
   StorageTopologyEvidence(
     linkCount: .known(2),
@@ -1542,6 +2096,29 @@ private final class AuthorityTestFlag: @unchecked Sendable {
       guard condition.wait(until: deadline) else { return isSet }
     }
     return true
+  }
+}
+
+private final class AuthorityTestOutput: @unchecked Sendable {
+  private let lock = NSLock()
+  private var payloads: [Data] = []
+
+  func append(_ payload: Data) {
+    lock.lock()
+    payloads.append(payload)
+    lock.unlock()
+  }
+
+  func runtimeEvents() -> [Diskplan_V1_RuntimeEvent] {
+    lock.lock()
+    let snapshot = payloads
+    lock.unlock()
+    return snapshot.compactMap { payload in
+      guard let envelope = try? Diskplan_V1_Envelope(serializedBytes: payload),
+        case .runtimeEvent(let event) = envelope.body
+      else { return nil }
+      return event
+    }
   }
 }
 
