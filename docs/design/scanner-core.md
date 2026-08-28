@@ -155,15 +155,20 @@ scope or weaker budgets while retaining the same provenance.
 Regular-file content remains `notRequested` during ordinary traversal. When a later
 plan contract explicitly requires content stability, the engine may use the bounded
 second-stage collector only through a one-shot request ID backed by an internal
-trusted registry. The registry receipt owns the already-held target descriptor and
-binds the exact raw slot, root identity, object identity, access policy, and
-authoritative File Provider probe. None of those facts are caller-supplied at
-collection time. The collector revalidates the process no-materialization policy,
-raw slot, root, descriptor, and provider state before every `pread`; provider-managed,
-metadata-only, or unverified targets therefore perform zero content reads. Its
-file/byte/deadline reservations are session-scoped and cannot be reset per request.
-Descriptor ownership is an internal RAII transfer: collection closes on every
-return path, and destroying a registry closes every unconsumed receipt.
+trusted registry. DiskplanScan alone transfers and validates the held descriptor and
+atomically registers the request before returning an opaque closed ID. Registration
+binds the exact raw slot, root and slot identity/access-policy receipts, authoritative
+live File Provider observer, and a private session epoch. No intermediate descriptor
+receipt crosses a target boundary; the package consumer capability can only call
+`collect` with the returned ID. None of the descriptor, root, slot, provider, or epoch
+facts are caller-supplied at collection time. The collector revalidates the process
+no-materialization policy, raw slot, root, descriptor, provider state, and session
+epoch before every `pread`; provider-managed,
+metadata-only, unverified, closed-session, or stale-epoch targets therefore fail
+closed. Its request/file/byte/deadline reservations are session-scoped and cannot be
+reset per request. Descriptor ownership is an internal RAII transfer: collection
+closes on every return path, and destroying, closing, or advancing a session retires
+IDs and closes every unconsumed receipt. Receipt and ID replay remain typed failures.
 A timestamp transition requests a fresh digest pass; it is not by itself classified
 as content mutation.
 

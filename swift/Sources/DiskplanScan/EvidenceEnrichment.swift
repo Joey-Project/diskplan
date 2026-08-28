@@ -147,7 +147,9 @@ public struct ContentCollectionBudget: Equatable, Sendable {
 }
 
 public struct ContentCollectionRequestID: Equatable, Hashable, Sendable {
-  public let rawValue: EvidenceDigest
+  private let rawValue: EvidenceDigest
+
+  fileprivate init(rawValue: EvidenceDigest) { self.rawValue = rawValue }
 }
 
 final class OwnedFileDescriptor: @unchecked Sendable {
@@ -177,73 +179,206 @@ final class OwnedFileDescriptor: @unchecked Sendable {
   }
 }
 
-struct TrustedBoundContentReceipt: @unchecked Sendable {
-  let requestID: ContentCollectionRequestID
+private final class ContentCollectionSessionBinding: @unchecked Sendable {
+  let nonce: EvidenceDigest
+
+  init() {
+    nonce = EvidenceDigest(unchecked: Data(SHA256.hash(data: Data(UUID().uuidString.utf8))))
+  }
+}
+
+private final class ContentCollectionSessionState: @unchecked Sendable {
+  private let lock = NSLock()
+  let binding = ContentCollectionSessionBinding()
+  private var epoch: UInt64 = 0
+  private var closed = false
+
+  func currentEpoch() -> Observation<UInt64> {
+    lock.withLock {
+      closed
+        ? .failed(reason: "content collection session is closed", errorCode: ECANCELED)
+        : .known(epoch)
+    }
+  }
+
+  func register<Value: Equatable & Sendable>(
+    expectedBinding: ContentCollectionSessionBinding,
+    expectedEpoch: UInt64,
+    _ body: () -> Observation<Value>
+  ) -> Observation<Value> {
+    lock.withLock {
+      guard expectedBinding === binding else {
+        return .failed(reason: "content request belongs to another session", errorCode: ESTALE)
+      }
+      guard !closed else {
+        return .failed(reason: "content collection session is closed", errorCode: ECANCELED)
+      }
+      guard expectedEpoch == epoch else {
+        return .failed(reason: "content collection epoch changed", errorCode: ESTALE)
+      }
+      return body()
+    }
+  }
+
+  func isCurrent(binding expectedBinding: ContentCollectionSessionBinding, epoch expected: UInt64)
+    -> Bool
+  {
+    lock.withLock { !closed && expectedBinding === binding && expected == epoch }
+  }
+
+  func advanceEpoch(draining body: () -> Void) -> Bool {
+    lock.withLock {
+      guard !closed else { return false }
+      let (next, overflow) = epoch.addingReportingOverflow(1)
+      guard !overflow else {
+        closed = true
+        body()
+        return false
+      }
+      epoch = next
+      body()
+      return true
+    }
+  }
+
+  func close(draining body: () -> Void) {
+    lock.withLock {
+      guard !closed else { return }
+      closed = true
+      body()
+    }
+  }
+}
+
+private struct BoundContentRequestPayload: @unchecked Sendable {
+  let sessionBinding: ContentCollectionSessionBinding
+  let sessionState: ContentCollectionSessionState
+  let epoch: UInt64
   let target: RawPath
   let ownedDescriptor: OwnedFileDescriptor
   let rootIdentity: ObjectIdentity
+  let rootAccessPolicy: AccessPolicyEvidence
   let expectedIdentity: ObjectIdentity
   let expectedAccessPolicy: AccessPolicyEvidence
   let rootIdentityObservation: @Sendable () -> Observation<ObjectIdentity>
+  let rootAccessPolicyObservation: @Sendable () -> Observation<AccessPolicyEvidence>
   let slotPathObservation: @Sendable () -> Observation<RawPath>
   let slotIdentityObservation: @Sendable () -> Observation<ObjectIdentity>
+  let slotAccessPolicyObservation: @Sendable () -> Observation<AccessPolicyEvidence>
   let providerObservation: @Sendable () -> Observation<ProviderBoundary>
+}
 
-  init(
-    requestID: ContentCollectionRequestID,
-    target: RawPath,
-    ownedDescriptor: OwnedFileDescriptor,
-    rootIdentity: ObjectIdentity,
-    expectedIdentity: ObjectIdentity,
-    expectedAccessPolicy: AccessPolicyEvidence,
-    rootIdentityObservation: @escaping @Sendable () -> Observation<ObjectIdentity>,
-    slotPathObservation: @escaping @Sendable () -> Observation<RawPath>,
-    slotIdentityObservation: @escaping @Sendable () -> Observation<ObjectIdentity>,
-    providerObservation: @escaping @Sendable () -> Observation<ProviderBoundary>
-  ) {
-    self.requestID = requestID
-    self.target = target
-    self.ownedDescriptor = ownedDescriptor
-    self.rootIdentity = rootIdentity
-    self.expectedIdentity = expectedIdentity
-    self.expectedAccessPolicy = expectedAccessPolicy
-    self.rootIdentityObservation = rootIdentityObservation
-    self.slotPathObservation = slotPathObservation
-    self.slotIdentityObservation = slotIdentityObservation
-    self.providerObservation = providerObservation
-  }
+private struct TrustedBoundContentReceipt: @unchecked Sendable {
+  let requestID: ContentCollectionRequestID
+  let payload: BoundContentRequestPayload
+}
+
+private enum RetiredContentRequestReason: Equatable, Sendable {
+  case consumed
+  case epochChanged
+  case sessionClosed
+}
+
+private enum ContentRequestLookup: @unchecked Sendable {
+  case active(TrustedBoundContentReceipt)
+  case retired(RetiredContentRequestReason)
+  case unknown
 }
 
 final class TrustedContentReceiptRegistry: @unchecked Sendable {
   private let lock = NSLock()
   private var receipts: [ContentCollectionRequestID: TrustedBoundContentReceipt] = [:]
   private var descriptorOwners: Set<ObjectIdentifier> = []
-  private var issuedRequestIDs: Set<ContentCollectionRequestID> = []
+  private var retiredRequests: [ContentCollectionRequestID: RetiredContentRequestReason] = [:]
+  private var registrations: UInt32 = 0
+  private var nextSequence: UInt64 = 0
+  private let maximumRegistrations: UInt32
 
-  func insert(_ receipt: TrustedBoundContentReceipt) -> Bool {
+  init(maximumRegistrations: UInt32) {
+    precondition(maximumRegistrations > 0)
+    self.maximumRegistrations = maximumRegistrations
+  }
+
+  fileprivate func insert(_ payload: BoundContentRequestPayload) -> Observation<
+    ContentCollectionRequestID
+  > {
     lock.withLock {
-      let descriptorOwner = ObjectIdentifier(receipt.ownedDescriptor)
-      guard !issuedRequestIDs.contains(receipt.requestID),
-        !descriptorOwners.contains(descriptorOwner)
-      else { return false }
-      receipts[receipt.requestID] = receipt
+      guard registrations < maximumRegistrations else {
+        return .failed(reason: "content request registration budget exhausted", errorCode: EFBIG)
+      }
+      let descriptorOwner = ObjectIdentifier(payload.ownedDescriptor)
+      guard !descriptorOwners.contains(descriptorOwner) else {
+        return .failed(
+          reason: "content descriptor authority is already registered", errorCode: EALREADY)
+      }
+      let (sequence, overflow) = nextSequence.addingReportingOverflow(1)
+      guard !overflow else {
+        return .failed(reason: "content request sequence exhausted", errorCode: EOVERFLOW)
+      }
+      let requestID = contentCollectionRequestID(
+        binding: payload.sessionBinding,
+        epoch: payload.epoch,
+        sequence: sequence
+      )
+      guard receipts[requestID] == nil, retiredRequests[requestID] == nil else {
+        return .failed(reason: "content request identifier collision", errorCode: EEXIST)
+      }
+      nextSequence = sequence
+      registrations += 1
+      receipts[requestID] = TrustedBoundContentReceipt(requestID: requestID, payload: payload)
       descriptorOwners.insert(descriptorOwner)
-      issuedRequestIDs.insert(receipt.requestID)
-      return true
+      return .known(requestID)
     }
   }
 
-  func take(_ requestID: ContentCollectionRequestID) -> TrustedBoundContentReceipt? {
+  fileprivate func take(_ requestID: ContentCollectionRequestID) -> ContentRequestLookup {
     lock.withLock {
-      guard let receipt = receipts.removeValue(forKey: requestID) else { return nil }
-      descriptorOwners.remove(ObjectIdentifier(receipt.ownedDescriptor))
-      return receipt
+      if let receipt = receipts.removeValue(forKey: requestID) {
+        descriptorOwners.remove(ObjectIdentifier(receipt.payload.ownedDescriptor))
+        retiredRequests[requestID] = .consumed
+        return .active(receipt)
+      }
+      if let reason = retiredRequests[requestID] { return .retired(reason) }
+      return .unknown
     }
+  }
+
+  fileprivate func drain(reason: RetiredContentRequestReason) {
+    let retired = lock.withLock { () -> [TrustedBoundContentReceipt] in
+      let active = Array(receipts.values)
+      for requestID in receipts.keys { retiredRequests[requestID] = reason }
+      receipts.removeAll(keepingCapacity: true)
+      descriptorOwners.removeAll(keepingCapacity: true)
+      return active
+    }
+    _ = retired
   }
 }
 
 public protocol ContentEvidenceCollecting: Sendable {
   func collect(_ requestID: ContentCollectionRequestID) -> ContentEvidence
+}
+
+private final class WeakContentCollectionAuthority: @unchecked Sendable {
+  weak var authority: ScannerContentCollectionAuthority?
+
+  init(_ authority: ScannerContentCollectionAuthority) { self.authority = authority }
+}
+
+/// Consumer capability for one session. It exposes only collection by an opaque closed ID.
+package struct ContentEvidenceConsumer: ContentEvidenceCollecting, Sendable {
+  private let endpoint: WeakContentCollectionAuthority
+
+  fileprivate init(authority: ScannerContentCollectionAuthority) {
+    endpoint = WeakContentCollectionAuthority(authority)
+  }
+
+  package func collect(_ requestID: ContentCollectionRequestID) -> ContentEvidence {
+    guard let authority = endpoint.authority else {
+      return .unavailable(reason: "content collection session is unavailable", errorCode: ECANCELED)
+    }
+    return authority.collect(requestID)
+  }
 }
 
 final class ContentCollectionSessionBudget: @unchecked Sendable {
@@ -335,15 +470,26 @@ final class DarwinBoundedContentEvidenceCollector: ContentEvidenceCollecting,
   }
 
   func collect(_ requestID: ContentCollectionRequestID) -> ContentEvidence {
-    guard let request = registry.take(requestID) else {
+    let request: TrustedBoundContentReceipt
+    switch registry.take(requestID) {
+    case .active(let active):
+      request = active
+    case .retired(.consumed):
       return .unavailable(
-        reason: "content collection request is unknown or consumed", errorCode: ENOENT)
+        reason: "content collection request is already consumed", errorCode: EALREADY)
+    case .retired(.epochChanged):
+      return .unavailable(reason: "content collection epoch changed", errorCode: ESTALE)
+    case .retired(.sessionClosed):
+      return .unavailable(reason: "content collection session is closed", errorCode: ECANCELED)
+    case .unknown:
+      return .unavailable(reason: "content collection request is unknown", errorCode: ENOENT)
     }
-    guard let fileDescriptor = request.ownedDescriptor.take() else {
+    let payload = request.payload
+    guard let fileDescriptor = payload.ownedDescriptor.take() else {
       return .unavailable(reason: "invalid held content descriptor", errorCode: EBADF)
     }
     defer { Darwin.close(fileDescriptor) }
-    guard request.expectedIdentity.objectType == .regular else {
+    guard payload.expectedIdentity.objectType == .regular else {
       return .notApplicable(.notRegularFile)
     }
     if let failure = validateTrustedReceipt(request, fileDescriptor: fileDescriptor) {
@@ -357,10 +503,10 @@ final class DarwinBoundedContentEvidenceCollector: ContentEvidenceCollecting,
     else {
       return .unavailable(reason: "content target seal unavailable", errorCode: errno)
     }
-    guard before.identity == request.expectedIdentity else {
+    guard before.identity == payload.expectedIdentity else {
       return .unavailable(reason: "content target identity mismatch", errorCode: ESTALE)
     }
-    guard before.accessPolicy == request.expectedAccessPolicy else {
+    guard before.accessPolicy == payload.expectedAccessPolicy else {
       return .unavailable(reason: "content target access policy mismatch", errorCode: EAGAIN)
     }
     if let failure = budget.reserve(logicalBytes: before.logicalBytes) { return failure }
@@ -422,6 +568,14 @@ final class DarwinBoundedContentEvidenceCollector: ContentEvidenceCollecting,
     if let failure = validateTrustedReceipt(request, fileDescriptor: fileDescriptor) {
       return failure
     }
+    guard
+      payload.sessionState.isCurrent(
+        binding: payload.sessionBinding,
+        epoch: payload.epoch
+      )
+    else {
+      return .unavailable(reason: "content collection session or epoch changed", errorCode: ESTALE)
+    }
     return .collected(
       ContentDigestBaseline(
         logicalBytes: before.logicalBytes,
@@ -433,14 +587,25 @@ final class DarwinBoundedContentEvidenceCollector: ContentEvidenceCollecting,
     _ request: TrustedBoundContentReceipt,
     fileDescriptor: Int32
   ) -> ContentEvidence? {
+    let payload = request.payload
+    guard
+      payload.sessionState.isCurrent(
+        binding: payload.sessionBinding,
+        epoch: payload.epoch
+      )
+    else {
+      return .unavailable(reason: "content collection session or epoch changed", errorCode: ESTALE)
+    }
     guard policy.revalidateLive().value != nil else {
       return .unavailable(reason: "no-materialization policy unavailable", errorCode: nil)
     }
-    guard request.rootIdentityObservation() == .known(request.rootIdentity),
-      request.slotPathObservation() == .known(request.target),
-      request.slotIdentityObservation() == .known(request.expectedIdentity)
+    guard payload.rootIdentityObservation() == .known(payload.rootIdentity),
+      payload.rootAccessPolicyObservation() == .known(payload.rootAccessPolicy),
+      payload.slotPathObservation() == .known(payload.target),
+      payload.slotIdentityObservation() == .known(payload.expectedIdentity),
+      payload.slotAccessPolicyObservation() == .known(payload.expectedAccessPolicy)
     else {
-      return .unavailable(reason: "bound content root or slot identity changed", errorCode: ESTALE)
+      return .unavailable(reason: "bound content root or slot receipt changed", errorCode: ESTALE)
     }
     guard
       let descriptor = descriptorSeal(
@@ -450,14 +615,22 @@ final class DarwinBoundedContentEvidenceCollector: ContentEvidenceCollecting,
     else {
       return .unavailable(reason: "bound content descriptor seal unavailable", errorCode: errno)
     }
-    guard descriptor.identity == request.expectedIdentity else {
+    guard descriptor.identity == payload.expectedIdentity else {
       return .unavailable(reason: "bound content descriptor identity changed", errorCode: ESTALE)
     }
-    guard descriptor.accessPolicy == request.expectedAccessPolicy else {
+    guard descriptor.accessPolicy == payload.expectedAccessPolicy else {
       return .unavailable(
         reason: "bound content descriptor access policy changed", errorCode: EAGAIN)
     }
-    switch request.providerObservation() {
+    guard policy.revalidateLive().value != nil else {
+      return .unavailable(reason: "no-materialization policy unavailable", errorCode: nil)
+    }
+    let providerBoundary = payload.providerObservation()
+    guard policy.revalidateLive().value != nil else {
+      return .unavailable(
+        reason: "no-materialization policy changed during provider probe", errorCode: nil)
+    }
+    switch providerBoundary {
     case .known(.localOrUnindicated):
       return nil
     case .known(.metadataOnly), .known(.rejected):
@@ -465,6 +638,154 @@ final class DarwinBoundedContentEvidenceCollector: ContentEvidenceCollecting,
     case .known(.unverified), .absent, .unknown, .unreadable, .failed:
       return .notApplicable(.providerStateUnverified)
     }
+  }
+}
+
+/// Scanner-owned session authority. Raw descriptor transfer and binding remain internal to
+/// DiskplanScan; other package targets receive only an opaque ID and consumer capability.
+final class ScannerContentCollectionAuthority: @unchecked Sendable {
+  private let policy: NoMaterializationPolicy
+  private let state = ContentCollectionSessionState()
+  private let registry: TrustedContentReceiptRegistry
+  private let collector: DarwinBoundedContentEvidenceCollector
+
+  init(
+    policy: NoMaterializationPolicy,
+    budget: ContentCollectionBudget
+  ) {
+    self.policy = policy
+    registry = TrustedContentReceiptRegistry(maximumRegistrations: budget.maximumFiles)
+    collector = DarwinBoundedContentEvidenceCollector(
+      policy: policy,
+      registry: registry,
+      budget: budget
+    )
+  }
+
+  init(
+    policy: NoMaterializationPolicy,
+    budget: ContentCollectionBudget,
+    monotonicNow: @escaping @Sendable () -> UInt64,
+    descriptorReader: @escaping DarwinBoundedContentEvidenceCollector.DescriptorReader =
+      Darwin.pread
+  ) {
+    self.policy = policy
+    registry = TrustedContentReceiptRegistry(maximumRegistrations: budget.maximumFiles)
+    collector = DarwinBoundedContentEvidenceCollector(
+      policy: policy,
+      registry: registry,
+      budget: budget,
+      monotonicNow: monotonicNow,
+      descriptorReader: descriptorReader
+    )
+  }
+
+  deinit { close() }
+
+  var evidenceConsumer: ContentEvidenceConsumer {
+    ContentEvidenceConsumer(authority: self)
+  }
+
+  /// Transfers descriptor ownership and atomically registers an opaque request ID after
+  /// validating all scanner-held authority facts. This method is intentionally internal to
+  /// DiskplanScan.
+  func bindScannerDescriptor(
+    transferring fileDescriptor: Int32,
+    target: RawPath,
+    rootIdentity: ObjectIdentity,
+    rootAccessPolicy: AccessPolicyEvidence,
+    expectedIdentity: ObjectIdentity,
+    expectedAccessPolicy: AccessPolicyEvidence,
+    rootIdentityObservation: @escaping @Sendable () -> Observation<ObjectIdentity>,
+    rootAccessPolicyObservation: @escaping @Sendable () -> Observation<AccessPolicyEvidence>,
+    slotPathObservation: @escaping @Sendable () -> Observation<RawPath>,
+    slotIdentityObservation: @escaping @Sendable () -> Observation<ObjectIdentity>,
+    slotAccessPolicyObservation: @escaping @Sendable () -> Observation<AccessPolicyEvidence>,
+    providerObservation: @escaping @Sendable () -> Observation<ProviderBoundary>
+  ) -> Observation<ContentCollectionRequestID> {
+    guard fileDescriptor >= 0 else {
+      return .failed(reason: "scanner content descriptor is invalid", errorCode: EBADF)
+    }
+    let ownedDescriptor = OwnedFileDescriptor(transferring: fileDescriptor)
+    guard rootIdentity.objectType == .directory, expectedIdentity.objectType == .regular else {
+      return .failed(reason: "scanner content root or target type is invalid", errorCode: EINVAL)
+    }
+    guard rootAccessPolicy.aclDigest.value != nil, expectedAccessPolicy.aclDigest.value != nil
+    else {
+      return .unknown(reason: "scanner content access-policy ACL is incomplete")
+    }
+    let epochObservation = state.currentEpoch()
+    guard let epoch = epochObservation.value else { return epochObservation.erasingValue() }
+    guard policy.revalidateLive().value != nil else {
+      return .unknown(reason: "no-materialization policy unavailable while binding content")
+    }
+    guard rootIdentityObservation() == .known(rootIdentity),
+      rootAccessPolicyObservation() == .known(rootAccessPolicy),
+      slotPathObservation() == .known(target),
+      slotIdentityObservation() == .known(expectedIdentity),
+      slotAccessPolicyObservation() == .known(expectedAccessPolicy)
+    else {
+      return .failed(reason: "scanner content root or slot receipt changed", errorCode: ESTALE)
+    }
+    guard policy.revalidateLive().value != nil else {
+      return .unknown(reason: "no-materialization policy unavailable before provider binding")
+    }
+    let providerBoundary = providerObservation()
+    guard policy.revalidateLive().value != nil else {
+      return .unknown(reason: "no-materialization policy changed during provider binding")
+    }
+    switch providerBoundary {
+    case .known(.localOrUnindicated):
+      break
+    case .known(.metadataOnly), .known(.rejected):
+      return .failed(reason: "provider-managed content cannot be bound", errorCode: EREMOTE)
+    case .known(.unverified), .absent, .unknown, .unreadable, .failed:
+      return .unknown(reason: "provider state is not authoritative for content binding")
+    }
+    guard let descriptor = descriptorSeal(fileDescriptor: fileDescriptor, policy: policy) else {
+      return .failed(reason: "scanner content descriptor seal unavailable", errorCode: errno)
+    }
+    guard descriptor.identity == expectedIdentity else {
+      return .failed(reason: "scanner content descriptor identity mismatch", errorCode: ESTALE)
+    }
+    guard descriptor.accessPolicy == expectedAccessPolicy else {
+      return .failed(reason: "scanner content descriptor access policy mismatch", errorCode: EAGAIN)
+    }
+    guard state.isCurrent(binding: state.binding, epoch: epoch) else {
+      return .failed(reason: "content collection epoch changed during binding", errorCode: ESTALE)
+    }
+    let payload = BoundContentRequestPayload(
+      sessionBinding: state.binding,
+      sessionState: state,
+      epoch: epoch,
+      target: target,
+      ownedDescriptor: ownedDescriptor,
+      rootIdentity: rootIdentity,
+      rootAccessPolicy: rootAccessPolicy,
+      expectedIdentity: expectedIdentity,
+      expectedAccessPolicy: expectedAccessPolicy,
+      rootIdentityObservation: rootIdentityObservation,
+      rootAccessPolicyObservation: rootAccessPolicyObservation,
+      slotPathObservation: slotPathObservation,
+      slotIdentityObservation: slotIdentityObservation,
+      slotAccessPolicyObservation: slotAccessPolicyObservation,
+      providerObservation: providerObservation
+    )
+    return state.register(expectedBinding: state.binding, expectedEpoch: epoch) {
+      registry.insert(payload)
+    }
+  }
+
+  func advanceEpoch() -> Bool {
+    state.advanceEpoch { registry.drain(reason: .epochChanged) }
+  }
+
+  func close() {
+    state.close { registry.drain(reason: .sessionClosed) }
+  }
+
+  fileprivate func collect(_ requestID: ContentCollectionRequestID) -> ContentEvidence {
+    collector.collect(requestID)
   }
 }
 
@@ -1477,6 +1798,19 @@ private func gitCommandSpecDigest(
     appendCanonical(Data(replacementEnvironment[key]!.utf8), to: &input)
   }
   return EvidenceDigest(unchecked: Data(SHA256.hash(data: input)))
+}
+
+private func contentCollectionRequestID(
+  binding: ContentCollectionSessionBinding,
+  epoch: UInt64,
+  sequence: UInt64
+) -> ContentCollectionRequestID {
+  var input = Data("diskplan/content-collection-request/v1\0".utf8)
+  appendCanonical(binding.nonce.bytes, to: &input)
+  appendCanonical(epoch, to: &input)
+  appendCanonical(sequence, to: &input)
+  return ContentCollectionRequestID(
+    rawValue: EvidenceDigest(unchecked: Data(SHA256.hash(data: input))))
 }
 
 private func configuredScopeTokenDigest(

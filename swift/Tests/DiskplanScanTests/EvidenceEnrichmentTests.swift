@@ -118,6 +118,55 @@ private final class LockedProviderSequence: @unchecked Sendable {
   }
 }
 
+private final class LockedObservationSequence<Value: Equatable & Sendable>: @unchecked Sendable {
+  private let lock = NSLock()
+  private let values: [Observation<Value>]
+  private var index = 0
+
+  init(_ values: [Observation<Value>]) { self.values = values }
+
+  func next() -> Observation<Value> {
+    lock.withLock {
+      let value = values[min(index, values.count - 1)]
+      index += 1
+      return value
+    }
+  }
+}
+
+private func contentBudget(maximumFiles: UInt32 = 8) throws -> ContentCollectionBudget {
+  try ContentCollectionBudget(
+    maximumBytesPerFile: 256 * 1_024,
+    maximumAggregateBytes: UInt64(maximumFiles) * 256 * 1_024,
+    maximumFiles: maximumFiles,
+    deadlineMonotonicNanoseconds: 100
+  )
+}
+
+private func registerContentRequest(
+  authority: ScannerContentCollectionAuthority,
+  transferring fileDescriptor: Int32,
+  seal: DescriptorContentSeal,
+  target: RawPath,
+  providerObservation: @escaping @Sendable () -> Observation<ProviderBoundary>
+) -> Observation<ContentCollectionRequestID> {
+  let rootAccessPolicy = policy()
+  return authority.bindScannerDescriptor(
+    transferring: fileDescriptor,
+    target: target,
+    rootIdentity: rootIdentity,
+    rootAccessPolicy: rootAccessPolicy,
+    expectedIdentity: seal.identity,
+    expectedAccessPolicy: seal.accessPolicy,
+    rootIdentityObservation: { .known(rootIdentity) },
+    rootAccessPolicyObservation: { .known(rootAccessPolicy) },
+    slotPathObservation: { .known(target) },
+    slotIdentityObservation: { .known(seal.identity) },
+    slotAccessPolicyObservation: { .known(seal.accessPolicy) },
+    providerObservation: providerObservation
+  )
+}
+
 @Test func ancestorSealSeparatesAccessPolicyFromObjectIdentity() {
   let base = appendAncestorAccessPolicySeal(
     parent: nil,
@@ -161,8 +210,6 @@ private final class LockedProviderSequence: @unchecked Sendable {
     MaterializationPolicyInstaller().installBeforePathAccess().value)
   let seal = try #require(
     descriptorSeal(fileDescriptor: fileDescriptor, policy: noMaterializationPolicy))
-  let requestID = ContentCollectionRequestID(
-    rawValue: evidenceDigest(Data("content-request".utf8)))
   let target = RawPath(rootID: "root", components: [RawPathComponent(Data("candidate".utf8))])
   let providers = LockedProviderSequence([
     .known(.localOrUnindicated),
@@ -171,39 +218,25 @@ private final class LockedProviderSequence: @unchecked Sendable {
   let firstOwnedDescriptor = dup(fileDescriptor)
   #expect(firstOwnedDescriptor >= 0)
   guard firstOwnedDescriptor >= 0 else { return }
-  let registry = TrustedContentReceiptRegistry()
-  #expect(
-    registry.insert(
-      TrustedBoundContentReceipt(
-        requestID: requestID,
-        target: target,
-        ownedDescriptor: OwnedFileDescriptor(transferring: firstOwnedDescriptor),
-        rootIdentity: rootIdentity,
-        expectedIdentity: seal.identity,
-        expectedAccessPolicy: seal.accessPolicy,
-        rootIdentityObservation: { .known(rootIdentity) },
-        slotPathObservation: { .known(target) },
-        slotIdentityObservation: { .known(seal.identity) },
-        providerObservation: providers.next
-      )))
   let reads = LockedCounter()
-  let configuration = try ContentCollectionBudget(
-    maximumBytesPerFile: 256 * 1_024,
-    maximumAggregateBytes: 256 * 1_024,
-    maximumFiles: 1,
-    deadlineMonotonicNanoseconds: 100
-  )
-  let collector = DarwinBoundedContentEvidenceCollector(
+  let authority = ScannerContentCollectionAuthority(
     policy: noMaterializationPolicy,
-    registry: registry,
-    budget: configuration,
+    budget: try contentBudget(maximumFiles: 1),
     monotonicNow: { 1 },
     descriptorReader: { descriptor, buffer, count, offset in
       reads.increment()
       return Darwin.pread(descriptor, buffer, count, offset)
     }
   )
-  #expect(collector.collect(requestID) == .notApplicable(.providerManaged))
+  let requestID = try #require(
+    registerContentRequest(
+      authority: authority,
+      transferring: firstOwnedDescriptor,
+      seal: seal,
+      target: target,
+      providerObservation: providers.next
+    ).value)
+  #expect(authority.evidenceConsumer.collect(requestID) == .notApplicable(.providerManaged))
   #expect(reads.value == 0)
   errno = 0
   #expect(fcntl(firstOwnedDescriptor, F_GETFD) == -1)
@@ -216,109 +249,268 @@ private final class LockedProviderSequence: @unchecked Sendable {
   }
   defer { Darwin.close(firstOwnedDescriptor) }
   #expect(
-    collector.collect(requestID)
+    authority.evidenceConsumer.collect(requestID)
       == .unavailable(
-        reason: "content collection request is unknown or consumed", errorCode: ENOENT))
+        reason: "content collection request is already consumed", errorCode: EALREADY))
   #expect(fcntl(firstOwnedDescriptor, F_GETFD) >= 0)
   #expect(reads.value == 0)
-  let replayDescriptor = dup(fileDescriptor)
-  let validReplayDescriptor = try #require(replayDescriptor >= 0 ? replayDescriptor : nil)
-  #expect(
-    registry.insert(
-      TrustedBoundContentReceipt(
-        requestID: requestID,
-        target: target,
-        ownedDescriptor: OwnedFileDescriptor(transferring: validReplayDescriptor),
-        rootIdentity: rootIdentity,
-        expectedIdentity: seal.identity,
-        expectedAccessPolicy: seal.accessPolicy,
-        rootIdentityObservation: { .known(rootIdentity) },
-        slotPathObservation: { .known(target) },
-        slotIdentityObservation: { .known(seal.identity) },
-        providerObservation: { .known(.localOrUnindicated) }
-      )) == false)
-
-  let mismatchedRequestID = ContentCollectionRequestID(
-    rawValue: evidenceDigest(Data("mismatched-content-request".utf8)))
   let secondOwnedDescriptor = dup(fileDescriptor)
   #expect(secondOwnedDescriptor >= 0)
   guard secondOwnedDescriptor >= 0 else { return }
-  let mismatchedRegistry = TrustedContentReceiptRegistry()
-  #expect(
-    mismatchedRegistry.insert(
-      TrustedBoundContentReceipt(
-        requestID: mismatchedRequestID,
-        target: target,
-        ownedDescriptor: OwnedFileDescriptor(transferring: secondOwnedDescriptor),
-        rootIdentity: rootIdentity,
-        expectedIdentity: seal.identity,
-        expectedAccessPolicy: seal.accessPolicy,
-        rootIdentityObservation: { .known(rootIdentity) },
-        slotPathObservation: { .known(RawPath(rootID: "wrong")) },
-        slotIdentityObservation: { .known(seal.identity) },
-        providerObservation: { .known(.localOrUnindicated) }
-      )))
-  let mismatchedCollector = DarwinBoundedContentEvidenceCollector(
+  let mismatchedAuthority = ScannerContentCollectionAuthority(
     policy: noMaterializationPolicy,
-    registry: mismatchedRegistry,
-    budget: configuration,
+    budget: try contentBudget(maximumFiles: 1),
     monotonicNow: { 1 },
     descriptorReader: { descriptor, buffer, count, offset in
       reads.increment()
       return Darwin.pread(descriptor, buffer, count, offset)
     }
   )
+  let rootAccessPolicy = policy()
   #expect(
-    mismatchedCollector.collect(mismatchedRequestID)
-      == .unavailable(reason: "bound content root or slot identity changed", errorCode: ESTALE))
+    mismatchedAuthority.bindScannerDescriptor(
+      transferring: secondOwnedDescriptor,
+      target: target,
+      rootIdentity: rootIdentity,
+      rootAccessPolicy: rootAccessPolicy,
+      expectedIdentity: seal.identity,
+      expectedAccessPolicy: seal.accessPolicy,
+      rootIdentityObservation: { .known(rootIdentity) },
+      rootAccessPolicyObservation: { .known(rootAccessPolicy) },
+      slotPathObservation: { .known(RawPath(rootID: "wrong")) },
+      slotIdentityObservation: { .known(seal.identity) },
+      slotAccessPolicyObservation: { .known(seal.accessPolicy) },
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value == nil)
   #expect(reads.value == 0)
+  errno = 0
+  #expect(fcntl(secondOwnedDescriptor, F_GETFD) == -1)
+  #expect(errno == EBADF)
 }
 
-@Test func contentRegistryClosesUnconsumedOwnedDescriptorAtEndOfLifetime() throws {
-  let fileDescriptor = open("/dev/null", O_RDONLY | O_CLOEXEC)
-  let original = try #require(fileDescriptor >= 0 ? fileDescriptor : nil)
-  let owned = dup(original)
-  let ownedDescriptor = try #require(owned >= 0 ? owned : nil)
-  defer { Darwin.close(original) }
-  var registry: TrustedContentReceiptRegistry? = TrustedContentReceiptRegistry()
-  var owner: OwnedFileDescriptor? = OwnedFileDescriptor(transferring: ownedDescriptor)
-  let requestID = ContentCollectionRequestID(
-    rawValue: evidenceDigest(Data("unconsumed-content-request".utf8)))
+@Test func providerUncertaintyAfterRegistrationPreventsAnyContentRead() throws {
+  let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-provider-uncertain-content-\(UUID().uuidString)")
+  try Data("content".utf8).write(to: temporaryURL, options: .withoutOverwriting)
+  defer { try? FileManager.default.removeItem(at: temporaryURL) }
+  let descriptor = open(temporaryURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+  let ownedDescriptor = try #require(descriptor >= 0 ? descriptor : nil)
+  let noMaterializationPolicy = try #require(
+    MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let seal = try #require(
+    descriptorSeal(fileDescriptor: ownedDescriptor, policy: noMaterializationPolicy))
+  let providers = LockedProviderSequence([
+    .known(.localOrUnindicated),
+    .unknown(reason: "provider ownership unavailable"),
+  ])
+  let reads = LockedCounter()
+  let authority = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(),
+    monotonicNow: { 1 },
+    descriptorReader: { descriptor, buffer, count, offset in
+      reads.increment()
+      return Darwin.pread(descriptor, buffer, count, offset)
+    }
+  )
+  let requestID = try #require(
+    registerContentRequest(
+      authority: authority,
+      transferring: ownedDescriptor,
+      seal: seal,
+      target: RawPath(rootID: "root"),
+      providerObservation: providers.next
+    ).value)
+  #expect(authority.evidenceConsumer.collect(requestID) == .notApplicable(.providerStateUnverified))
+  #expect(reads.value == 0)
+  errno = 0
+  #expect(fcntl(ownedDescriptor, F_GETFD) == -1)
+  #expect(errno == EBADF)
+}
+
+@Test func rootAccessReceiptDriftAfterRegistrationPreventsAnyContentRead() throws {
+  let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-root-policy-drift-content-\(UUID().uuidString)")
+  try Data("content".utf8).write(to: temporaryURL, options: .withoutOverwriting)
+  defer { try? FileManager.default.removeItem(at: temporaryURL) }
+  let descriptor = open(temporaryURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+  let ownedDescriptor = try #require(descriptor >= 0 ? descriptor : nil)
+  let noMaterializationPolicy = try #require(
+    MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let seal = try #require(
+    descriptorSeal(fileDescriptor: ownedDescriptor, policy: noMaterializationPolicy))
+  let rootAccessPolicy = policy()
+  let rootPolicies = LockedObservationSequence<AccessPolicyEvidence>([
+    .known(rootAccessPolicy),
+    .known(policy(mode: UInt32(S_IFDIR | S_IRUSR))),
+  ])
+  let target = RawPath(rootID: "root")
+  let reads = LockedCounter()
+  let authority = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(),
+    monotonicNow: { 1 },
+    descriptorReader: { descriptor, buffer, count, offset in
+      reads.increment()
+      return Darwin.pread(descriptor, buffer, count, offset)
+    }
+  )
+  let requestID = try #require(
+    authority.bindScannerDescriptor(
+      transferring: ownedDescriptor,
+      target: target,
+      rootIdentity: rootIdentity,
+      rootAccessPolicy: rootAccessPolicy,
+      expectedIdentity: seal.identity,
+      expectedAccessPolicy: seal.accessPolicy,
+      rootIdentityObservation: { .known(rootIdentity) },
+      rootAccessPolicyObservation: rootPolicies.next,
+      slotPathObservation: { .known(target) },
+      slotIdentityObservation: { .known(seal.identity) },
+      slotAccessPolicyObservation: { .known(seal.accessPolicy) },
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value)
   #expect(
-    registry?.insert(
-      TrustedBoundContentReceipt(
-        requestID: requestID,
-        target: RawPath(rootID: "root"),
-        ownedDescriptor: owner!,
-        rootIdentity: rootIdentity,
-        expectedIdentity: ObjectIdentity(device: 1, fileID: 1, objectType: .regular),
-        expectedAccessPolicy: policy(),
-        rootIdentityObservation: { .known(rootIdentity) },
-        slotPathObservation: { .known(RawPath(rootID: "root")) },
-        slotIdentityObservation: {
-          .known(ObjectIdentity(device: 1, fileID: 1, objectType: .regular))
-        },
-        providerObservation: { .known(.localOrUnindicated) }
-      )) == true)
+    authority.evidenceConsumer.collect(requestID)
+      == .unavailable(reason: "bound content root or slot receipt changed", errorCode: ESTALE))
+  #expect(reads.value == 0)
+  errno = 0
+  #expect(fcntl(ownedDescriptor, F_GETFD) == -1)
+  #expect(errno == EBADF)
+}
+
+@Test func registrationBudgetRejectsAndClosesExcessDescriptor() throws {
+  let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-unregistered-content-\(UUID().uuidString)")
+  try Data("content".utf8).write(to: temporaryURL, options: .withoutOverwriting)
+  defer { try? FileManager.default.removeItem(at: temporaryURL) }
+  let descriptor = open(temporaryURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+  let ownedDescriptor = try #require(descriptor >= 0 ? descriptor : nil)
+  let noMaterializationPolicy = try #require(
+    MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let seal = try #require(
+    descriptorSeal(fileDescriptor: ownedDescriptor, policy: noMaterializationPolicy))
+  let authority = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(maximumFiles: 1),
+    monotonicNow: { 1 }
+  )
+  let firstDescriptor = dup(ownedDescriptor)
+  let firstOwnedDescriptor = try #require(firstDescriptor >= 0 ? firstDescriptor : nil)
+  _ = try #require(
+    registerContentRequest(
+      authority: authority,
+      transferring: firstOwnedDescriptor,
+      seal: seal,
+      target: RawPath(rootID: "root"),
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value)
   #expect(
-    registry?.insert(
-      TrustedBoundContentReceipt(
-        requestID: ContentCollectionRequestID(
-          rawValue: evidenceDigest(Data("duplicate-owner-request".utf8))),
-        target: RawPath(rootID: "root"),
-        ownedDescriptor: owner!,
-        rootIdentity: rootIdentity,
-        expectedIdentity: ObjectIdentity(device: 1, fileID: 1, objectType: .regular),
-        expectedAccessPolicy: policy(),
-        rootIdentityObservation: { .known(rootIdentity) },
-        slotPathObservation: { .known(RawPath(rootID: "root")) },
-        slotIdentityObservation: {
-          .known(ObjectIdentity(device: 1, fileID: 1, objectType: .regular))
-        },
-        providerObservation: { .known(.localOrUnindicated) }
-      )) == false)
-  owner = nil
-  registry = nil
+    registerContentRequest(
+      authority: authority,
+      transferring: ownedDescriptor,
+      seal: seal,
+      target: RawPath(rootID: "root"),
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value == nil)
+  errno = 0
+  #expect(fcntl(ownedDescriptor, F_GETFD) == -1)
+  #expect(errno == EBADF)
+}
+
+@Test func contentSessionCloseAndEpochAdvanceDrainRequestsAndRejectIDs() throws {
+  let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-session-content-\(UUID().uuidString)")
+  try Data("content".utf8).write(to: temporaryURL, options: .withoutOverwriting)
+  defer { try? FileManager.default.removeItem(at: temporaryURL) }
+  let sourceDescriptor = open(temporaryURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+  let source = try #require(sourceDescriptor >= 0 ? sourceDescriptor : nil)
+  defer { Darwin.close(source) }
+  let noMaterializationPolicy = try #require(
+    MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let seal = try #require(descriptorSeal(fileDescriptor: source, policy: noMaterializationPolicy))
+
+  let epochAuthority = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(),
+    monotonicNow: { 1 }
+  )
+  let epochRaw = dup(source)
+  let epochDescriptor = try #require(epochRaw >= 0 ? epochRaw : nil)
+  let epochID = try #require(
+    registerContentRequest(
+      authority: epochAuthority,
+      transferring: epochDescriptor,
+      seal: seal,
+      target: RawPath(rootID: "root"),
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value)
+  #expect(epochAuthority.advanceEpoch())
+  #expect(
+    epochAuthority.evidenceConsumer.collect(epochID)
+      == .unavailable(reason: "content collection epoch changed", errorCode: ESTALE))
+  errno = 0
+  #expect(fcntl(epochDescriptor, F_GETFD) == -1)
+  #expect(errno == EBADF)
+
+  let closeAuthority = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(),
+    monotonicNow: { 1 }
+  )
+  let closeRaw = dup(source)
+  let closeDescriptor = try #require(closeRaw >= 0 ? closeRaw : nil)
+  let closeID = try #require(
+    registerContentRequest(
+      authority: closeAuthority,
+      transferring: closeDescriptor,
+      seal: seal,
+      target: RawPath(rootID: "root"),
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value)
+  closeAuthority.close()
+  #expect(
+    closeAuthority.evidenceConsumer.collect(closeID)
+      == .unavailable(reason: "content collection session is closed", errorCode: ECANCELED))
+  errno = 0
+  #expect(fcntl(closeDescriptor, F_GETFD) == -1)
+  #expect(errno == EBADF)
+}
+
+@Test func contentRequestMisrouteCannotConsumeAnotherSessionReceipt() throws {
+  let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-misroute-content-\(UUID().uuidString)")
+  try Data("content".utf8).write(to: temporaryURL, options: .withoutOverwriting)
+  defer { try? FileManager.default.removeItem(at: temporaryURL) }
+  let descriptor = open(temporaryURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+  let ownedDescriptor = try #require(descriptor >= 0 ? descriptor : nil)
+  let noMaterializationPolicy = try #require(
+    MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let seal = try #require(
+    descriptorSeal(fileDescriptor: ownedDescriptor, policy: noMaterializationPolicy))
+  let first = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(),
+    monotonicNow: { 1 }
+  )
+  let second = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(),
+    monotonicNow: { 1 }
+  )
+  let requestID = try #require(
+    registerContentRequest(
+      authority: first,
+      transferring: ownedDescriptor,
+      seal: seal,
+      target: RawPath(rootID: "root"),
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value)
+  #expect(
+    second.evidenceConsumer.collect(requestID)
+      == .unavailable(reason: "content collection request is unknown", errorCode: ENOENT))
+  #expect(fcntl(ownedDescriptor, F_GETFD) >= 0)
+  _ = first.evidenceConsumer.collect(requestID)
   errno = 0
   #expect(fcntl(ownedDescriptor, F_GETFD) == -1)
   #expect(errno == EBADF)
