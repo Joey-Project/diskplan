@@ -2,11 +2,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/attr.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#include <sys/snapshot.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
 #include <sys/vnode.h>
@@ -29,6 +31,7 @@ _Static_assert(sizeof(dev_t) == sizeof(uint32_t), "unexpected Darwin dev_t size"
 _Static_assert(sizeof(fsobj_type_t) == sizeof(uint32_t),
                "unexpected Darwin object type size");
 _Static_assert(sizeof(off_t) == sizeof(uint64_t), "unexpected Darwin off_t size");
+_Static_assert(sizeof(pid_t) == sizeof(int32_t), "unexpected Darwin pid_t size");
 
 typedef struct __attribute__((packed, aligned(4))) {
     uint32_t length;
@@ -389,6 +392,198 @@ int dp_probe_volume_fd(int fd, dp_volume_evidence_v1 *result) {
     }
     strlcpy(result->filesystem_type, filesystem.f_fstypename,
             sizeof(result->filesystem_type));
+    return 0;
+}
+
+int dp_list_snapshot_attributes(int fd, uint8_t *buffer, size_t buffer_size) {
+    if (fd < 0 || buffer == NULL || buffer_size == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct attrlist attributes = {0};
+    attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+    attributes.commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME;
+    return fs_snapshot_list(fd, &attributes, buffer, buffer_size, 0);
+}
+
+int dp_spawn_process_group(const char *executable,
+                           const uint8_t *arguments,
+                           size_t arguments_size,
+                           size_t argument_count,
+                           const uint8_t *environment,
+                           size_t environment_size,
+                           size_t environment_count,
+                           dp_spawned_process_group_v1 *result) {
+    if (executable == NULL || executable[0] == '\0' || result == NULL ||
+        (arguments_size > 0 && arguments == NULL) ||
+        (argument_count == 0 && arguments_size != 0) ||
+        (environment_size > 0 && environment == NULL) ||
+        (environment_count == 0 && environment_size != 0) ||
+        argument_count > SIZE_MAX / sizeof(char *) - 2 ||
+        environment_count > SIZE_MAX / sizeof(char *) - 1) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    char **argv = calloc(argument_count + 2, sizeof(*argv));
+    char **environment_variables =
+        calloc(environment_count + 1, sizeof(*environment_variables));
+    if (argv == NULL || environment_variables == NULL) {
+        free(argv);
+        free(environment_variables);
+        return -1;
+    }
+    argv[0] = (char *)executable;
+    size_t cursor = 0;
+    for (size_t index = 0; index < argument_count; index++) {
+        if (cursor >= arguments_size) {
+            free(argv);
+            free(environment_variables);
+            errno = EINVAL;
+            return -1;
+        }
+        const uint8_t *terminator =
+            memchr(arguments + cursor, '\0', arguments_size - cursor);
+        if (terminator == NULL) {
+            free(argv);
+            free(environment_variables);
+            errno = EINVAL;
+            return -1;
+        }
+        argv[index + 1] = (char *)(arguments + cursor);
+        cursor = (size_t)(terminator - arguments) + 1;
+    }
+    if (cursor != arguments_size) {
+        free(argv);
+        free(environment_variables);
+        errno = EINVAL;
+        return -1;
+    }
+    cursor = 0;
+    for (size_t index = 0; index < environment_count; index++) {
+        if (cursor >= environment_size) {
+            free(argv);
+            free(environment_variables);
+            errno = EINVAL;
+            return -1;
+        }
+        const uint8_t *terminator =
+            memchr(environment + cursor, '\0', environment_size - cursor);
+        if (terminator == NULL ||
+            memchr(environment + cursor, '=', terminator - (environment + cursor)) == NULL) {
+            free(argv);
+            free(environment_variables);
+            errno = EINVAL;
+            return -1;
+        }
+        environment_variables[index] = (char *)(environment + cursor);
+        cursor = (size_t)(terminator - environment) + 1;
+    }
+    if (cursor != environment_size) {
+        free(argv);
+        free(environment_variables);
+        errno = EINVAL;
+        return -1;
+    }
+
+    int output_pipe[2] = {-1, -1};
+    int error_pipe[2] = {-1, -1};
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int actions_initialized = 0;
+    int attributes_initialized = 0;
+    int error = 0;
+
+    if (pipe(output_pipe) != 0 || pipe(error_pipe) != 0) {
+        error = errno;
+        goto cleanup;
+    }
+    if (fcntl(output_pipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(output_pipe[1], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(error_pipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(error_pipe[1], F_SETFD, FD_CLOEXEC) != 0) {
+        error = errno;
+        goto cleanup;
+    }
+
+    error = posix_spawn_file_actions_init(&actions);
+    if (error != 0) {
+        goto cleanup;
+    }
+    actions_initialized = 1;
+    error = posix_spawn_file_actions_addopen(
+        &actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (error == 0) {
+        error = posix_spawn_file_actions_adddup2(
+            &actions, output_pipe[1], STDOUT_FILENO);
+    }
+    if (error == 0) {
+        error = posix_spawn_file_actions_adddup2(
+            &actions, error_pipe[1], STDERR_FILENO);
+    }
+    if (error == 0) {
+        error = posix_spawn_file_actions_addclose(&actions, output_pipe[0]);
+    }
+    if (error == 0) {
+        error = posix_spawn_file_actions_addclose(&actions, error_pipe[0]);
+    }
+    if (error != 0) {
+        goto cleanup;
+    }
+
+    error = posix_spawnattr_init(&attributes);
+    if (error != 0) {
+        goto cleanup;
+    }
+    attributes_initialized = 1;
+    error = posix_spawnattr_setpgroup(&attributes, 0);
+    if (error == 0) {
+        error = posix_spawnattr_setflags(
+            &attributes, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT);
+    }
+    if (error != 0) {
+        goto cleanup;
+    }
+
+    pid_t process_id = -1;
+    error = posix_spawn(
+        &process_id, executable, &actions, &attributes, argv,
+        environment_variables);
+    if (error != 0) {
+        goto cleanup;
+    }
+
+    close(output_pipe[1]);
+    output_pipe[1] = -1;
+    close(error_pipe[1]);
+    error_pipe[1] = -1;
+    result->process_id = process_id;
+    result->standard_output_fd = output_pipe[0];
+    result->standard_error_fd = error_pipe[0];
+    output_pipe[0] = -1;
+    error_pipe[0] = -1;
+
+cleanup:
+    if (attributes_initialized) {
+        posix_spawnattr_destroy(&attributes);
+    }
+    if (actions_initialized) {
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    for (size_t index = 0; index < 2; index++) {
+        if (output_pipe[index] >= 0) {
+            close(output_pipe[index]);
+        }
+        if (error_pipe[index] >= 0) {
+            close(error_pipe[index]);
+        }
+    }
+    free(argv);
+    free(environment_variables);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
     return 0;
 }
 

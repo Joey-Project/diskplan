@@ -34,6 +34,12 @@ typedef struct {
     uint32_t reserved;
 } dp_fd_identity_v1;
 
+typedef struct {
+    int32_t process_id;
+    int32_t standard_output_fd;
+    int32_t standard_error_fd;
+} dp_spawned_process_group_v1;
+
 int dp_set_materialization_off(void);
 int dp_get_materialization_policy(void);
 uint64_t dp_item_probe_options(void);
@@ -44,6 +50,15 @@ int dp_probe_item_at(int parent_fd, const uint8_t *name, size_t name_length,
                      uint8_t *wire, size_t wire_capacity, size_t *wire_length);
 int dp_probe_fd_identity(int fd, dp_fd_identity_v1 *result);
 int dp_probe_volume_fd(int fd, dp_volume_evidence_v1 *result);
+int dp_list_snapshot_attributes(int fd, uint8_t *buffer, size_t buffer_size);
+int dp_spawn_process_group(const char *executable,
+                           const uint8_t *arguments,
+                           size_t arguments_size,
+                           size_t argument_count,
+                           const uint8_t *environment,
+                           size_t environment_size,
+                           size_t environment_count,
+                           dp_spawned_process_group_v1 *result);
 
 uint32_t dp_attr_common_device(void);
 uint32_t dp_attr_common_object_type(void);

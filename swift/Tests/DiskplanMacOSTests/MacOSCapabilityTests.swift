@@ -27,6 +27,15 @@ func noMaterializationPolicyIsSetThenReadBack() throws {
 }
 
 @Test
+func snapshotListShimPreservesTypedPOSIXFailureWithoutPathAccess() {
+  var buffer = Data(count: 64)
+  let result = SnapshotListProbe().list(fileDescriptor: -1, buffer: &buffer)
+  #expect(result.status == .failed)
+  #expect(result.detail == "fs_snapshot_list")
+  #expect(result.errorCode == EINVAL)
+}
+
+@Test
 func noMaterializationPolicyRejectsInconsistentReadback() {
   let installer = MaterializationPolicyInstaller(
     setOff: { (0, 0) },
