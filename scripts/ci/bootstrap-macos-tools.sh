@@ -7,6 +7,8 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 readonly REPO_ROOT
 readonly LOCK_FILE="${SCRIPT_DIR}/toolchain.lock"
+readonly PACKAGE_RESOLVED="${REPO_ROOT}/Package.resolved"
+readonly PACKAGE_RESOLVED_GUARD="${SCRIPT_DIR}/package-resolved-guard.sh"
 readonly MODE="${1:-foundation}"
 
 if (( $# > 1 )) || [[ "${MODE}" != "foundation" && "${MODE}" != "rust-only" ]]; then
@@ -74,6 +76,10 @@ download() {
 
 validate_lock_schema
 
+if [[ "${MODE}" == "foundation" ]]; then
+    "${PACKAGE_RESOLVED_GUARD}" check "${PACKAGE_RESOLVED}"
+fi
+
 RUST_VERSION="$(read_lock_value rust)"
 readonly RUST_VERSION
 rustup toolchain install "${RUST_VERSION}" --profile minimal --component clippy,rustfmt
@@ -124,20 +130,25 @@ if [[ "$(sed -n 's/^swift-protobuf=//p' "${REPO_ROOT}/proto/toolchain.lock")" !=
     echo "SwiftProtobuf version mismatch between CI and protocol locks" >&2
     exit 1
 fi
-if ! grep -Fq "\"revision\" : \"${SWIFT_PROTOBUF_REVISION}\"" "${REPO_ROOT}/Package.resolved"; then
+if ! grep -Fq "\"revision\" : \"${SWIFT_PROTOBUF_REVISION}\"" "${PACKAGE_RESOLVED}"; then
     echo "SwiftProtobuf revision mismatch between CI lock and Package.resolved" >&2
     exit 1
 fi
 
 cd "${REPO_ROOT}"
-swift package resolve
+"${PACKAGE_RESOLVED_GUARD}" run "${PACKAGE_RESOLVED}" -- \
+    swift package --package-path "${REPO_ROOT}" --disable-automatic-resolution resolve
 readonly SWIFT_PROTOBUF_CHECKOUT="${REPO_ROOT}/.build/checkouts/swift-protobuf"
 if [[ "$(git -C "${SWIFT_PROTOBUF_CHECKOUT}" rev-parse HEAD)" != "${SWIFT_PROTOBUF_REVISION}" ]]; then
     echo "resolved SwiftProtobuf checkout does not match the pinned revision" >&2
     exit 1
 fi
-swift build --package-path "${SWIFT_PROTOBUF_CHECKOUT}" -c release --product protoc-gen-swift
-SWIFT_PROTOBUF_BIN_DIR="$(swift build --package-path "${SWIFT_PROTOBUF_CHECKOUT}" -c release --show-bin-path)"
+"${PACKAGE_RESOLVED_GUARD}" run "${PACKAGE_RESOLVED}" -- \
+    swift build --package-path "${SWIFT_PROTOBUF_CHECKOUT}" --disable-automatic-resolution -c release --product protoc-gen-swift
+SWIFT_PROTOBUF_BIN_DIR="$(
+    "${PACKAGE_RESOLVED_GUARD}" run "${PACKAGE_RESOLVED}" -- \
+        swift build --package-path "${SWIFT_PROTOBUF_CHECKOUT}" --disable-automatic-resolution -c release --show-bin-path
+)"
 readonly SWIFT_PROTOBUF_BIN_DIR
 install -m 0755 "${SWIFT_PROTOBUF_BIN_DIR}/protoc-gen-swift" "${BIN_DIR}/protoc-gen-swift"
 
@@ -165,4 +176,5 @@ verify_sha256 "${ACTIONLINT_ARCHIVE}" "${ACTIONLINT_SHA256}"
 tar -xzf "${ACTIONLINT_ARCHIVE}" -C "${TOOLS_ROOT}"
 install -m 0755 "${TOOLS_ROOT}/actionlint" "${BIN_DIR}/actionlint"
 
+"${PACKAGE_RESOLVED_GUARD}" check "${PACKAGE_RESOLVED}"
 printf '%s\n' "${BIN_DIR}" >> "${GITHUB_PATH}"

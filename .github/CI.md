@@ -40,12 +40,17 @@ and update the adjacent version comment plus this table in the same change.
 `scripts/ci/toolchain.lock` pins Xcode, Rust, Protobuf, ShellCheck, actionlint,
 download checksums, and the SwiftProtobuf source revision. The bootstrap script
 also checks the shared `proto/toolchain.lock` and `Package.resolved` pins before
-installing generators.
+installing generators. SwiftPM resolve, build, and test commands use
+resolved-only mode. A content-stability guard verifies the exact
+`Package.resolved` bytes before and after every such command, including failure
+paths; a same-byte file replacement is intentionally benign.
 
 Only Cargo and SwiftPM dependency downloads are cached. Compiled targets,
 generated sources, test results, and tool downloads are not cached. `Cargo.lock`,
 `Package.resolved`, checksummed downloads, source-revision checks, and drift
-tests remain authoritative even when a cache is restored.
+tests remain authoritative even when a cache is restored. The cache key binds
+both dependency manifests, both resolved lockfiles, the protocol toolchain lock,
+and the CI toolchain lock, after an explicit `Package.resolved` preflight.
 
 The required job checks whitespace against the exact event SHA pair. Pull
 requests use base/head SHAs, pushes use before/after SHAs, new branches map the

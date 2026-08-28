@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +71,46 @@ class CiScriptTests(unittest.TestCase):
             self.assertLessEqual(output.stat().st_size, 16384)
             self.assertEqual(stat.S_IRUSR | stat.S_IWUSR, stat.S_IMODE(output.stat().st_mode))
             self.assertEqual([], list(output.parent.glob(f".{output.name}.tmp.*")))
+
+    def test_package_resolved_guard_rejects_missing_lockfile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lockfile = Path(directory) / "Package.resolved"
+            result = run_script("package-resolved-guard.sh", "check", str(lockfile))
+            self.assertEqual(1, result.returncode)
+            self.assertIn("must be a non-symlink regular file", result.stderr)
+
+    def test_package_resolved_guard_detects_content_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lockfile = Path(directory) / "Package.resolved"
+            lockfile.write_bytes(b"locked")
+            result = run_script(
+                "package-resolved-guard.sh",
+                "run",
+                str(lockfile),
+                "--",
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'drift')",
+                str(lockfile),
+            )
+            self.assertEqual(1, result.returncode)
+            self.assertIn("content changed", result.stderr)
+
+    def test_package_resolved_guard_preserves_command_status_when_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lockfile = Path(directory) / "Package.resolved"
+            lockfile.write_bytes(b"locked")
+            result = run_script(
+                "package-resolved-guard.sh",
+                "run",
+                str(lockfile),
+                "--",
+                sys.executable,
+                "-c",
+                "raise SystemExit(7)",
+            )
+            self.assertEqual(7, result.returncode)
+            self.assertEqual(b"locked", lockfile.read_bytes())
 
 
 if __name__ == "__main__":

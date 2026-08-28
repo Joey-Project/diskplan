@@ -40,6 +40,9 @@ jobs:
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/diskplan-cargo-target" >> "$GITHUB_ENV"
           echo "DISKPLAN_DEPLOYMENT_TARGET_DIR=$RUNNER_TEMP/diskplan-deployment-target" >> "$GITHUB_ENV"
 
+      - name: Verify dependency lock inputs
+        run: scripts/ci/package-resolved-guard.sh check Package.resolved
+
       - name: Select pinned Xcode
         run: scripts/ci/select-xcode.sh
 
@@ -53,7 +56,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/registry/index
             ~/Library/Caches/org.swift.swiftpm/repositories
-          key: foundation-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ hashFiles('Cargo.lock', 'Package.resolved') }}
+          key: foundation-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'Package.resolved', 'Package.swift', 'proto/toolchain.lock', 'scripts/ci/toolchain.lock') }}
 
       - name: Bootstrap pinned tools
         run: scripts/ci/bootstrap-macos-tools.sh foundation
@@ -98,8 +101,8 @@ jobs:
 
       - name: Build and test Swift foundation
         run: |
-          swift build
-          swift test
+          scripts/ci/package-resolved-guard.sh run Package.resolved -- swift build --disable-automatic-resolution
+          scripts/ci/package-resolved-guard.sh run Package.resolved -- swift test --disable-automatic-resolution
 
       - name: Check Rust foundation
         run: |
@@ -112,10 +115,10 @@ jobs:
         run: scripts/proto-codegen.sh check
 
       - name: Check canonical fixture
-        run: scripts/canonical-fixture.sh check
+        run: scripts/ci/package-resolved-guard.sh run Package.resolved -- scripts/canonical-fixture.sh check
 
       - name: Test real Swift and Rust processes
-        run: scripts/test-cross-language.sh
+        run: scripts/ci/package-resolved-guard.sh run Package.resolved -- scripts/test-cross-language.sh
 
       - name: Assert deployment target
         run: scripts/test-deployment-target.sh aarch64-apple-darwin
