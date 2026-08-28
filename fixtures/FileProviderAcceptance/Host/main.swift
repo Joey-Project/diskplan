@@ -77,6 +77,23 @@ enum FixtureHost {
       let manifestURL = try options.requiredURL("manifest")
       let loaded = try loadManifest(manifestURL, allowCleanupRecovery: true)
       try cleanup(loaded: loaded, manifestURL: manifestURL)
+    case "mutation-begin":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      try mutationJournal(loaded.manifest).begin(kind)
+      printJSON(["status": "mutation-in-flight", "kind": kind.rawValue])
+    case "mutation-confirm":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      let presence = try options.requiredMutationPresence("state")
+      try mutationJournal(loaded.manifest).confirmFinished(kind, observed: presence)
+      printJSON(["status": "mutation-confirmed", "kind": kind.rawValue])
     case "extension-path":
       let loaded = try loadManifest(
         try options.requiredURL("manifest"),
@@ -111,7 +128,10 @@ enum FixtureHost {
       appGroupRunPath: log.runDirectory.path
     )
     try manifest.validate(expectedTaskRoot: taskRoot)
-    try secureWrite(try JSONEncoder().encode(manifest), to: manifestURL)
+    try SecureFixtureStorage.publishInitialManifest(
+      try JSONEncoder().encode(manifest),
+      in: taskRoot
+    )
     printJSON(["status": "prepared", "manifest": manifestURL.path])
   }
 
@@ -126,7 +146,14 @@ enum FixtureHost {
     )
     domain.isHidden = true
     domain.testingModes = []
+    let journal = mutationJournal(manifest)
+    try journal.begin(.domainAdd)
     try await addDomain(domain, deadline: deadline)
+    let identifiers = try await registeredDomainIdentifiers(deadline: deadline)
+    guard identifiers.filter({ $0 == domainIdentifier }).count == 1 else {
+      throw HostError.domainAdditionNotConfirmed
+    }
+    try journal.confirmFinished(.domainAdd, observed: .present)
     guard let manager = NSFileProviderManager(for: domain) else {
       throw HostError.managerUnavailable
     }
@@ -197,25 +224,15 @@ enum FixtureHost {
   private static func assertAcceptance(manifest: FixtureManifest) throws {
     let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
     let snapshot = try log.sealedSnapshot()
+    try snapshot.validate(
+      runID: manifest.runID,
+      domainIdentifier: manifest.domainIdentifier
+    )
     let window = snapshot.window
-    guard window.endNanoseconds != nil else { throw HostError.oracleWindowOpen }
     let events = snapshot.events
-    guard window.eventCount == events.count,
-      window.lastSequence == (events.last?.sequence ?? 0)
-    else { throw HostError.oracleWindowMismatch }
-    let matching = events.filter {
-      $0.runID == manifest.runID && $0.domainIdentifier == manifest.domainIdentifier
-    }
-    let observed = matching.filter {
-      $0.runID == manifest.runID && $0.domainIdentifier == manifest.domainIdentifier
-        && window.contains($0)
-    }
-    let forbidden = observed.filter {
-      FixtureContract.forbiddenEventKinds.contains($0.kind)
-    }
-    let liveness = observed.filter {
-      !FixtureContract.forbiddenEventKinds.contains($0.kind)
-    }
+    let observed = events.filter { window.contains($0) }
+    let forbidden = observed.filter(FixtureContract.isForbiddenEvent)
+    let liveness = observed.filter { !FixtureContract.isForbiddenEvent($0) }
     guard !liveness.isEmpty else { throw HostError.oracleSilent }
     guard forbidden.isEmpty else {
       throw HostError.forbiddenCallbacks(forbidden.map { "\($0.sequence):\($0.kind.rawValue)" })
@@ -242,34 +259,8 @@ enum FixtureHost {
   private static func teardown(loaded: LoadedFixtureManifest) async throws {
     let deadline = ContinuousClock.now + .seconds(20)
     let manifest = loaded.manifest
-    let matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
-      $0 == manifest.domainIdentifier
-    }
-    guard matches.count <= 1 else { throw HostError.duplicateExactDomain }
-    switch loaded.location {
-    case .canonical(let runDirectory):
-      try OracleLog(runDirectory: runDirectory).sealRecorder()
-    case .cleanupRecovery(let stagingDirectory):
-      guard matches.first != nil else { break }
-      try OracleLog(runDirectory: stagingDirectory).sealRecorder()
-    }
-    if matches.first != nil {
-      let domain = NSFileProviderDomain(
-        identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
-        displayName: FixtureContract.displayName
-      )
-      try await removeExactDomain(domain, deadline: deadline)
-    }
-    while ContinuousClock.now < deadline {
-      if try await !registeredDomainIdentifiers(deadline: deadline).contains(
-        manifest.domainIdentifier
-      ) {
-        printJSON(["status": "removed", "domain": manifest.domainIdentifier])
-        return
-      }
-      try await sleepForPolling(.milliseconds(200), until: deadline)
-    }
-    throw HostError.domainRemovalTimedOut
+    try await reconcileDomainRemoval(loaded: loaded, deadline: deadline)
+    printJSON(["status": "removed", "domain": manifest.domainIdentifier])
   }
 
   private static func assertOracleHealth(manifest: FixtureManifest) async throws {
@@ -291,7 +282,7 @@ enum FixtureHost {
       let healthy = try log.events().contains {
         $0.sequence > baseline && $0.runID == manifest.runID
           && $0.domainIdentifier == manifest.domainIdentifier && window.contains($0)
-          && !FixtureContract.forbiddenEventKinds.contains($0.kind)
+          && !FixtureContract.isForbiddenEvent($0)
       }
       if healthy, try log.recorderState() == .healthy {
         printJSON(["status": "oracle-healthy", "domain": manifest.domainIdentifier])
@@ -307,6 +298,7 @@ enum FixtureHost {
     let expectedLog = try OracleLog.appGroup(runID: manifest.runID)
     let expectedTaskRoot = expectedLog.runDirectory.standardizedFileURL
     try manifest.validate(expectedTaskRoot: expectedTaskRoot)
+    try mutationJournal(manifest).requireClear()
     switch loaded.location {
     case .canonical:
       try SecureFixtureStorage.cleanupRun(
@@ -320,6 +312,69 @@ enum FixtureHost {
       )
     }
     printJSON(["status": "cleaned", "run_id": manifest.runID.uuidString.lowercased()])
+  }
+
+  private static func reconcileDomainRemoval(
+    loaded: LoadedFixtureManifest,
+    deadline: ContinuousClock.Instant
+  ) async throws {
+    let manifest = loaded.manifest
+    let journal = mutationJournal(manifest)
+    try journal.begin(.domainRemove)
+    let domain = NSFileProviderDomain(
+      identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
+      displayName: FixtureContract.displayName
+    )
+    var removalAttempts = 0
+    var recorderSealed = false
+    while ContinuousClock.now < deadline {
+      let matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
+        $0 == manifest.domainIdentifier
+      }
+      guard matches.count <= 1 else { throw HostError.duplicateExactDomain }
+      if matches.isEmpty {
+        let result = try journal.observe(
+          .domainRemove,
+          presence: .absent,
+          nowNanoseconds: monotonicNow()
+        )
+        if result == .stableTerminal { return }
+      } else {
+        if !recorderSealed {
+          switch loaded.location {
+          case .canonical(let runDirectory):
+            try OracleLog(runDirectory: runDirectory).sealRecorder()
+          case .cleanupRecovery(let stagingDirectory):
+            try OracleLog(runDirectory: stagingDirectory).sealRecorder()
+          }
+          recorderSealed = true
+        }
+        _ = try journal.observe(
+          .domainRemove,
+          presence: .present,
+          nowNanoseconds: monotonicNow()
+        )
+        if removalAttempts < 3 {
+          removalAttempts += 1
+          do {
+            try await removeExactDomain(domain, deadline: deadline)
+          } catch {
+            // A timed-out callback is ambiguous. Preserve the journal and continue bounded
+            // observation so a delayed success can still be reconciled in this recovery run.
+          }
+          let remaining = try await registeredDomainIdentifiers(deadline: deadline).filter {
+            $0 == manifest.domainIdentifier
+          }
+          guard remaining.count <= 1 else { throw HostError.duplicateExactDomain }
+          if remaining.isEmpty {
+            try journal.confirmFinished(.domainRemove, observed: .absent)
+            return
+          }
+        }
+      }
+      try await sleepForPolling(.milliseconds(200), until: deadline)
+    }
+    throw HostError.domainRemovalTimedOut
   }
 
   private static func requireDataless(_ url: URL) throws {
@@ -383,6 +438,10 @@ enum FixtureHost {
   }
 }
 
+private func mutationJournal(_ manifest: FixtureManifest) -> ExternalMutationJournal {
+  ExternalMutationJournal(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
+}
+
 private struct Options {
   private let values: [String: String]
 
@@ -420,6 +479,20 @@ private struct Options {
     return value
   }
 
+  func requiredMutationKind(_ key: String) throws -> ExternalMutationKind {
+    guard let value = ExternalMutationKind(rawValue: try required(key)) else {
+      throw HostError.usage
+    }
+    return value
+  }
+
+  func requiredMutationPresence(_ key: String) throws -> ExternalMutationPresence {
+    guard let value = ExternalMutationPresence(rawValue: try required(key)) else {
+      throw HostError.usage
+    }
+    return value
+  }
+
   func optionalInt(_ key: String, default defaultValue: Int) throws -> Int {
     guard let value = values[key] else { return defaultValue }
     guard let parsed = Int(value) else { throw HostError.usage }
@@ -442,6 +515,7 @@ private enum HostError: Error {
   case callbackTimedOut
   case forbiddenCallbacks([String])
   case duplicateExactDomain
+  case domainAdditionNotConfirmed
   case domainRemovalTimedOut
 }
 

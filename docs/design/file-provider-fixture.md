@@ -146,6 +146,10 @@ registry no longer references that physical extension path, and removes only the
 named by the validated manifest. Registry add/remove mutation and convergence checks are each
 bounded. A timeout or stale exact-path registration fails closed and retains the manifest and
 build artifacts for recovery.
+The shell holds one nonblocking, host-and-user-global advisory lock across the entire build,
+registration, domain, assertion, cleanup, or recovery lifecycle. Concurrent runs therefore
+cannot unregister the shared extension bundle out from under one another; a crashed holder
+releases the kernel-owned lock so the next explicit recovery can proceed.
 `pluginkit` output must be strict UTF-8. Every exact-bundle registry block must use a recognized
 header and contain exactly one absolute `Path`; missing, duplicate, empty, relative, or otherwise
 malformed records or text that mentions the exact bundle fail closed instead of being interpreted
@@ -157,6 +161,54 @@ clock while holding the same lock that claims callback completion. Therefore a s
 precomputed comparison cannot let a late callback win merely because the timeout task was
 delayed; a daemon that never replies or replies late cannot hang the host or resume a
 continuation twice.
+
+Callback admission and the sealing cutoff share the recorder attempt gate. A live extension opens
+its run-directory, attempt-lock, and append-only admission descriptors before accepting callbacks;
+failure to establish that capability terminates the extension instead of creating an unwitnessed
+callback path. Every callback first durably appends a unique admission token. Successful event
+append or durable failure publication resolves it. Sealing appends a durable cutoff while holding
+the exclusive gate and rejects any unresolved token admitted before that cutoff; records proven to
+start after the cutoff cannot change the immutable snapshot. Failure publication uses the same
+absolute callback deadline and a dedicated thread, so a blocked failure path cannot hold callback
+completion indefinitely or be mistaken for callback-zero.
+
+The final oracle snapshot is descriptor-bound to one verified run-directory object. Attempt lock,
+recorder lock, events, window, state markers, and sealed snapshot use that held descriptor and
+revalidate canonical path identity and access policy before success. The protected properties are
+object identity (`st_dev` plus `st_ino`) and owner-only access policy (uid, type, mode, and absence
+of an extended ACL); child-entry churn is deliberately not treated as replacement. The closed
+window is written and fsynced, atomically renamed, and followed by a run-directory fsync before the
+sealed marker is published.
+
+Acceptance validates every sealed event rather than filtering unexpected identities: run ID,
+domain ID, exact sequence `1...N`, structure, and window membership must all match. Enumerator
+JSONL parsing also requires the exact top-level key set and rejects duplicate or unknown keys.
+Its structural scanner enforces a small explicit nesting bound before Foundation decoding, so a
+bounded-but-deep tampered event cannot exhaust the call stack.
+acquisition is itself recorded. Acquisition, item enumeration, change enumeration, or sync-anchor
+access for `sealed-dir` is forbidden evidence, and enumerators strongly retain the minimal
+recording capability so extension instance teardown cannot create a silent callback path.
+
+Before `NSFileProviderManager.add`, domain removal, or either non-cancellable `pluginkit`
+mutation begins, the Host durably publishes a UUID-and-operation-scoped ambiguity journal beside
+the run directory. A normal callback/process completion plus a matching registry observation is
+terminal evidence. After timeout or crash, recovery performs bounded repeated reconciliation;
+one absence observation never clears the journal, and any late contradictory presence resets the
+absence proof. A completed compensating removal clears both its own journal and the earlier add
+journal. Cleanup refuses to remove the manifest while any external-mutation journal remains.
+The shell lifecycle is additionally serialized by an owner-private global lock. Only the
+inherited descriptor for the open-file description that actually holds that exact lock is
+accepted as the helper capability; a caller-provided boolean environment variable cannot bypass
+single-flight execution. The shell consumes that descriptor immediately after validation, clears
+the environment capability, and verifies that the helper parent still owns the lock. Nested or
+detached lifecycle children therefore cannot reuse or pin the capability.
+
+The initial canonical manifest is atomically published and durably synced before any extension or
+domain mutation. Cleanup recovery preserves a deterministic sibling manifest until the staging
+directory removal and canonical-parent fsync are durable. Existing sibling evidence is freshly
+synced before reuse; restored canonical evidence is fsynced before rename-back and the parent is
+fsynced before sibling deletion. Protected directories, control leaves, mutation journals, and
+recovery evidence reject extended ACL grants or unreadable ACL state.
 
 It never performs bulk domain removal and never deletes paths under the user-visible File
 Provider storage location. If the lifecycle fails, it retains the owner-private manifest and
@@ -183,7 +235,10 @@ Recovery removes only the exact domain, unregisters only that exact embedded ext
 then removes only the App Group UUID run directory. A sibling recovery manifest is accepted only
 when its exact lowercased UUID path, embedded manifest identity, expected App Group run path, and
 deterministic `.cleanup-<uuid>` staging path all agree. If the exact domain still exists, the
-host must seal the recorder in that staging directory before removal; missing or mismatched
+host must seal the recorder in that staging directory before removal. Teardown sealing is
+idempotent across recovery runs: an existing sealed state reuses its single durable admission
+cutoff, and a clean sealing-plus-cutoff crash intermediate can be completed without appending a
+second cutoff. Missing or mismatched
 staging state fails closed. The Host rejects noncanonical manifest strings before constructing
 the lifecycle request. The support layer then opens the recovery file by its exact basename from
 a descriptor for the trusted expected App Group `runs` parent; it never opens a caller-supplied
@@ -198,7 +253,9 @@ remain on that root device. A mount point or any directory whose device cannot b
 fails closed before inventory, so cleanup never traverses or deletes a mounted volume.
 The exact UUID directory is atomically renamed with exclusive semantics inside the held
 owner-private `runs` directory before recursive deletion; symlinks and special objects fail
-closed. Before that rename, cleanup durably creates and validates the sibling recovery record
+closed. The held parent directory is fsynced immediately after that staging rename and before
+inventory or any deletion, so a crash cannot expose a partially deleted tree under an undurable
+name transition. Before that rename, cleanup durably creates and validates the sibling recovery record
 `.manifest-recovery-<uuid>.json` outside the staging directory. It remains present while the
 staging tree, its manifest, and the staging directory itself are removed. After final `rmdir`,
 cleanup `fsync`s the held parent directory before it validates and unlinks the sibling evidence.

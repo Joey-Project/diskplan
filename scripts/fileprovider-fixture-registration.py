@@ -3,14 +3,38 @@ import argparse
 import json
 from pathlib import Path
 import re
-import subprocess
 import sys
 import time
 
+from fileprovider_fixture_subprocess import BoundedCommandFailure, run_bounded_text
+
 
 MAXIMUM_OUTPUT_BYTES = 64 * 1024
+REQUIRED_ABSENCE_OBSERVATIONS = 3
+MINIMUM_ABSENCE_SECONDS = 1.0
 HEADER = re.compile(r"^\s*([+!-])\s+([^\s(]+)(?:\(|\s|$)")
 PATH_LINE = re.compile(r"^\s*Path\s*=\s*(.*?)\s*$")
+
+
+class StableAbsenceEvidence:
+    def __init__(self) -> None:
+        self.count = 0
+        self.first_observation: float | None = None
+
+    def observe(self, absent: bool, now: float) -> bool:
+        if not absent:
+            self.count = 0
+            self.first_observation = None
+            return False
+        if self.first_observation is None or now < self.first_observation:
+            self.count = 1
+            self.first_observation = now
+            return False
+        self.count += 1
+        return (
+            self.count >= REQUIRED_ABSENCE_OBSERVATIONS
+            and now - self.first_observation >= MINIMUM_ABSENCE_SECONDS
+        )
 
 
 def exact_bundle_records(output: str, bundle_id: str) -> list[tuple[str, str]]:
@@ -80,27 +104,13 @@ def verify_removal(bundle_id: str, expected_path: Path, output: str) -> None:
             raise ValueError("registry still references the embedded appex")
 
 
-def decode_registration_output(output: bytes) -> str:
-    try:
-        return output.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as error:
-        raise ValueError("pluginkit query output is not valid UTF-8") from error
-
-
 def query_registration(bundle_id: str, timeout_seconds: float) -> str:
-    result = subprocess.run(
+    result = run_bounded_text(
         ["pluginkit", "-m", "-A", "-D", "-v", "-i", bundle_id],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout_seconds,
-        check=False,
+        timeout_seconds=timeout_seconds,
+        maximum_output_bytes=MAXIMUM_OUTPUT_BYTES,
     )
-    if len(result.stdout) > MAXIMUM_OUTPUT_BYTES:
-        raise ValueError("pluginkit query exceeded output limit")
-    if result.returncode != 0:
-        raise RuntimeError(f"pluginkit query exited {result.returncode}")
-    return decode_registration_output(result.stdout)
+    return result.output
 
 
 def main() -> int:
@@ -110,6 +120,7 @@ def main() -> int:
     parser.add_argument("--state", choices=("elected", "absent"), required=True)
     arguments = parser.parse_args()
     verifier = verify_registration if arguments.state == "elected" else verify_removal
+    stable_absence = StableAbsenceEvidence()
     deadline = time.monotonic() + 10.0
     last_error = "registry state did not converge"
     while True:
@@ -119,9 +130,16 @@ def main() -> int:
         try:
             output = query_registration(arguments.bundle_id, min(2.0, remaining))
             verifier(arguments.bundle_id, arguments.expected_path, output)
-        except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as error:
+        except (BoundedCommandFailure, ValueError) as error:
             last_error = str(error)
+            if arguments.state == "absent":
+                stable_absence.observe(False, time.monotonic())
         else:
+            if arguments.state == "absent" and not stable_absence.observe(
+                True, time.monotonic()
+            ):
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+                continue
             registration = (
                 "exact-elected-physical-path"
                 if arguments.state == "elected"

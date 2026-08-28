@@ -29,9 +29,23 @@ superseded_by:
   are owner-private and UUID-scoped.
 - Lifecycle teardown is exact-domain and exact-extension only; cleanup is limited to validated
   App Group run paths.
+- The complete lifecycle and recovery path share one host-global single-flight lock. Every domain
+  or extension registry mutation has durable ambiguity evidence outside the run tree; recovery
+  requires repeated stable terminal observations after timeout, and cleanup rejects pending
+  mutation evidence.
 - Control records use bounded descriptor-bound reads with distinct missing, unreadable, and
   mismatch results. Cleanup atomically isolates the exact run directory and validates object
   identity/access policy without treating directory child churn as replacement.
+- Callback admission now has durable pre-attempt evidence, one absolute failure-publication
+  deadline, and an atomic sealing cutoff. Extension initialization fails closed if the admission
+  capability cannot be established, while enumerators retain that minimal capability across
+  extension lifetime changes.
+- Oracle acceptance binds one run-directory descriptor through locks, events, window, and markers;
+  rejects canonical replacement or extended-ACL drift; validates every event identity and exact
+  sequence; and treats every sealed-directory enumerator operation as forbidden evidence.
+- Manifest, window, cleanup-recovery, and sibling-evidence publication now use explicit file and
+  directory durability barriers. Injected crash/fsync tests prove that a sealed oracle or completed
+  cleanup cannot be reported before its recovery evidence is durable.
 - Recovery executes only the known signed host after physical-path, bundle/team identity, and
   signature validation. Registration verifies the elected bundle ID resolves to the current
   embedded extension, and unregister must converge to absence of that exact physical path.
@@ -74,6 +88,15 @@ superseded_by:
 - Every admitted record attempt persists a unique incomplete marker before callback logic and
   clears it only after a durable event or failure marker. Publication failure and simulated crash
   leave evidence that remains poisoned across recorder recreation.
+- Teardown sealing is idempotent across recovery runs and resumes a clean durable
+  sealing-plus-cutoff intermediate without appending a malformed second cutoff. Strict JSONL
+  decoding rejects unknown and duplicate event keys.
+- The host-global lifecycle lock now passes and verifies the inherited locked open-file
+  description instead of trusting a caller-set boolean environment variable. Cleanup fsyncs the
+  parent immediately after staging rename and before inventory or deletion.
+- The shell consumes the inherited lock descriptor before running lifecycle children and proves
+  the helper parent still owns the lock, preventing nested reuse or detached-child pinning. The
+  strict JSON scanner has an explicit depth bound before decoding.
 - Cleanup rejects mount/device-boundary traversal before inventory. The current gate is
   explicitly probe-level; full scanner acceptance remains a later engine integration.
 - Local unsigned compile and support tests are available without provisioning.
@@ -103,6 +126,10 @@ superseded_by:
   synchronization from the sixth frozen rereview.
 - [x] Preserve durable incomplete-attempt evidence across failure-marker publication errors and
   process crashes from the seventh frozen rereview.
+- [x] Close idempotent teardown sealing, lifecycle-lock capability, staging-rename durability,
+  and strict event-key parsing gaps from final frozen review.
+- [x] Close lifecycle capability propagation and deep-JSON stack exhaustion gaps from final
+  rereview.
 - [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
 - [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
 - [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
@@ -120,7 +147,7 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 43 targeted support tests pass
+- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 68 targeted support tests pass
   and cover
   concurrent JSONL writers, manifest/ready validation, typed secure-read failures,
   symlink-retaining cleanup, recursive cleanup, device-boundary rejection, append-failure
@@ -132,8 +159,9 @@ superseded_by:
   durable poison after local-lock and state-read failure, bounded sealing contention, atomic
   failure-marker publication against a racing final seal, injected failure-marker publication,
   abandoned-attempt recovery across recorder recreation, deterministic final-rmdir recovery,
-  semantic window validation, and deterministic two-second quiet-window reset after a
-  one-second-late callback.
+  semantic window validation, deterministic two-second quiet-window reset after a one-second-late
+  callback, idempotent teardown sealing, strict event-key decoding, and staging-rename crash
+  recovery before any deletion.
 - `python3 scripts/test-fileprovider-fixture-registration.py`: 12 parser/physical-path election,
   strict-UTF-8, malformed exact-bundle text, and exact-path removal tests pass.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension

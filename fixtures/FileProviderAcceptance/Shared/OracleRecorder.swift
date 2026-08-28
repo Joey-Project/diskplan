@@ -22,7 +22,7 @@ public final class OracleRecorder: @unchecked Sendable {
   typealias Append = @Sendable (OracleEvent, UInt64) throws -> Void
   typealias RecorderState = @Sendable (UInt64) throws -> OracleRecorderState
   typealias Poison = @Sendable (UInt64) throws -> Void
-  typealias Failure = @Sendable () throws -> Void
+  typealias Failure = @Sendable (UInt64) throws -> Void
   typealias BeginAttempt = @Sendable (UInt64) throws -> OracleRecordAttempt?
 
   private let lock = NSLock()
@@ -39,7 +39,7 @@ public final class OracleRecorder: @unchecked Sendable {
     append: @escaping Append,
     state: @escaping RecorderState = { _ in .healthy },
     poison: @escaping Poison = { _ in },
-    failure: @escaping Failure = {},
+    failure: @escaping Failure = { _ in },
     beginAttempt: @escaping BeginAttempt = { _ in nil },
     clock: any OracleQuiescenceClock = SystemOracleQuiescenceClock(),
     timeoutNanoseconds: UInt64 = 30_000_000_000
@@ -53,32 +53,27 @@ public final class OracleRecorder: @unchecked Sendable {
     self.timeoutNanoseconds = timeoutNanoseconds
   }
 
-  public convenience init(log: OracleLog) {
+  public convenience init(log: OracleLog) throws {
+    let admission = try log.makeAdmissionChannel()
     self.init(
       append: { event, deadline in
-        try log.append(
+        try admission.append(
+          log: log,
           event,
-          injecting: nil,
-          duringRecordAttempt: true,
-          deadlineNanoseconds: deadline,
-          clock: SystemOracleQuiescenceClock()
+          deadlineNanoseconds: deadline
         )
       },
       state: { deadline in
-        try log.recorderStateDuringAttempt(
-          deadlineNanoseconds: deadline,
-          clock: SystemOracleQuiescenceClock()
-        )
+        try admission.recorderState(log: log, deadlineNanoseconds: deadline)
       },
       poison: { deadline in
-        try log.poisonRecorder(
-          deadlineNanoseconds: deadline,
-          clock: SystemOracleQuiescenceClock()
-        )
+        try admission.poison(log: log, deadlineNanoseconds: deadline)
       },
-      failure: { try log.failRecorder() },
+      failure: { deadline in
+        try admission.fail(log: log, deadlineNanoseconds: deadline)
+      },
       beginAttempt: { deadline in
-        try log.beginRecordAttempt(
+        try admission.beginRecordAttempt(
           deadlineNanoseconds: deadline,
           clock: SystemOracleQuiescenceClock()
         )
@@ -87,10 +82,13 @@ public final class OracleRecorder: @unchecked Sendable {
   }
 
   public func record(_ event: OracleEvent) throws {
+    try record { event }
+  }
+
+  public func record(_ makeEvent: @Sendable () -> OracleEvent) throws {
     let start = clock.nowNanoseconds()
     let (deadline, overflow) = start.addingReportingOverflow(timeoutNanoseconds)
     guard !overflow else {
-      try failRecorder()
       throw OracleRecorderError.lockTimedOut
     }
     let attempt: OracleRecordAttempt?
@@ -99,21 +97,46 @@ public final class OracleRecorder: @unchecked Sendable {
     } catch let error as OracleRecorderError where error == .sealed {
       throw error
     } catch {
-      try failRecorder()
+      _ = try? publishFailureBounded(deadlineNanoseconds: deadline)
       throw error
     }
     defer { attempt?.finish() }
     do {
-      try recordAttempt(event, deadlineNanoseconds: deadline)
+      try recordAttempt(makeEvent(), deadlineNanoseconds: deadline)
       try attempt?.resolve()
     } catch let error as OracleRecorderError where error == .sealed {
       try attempt?.resolve()
       throw error
     } catch {
-      try failRecorder()
-      try attempt?.resolve()
+      do {
+        try publishFailureBounded(deadlineNanoseconds: deadline)
+        try attempt?.resolve()
+      } catch {
+        // The durable admission/incomplete-attempt evidence remains unresolved.
+      }
       throw error
     }
+  }
+
+  private func publishFailureBounded(deadlineNanoseconds deadline: UInt64) throws {
+    try requireBeforeDeadline(deadline)
+    let semaphore = DispatchSemaphore(value: 0)
+    let result = LockedFailureResult()
+    Thread.detachNewThread { [failRecorder] in
+      do {
+        try failRecorder(deadline)
+        result.store(.success(()))
+      } catch {
+        result.store(.failure(error))
+      }
+      semaphore.signal()
+    }
+    while semaphore.wait(timeout: .now()) != .success {
+      try requireBeforeDeadline(deadline)
+      clock.sleepForPoll()
+    }
+    try requireBeforeDeadline(deadline)
+    try result.get().get()
   }
 
   private func recordAttempt(_ event: OracleEvent, deadlineNanoseconds deadline: UInt64) throws {
@@ -167,6 +190,20 @@ public final class OracleRecorder: @unchecked Sendable {
   private func requireBeforeDeadline(_ deadlineNanoseconds: UInt64) throws {
     guard clock.nowNanoseconds() < deadlineNanoseconds else {
       throw OracleRecorderError.lockTimedOut
+    }
+  }
+}
+
+private final class LockedFailureResult: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: Result<Void, Error>?
+
+  func store(_ value: Result<Void, Error>) { lock.withLock { self.value = value } }
+
+  func get() throws -> Result<Void, Error> {
+    try lock.withLock {
+      guard let value else { throw OracleRecorderError.unavailable }
+      return value
     }
   }
 }

@@ -2,9 +2,17 @@
 import argparse
 import json
 from pathlib import Path
-import subprocess
 import sys
 
+from fileprovider_fixture_subprocess import (
+    BoundedCommandFailure,
+    CommandExited,
+    CommandOutputInvalidUTF8,
+    CommandOutputLimitExceeded,
+    CommandStartFailed,
+    CommandTimedOut,
+    run_bounded_text,
+)
 
 MAXIMUM_OUTPUT_BYTES = 64 * 1024
 
@@ -19,33 +27,39 @@ def main() -> int:
         return 1
     option = "-a" if arguments.action == "add" else "-r"
     try:
-        result = subprocess.run(
+        run_bounded_text(
             ["pluginkit", option, str(arguments.path.resolve(strict=True))],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=10,
-            check=False,
+            timeout_seconds=10,
+            maximum_output_bytes=MAXIMUM_OUTPUT_BYTES,
         )
-    except subprocess.TimeoutExpired:
+    except CommandTimedOut:
         print('{"status":"failed","reason":"pluginkit-command-timeout"}', file=sys.stderr)
         return 1
-    if len(result.stdout) > MAXIMUM_OUTPUT_BYTES:
+    except CommandOutputLimitExceeded:
         print('{"status":"failed","reason":"pluginkit-command-output-limit"}', file=sys.stderr)
         return 1
-    if result.returncode != 0:
+    except CommandOutputInvalidUTF8:
+        print('{"status":"failed","reason":"pluginkit-command-invalid-utf8"}', file=sys.stderr)
+        return 1
+    except CommandStartFailed:
+        print('{"status":"failed","reason":"pluginkit-command-unavailable"}', file=sys.stderr)
+        return 1
+    except CommandExited as error:
         print(
             json.dumps(
                 {
                     "status": "failed",
                     "reason": "pluginkit-command",
                     "action": arguments.action,
-                    "exit": result.returncode,
+                    "exit": error.returncode,
                 },
                 sort_keys=True,
             ),
             file=sys.stderr,
         )
+        return 1
+    except BoundedCommandFailure:
+        print('{"status":"failed","reason":"pluginkit-command-internal"}', file=sys.stderr)
         return 1
     print(json.dumps({"status": "completed", "action": arguments.action}, sort_keys=True))
     return 0

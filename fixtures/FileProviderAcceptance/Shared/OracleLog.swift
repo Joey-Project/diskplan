@@ -1,6 +1,11 @@
 import Darwin
 import Foundation
 
+enum OracleWindowWriteInjectedFailure: Error, Equatable {
+  case afterFileSync
+  case afterRenameBeforeDirectorySync
+}
+
 public struct OracleLog: Sendable {
   public let runDirectory: URL
 
@@ -40,6 +45,18 @@ public struct OracleLog: Sendable {
     guard attemptLock >= 0 else { throw makePOSIXError(code: errno) }
     defer { close(attemptLock) }
     try validateOwnerPrivateRegularFile(descriptor: attemptLock)
+    let admissions = openat(
+      directory,
+      "recorder-admissions.log",
+      O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+      0o600
+    )
+    guard admissions >= 0 else { throw makePOSIXError(code: errno) }
+    defer { close(admissions) }
+    try validateOwnerPrivateRegularFile(descriptor: admissions)
+    guard fsync(lock) == 0, fsync(attemptLock) == 0, fsync(admissions) == 0,
+      fsync(directory) == 0
+    else { throw makePOSIXError(code: errno) }
   }
 
   public func append(_ original: OracleEvent) throws {
@@ -70,7 +87,28 @@ public struct OracleLog: Sendable {
     deadlineNanoseconds: UInt64,
     clock: any OracleQuiescenceClock
   ) throws {
+    let directory = try openExistingRunDirectory(runDirectory)
+    defer { close(directory) }
+    try appendLocked(
+      original,
+      injecting: failure,
+      duringRecordAttempt: duringRecordAttempt,
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock
+    )
+  }
+
+  fileprivate func appendLocked(
+    _ original: OracleEvent,
+    injecting failure: OracleAppendInjectedFailure?,
+    duringRecordAttempt: Bool,
+    directory: Int32,
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws {
     try withRecorderLock(
+      directory: directory,
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
       timeout: .recorder
@@ -149,6 +187,21 @@ public struct OracleLog: Sendable {
     }
   }
 
+  fileprivate func recorderStateDuringAttempt(
+    directory: Int32,
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws -> OracleRecorderState {
+    try withRecorderLock(
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    ) {
+      try lockedRecorderState(directory: $0, includeIncompleteAttempts: false)
+    }
+  }
+
   func recorderState(
     deadlineNanoseconds: UInt64,
     clock: any OracleQuiescenceClock
@@ -157,8 +210,9 @@ public struct OracleLog: Sendable {
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
       timeout: .recorder
-    ) { _ in
+    ) { directory in
       try recorderStateDuringAttempt(
+        directory: directory,
         deadlineNanoseconds: deadlineNanoseconds,
         clock: clock
       )
@@ -170,9 +224,66 @@ public struct OracleLog: Sendable {
   }
 
   func failRecorder() throws {
+    let clock = SystemOracleQuiescenceClock()
+    let (deadline, overflow) = clock.nowNanoseconds().addingReportingOverflow(30_000_000_000)
+    guard !overflow else { throw OracleRecorderError.lockTimedOut }
+    try failRecorder(deadlineNanoseconds: deadline, clock: clock)
+  }
+
+  func failRecorder(
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws {
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    )
     let directory = try openExistingRunDirectory(runDirectory)
     defer { close(directory) }
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    )
     try createRecorderMarker("recorder-failed", directory: directory)
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    )
+  }
+
+  fileprivate func failRecorder(
+    directory: Int32,
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws {
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    )
+    try createRecorderMarker("recorder-failed", directory: directory)
+    try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    )
+  }
+
+  func makeAdmissionChannel(
+    injectAttemptMarkerFailure: Bool = false,
+    onAdmissionWitnessed: @escaping @Sendable () -> Void = {}
+  ) throws
+    -> OracleAdmissionChannel
+  {
+    try OracleAdmissionChannel(
+      log: self,
+      injectAttemptMarkerFailure: injectAttemptMarkerFailure,
+      onAdmissionWitnessed: onAdmissionWitnessed
+    )
   }
 
   func beginRecordAttempt(
@@ -223,10 +334,38 @@ public struct OracleLog: Sendable {
     ) { try createRecorderMarker("recorder-poisoned", directory: $0) }
   }
 
+  fileprivate func poisonRecorder(
+    directory: Int32,
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws {
+    try withRecorderLock(
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    ) { try createRecorderMarker("recorder-poisoned", directory: $0) }
+  }
+
   public func sealRecorder() throws {
     try withSynchronizedRecorder { directory in
-      try createRecorderMarker("recorder-sealing", directory: directory)
-      try createRecorderMarker("recorder-sealed", directory: directory)
+      let sealing = try recorderMarkerExists("recorder-sealing", directory: directory)
+      let sealed = try recorderMarkerExists("recorder-sealed", directory: directory)
+      guard !sealed || sealing else { throw OracleRecorderError.poisoned }
+      if !sealing {
+        try createRecorderMarker("recorder-sealing", directory: directory)
+      }
+      var admissions = try recorderAdmissionState(directory: directory)
+      if !admissions.hasCutoff {
+        try appendAdmissionCutoff(directory: directory)
+        admissions = try recorderAdmissionState(directory: directory)
+      }
+      guard !admissions.poisonedBeforeCutoff else {
+        throw OracleRecorderError.poisoned
+      }
+      if !sealed {
+        try createRecorderMarker("recorder-sealed", directory: directory)
+      }
     }
   }
 
@@ -243,9 +382,7 @@ public struct OracleLog: Sendable {
       return []
     }
     do {
-      return try data.split(separator: 0x0a).map {
-        try JSONDecoder().decode(OracleEvent.self, from: $0)
-      }
+      return try data.split(separator: 0x0a).map(decodeOracleEventStrict)
     } catch {
       throw FixtureControlReadError.mismatch(.events, .malformed)
     }
@@ -257,7 +394,7 @@ public struct OracleLog: Sendable {
         throw try recorderError(directory: directory)
       }
       return try OracleSealedSnapshot(
-        window: window(),
+        window: lockedWindow(directory: directory),
         events: lockedEvents(directory: directory)
       )
     }
@@ -265,16 +402,15 @@ public struct OracleLog: Sendable {
 
   public func writeWindow(_ window: OracleWindow) throws {
     try prepare()
-    let destination = runDirectory.appendingPathComponent("window.json")
-    let temporary = runDirectory.appendingPathComponent("window.json.tmp-\(UUID().uuidString)")
-    try secureCreate(JSONEncoder().encode(window), at: temporary)
-    guard rename(temporary.path, destination.path) == 0 else {
-      throw makePOSIXError(code: errno)
-    }
+    let directory = try openExistingRunDirectory(runDirectory)
+    defer { close(directory) }
+    try writeWindow(window, directory: directory)
   }
 
   public func window() throws -> OracleWindow {
-    try SecureFixtureStorage.readWindow(runDirectory: runDirectory)
+    let directory = try openExistingRunDirectory(runDirectory)
+    defer { close(directory) }
+    return try lockedWindow(directory: directory)
   }
 
   public func closeWindowAfterQuiescence(
@@ -292,18 +428,26 @@ public struct OracleLog: Sendable {
     quietMilliseconds: Int,
     timeoutMilliseconds: Int,
     clock: any OracleQuiescenceClock,
-    onFinalSnapshotLocked: @Sendable () -> Void = {}
+    onFinalSnapshotLocked: @Sendable () -> Void = {},
+    windowWriteFailure: OracleWindowWriteInjectedFailure? = nil
   ) throws -> OracleQuiescence {
     guard quietMilliseconds >= 50, quietMilliseconds <= 5_000,
       timeoutMilliseconds >= quietMilliseconds, timeoutMilliseconds <= 30_000
     else { throw OracleQuiescenceError.invalidBounds }
-    let openedWindow = try window()
+    let directory = try openExistingRunDirectory(runDirectory)
+    defer { close(directory) }
+    try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
+    let openedWindow = try lockedWindow(directory: directory)
     let start = clock.nowNanoseconds()
     let (deadline, overflow) = start.addingReportingOverflow(
       UInt64(timeoutMilliseconds) * 1_000_000
     )
     guard !overflow else { throw OracleQuiescenceError.invalidBounds }
-    var fingerprint = try eventFingerprint(deadlineNanoseconds: deadline, clock: clock)
+    var fingerprint = try eventFingerprint(
+      directory: directory,
+      deadlineNanoseconds: deadline,
+      clock: clock
+    )
     var quietStart = clock.nowNanoseconds()
     guard quietStart - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
       throw OracleQuiescenceError.timedOut
@@ -312,7 +456,11 @@ public struct OracleLog: Sendable {
       guard clock.nowNanoseconds() - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
         throw OracleQuiescenceError.timedOut
       }
-      let current = try eventFingerprint(deadlineNanoseconds: deadline, clock: clock)
+      let current = try eventFingerprint(
+        directory: directory,
+        deadlineNanoseconds: deadline,
+        clock: clock
+      )
       let now = clock.nowNanoseconds()
       guard now - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
         throw OracleQuiescenceError.timedOut
@@ -323,13 +471,15 @@ public struct OracleLog: Sendable {
       }
       if now - quietStart >= UInt64(quietMilliseconds) * 1_000_000 {
         switch try sealWindowSnapshotIfQuiet(
+          directory: directory,
           openedWindow: openedWindow,
           expectedFingerprint: current,
           quietStartNanoseconds: quietStart,
           quietMilliseconds: quietMilliseconds,
           deadlineNanoseconds: deadline,
           clock: clock,
-          onFinalSnapshotLocked: onFinalSnapshotLocked
+          onFinalSnapshotLocked: onFinalSnapshotLocked,
+          windowWriteFailure: windowWriteFailure
         ) {
         case .changed(let changed, let changedAt):
           fingerprint = changed
@@ -345,15 +495,18 @@ public struct OracleLog: Sendable {
   }
 
   private func sealWindowSnapshotIfQuiet(
+    directory: Int32,
     openedWindow: OracleWindow,
     expectedFingerprint: OracleEventFingerprint,
     quietStartNanoseconds: UInt64,
     quietMilliseconds: Int,
     deadlineNanoseconds: UInt64,
     clock: any OracleQuiescenceClock,
-    onFinalSnapshotLocked: @Sendable () -> Void
+    onFinalSnapshotLocked: @Sendable () -> Void,
+    windowWriteFailure: OracleWindowWriteInjectedFailure?
   ) throws -> WindowSealAttempt {
     let prepared = try withRecorderLock(
+      directory: directory,
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
       timeout: .quiescence
@@ -387,19 +540,23 @@ public struct OracleLog: Sendable {
       preparedFingerprint = fingerprint
     }
     return try withAttemptGate(
+      directory: directory,
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
       timeout: .quiescence
     ) { _ in
       try withRecorderLock(
+        directory: directory,
         deadlineNanoseconds: deadlineNanoseconds,
         clock: clock,
         timeout: .quiescence
       ) { directory in
+        try appendAdmissionCutoff(directory: directory)
         guard try recorderMarkerExists("recorder-sealing", directory: directory),
           try !recorderMarkerExists("recorder-failed", directory: directory),
           try !recorderMarkerExists("recorder-poisoned", directory: directory),
           try !recorderHasIncompleteAttempts(directory: directory),
+          try !recorderHasUnresolvedAdmissions(directory: directory),
           try !recorderMarkerExists("recorder-sealed", directory: directory)
         else { throw OracleRecorderError.poisoned }
         let values = try lockedEvents(directory: directory)
@@ -418,7 +575,9 @@ public struct OracleLog: Sendable {
             quietMilliseconds: quietMilliseconds,
             eventCount: current.count,
             lastSequence: current.lastSequence
-          )
+          ),
+          directory: directory,
+          injecting: windowWriteFailure
         )
         try createRecorderMarker("recorder-sealed", directory: directory)
         return WindowSealAttempt.sealed(
@@ -433,15 +592,18 @@ public struct OracleLog: Sendable {
   }
 
   private func eventFingerprint(
+    directory: Int32,
     deadlineNanoseconds: UInt64,
     clock: any OracleQuiescenceClock
   ) throws -> OracleEventFingerprint {
     try withAttemptGate(
+      directory: directory,
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
       timeout: .quiescence
     ) { _ in
       try withRecorderLock(
+        directory: directory,
         deadlineNanoseconds: deadlineNanoseconds,
         clock: clock,
         timeout: .quiescence
@@ -478,12 +640,69 @@ public struct OracleLog: Sendable {
     }
     let data = try readAll(descriptor: descriptor, count: Int(metadata.st_size))
     do {
-      return try data.split(separator: 0x0a).map {
-        try JSONDecoder().decode(OracleEvent.self, from: $0)
-      }
+      return try data.split(separator: 0x0a).map(decodeOracleEventStrict)
     } catch {
       throw FixtureControlReadError.mismatch(.events, .malformed)
     }
+  }
+
+  private func lockedWindow(directory: Int32) throws -> OracleWindow {
+    let descriptor = openat(
+      directory,
+      "window.json",
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+    )
+    guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
+    defer { close(descriptor) }
+    try validateOwnerPrivateRegularFile(descriptor: descriptor)
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
+    guard metadata.st_size >= 0, metadata.st_size <= SecureFixtureStorage.maximumControlBytes else {
+      throw FixtureControlReadError.mismatch(.window, .sizeLimit)
+    }
+    let data = try readAll(descriptor: descriptor, count: Int(metadata.st_size))
+    do {
+      let window = try JSONDecoder().decode(OracleWindow.self, from: data)
+      try window.validate()
+      return window
+    } catch let error as FixtureControlReadError {
+      throw error
+    } catch {
+      throw FixtureControlReadError.mismatch(.window, .malformed)
+    }
+  }
+
+  private func writeWindow(
+    _ window: OracleWindow,
+    directory: Int32,
+    injecting failure: OracleWindowWriteInjectedFailure? = nil
+  ) throws {
+    let temporary = "window.json.tmp-\(UUID().uuidString.lowercased())"
+    let descriptor = openat(
+      directory,
+      temporary,
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      0o600
+    )
+    guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
+    var shouldRemove = true
+    defer {
+      close(descriptor)
+      if shouldRemove { unlinkat(directory, temporary, 0) }
+    }
+    try validateOwnerPrivateRegularFile(descriptor: descriptor)
+    try writeAll(JSONEncoder().encode(window), descriptor: descriptor)
+    guard fsync(descriptor) == 0 else { throw makePOSIXError(code: errno) }
+    if failure == .afterFileSync { throw OracleWindowWriteInjectedFailure.afterFileSync }
+    guard renameat(directory, temporary, directory, "window.json") == 0 else {
+      throw makePOSIXError(code: errno)
+    }
+    shouldRemove = false
+    if failure == .afterRenameBeforeDirectorySync {
+      throw OracleWindowWriteInjectedFailure.afterRenameBeforeDirectorySync
+    }
+    guard fsync(directory) == 0 else { throw makePOSIXError(code: errno) }
+    try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
   }
 }
 
@@ -524,6 +743,8 @@ final class OracleRecordAttempt: @unchecked Sendable {
   private var descriptor: Int32?
   private var runDirectoryDescriptor: Int32?
   private var markerName: String?
+  private var resolveAction: (() throws -> Void)?
+  private var finishAction: (() -> Void)?
 
   fileprivate init(
     descriptor: Int32,
@@ -535,8 +756,21 @@ final class OracleRecordAttempt: @unchecked Sendable {
     self.markerName = markerName
   }
 
+  fileprivate init(
+    resolve: @escaping () throws -> Void,
+    finish: @escaping () -> Void
+  ) {
+    resolveAction = resolve
+    finishAction = finish
+  }
+
   func resolve() throws {
     try lock.withLock {
+      if let resolveAction {
+        try resolveAction()
+        self.resolveAction = nil
+        return
+      }
       guard let directory = runDirectoryDescriptor, let markerName else { return }
       guard unlinkat(directory, markerName, 0) == 0 else { throw makePOSIXError(code: errno) }
       self.markerName = nil
@@ -546,6 +780,11 @@ final class OracleRecordAttempt: @unchecked Sendable {
 
   func finish() {
     lock.withLock {
+      if let finishAction {
+        self.finishAction = nil
+        finishAction()
+        return
+      }
       guard let descriptor else { return }
       flock(descriptor, LOCK_UN)
       close(descriptor)
@@ -558,6 +797,188 @@ final class OracleRecordAttempt: @unchecked Sendable {
   }
 
   deinit { finish() }
+}
+
+final class OracleAdmissionChannel: @unchecked Sendable {
+  private let localLock = NSLock()
+  private let runDirectoryURL: URL
+  private let directory: Int32
+  private let attemptLock: Int32
+  private let admissions: Int32
+  private let injectAttemptMarkerFailure: Bool
+  private let onAdmissionWitnessed: @Sendable () -> Void
+
+  fileprivate init(
+    log: OracleLog,
+    injectAttemptMarkerFailure: Bool,
+    onAdmissionWitnessed: @escaping @Sendable () -> Void
+  ) throws {
+    runDirectoryURL = log.runDirectory
+    self.injectAttemptMarkerFailure = injectAttemptMarkerFailure
+    self.onAdmissionWitnessed = onAdmissionWitnessed
+    directory = try openExistingRunDirectory(log.runDirectory)
+    do {
+      attemptLock = try openAttemptLock(directory: directory)
+      admissions = openat(
+        directory,
+        "recorder-admissions.log",
+        O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+      )
+      guard admissions >= 0 else { throw makePOSIXError(code: errno) }
+      try validateOwnerPrivateRegularFile(descriptor: admissions)
+    } catch {
+      close(directory)
+      throw error
+    }
+  }
+
+  func append(log: OracleLog, _ event: OracleEvent, deadlineNanoseconds: UInt64) throws {
+    try requireCanonicalRunDirectoryIdentity(runDirectoryURL, descriptor: directory)
+    try log.appendLocked(
+      event,
+      injecting: nil,
+      duringRecordAttempt: true,
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: SystemOracleQuiescenceClock()
+    )
+  }
+
+  func recorderState(log: OracleLog, deadlineNanoseconds: UInt64) throws -> OracleRecorderState {
+    try requireCanonicalRunDirectoryIdentity(runDirectoryURL, descriptor: directory)
+    return try log.recorderStateDuringAttempt(
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: SystemOracleQuiescenceClock()
+    )
+  }
+
+  func poison(log: OracleLog, deadlineNanoseconds: UInt64) throws {
+    try requireCanonicalRunDirectoryIdentity(runDirectoryURL, descriptor: directory)
+    try log.poisonRecorder(
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: SystemOracleQuiescenceClock()
+    )
+  }
+
+  func fail(log: OracleLog, deadlineNanoseconds: UInt64) throws {
+    try requireCanonicalRunDirectoryIdentity(runDirectoryURL, descriptor: directory)
+    try log.failRecorder(
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: SystemOracleQuiescenceClock()
+    )
+  }
+
+  func beginRecordAttempt(
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws -> OracleRecordAttempt {
+    let token = UUID().uuidString.lowercased()
+    try appendAdmission("begin \(token)\n", deadlineNanoseconds: deadlineNanoseconds, clock: clock)
+    onAdmissionWitnessed()
+    try acquireLocalLock(deadlineNanoseconds: deadlineNanoseconds, clock: clock)
+    var ownsLocalLock = true
+    do {
+      try acquireBoundedLock(
+        attemptLock,
+        operation: LOCK_SH,
+        deadlineNanoseconds: deadlineNanoseconds,
+        clock: clock,
+        timeout: .recorder
+      )
+      var ownsAttemptLock = true
+      do {
+        if try recorderMarkerExists("recorder-sealing", directory: directory)
+          || recorderMarkerExists("recorder-sealed", directory: directory)
+        {
+          throw OracleRecorderError.sealed
+        }
+        if injectAttemptMarkerFailure { throw POSIXError(.EMFILE) }
+        let markerName = try createIncompleteAttemptMarker(directory: directory)
+        let attempt = OracleRecordAttempt(
+          resolve: { [self] in
+            try requireCanonicalRunDirectoryIdentity(runDirectoryURL, descriptor: directory)
+            guard unlinkat(directory, markerName, 0) == 0 else {
+              throw makePOSIXError(code: errno)
+            }
+            guard fsync(directory) == 0 else { throw makePOSIXError(code: errno) }
+            try appendAdmission(
+              "resolved \(token)\n",
+              deadlineNanoseconds: deadlineNanoseconds,
+              clock: clock
+            )
+          },
+          finish: { [self] in
+            flock(attemptLock, LOCK_UN)
+            localLock.unlock()
+          }
+        )
+        ownsAttemptLock = false
+        ownsLocalLock = false
+        return attempt
+      } catch {
+        if ownsAttemptLock { flock(attemptLock, LOCK_UN) }
+        throw error
+      }
+    } catch {
+      if ownsLocalLock { localLock.unlock() }
+      throw error
+    }
+  }
+
+  private func appendAdmission(
+    _ line: String,
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws {
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    )
+    try writeAll(Data(line.utf8), descriptor: admissions)
+    guard fsync(admissions) == 0 else { throw makePOSIXError(code: errno) }
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    )
+  }
+
+  private func acquireLocalLock(
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws {
+    while true {
+      try requireLockDeadline(
+        deadlineNanoseconds: deadlineNanoseconds,
+        clock: clock,
+        timeout: .recorder
+      )
+      if localLock.try() {
+        do {
+          try requireLockDeadline(
+            deadlineNanoseconds: deadlineNanoseconds,
+            clock: clock,
+            timeout: .recorder
+          )
+          return
+        } catch {
+          localLock.unlock()
+          throw error
+        }
+      }
+      clock.sleepForPoll()
+    }
+  }
+
+  deinit {
+    close(admissions)
+    close(attemptLock)
+    close(directory)
+  }
 }
 
 private func makeOwnerPrivateDirectory(_ url: URL) throws {
@@ -579,6 +1000,17 @@ private func validateOwnerPrivateRegularFile(descriptor: Int32) throws {
   var metadata = stat()
   guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
   try validateOwnerPrivateRegularFile(metadata)
+  try requireNoExtendedACL(descriptor: descriptor)
+}
+
+private func requireNoExtendedACL(descriptor: Int32) throws {
+  errno = 0
+  guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+    if errno == ENOENT { return }
+    throw makePOSIXError(code: errno == 0 ? EIO : errno)
+  }
+  acl_free(UnsafeMutableRawPointer(acl))
+  throw FixtureContractError.unsafePath
 }
 
 private func openExistingRunDirectory(_ url: URL) throws -> Int32 {
@@ -599,7 +1031,25 @@ private func openExistingRunDirectory(_ url: URL) throws -> Int32 {
     close(descriptor)
     throw FixtureContractError.unsafePath
   }
+  do {
+    try requireNoExtendedACL(descriptor: descriptor)
+  } catch {
+    close(descriptor)
+    throw error
+  }
   return descriptor
+}
+
+private func requireCanonicalRunDirectoryIdentity(_ url: URL, descriptor: Int32) throws {
+  try requireNoExtendedACL(descriptor: descriptor)
+  var held = stat()
+  guard fstat(descriptor, &held) == 0 else { throw makePOSIXError(code: errno) }
+  var canonical = stat()
+  guard lstat(url.path, &canonical) == 0 else { throw makePOSIXError(code: errno) }
+  guard held.st_dev == canonical.st_dev, held.st_ino == canonical.st_ino,
+    canonical.st_uid == geteuid(), canonical.st_mode & S_IFMT == S_IFDIR,
+    canonical.st_mode & 0o077 == 0
+  else { throw FixtureContractError.unsafePath }
 }
 
 private func openAttemptLock(directory: Int32) throws -> Int32 {
@@ -629,8 +1079,9 @@ extension OracleLog {
       deadlineNanoseconds: deadline,
       clock: clock,
       timeout: .recorder
-    ) { _ in
+    ) { directory in
       try withRecorderLock(
+        directory: directory,
         deadlineNanoseconds: deadline,
         clock: clock,
         timeout: .recorder,
@@ -647,6 +1098,23 @@ extension OracleLog {
   ) throws -> Result {
     let directory = try openExistingRunDirectory(runDirectory)
     defer { close(directory) }
+    return try withAttemptGate(
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: timeout,
+      body
+    )
+  }
+
+  fileprivate func withAttemptGate<Result>(
+    directory: Int32,
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock,
+    timeout: RecorderLockTimeout,
+    _ body: (Int32) throws -> Result
+  ) throws -> Result {
+    try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
     let descriptor = try openAttemptLock(directory: directory)
     defer { close(descriptor) }
     try acquireBoundedLock(
@@ -658,6 +1126,7 @@ extension OracleLog {
     )
     defer { flock(descriptor, LOCK_UN) }
     let result = try body(directory)
+    try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
     try requireLockDeadline(
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
@@ -688,6 +1157,23 @@ extension OracleLog {
   ) throws -> Result {
     let directory = try openExistingRunDirectory(runDirectory)
     defer { close(directory) }
+    return try withRecorderLock(
+      directory: directory,
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: timeout,
+      body
+    )
+  }
+
+  fileprivate func withRecorderLock<Result>(
+    directory: Int32,
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock,
+    timeout: RecorderLockTimeout,
+    _ body: (Int32) throws -> Result
+  ) throws -> Result {
+    try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
     let lock = openat(directory, "recorder.lock", O_RDWR | O_CLOEXEC | O_NOFOLLOW)
     guard lock >= 0 else { throw makePOSIXError(code: errno) }
     defer { close(lock) }
@@ -700,6 +1186,7 @@ extension OracleLog {
     )
     defer { flock(lock, LOCK_UN) }
     let result = try body(directory)
+    try requireCanonicalRunDirectoryIdentity(runDirectory, descriptor: directory)
     try requireLockDeadline(
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
@@ -765,12 +1252,105 @@ private func lockedRecorderState(
 ) throws -> OracleRecorderState {
   if try recorderMarkerExists("recorder-failed", directory: directory) { return .poisoned }
   if try recorderMarkerExists("recorder-poisoned", directory: directory) { return .poisoned }
-  if includeIncompleteAttempts, try recorderHasIncompleteAttempts(directory: directory) {
+  if includeIncompleteAttempts,
+    try recorderHasIncompleteAttempts(directory: directory)
+      || recorderHasUnresolvedAdmissions(directory: directory)
+  {
     return .poisoned
   }
   if try recorderMarkerExists("recorder-sealed", directory: directory) { return .sealed }
   if try recorderMarkerExists("recorder-sealing", directory: directory) { return .poisoned }
   return .healthy
+}
+
+private func recorderHasUnresolvedAdmissions(directory: Int32) throws -> Bool {
+  try recorderAdmissionState(directory: directory).poisonedBeforeCutoff
+}
+
+private struct RecorderAdmissionState {
+  let hasCutoff: Bool
+  let poisonedBeforeCutoff: Bool
+}
+
+private func recorderAdmissionState(directory: Int32) throws -> RecorderAdmissionState {
+  let descriptor = openat(
+    directory,
+    "recorder-admissions.log",
+    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+  )
+  guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
+  defer { close(descriptor) }
+  try validateOwnerPrivateRegularFile(descriptor: descriptor)
+  var metadata = stat()
+  guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
+  guard metadata.st_size >= 0, metadata.st_size <= FixtureContract.maximumOracleBytes else {
+    throw FixtureContractError.oracleTooLarge
+  }
+  let data = try readAll(descriptor: descriptor, count: Int(metadata.st_size))
+  guard data.last == nil || data.last == 0x0a else {
+    throw FixtureControlReadError.mismatch(.events, .malformed)
+  }
+  var unresolved = Set<String>()
+  var unresolvedAfterCutoff = Set<String>()
+  var cutoffSeen = false
+  var poisonedBeforeCutoff = false
+  for rawLine in data.split(separator: 0x0a) {
+    guard let line = String(data: rawLine, encoding: .utf8) else {
+      throw FixtureControlReadError.mismatch(.events, .malformed)
+    }
+    let parts = line.split(separator: " ", omittingEmptySubsequences: false)
+    guard parts.count == 2, UUID(uuidString: String(parts[1])) != nil else {
+      throw FixtureControlReadError.mismatch(.events, .malformed)
+    }
+    let token = String(parts[1]).lowercased()
+    switch parts[0] {
+    case "begin":
+      let inserted =
+        cutoffSeen
+        ? unresolvedAfterCutoff.insert(token).inserted
+        : unresolved.insert(token).inserted
+      guard inserted else {
+        throw FixtureControlReadError.mismatch(.events, .malformed)
+      }
+    case "resolved":
+      let removed =
+        cutoffSeen
+        ? unresolvedAfterCutoff.remove(token) != nil
+        : unresolved.remove(token) != nil
+      guard removed else {
+        throw FixtureControlReadError.mismatch(.events, .malformed)
+      }
+    case "cutoff":
+      guard !cutoffSeen else {
+        throw FixtureControlReadError.mismatch(.events, .malformed)
+      }
+      cutoffSeen = true
+      poisonedBeforeCutoff = !unresolved.isEmpty
+      unresolved.removeAll()
+    default:
+      throw FixtureControlReadError.mismatch(.events, .malformed)
+    }
+  }
+  return RecorderAdmissionState(
+    hasCutoff: cutoffSeen,
+    poisonedBeforeCutoff: poisonedBeforeCutoff || (!cutoffSeen && !unresolved.isEmpty)
+  )
+}
+
+private func appendAdmissionCutoff(directory: Int32) throws {
+  let descriptor = openat(
+    directory,
+    "recorder-admissions.log",
+    O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+  )
+  guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
+  defer { close(descriptor) }
+  try validateOwnerPrivateRegularFile(descriptor: descriptor)
+  try writeAll(
+    Data("cutoff \(UUID().uuidString.lowercased())\n".utf8),
+    descriptor: descriptor
+  )
+  guard fsync(descriptor) == 0 else { throw makePOSIXError(code: errno) }
 }
 
 private let incompleteAttemptPrefix = "recorder-incomplete-attempt-"
@@ -939,9 +1519,162 @@ private func readAll(descriptor: Int32, count: Int) throws -> Data {
 
 private func nextSequence(_ data: Data) throws -> UInt64 {
   guard let last = data.split(separator: 0x0a).last else { return 1 }
-  let event = try JSONDecoder().decode(OracleEvent.self, from: last)
+  let event = try decodeOracleEventStrict(last)
   guard event.sequence < UInt64.max else { throw FixtureContractError.oracleTooLarge }
   return event.sequence + 1
+}
+
+private let oracleEventJSONKeys: Set<String> = [
+  "sequence",
+  "runID",
+  "domainIdentifier",
+  "itemIdentifier",
+  "kind",
+  "processID",
+  "monotonicNanoseconds",
+  "requestFlags",
+]
+
+private func decodeOracleEventStrict(_ data: some DataProtocol) throws -> OracleEvent {
+  let value = Data(data)
+  var scanner = StrictJSONObjectKeyScanner(bytes: Array(value))
+  let keys = try scanner.topLevelKeys()
+  guard keys.count == oracleEventJSONKeys.count, Set(keys) == oracleEventJSONKeys else {
+    throw FixtureControlReadError.mismatch(.events, .malformed)
+  }
+  return try JSONDecoder().decode(OracleEvent.self, from: value)
+}
+
+private struct StrictJSONObjectKeyScanner {
+  private static let maximumNestingDepth = 64
+  let bytes: [UInt8]
+  var index = 0
+
+  mutating func topLevelKeys() throws -> [String] {
+    skipWhitespace()
+    try consume(0x7b)
+    skipWhitespace()
+    var keys: [String] = []
+    var seen = Set<String>()
+    if consumeIf(0x7d) {
+      skipWhitespace()
+      try requireEnd()
+      return keys
+    }
+    while true {
+      let key = try string()
+      guard seen.insert(key).inserted else { throw malformed() }
+      keys.append(key)
+      skipWhitespace()
+      try consume(0x3a)
+      skipWhitespace()
+      try skipValue(depth: 0)
+      skipWhitespace()
+      if consumeIf(0x7d) { break }
+      try consume(0x2c)
+      skipWhitespace()
+    }
+    skipWhitespace()
+    try requireEnd()
+    return keys
+  }
+
+  private mutating func skipValue(depth: Int) throws {
+    guard index < bytes.count, depth <= Self.maximumNestingDepth else { throw malformed() }
+    switch bytes[index] {
+    case 0x22:
+      _ = try string()
+    case 0x7b:
+      try skipObject(depth: depth + 1)
+    case 0x5b:
+      try skipArray(depth: depth + 1)
+    default:
+      let start = index
+      while index < bytes.count, ![0x20, 0x09, 0x0a, 0x0d, 0x2c, 0x5d, 0x7d].contains(bytes[index])
+      {
+        index += 1
+      }
+      guard index > start else { throw malformed() }
+    }
+  }
+
+  private mutating func skipObject(depth: Int) throws {
+    guard depth <= Self.maximumNestingDepth else { throw malformed() }
+    try consume(0x7b)
+    skipWhitespace()
+    if consumeIf(0x7d) { return }
+    while true {
+      _ = try string()
+      skipWhitespace()
+      try consume(0x3a)
+      skipWhitespace()
+      try skipValue(depth: depth)
+      skipWhitespace()
+      if consumeIf(0x7d) { return }
+      try consume(0x2c)
+      skipWhitespace()
+    }
+  }
+
+  private mutating func skipArray(depth: Int) throws {
+    guard depth <= Self.maximumNestingDepth else { throw malformed() }
+    try consume(0x5b)
+    skipWhitespace()
+    if consumeIf(0x5d) { return }
+    while true {
+      try skipValue(depth: depth)
+      skipWhitespace()
+      if consumeIf(0x5d) { return }
+      try consume(0x2c)
+      skipWhitespace()
+    }
+  }
+
+  private mutating func string() throws -> String {
+    let start = index
+    try consume(0x22)
+    var escaped = false
+    while index < bytes.count {
+      let byte = bytes[index]
+      index += 1
+      if escaped {
+        escaped = false
+        continue
+      }
+      if byte == 0x5c {
+        escaped = true
+      } else if byte == 0x22 {
+        return try JSONDecoder().decode(String.self, from: Data(bytes[start..<index]))
+      } else if byte < 0x20 {
+        throw malformed()
+      }
+    }
+    throw malformed()
+  }
+
+  private mutating func skipWhitespace() {
+    while index < bytes.count, [0x20, 0x09, 0x0a, 0x0d].contains(bytes[index]) {
+      index += 1
+    }
+  }
+
+  private mutating func consume(_ expected: UInt8) throws {
+    guard consumeIf(expected) else { throw malformed() }
+  }
+
+  private mutating func consumeIf(_ expected: UInt8) -> Bool {
+    guard index < bytes.count, bytes[index] == expected else { return false }
+    index += 1
+    return true
+  }
+
+  private func requireEnd() throws {
+    guard index == bytes.count else { throw malformed() }
+  }
+
+  private func malformed() -> FixtureControlReadError {
+    .mismatch(.events, .malformed)
+  }
 }
 
 private func makePOSIXError(code: Int32) -> POSIXError {

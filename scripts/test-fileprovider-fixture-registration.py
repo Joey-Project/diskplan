@@ -8,6 +8,7 @@ import unittest
 
 sys.dont_write_bytecode = True
 MODULE_PATH = Path(__file__).with_name("fileprovider-fixture-registration.py")
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("fileprovider_fixture_registration", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -15,6 +16,21 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RegistrationParserTests(unittest.TestCase):
+    def test_absence_requires_repeated_observations_spanning_quiet_interval(self) -> None:
+        evidence = MODULE.StableAbsenceEvidence()
+        self.assertFalse(evidence.observe(True, 10.0))
+        self.assertFalse(evidence.observe(True, 10.5))
+        self.assertTrue(evidence.observe(True, 11.0))
+
+    def test_late_presence_resets_prior_absence_observations(self) -> None:
+        evidence = MODULE.StableAbsenceEvidence()
+        self.assertFalse(evidence.observe(True, 10.0))
+        self.assertFalse(evidence.observe(True, 10.5))
+        self.assertFalse(evidence.observe(False, 10.75))
+        self.assertFalse(evidence.observe(True, 11.0))
+        self.assertFalse(evidence.observe(True, 11.5))
+        self.assertTrue(evidence.observe(True, 12.0))
+
     def test_extracts_only_exact_elected_bundle_block(self) -> None:
         output = """
         -    com.example.fixture(1.0)
@@ -116,11 +132,6 @@ class RegistrationParserTests(unittest.TestCase):
         output = "Identifier = com.example.fixture\nPath = /current/Fixture.appex\n"
         with self.assertRaisesRegex(ValueError, "malformed pluginkit text"):
             MODULE.registered_paths(output, "com.example.fixture")
-
-    def test_rejects_non_utf8_query_output(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not valid UTF-8"):
-            MODULE.decode_registration_output(b"+ com.example.fixture\xff")
-
 
 if __name__ == "__main__":
     unittest.main()

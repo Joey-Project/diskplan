@@ -25,6 +25,20 @@ public enum FixtureContract {
     .materializedItemsDidChange,
     .sealedDirectoryEnumeration,
   ]
+  public static let enumeratorEventKinds: Set<OracleEventKind> = [
+    .enumeratorAcquisition,
+    .rootEnumeration,
+    .workingSetEnumeration,
+    .sealedDirectoryEnumeration,
+    .changeEnumeration,
+    .syncAnchor,
+  ]
+
+  public static func isForbiddenEvent(_ event: OracleEvent) -> Bool {
+    if forbiddenEventKinds.contains(event.kind) { return true }
+    return event.itemIdentifier == sealedDirectoryIdentifier
+      && enumeratorEventKinds.contains(event.kind)
+  }
 
   public static func domainIdentifier(runID: UUID) -> String {
     domainPrefix + runID.uuidString.lowercased()
@@ -116,6 +130,32 @@ public struct OracleSealedSnapshot: Sendable {
     self.window = window
     self.events = events
   }
+
+  public func validate(runID: UUID, domainIdentifier: String) throws {
+    try window.validate()
+    guard window.endNanoseconds != nil,
+      window.eventCount == events.count,
+      window.lastSequence == UInt64(events.count)
+    else { throw OracleAcceptanceError.windowMismatch }
+
+    for (index, event) in events.enumerated() {
+      try event.validate(
+        expectedRunID: runID,
+        expectedDomainIdentifier: domainIdentifier,
+        expectedSequence: UInt64(index + 1)
+      )
+      guard window.contains(event) else {
+        throw OracleAcceptanceError.malformedEvent(sequence: event.sequence)
+      }
+    }
+  }
+}
+
+public enum OracleAcceptanceError: Error, Equatable, Sendable {
+  case windowMismatch
+  case identityMismatch(sequence: UInt64)
+  case sequenceMismatch(expected: UInt64, actual: UInt64)
+  case malformedEvent(sequence: UInt64)
 }
 
 public struct FixtureManifest: Codable, Equatable, Sendable {
@@ -203,6 +243,7 @@ public struct FixtureReadyState: Codable, Equatable, Sendable {
 
 public enum OracleEventKind: String, Codable, CaseIterable, Sendable {
   case itemMetadata = "item_metadata"
+  case enumeratorAcquisition = "enumerator_acquisition"
   case rootEnumeration = "root_enumeration"
   case workingSetEnumeration = "working_set_enumeration"
   case sealedDirectoryEnumeration = "sealed_directory_enumeration"
@@ -243,6 +284,32 @@ public struct OracleEvent: Codable, Equatable, Sendable {
     self.processID = processID
     self.monotonicNanoseconds = monotonicNanoseconds
     self.requestFlags = requestFlags.sorted()
+  }
+
+  public func validate(
+    expectedRunID: UUID,
+    expectedDomainIdentifier: String,
+    expectedSequence: UInt64
+  ) throws {
+    guard sequence == expectedSequence else {
+      throw OracleAcceptanceError.sequenceMismatch(
+        expected: expectedSequence,
+        actual: sequence
+      )
+    }
+    guard runID == expectedRunID, domainIdentifier == expectedDomainIdentifier else {
+      throw OracleAcceptanceError.identityMismatch(sequence: sequence)
+    }
+    guard !itemIdentifier.isEmpty,
+      itemIdentifier.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f }),
+      processID > 0,
+      monotonicNanoseconds > 0,
+      requestFlags == requestFlags.sorted(),
+      requestFlags.allSatisfy({ flag in
+        !flag.isEmpty
+          && flag.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7f }
+      })
+    else { throw OracleAcceptanceError.malformedEvent(sequence: sequence) }
   }
 }
 

@@ -11,6 +11,29 @@ if (($# < 1)); then
 fi
 
 repo_root=$(git rev-parse --show-toplevel)
+lifecycle_lock="/tmp/com.joeyteng.diskplan.fileprovider-fixture.$EUID.lifecycle.lock"
+lifecycle_lock_fd=${DISKPLAN_FILEPROVIDER_LIFECYCLE_LOCK_FD:-}
+lifecycle_capability_valid=0
+if [[ $lifecycle_lock_fd == 9 ]] &&
+  python3 "$repo_root/scripts/fileprovider-fixture-lifecycle-lock.py" \
+    --lock "$lifecycle_lock" \
+    --verify-held-fd "$lifecycle_lock_fd"
+then
+  exec 9>&-
+  unset DISKPLAN_FILEPROVIDER_LIFECYCLE_LOCK_FD
+  if python3 "$repo_root/scripts/fileprovider-fixture-lifecycle-lock.py" \
+    --lock "$lifecycle_lock" \
+    --verify-lock-busy
+  then
+    lifecycle_capability_valid=1
+  fi
+fi
+if [[ $lifecycle_capability_valid != 1 ]]; then
+  unset DISKPLAN_FILEPROVIDER_LIFECYCLE_LOCK_FD
+  exec python3 "$repo_root/scripts/fileprovider-fixture-lifecycle-lock.py" \
+    --lock "$lifecycle_lock" \
+    -- "$0" "$@"
+fi
 project="$repo_root/fixtures/FileProviderAcceptance/DiskplanFileProviderFixture.xcodeproj"
 derived="$repo_root/.codex-tmp/fileprovider-fixture-derived"
 packages="$repo_root/.codex-tmp/fileprovider-fixture-packages"
@@ -68,11 +91,21 @@ verify_removed_extension() {
 }
 
 register_extension() {
+  "$host" mutation-begin --manifest "$manifest" --kind extension-add
   python3 "$repo_root/scripts/fileprovider-fixture-pluginkit.py" --action add --path "$appex"
 }
 
 unregister_extension() {
+  "$host" mutation-begin --manifest "$manifest" --kind extension-remove
   python3 "$repo_root/scripts/fileprovider-fixture-pluginkit.py" --action remove --path "$appex"
+}
+
+confirm_registered_extension() {
+  "$host" mutation-confirm --manifest "$manifest" --kind extension-add --state present
+}
+
+confirm_removed_extension() {
+  "$host" mutation-confirm --manifest "$manifest" --kind extension-remove --state absent
 }
 
 build_unsigned() {
@@ -145,6 +178,7 @@ recover() {
   "$host" teardown --manifest "$manifest"
   unregister_extension
   verify_removed_extension
+  confirm_removed_extension
   "$host" cleanup --manifest "$manifest"
 }
 
@@ -173,6 +207,7 @@ accept() {
   trap report_recovery EXIT
   register_extension
   verify_elected_extension
+  confirm_registered_extension
   "$host" setup --manifest "$manifest"
   "$host" oracle-begin --manifest "$manifest"
   "$host" probe --manifest "$manifest"
@@ -183,6 +218,7 @@ accept() {
   "$host" teardown --manifest "$manifest"
   unregister_extension
   verify_removed_extension
+  confirm_removed_extension
   "$host" cleanup --manifest "$manifest"
   complete=1
   trap - EXIT

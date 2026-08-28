@@ -16,6 +16,9 @@ def require(condition: bool, message: str) -> None:
 def main() -> int:
     swift = "\n".join(path.read_text() for path in FIXTURE.rglob("*.swift"))
     lifecycle = (ROOT / "scripts" / "fileprovider-fixture.sh").read_text()
+    lifecycle_lock = (ROOT / "scripts" / "fileprovider-fixture-lifecycle-lock.py").read_text()
+    registration = (ROOT / "scripts" / "fileprovider-fixture-registration.py").read_text()
+    pluginkit = (ROOT / "scripts" / "fileprovider-fixture-pluginkit.py").read_text()
     all_fixture_text = swift + "\n" + lifecycle
     require("removeAllDomains" not in all_fixture_text, "bulk domain removal is forbidden")
     require("CloudStorage" not in lifecycle, "lifecycle must not delete or address CloudStorage")
@@ -50,6 +53,14 @@ def main() -> int:
     require("pluginkit -a " not in lifecycle, "registration must not use an unbounded pluginkit command")
     require("pluginkit -r " not in lifecycle, "unregistration must not use an unbounded pluginkit command")
     require("fileprovider-fixture-pluginkit.py" in lifecycle, "pluginkit mutation must use a bounded helper")
+    require(
+        "subprocess.run" not in registration + pluginkit,
+        "PlugInKit helpers must not collect unbounded output before enforcing the cap",
+    )
+    require(
+        "run_bounded_text(" in registration and "run_bounded_text(" in pluginkit,
+        "both PlugInKit helpers must use incremental bounded capture",
+    )
     require("verify_elected_extension" in lifecycle, "registration must verify the elected physical appex")
     require("unregister_extension" in lifecycle, "recovery must unregister the exact manifest appex")
     require(lifecycle.count("verify_removed_extension") == 3, "both teardown paths must verify exact-path removal")
@@ -71,6 +82,14 @@ def main() -> int:
     require("plutil -extract appPath" not in lifecycle, "recovery must not read executable paths before trusted validation")
     require('"$host" status --manifest' in lifecycle, "recovery must validate with the known host first")
     require("sleep 2" not in lifecycle, "fixed sleeps are not a quiescence oracle")
+    require(
+        "DISKPLAN_FILEPROVIDER_LIFECYCLE_LOCK_HELD" not in lifecycle
+        and "--verify-held-fd" in lifecycle
+        and "exec 9>&-" in lifecycle
+        and "--verify-lock-busy" in lifecycle
+        and "pass_fds=(LOCK_CAPABILITY_FD,)" in lifecycle_lock,
+        "lifecycle single-flight must require the inherited locked descriptor capability",
+    )
     require("closeWindowAfterQuiescence" in swift, "oracle close must use bounded event quiescence")
     require("sealRecorder" in swift, "teardown must persistently seal the recorder")
     require(
@@ -114,12 +133,14 @@ def main() -> int:
     require(
         'try createRecorderMarker("recorder-failed", directory: directory)' in swift
         and 'recorderMarkerExists("recorder-failed"' in swift
-        and "failure: { try log.failRecorder() }" in swift,
+        and "try admission.fail(log: log, deadlineNanoseconds: deadline)" in swift
+        and '"recorder-admissions.log"' in swift,
         "every production non-sealed recorder failure must leave immutable poison evidence",
     )
     require(
         '"recorder-attempt.lock"' in swift
-        and "try log.beginRecordAttempt(" in swift
+        and "let admission = try log.makeAdmissionChannel()" in swift
+        and "try admission.beginRecordAttempt(" in swift
         and "operation: LOCK_SH" in swift
         and "operation: LOCK_EX" in swift
         and "withSynchronizedRecorder" in swift,
@@ -127,9 +148,21 @@ def main() -> int:
     )
     require(
         'try createRecorderMarker("recorder-sealing", directory: directory)' in swift
-        and 'recorderMarkerExists("recorder-sealing"' in swift,
+        and 'recorderMarkerExists("recorder-sealing"' in swift
+        and "if !admissions.hasCutoff" in swift,
         "acceptance sealing must publish persistent fail-closed transition evidence",
     )
+    require(
+        "decodeOracleEventStrict" in swift
+        and "guard seen.insert(key).inserted" in swift
+        and "Set(keys) == oracleEventJSONKeys" in swift
+        and "maximumNestingDepth" in swift,
+        "sealed event parsing must reject unknown and duplicate top-level keys",
+    )
+    staging_sync = swift.index('"sync-staged-run-directory-parent"')
+    inventory = swift.index("let tree = try inventory", staging_sync)
+    deletion = swift.index("try delete(entries: tree", inventory)
+    require(staging_sync < inventory < deletion, "staging rename must be parent-durable before deletion")
     require(
         '"recorder-incomplete-attempt-"' in swift
         and "let markerName = try createIncompleteAttemptMarker" in swift

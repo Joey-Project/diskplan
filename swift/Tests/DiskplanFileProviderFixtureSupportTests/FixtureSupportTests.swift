@@ -782,7 +782,7 @@ func finalSnapshotAndSealExcludeARacingCallback() throws {
   let started = DispatchSemaphore(value: 0)
   let finished = DispatchSemaphore(value: 0)
   let result = LockedRecorderResult()
-  let recorder = OracleRecorder(log: log)
+  let recorder = try OracleRecorder(log: log)
   _ = try log.closeWindowAfterQuiescence(
     quietMilliseconds: 2_000,
     timeoutMilliseconds: 30_000,
@@ -824,7 +824,7 @@ func sealWaitsForInFlightFailureMarkerPublication() throws {
   let recorder = OracleRecorder(
     append: { _, _ in Issue.record("append unexpectedly ran after state-read failure") },
     state: { _ in throw POSIXError(.EIO) },
-    failure: {
+    failure: { _ in
       failureStarted.signal()
       releaseFailure.wait()
       try log.failRecorder()
@@ -836,7 +836,7 @@ func sealWaitsForInFlightFailureMarkerPublication() throws {
       )
     }
   )
-  DispatchQueue.global().async {
+  Thread.detachNewThread {
     do {
       try recorder.record(fixture.oracleEvent(kind: .materializedItemsDidChange))
     } catch {
@@ -845,7 +845,7 @@ func sealWaitsForInFlightFailureMarkerPublication() throws {
     recordFinished.signal()
   }
   #expect(failureStarted.wait(timeout: .now() + 2) == .success)
-  DispatchQueue.global().async {
+  Thread.detachNewThread {
     closeStarted.signal()
     do {
       _ = try log.closeWindowAfterQuiescence(
@@ -901,7 +901,7 @@ func failedFailureMarkerPublicationLeavesDurableIncompleteAttempt() throws {
   let recorder = OracleRecorder(
     append: { _, _ in Issue.record("append unexpectedly ran after state-read failure") },
     state: { _ in throw POSIXError(.EIO) },
-    failure: { throw POSIXError(.ENOSPC) },
+    failure: { _ in throw POSIXError(.ENOSPC) },
     beginAttempt: { deadline in
       try log.beginRecordAttempt(
         deadlineNanoseconds: deadline,
@@ -995,42 +995,29 @@ func oracleRecorderLocalLockContentionIsDeadlineBoundedAndDurablyPoisons() throw
   let log = OracleLog(runDirectory: fixture.runDirectory)
   try log.prepare()
   let clock = DeterministicOracleClock()
-  let entered = DispatchSemaphore(value: 0)
-  let release = DispatchSemaphore(value: 0)
-  let finished = DispatchSemaphore(value: 0)
-  let firstResult = LockedRecorderResult()
+  let admission = try log.makeAdmissionChannel()
+  let held = try admission.beginRecordAttempt(
+    deadlineNanoseconds: clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) + 1_000_000_000,
+    clock: SystemOracleQuiescenceClock()
+  )
   let recorder = OracleRecorder(
-    append: { _, _ in
-      entered.signal()
-      release.wait()
+    append: { _, _ in Issue.record("append must not run while admission is contended") },
+    beginAttempt: { deadline in
+      try admission.beginRecordAttempt(
+        deadlineNanoseconds: deadline,
+        clock: clock
+      )
     },
-    failure: { try log.failRecorder() },
     clock: clock,
     timeoutNanoseconds: 100_000_000
   )
-  DispatchQueue.global().async {
-    do {
-      try recorder.record(fixture.oracleEvent(kind: .itemMetadata))
-    } catch {
-      firstResult.store(error)
-    }
-    finished.signal()
-  }
-  #expect(entered.wait(timeout: .now() + 2) == .success)
   #expect(throws: OracleRecorderError.lockTimedOut) {
     try recorder.record(fixture.oracleEvent(kind: .fetchContents))
   }
-  release.signal()
-  #expect(finished.wait(timeout: .now() + 2) == .success)
-  #expect(firstResult.recorderError == .lockTimedOut)
+  try held.resolve()
+  held.finish()
   #expect(clock.nanoseconds == 100_000_000)
   #expect(try log.recorderState() == .poisoned)
-  #expect(
-    try SecureFixtureStorage.readControlFile(
-      at: fixture.runDirectory.appendingPathComponent("recorder-failed"),
-      record: .events
-    ) == Data("diskplan-recorder-state-v1\n".utf8)
-  )
 }
 
 @Test
@@ -1042,7 +1029,7 @@ func oracleRecorderStateReadFailureDurablyPoisonsBeforeReturning() throws {
   let recorder = OracleRecorder(
     append: { _, _ in Issue.record("append unexpectedly ran after state-read failure") },
     state: { _ in throw POSIXError(.EIO) },
-    failure: { try log.failRecorder() }
+    failure: { _ in try log.failRecorder() }
   )
   #expect(throws: POSIXError.self) {
     try recorder.record(fixture.oracleEvent(kind: .materializedItemsDidChange))

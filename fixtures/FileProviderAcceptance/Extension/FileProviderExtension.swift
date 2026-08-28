@@ -7,17 +7,22 @@ import Foundation
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, @unchecked Sendable
 {
   private let domain: NSFileProviderDomain
-  private let runID: UUID?
-  private let recorder: OracleRecorder?
+  private let recordingCapability: RecordingCapability?
 
   required init(domain: NSFileProviderDomain) {
     self.domain = domain
-    let resolvedRunID = FixtureContract.runID(domainIdentifier: domain.identifier.rawValue)
-    runID = resolvedRunID
-    if let resolvedRunID {
-      recorder = try? OracleRecorder(log: OracleLog.appGroup(runID: resolvedRunID))
+    if let runID = FixtureContract.runID(domainIdentifier: domain.identifier.rawValue) {
+      do {
+        recordingCapability = RecordingCapability(
+          runID: runID,
+          domainIdentifier: domain.identifier.rawValue,
+          recorder: try OracleRecorder(log: OracleLog.appGroup(runID: runID))
+        )
+      } catch {
+        fatalError("fixture recorder admission channel unavailable: \(error)")
+      }
     } else {
-      recorder = nil
+      recordingCapability = nil
     }
     super.init()
   }
@@ -145,14 +150,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     for containerItemIdentifier: NSFileProviderItemIdentifier,
     request: NSFileProviderRequest
   ) throws -> NSFileProviderEnumerator {
+    guard let recordingCapability else { throw OracleRecorderError.unavailable }
     let requestFlags = flags(for: request)
-    return FixtureEnumerator(container: containerItemIdentifier) { [weak self] kind, item, flags in
-      guard let self else { throw OracleRecorderError.unavailable }
-      try self.record(
-        kind,
-        item: NSFileProviderItemIdentifier(item),
-        flags: requestFlags + flags
-      )
+    try recordingCapability.record(
+      .enumeratorAcquisition,
+      item: containerItemIdentifier.rawValue,
+      flags: requestFlags
+    )
+    return FixtureEnumerator(container: containerItemIdentifier) { kind, item, flags in
+      try recordingCapability.record(kind, item: item, flags: requestFlags + flags)
     }
   }
 
@@ -167,19 +173,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     request: NSFileProviderRequest? = nil,
     flags: [String] = []
   ) throws {
-    guard let runID, let recorder else { throw OracleRecorderError.unavailable }
+    guard let recordingCapability else { throw OracleRecorderError.unavailable }
     var requestFlags = flags
     if let request { requestFlags.append(contentsOf: self.flags(for: request)) }
-    let event = OracleEvent(
-      runID: runID,
-      domainIdentifier: domain.identifier.rawValue,
-      itemIdentifier: item.rawValue,
-      kind: kind,
-      processID: getpid(),
-      monotonicNanoseconds: clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW),
-      requestFlags: requestFlags
-    )
-    try recorder.record(event)
+    try recordingCapability.record(kind, item: item.rawValue, flags: requestFlags)
   }
 
   private func flags(for request: NSFileProviderRequest) -> [String] {
@@ -188,6 +185,32 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
       "fileViewer:\(request.isFileViewerRequest)",
       "requestingExecutablePresent:\(request.requestingExecutable != nil)",
     ]
+  }
+}
+
+private final class RecordingCapability: @unchecked Sendable {
+  private let runID: UUID
+  private let domainIdentifier: String
+  private let recorder: OracleRecorder
+
+  init(runID: UUID, domainIdentifier: String, recorder: OracleRecorder) {
+    self.runID = runID
+    self.domainIdentifier = domainIdentifier
+    self.recorder = recorder
+  }
+
+  func record(_ kind: OracleEventKind, item: String, flags: [String] = []) throws {
+    try recorder.record { [runID, domainIdentifier] in
+      OracleEvent(
+        runID: runID,
+        domainIdentifier: domainIdentifier,
+        itemIdentifier: item,
+        kind: kind,
+        processID: getpid(),
+        monotonicNanoseconds: clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW),
+        requestFlags: flags
+      )
+    }
   }
 }
 
