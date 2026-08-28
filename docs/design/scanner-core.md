@@ -84,7 +84,10 @@ descendants local by path convention.
   and conditional reclaim uncertainty as independent typed observations.
 - Filesystem atime, mtime, ctime, and birthtime stay separate advisory metadata;
   the scanner never synthesizes a `last_used_at`. UID, GID, mode, and flags form a
-  separate access-policy seal. Every non-root root descriptor and child-directory
+  separate access-policy seal together with a descriptor-bound serialized ACL
+  digest. Every retained node also carries a deterministic root-to-parent access
+  policy chain seal. A missing, unreadable, or failed ACL remains typed uncertainty
+  and cannot produce a known chain seal. Every non-root root descriptor and child-directory
   descriptor must match the inspection-time access-policy seal immediately after
   open and before its first enumeration, then match again at close. Pre/post
   access-policy changes are unstable scan evidence, while timestamp changes alone
@@ -148,6 +151,65 @@ not-yet-started raw roots, the profile and resolver version, entry/depth/enumera
 pending-name/retention limits, the scan time limit, and the canonical collector
 configuration. A partial or failed scan therefore cannot be detached from omitted
 scope or weaker budgets while retaining the same provenance.
+
+Regular-file content remains `notRequested` during ordinary traversal. When a later
+plan contract explicitly requires content stability, the engine may use the bounded
+second-stage collector only through a one-shot request ID backed by an internal
+trusted registry. The registry receipt owns the already-held target descriptor and
+binds the exact raw slot, root identity, object identity, access policy, and
+authoritative File Provider probe. None of those facts are caller-supplied at
+collection time. The collector revalidates the process no-materialization policy,
+raw slot, root, descriptor, and provider state before every `pread`; provider-managed,
+metadata-only, or unverified targets therefore perform zero content reads. Its
+file/byte/deadline reservations are session-scoped and cannot be reset per request.
+Descriptor ownership is an internal RAII transfer: collection closes on every
+return path, and destroying a registry closes every unconsumed receipt.
+A timestamp transition requests a fresh digest pass; it is not by itself classified
+as content mutation.
+
+Access-policy evidence separates owner/group/mode/ACL and the Darwin flags that
+actually restrict mutation (`UF_IMMUTABLE`, `UF_APPEND`, `UF_DATAVAULT`,
+`SF_IMMUTABLE`, `SF_APPEND`, `SF_RESTRICTED`, and `SF_NOUNLINK`) from advisory or
+storage metadata such as `UF_NODUMP`, `UF_COMPRESSED`, and `UF_HIDDEN`. Ancestor
+seals emitted before directory close carry pending close epoch IDs. They become
+authoritative only after `AccessPolicyEpochLedger` receives successful identity and
+access-policy close receipts for every epoch; missing, conflicting, unreadable, or
+changed close evidence stays typed unknown/failed instead of freezing a stale leaf.
+Directory child churn, directory timestamps, and link counts are not object
+replacement signals.
+
+Git, Codex temporary, and versioned-artifact enrichment uses configured adapter
+scopes. Names and paths can route a probe but cannot establish recoverability. Git
+status is consumed as bounded NUL-framed porcelain-v2 counters plus a streaming
+digest, with ignored entries explicit and no retained path corpus. Every Git command
+uses `--no-optional-locks`, a sanitized environment, disabled fsmonitor, maintenance,
+hooks, credentials, prompts, lazy fetch, and ambient global/system configuration;
+stderr, truncation, nonzero exit, deadline/budget exhaustion, or held root/admin/
+common/index/HEAD/registration pre/post drift makes the evidence partial. Versioned
+artifact survivors become authoritative only when the configured install root,
+unfollowed active selector and raw target, every version identity/metadata digest,
+and update state are known.
+
+The command vocabulary is a closed internal enum bound to `/usr/bin/git`, exact
+arguments, a replacement environment, and a command-spec digest. Until the shared
+supervised subprocess runner can return an authority receipt binding those values,
+the raw cwd/root/admin/common objects, deadline, output digests, and pre/post held
+object seals, the production Git collector returns typed unavailable evidence and
+cannot claim complete coverage. Critical root/admin/common/index/HEAD/registration
+content digests must all be known and exact-cross-joined within one worktree receipt.
+The canonical digest of the raw registration binding must match both registration
+evidence and the held registration object; a separate canonical digest binds all six
+held metadata seals.
+Git and configured-adapter target/output/entry/raw-name budgets are session-scoped.
+
+Codex cleanup and versioned-artifact authority is created only by the internal
+configured-scope registry. Its opaque token binds the raw configured root, directory
+identity, access policy, helper capability, and (for versioned artifacts) selector
+namespace identity/access policy. A scope ID or path-shaped name alone yields only a
+type hint. The active selector is bound no-follow as its own symlink object plus raw
+slot name and raw target; survivor selection requires the token, current raw root
+path/identity/access/helper receipts, selector namespace, every manifest,
+the update marker, and all budget reservations to be known.
 
 Process activity is represented by a bounded collector protocol. The included
 parser accepts normalized `lsof -nP -F0pcfn` records and canonicalizes typed results;

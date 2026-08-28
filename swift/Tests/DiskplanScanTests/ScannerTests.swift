@@ -280,7 +280,8 @@ private func accessPolicyForTest(_ fileDescriptor: Int32) -> AccessPolicyEvidenc
     ownerUserID: value.st_uid,
     ownerGroupID: value.st_gid,
     mode: UInt32(value.st_mode),
-    flags: value.st_flags
+    flags: darwinAccessControlFlags(value.st_flags),
+    aclDigest: descriptorACLDigest(fileDescriptor)
   )
 }
 
@@ -322,6 +323,15 @@ private final class CapturingSink: ScanNodeSink, @unchecked Sendable {
   private var stored: [ScanNodeEvent] = []
   func receive(_ event: ScanNodeEvent) { lock.withLock { stored.append(event) } }
   var events: [ScanNodeEvent] { lock.withLock { stored } }
+}
+
+private final class CapturingEpochSink: AccessPolicyEpochSink, @unchecked Sendable {
+  private let lock = NSLock()
+  private var stored: [DirectoryCloseEpochReceipt] = []
+  func receive(_ receipt: DirectoryCloseEpochReceipt) {
+    lock.withLock { stored.append(receipt) }
+  }
+  var receipts: [DirectoryCloseEpochReceipt] { lock.withLock { stored } }
 }
 
 private func component(_ string: String) -> RawPathComponent { RawPathComponent(Data(string.utf8)) }
@@ -393,7 +403,8 @@ private let fakeAccessPolicy = AccessPolicyEvidence(
   ownerUserID: 501,
   ownerGroupID: 20,
   mode: UInt32(S_IFDIR | S_IRWXU),
-  flags: 0
+  flags: 0,
+  aclDigest: .known(try! EvidenceDigest(bytes: Data(repeating: 0, count: 32)))
 )
 
 private func replacingItemEvidence(
@@ -556,6 +567,89 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let rhs = run(FakeFilesystem(rootChildren: [a, b], nodes: nodes))
   #expect(lhs.progress.retainedNodes == rhs.progress.retainedNodes)
   #expect(lhs.roots == rhs.roots)
+}
+
+@Test func rootAccessPolicySealIsDeterministicAndACLBound() {
+  let result = run(FakeFilesystem(rootChildren: [], nodes: [:]))
+  #expect(result.roots[0].rootAccessPolicy == .known(fakeAccessPolicy))
+  #expect(
+    result.roots[0].rootAccessPolicySeal.value?.rootIdentity == result.roots[0].binding.identity)
+  #expect(result.roots[0].rootAccessPolicySeal.value?.depth == 0)
+  #expect(result.roots[0].rootAccessPolicySeal.value?.isFinalized == true)
+}
+
+@Test func observedLeafAncestorSealRemainsProvisionalUntilRootCloseReceipt() {
+  let name = component("leaf")
+  let root = RawPath(rootID: "root")
+  let fs = FakeFilesystem(rootChildren: [name], nodes: [root.appending(name): file(2, bytes: 1)])
+  let scope = try! ResolvedScanScope(
+    resolverVersion: 1,
+    profile: .deep,
+    roots: [fs.request],
+    budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 2),
+    maximumDurationNanoseconds: nil
+  )
+  let nodes = CapturingSink()
+  let epochs = CapturingEpochSink()
+  let scanner = DeterministicScanner(
+    filesystem: fs,
+    scope: scope,
+    clock: FixedClock(times: [100]),
+    nodeSink: nodes,
+    accessPolicyEpochSink: epochs
+  )
+  let result = scanner.advance(maximumEntries: 10)
+  let leaf = nodes.events.compactMap { event -> ScannedNode? in
+    if case .observed(let node) = event { return node }
+    return nil
+  }.first
+  #expect(leaf?.ancestorAccessPolicy.value?.isFinalized == false)
+  #expect(leaf?.ancestorAccessPolicy.value?.pendingCloseEpochIDs.count == 1)
+  #expect(epochs.receipts.count == 1)
+  #expect(epochs.receipts[0].epochID == leaf?.ancestorAccessPolicy.value?.pendingCloseEpochIDs[0])
+  #expect(epochs.receipts[0].result == .known(true))
+  #expect(
+    result.progress.retainedNodes.first(where: { $0.path == root.appending(name) })?
+      .ancestorAccessPolicy.value?.isFinalized == true)
+}
+
+@Test func rootClosePolicyFailureInvalidatesProvisionalEpoch() {
+  let changedPolicy = AccessPolicyEvidence(
+    ownerUserID: fakeAccessPolicy.ownerUserID,
+    ownerGroupID: fakeAccessPolicy.ownerGroupID,
+    mode: fakeAccessPolicy.mode & ~UInt32(S_IWUSR),
+    flags: fakeAccessPolicy.flags,
+    aclDigest: fakeAccessPolicy.aclDigest
+  )
+  let fs = FakeFilesystem(
+    rootChildren: [],
+    nodes: [:],
+    rootCloseFailure: DirectoryCloseEvidence(
+      identity: .known(ObjectIdentity(device: 1, fileID: 1, objectType: .directory)),
+      accessPolicy: .known(changedPolicy)
+    )
+  )
+  let scope = try! ResolvedScanScope(
+    resolverVersion: 1,
+    profile: .deep,
+    roots: [fs.request],
+    budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 2),
+    maximumDurationNanoseconds: nil
+  )
+  let epochs = CapturingEpochSink()
+  let scanner = DeterministicScanner(
+    filesystem: fs,
+    scope: scope,
+    clock: FixedClock(times: [100]),
+    accessPolicyEpochSink: epochs
+  )
+  _ = scanner.advance(maximumEntries: 10)
+  #expect(epochs.receipts.count == 1)
+  #expect(
+    epochs.receipts[0].result
+      == .failed(reason: "directory access policy changed before close", errorCode: EAGAIN))
+  #expect(scanner.snapshot().roots[0].rootAccessPolicySeal.value == nil)
+  #expect(scanner.snapshot().roots[0].coverage.reasons.contains(.accessPolicyChanged))
 }
 
 @Test func missingMismatchAndUnreadableRemainDistinct() {
@@ -2039,6 +2133,46 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let closeEvidence = changingTimes.close(directory)
   #expect(closeEvidence.identity.value == inspected.identity)
   #expect(closeEvidence.accessPolicy.value == expectedPolicy)
+}
+
+@Test func directoryCloseTreatsChildEntryChurnAsNonReplacement() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-close-child-churn-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  let childURL = rootURL.appendingPathComponent("child", isDirectory: true)
+  try FileManager.default.createDirectory(at: childURL, withIntermediateDirectories: false)
+  let parentFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(parentFD >= 0 ? parentFD : nil)
+  defer { close(fd) }
+  let parent = DirectoryHandle(rawValue: fd)
+  let name = component("child")
+  let filesystem = DarwinScanFilesystem(policy: policy)
+  let inspected = try #require(
+    filesystem.inspect(
+      parent: parent,
+      name: name,
+      inheritedProviderBoundary: false,
+      requiresAuthoritativeProviderEvidence: false
+    ).value
+  )
+  let expectedPolicy = try #require(inspected.accessPolicy.value)
+  let directory = try #require(
+    filesystem.openDirectory(
+      parent: parent,
+      name: name,
+      expectedIdentity: inspected.identity,
+      expectedAccessPolicy: expectedPolicy
+    ).value
+  )
+  try Data([1]).write(to: childURL.appendingPathComponent("new-child"))
+  let closeEvidence = filesystem.close(directory)
+  #expect(closeEvidence.identity == .known(inspected.identity))
+  #expect(closeEvidence.accessPolicy == .known(expectedPolicy))
 }
 
 @Test func closeAccessPolicyObservationIsBracketedByParentSlotIdentity() throws {

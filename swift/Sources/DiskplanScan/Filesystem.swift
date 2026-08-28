@@ -12,6 +12,7 @@ public struct InspectedObject: Equatable, Sendable {
   public let bytes: ItemByteEvidence
   public let storageTopology: StorageTopologyEvidence
   public let filesystemTimes: FilesystemTimeEvidence
+  public let filesystemFlags: Observation<FilesystemFlagMetadataEvidence>
   public let accessPolicy: Observation<AccessPolicyEvidence>
   public let providerBoundary: ProviderBoundary
   public let providerEvidence: Observation<ProviderScanEvidence>
@@ -21,6 +22,8 @@ public struct InspectedObject: Equatable, Sendable {
     bytes: ItemByteEvidence,
     storageTopology: StorageTopologyEvidence = .unknown,
     filesystemTimes: FilesystemTimeEvidence = .unknown,
+    filesystemFlags: Observation<FilesystemFlagMetadataEvidence> = .unknown(
+      reason: "filesystem flags not observed"),
     accessPolicy: Observation<AccessPolicyEvidence> = .unknown(reason: "not observed"),
     providerBoundary: ProviderBoundary,
     providerEvidence: Observation<ProviderScanEvidence> = .unknown(reason: "not observed")
@@ -29,6 +32,7 @@ public struct InspectedObject: Equatable, Sendable {
     self.bytes = bytes
     self.storageTopology = storageTopology
     self.filesystemTimes = filesystemTimes
+    self.filesystemFlags = filesystemFlags
     self.accessPolicy = accessPolicy
     self.providerBoundary = providerBoundary
     self.providerEvidence = providerEvidence
@@ -38,6 +42,7 @@ public struct InspectedObject: Equatable, Sendable {
 private struct SlotSeal: Equatable, Sendable {
   let identity: ObjectIdentity
   let accessPolicy: AccessPolicyEvidence
+  let filesystemFlags: FilesystemFlagMetadataEvidence
   let times: FilesystemTimeEvidence
 }
 
@@ -154,6 +159,7 @@ public struct BoundScanRoot: Equatable, Sendable {
   public let providerBoundary: ProviderBoundary
   public let providerEvidence: Observation<ProviderScanEvidence>
   public let filesystemTimes: FilesystemTimeEvidence
+  public let filesystemFlags: Observation<FilesystemFlagMetadataEvidence>
   public let accessPolicy: Observation<AccessPolicyEvidence>
 
   public init(
@@ -162,6 +168,8 @@ public struct BoundScanRoot: Equatable, Sendable {
     providerBoundary: ProviderBoundary = .localOrUnindicated,
     providerEvidence: Observation<ProviderScanEvidence> = .unknown(reason: "not observed"),
     filesystemTimes: FilesystemTimeEvidence = .unknown,
+    filesystemFlags: Observation<FilesystemFlagMetadataEvidence> = .unknown(
+      reason: "filesystem flags not observed"),
     accessPolicy: Observation<AccessPolicyEvidence> = .unknown(reason: "not observed")
   ) {
     self.binding = binding
@@ -169,6 +177,7 @@ public struct BoundScanRoot: Equatable, Sendable {
     self.providerBoundary = providerBoundary
     self.providerEvidence = providerEvidence
     self.filesystemTimes = filesystemTimes
+    self.filesystemFlags = filesystemFlags
     self.accessPolicy = accessPolicy
   }
 }
@@ -396,6 +405,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         providerBoundary: item.providerBoundary,
         providerEvidence: item.providerEvidence,
         filesystemTimes: item.filesystemTimes,
+        filesystemFlags: item.filesystemFlags,
         accessPolicy: item.accessPolicy
       )
     )
@@ -451,6 +461,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
           reason: "canonical filesystem root is outside File Provider item namespaces"
         ),
         filesystemTimes: observedSeal.times,
+        filesystemFlags: .known(observedSeal.filesystemFlags),
         accessPolicy: .known(observedSeal.accessPolicy)
       )
     )
@@ -610,6 +621,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         bytes: boundary.preventsNormalDescent ? .unknown : byteEvidence(afterItem),
         storageTopology: topologyEvidence(afterItem),
         filesystemTimes: afterSeal.times,
+        filesystemFlags: .known(afterSeal.filesystemFlags),
         accessPolicy: .known(afterSeal.accessPolicy),
         providerBoundary: boundary,
         providerEvidence: providerEvidence
@@ -907,8 +919,10 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
           ownerUserID: value.st_uid,
           ownerGroupID: value.st_gid,
           mode: UInt32(value.st_mode),
-          flags: value.st_flags
+          flags: darwinAccessControlFlags(value.st_flags),
+          aclDigest: descriptorACLDigest(fileDescriptor)
         ),
+        filesystemFlags: FilesystemFlagMetadataEvidence(rawFlags: value.st_flags),
         times: FilesystemTimeEvidence(
           accessTime: .known(canonicalTime(value.st_atimespec)),
           modificationTime: .known(canonicalTime(value.st_mtimespec)),
