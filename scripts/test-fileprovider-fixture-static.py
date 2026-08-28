@@ -29,7 +29,7 @@ def main() -> int:
         "oracle session and event locks must use bounded acquisition",
     )
     require(
-        "if flock(descriptor, LOCK_EX | LOCK_NB) == 0" in swift,
+        "if flock(descriptor, operation | LOCK_NB) == 0" in swift,
         "oracle locks must use nonblocking acquisition",
     )
     require(
@@ -116,6 +116,19 @@ def main() -> int:
         and 'recorderMarkerExists("recorder-failed"' in swift
         and "failure: { try log.failRecorder() }" in swift,
         "every production non-sealed recorder failure must leave immutable poison evidence",
+    )
+    require(
+        '"recorder-attempt.lock"' in swift
+        and "try log.beginRecordAttempt(" in swift
+        and "operation: LOCK_SH" in swift
+        and "operation: LOCK_EX" in swift
+        and "withSynchronizedRecorder" in swift,
+        "record attempts and acceptance snapshots must share the independent in-flight gate",
+    )
+    require(
+        'try createRecorderMarker("recorder-sealing", directory: directory)' in swift
+        and 'recorderMarkerExists("recorder-sealing"' in swift,
+        "acceptance sealing must publish persistent fail-closed transition evidence",
     )
     require(
         "recoveryURL.isFileURL, recoveryURL.path == expectedURL.path" in swift

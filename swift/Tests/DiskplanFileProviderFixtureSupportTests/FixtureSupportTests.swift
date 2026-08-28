@@ -808,6 +808,90 @@ func finalSnapshotAndSealExcludeARacingCallback() throws {
 }
 
 @Test
+func sealWaitsForInFlightFailureMarkerPublication() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  let failureStarted = DispatchSemaphore(value: 0)
+  let releaseFailure = DispatchSemaphore(value: 0)
+  let recordFinished = DispatchSemaphore(value: 0)
+  let closeStarted = DispatchSemaphore(value: 0)
+  let closeFinished = DispatchSemaphore(value: 0)
+  let recordResult = LockedRecorderResult()
+  let closeResult = LockedRecorderResult()
+  let recorder = OracleRecorder(
+    append: { _, _ in Issue.record("append unexpectedly ran after state-read failure") },
+    state: { _ in throw POSIXError(.EIO) },
+    failure: {
+      failureStarted.signal()
+      releaseFailure.wait()
+      try log.failRecorder()
+    },
+    beginAttempt: { deadline in
+      try log.beginRecordAttempt(
+        deadlineNanoseconds: deadline,
+        clock: SystemOracleQuiescenceClock()
+      )
+    }
+  )
+  DispatchQueue.global().async {
+    do {
+      try recorder.record(fixture.oracleEvent(kind: .materializedItemsDidChange))
+    } catch {
+      recordResult.store(error)
+    }
+    recordFinished.signal()
+  }
+  #expect(failureStarted.wait(timeout: .now() + 2) == .success)
+  DispatchQueue.global().async {
+    closeStarted.signal()
+    do {
+      _ = try log.closeWindowAfterQuiescence(
+        quietMilliseconds: 50,
+        timeoutMilliseconds: 3_000
+      )
+    } catch {
+      closeResult.store(error)
+    }
+    closeFinished.signal()
+  }
+  #expect(closeStarted.wait(timeout: .now() + 2) == .success)
+  #expect(closeFinished.wait(timeout: .now() + 0.1) == .timedOut)
+  releaseFailure.signal()
+  #expect(recordFinished.wait(timeout: .now() + 2) == .success)
+  #expect(closeFinished.wait(timeout: .now() + 2) == .success)
+  #expect(recordResult.errorIsPOSIX)
+  #expect(closeResult.recorderError == .poisoned)
+  #expect(try log.recorderState() == .poisoned)
+}
+
+@Test
+func sealAttemptGateContentionFailsWithinAbsoluteDeadline() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  let attemptClock = DeterministicOracleClock()
+  let attempt = try log.beginRecordAttempt(
+    deadlineNanoseconds: 1_000_000_000,
+    clock: attemptClock
+  )
+  defer { attempt.finish() }
+  let closeClock = DeterministicOracleClock()
+  #expect(throws: OracleQuiescenceError.timedOut) {
+    _ = try log.closeWindowAfterQuiescence(
+      quietMilliseconds: 50,
+      timeoutMilliseconds: 50,
+      clock: closeClock
+    )
+  }
+  #expect(closeClock.nanoseconds == 50_000_000)
+}
+
+@Test
 func oracleRecorderUsesOneEntryDeadlineAcrossAllStages() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
@@ -1053,6 +1137,10 @@ private final class LockedRecorderResult: @unchecked Sendable {
 
   var recorderError: OracleRecorderError? {
     lock.withLock { error as? OracleRecorderError }
+  }
+
+  var errorIsPOSIX: Bool {
+    lock.withLock { error is POSIXError }
   }
 
   func store(_ error: Error) {

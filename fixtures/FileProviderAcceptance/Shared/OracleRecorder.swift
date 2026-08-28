@@ -23,6 +23,7 @@ public final class OracleRecorder: @unchecked Sendable {
   typealias RecorderState = @Sendable (UInt64) throws -> OracleRecorderState
   typealias Poison = @Sendable (UInt64) throws -> Void
   typealias Failure = @Sendable () throws -> Void
+  typealias BeginAttempt = @Sendable (UInt64) throws -> OracleRecordAttempt?
 
   private let lock = NSLock()
   private let clock: any OracleQuiescenceClock
@@ -31,6 +32,7 @@ public final class OracleRecorder: @unchecked Sendable {
   private let recorderState: RecorderState
   private let poisonRecorder: Poison
   private let failRecorder: Failure
+  private let beginAttempt: BeginAttempt
   private var poisoned = false
 
   init(
@@ -38,6 +40,7 @@ public final class OracleRecorder: @unchecked Sendable {
     state: @escaping RecorderState = { _ in .healthy },
     poison: @escaping Poison = { _ in },
     failure: @escaping Failure = {},
+    beginAttempt: @escaping BeginAttempt = { _ in nil },
     clock: any OracleQuiescenceClock = SystemOracleQuiescenceClock(),
     timeoutNanoseconds: UInt64 = 30_000_000_000
   ) {
@@ -45,6 +48,7 @@ public final class OracleRecorder: @unchecked Sendable {
     recorderState = state
     poisonRecorder = poison
     failRecorder = failure
+    self.beginAttempt = beginAttempt
     self.clock = clock
     self.timeoutNanoseconds = timeoutNanoseconds
   }
@@ -60,7 +64,7 @@ public final class OracleRecorder: @unchecked Sendable {
         )
       },
       state: { deadline in
-        try log.recorderState(
+        try log.recorderStateDuringAttempt(
           deadlineNanoseconds: deadline,
           clock: SystemOracleQuiescenceClock()
         )
@@ -71,13 +75,35 @@ public final class OracleRecorder: @unchecked Sendable {
           clock: SystemOracleQuiescenceClock()
         )
       },
-      failure: { try log.failRecorder() }
+      failure: { try log.failRecorder() },
+      beginAttempt: { deadline in
+        try log.beginRecordAttempt(
+          deadlineNanoseconds: deadline,
+          clock: SystemOracleQuiescenceClock()
+        )
+      }
     )
   }
 
   public func record(_ event: OracleEvent) throws {
+    let start = clock.nowNanoseconds()
+    let (deadline, overflow) = start.addingReportingOverflow(timeoutNanoseconds)
+    guard !overflow else {
+      try failRecorder()
+      throw OracleRecorderError.lockTimedOut
+    }
+    let attempt: OracleRecordAttempt?
     do {
-      try recordAttempt(event)
+      attempt = try beginAttempt(deadline)
+    } catch let error as OracleRecorderError where error == .sealed {
+      throw error
+    } catch {
+      try failRecorder()
+      throw error
+    }
+    defer { attempt?.finish() }
+    do {
+      try recordAttempt(event, deadlineNanoseconds: deadline)
     } catch let error as OracleRecorderError where error == .sealed {
       throw error
     } catch {
@@ -86,10 +112,7 @@ public final class OracleRecorder: @unchecked Sendable {
     }
   }
 
-  private func recordAttempt(_ event: OracleEvent) throws {
-    let start = clock.nowNanoseconds()
-    let (deadline, overflow) = start.addingReportingOverflow(timeoutNanoseconds)
-    guard !overflow else { throw OracleRecorderError.lockTimedOut }
+  private func recordAttempt(_ event: OracleEvent, deadlineNanoseconds deadline: UInt64) throws {
     try acquireLocalLock(deadlineNanoseconds: deadline)
     defer { lock.unlock() }
     guard !poisoned else { throw OracleRecorderError.poisoned }

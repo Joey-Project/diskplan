@@ -21,8 +21,8 @@ window fails if it sees content fetch, upload/create, modify, delete,
 `materializedItemsDidChange`, or sealed-directory enumeration. Both provider probes and a
 postflight extension-liveness signal run inside the open window. Closure requires two continuous
 seconds without a new event within a 30-second total bound. Healthy state, the final event
-snapshot, closed-window publication, and seal happen under one recorder lock; assertion after
-closure reads only that immutable sealed snapshot.
+snapshot, closed-window publication, and seal happen under the recorder lock and an independent
+cross-process attempt gate; assertion after closure reads only that immutable sealed snapshot.
 
 Every append first durably writes run-scoped poison evidence while holding the recorder lock,
 then durably appends its JSONL event, and clears the poison marker only after that success. An
@@ -31,13 +31,16 @@ instances instead of masquerading as callback-zero.
 Every other non-sealed recorder failure, including local-lock timeout and state-read failure,
 durably creates a separate immutable `recorder-failed` marker before callback completion.
 Successful append never clears this marker, and every host acceptance read treats it as poison.
+Each record attempt holds the attempt gate through failure-marker publication, while health and
+seal take it exclusively and wait only until the shared absolute deadline. Acceptance therefore
+cannot seal across an in-flight failure, and gate contention fails closed.
 Teardown persistently seals the recorder before domain removal, and append never recreates a
 missing run directory. File Provider callbacks and `pluginkit` mutation/query steps have bounded
 monotonic deadlines and discard late completions. A callback checks the absolute deadline before
 claiming completion under the one-shot gate lock, so a stale comparison or delayed timeout task
 cannot admit a late reply. The callback-only `materializedItemsDidChange` API always completes
 even if its oracle append fails; persistent poison evidence still rejects acceptance. The bounded local,
-recorder, and JSONL locks plus state/append/poison stages use one 30-second entry deadline.
+attempt, recorder, and JSONL locks plus state/append/poison stages use one 30-second entry deadline.
 Exact-bundle registry records require
 strict UTF-8, a recognized header, and one absolute path; malformed text that mentions the exact
 bundle fails closed.

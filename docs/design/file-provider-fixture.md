@@ -58,9 +58,16 @@ path. The window closes only after the JSONL sequence/count fingerprint remains
 unchanged for a continuous two seconds, within a 30-second total bound. Each timestamp is taken
 after the fingerprint read and its locks complete, and the total deadline is checked before
 quiet success. Time spent reading is never credited as silence, and quiet cannot pass at the
-timeout boundary. At quiet success, one recorder-lock critical section checks healthy state,
-reads the final descriptor-bound event snapshot, writes the closed window, and persists the seal.
-No callback can append or poison the recorder between that snapshot and acceptance. The persisted
+timeout boundary. An independent run-scoped attempt gate holds a shared lock from callback record
+entry through any failure-marker publication. Health, fingerprint, final closure, and sealed
+snapshot reads take its exclusive lock with the same absolute deadline. At quiet success, the
+recorder lock checks healthy state and publishes a persistent sealing transition before final
+exclusive-gate acquisition. That transition keeps not-yet-admitted callbacks from racing the
+seal. The exclusive attempt gate then waits for admitted records and their failure publication;
+under the recorder lock, closure rechecks failure evidence, reads the final descriptor-bound
+event snapshot, writes the closed window, and persists the seal. A changed fingerprint after the
+transition, gate contention, or incomplete failure publication fails closed. No callback can
+append or poison the recorder between that snapshot and acceptance. The persisted
 close record binds its end timestamp, quiet interval, event count, and final sequence. Assertion
 requires sealed state and rechecks that immutable fingerprint; malformed or internally
 inconsistent close metadata fails as a typed semantic mismatch.
@@ -77,14 +84,18 @@ handler even if recording fails. Before that completion, every non-sealed `recor
 durably creates an immutable `recorder-failed` marker outside the recorder lock. This covers
 local-lock timeout, deadline expiry, state-read failure, and append/poison failure; successful
 append cannot clear that marker. Host health, closure, and sealed-snapshot assertion all interpret
-it as poisoned, so the callback-only API cannot turn a recording failure into callback-zero.
+it as poisoned, so the callback-only API cannot turn a recording failure into callback-zero. The
+record attempt retains its shared attempt-gate lock until this immutable failure marker is
+durable; therefore closure cannot observe healthy state and return a sealed snapshot while
+failure publication is still in flight.
 
-The recorder lock and the nested JSONL lock both use nonblocking `flock` acquisition and share
+The attempt, recorder, and nested JSONL locks all use nonblocking `flock` acquisition and share
 the same absolute 30-second monotonic deadline for an append. Lock contention cannot turn a
-provider callback into an unbounded wait, and a timeout after write-ahead poison remains visible
-as poisoned state. The in-process recorder lock is also acquired with bounded `tryLock` polling;
-one entry deadline is passed unchanged through local locking, state read, append, and poison.
-Every filesystem lock checks that deadline before each attempt and immediately after acquisition.
+provider callback or closure into an unbounded wait, and a timeout after write-ahead poison
+remains visible as poisoned state. The in-process recorder lock is also acquired with bounded
+`tryLock` polling; one entry deadline is passed unchanged through attempt admission, local
+locking, state read, append, poison, and failure publication. Every filesystem lock checks that
+deadline before each attempt and immediately after acquisition.
 
 Extension append opens only the already-existing owner-private run directory and pre-created
 recorder lock; it never prepares or recreates the run. Teardown writes an immutable
