@@ -1,8 +1,12 @@
 # Revalidation and Dry-Run Isolation
 
 `DiskplanExecution` is the Phase 4 boundary between a validated immutable plan and any
-future mutation adapter. It accepts only an `ImmutablePlan`, its `DecisionOverlay`, and a
-read-only `RevalidationEvidenceSource`.
+future mutation adapter. Its production entry point accepts only an `ImmutablePlan`, its
+`DecisionOverlay`, and the engine-owned `EngineRevalidationCollector`. The current-evidence
+protocol, injectable source initializer, sealed-collector factory, and snapshot/request
+constructors remain internal. The `DiskplanEngine` SPI exposes only the sealed collector handle
+and preparation entry point, so even an SPI caller cannot inject a fabricated authoritative
+snapshot or collector closure.
 
 ## Protected properties
 
@@ -28,6 +32,12 @@ The policy validator first resolves the editable overlay into deterministic exec
 Phase 4 then collects one read-only snapshot for every unique JIT-revalidation action. It
 rejects missing, duplicate, and unexpected action observations. Duplicate-survivor and
 terminal-namespace invariants are collected and checked as explicit global observations.
+Every selected action also carries a freshly frozen policy evidence snapshot from the same
+capture and global-facts binding. The snapshot-level fresh capture ID also encloses release
+topology and survivor observations and must differ from the immutable plan capture. Phase 4
+rebuilds the action prototype and reruns all seven
+one-vote policy dimensions at the new execution reference time; a blocked vote, changed
+predicate, changed value bucket, or mismatched current typed observation rejects preparation.
 
 Release sets are joined into connected compound units by shared owner ActionIDs or file-object
 IDs. Selecting any complete-release action selects the entire connected unit. Every owner
@@ -37,18 +47,29 @@ an unreadable APFS observation rejects the whole preparation.
 
 ## Execution epoch and current binding
 
-A successful preparation creates a strict-deadline `ExecutionEpochContext` and a deterministic
-manifest that binds:
+A preparation creates a new semantic reference time from the engine clock and a strict-deadline
+`ExecutionEpochContext`. It consumes every waiver epoch requirement produced by overlay
+validation. Each requirement must still resolve to exactly one current predicate and the
+original consent; plan, plan-evidence, overlay, action, predicate, value bucket, semantic
+evidence, original reference time, current evidence, current global facts, epoch ID, and
+deadline are all bound into the deterministic manifest. A missing, extra, duplicate, or stale
+requirement rejects preparation.
+
+The manifest also binds:
 
 - the immutable plan and overlay hashes;
 - the epoch ID, issue time, and deadline;
-- topologically ordered execution actions and every JIT action; and
-- complete connected release units.
+- topologically ordered execution actions and every JIT action;
+- complete connected release units;
+- the single fresh capture and global-facts binding shared by all selected actions; and
+- the complete current waiver requirement set.
 
 The current binding hash is meaningful only after every typed observation equals the protected
-contract. It does not hash unselected metadata. Starting another revalidation invalidates every
-previously issued capability before collection begins; failed, changed, or newly scanned
-evidence cannot leave an older capability usable.
+contract. It does not hash unselected metadata. Before any suspension, each preparation takes a
+new actor-owned monotonic generation and invalidates every previously issued capability. After
+collection and immediately before capability registration, the generation must still be current.
+A newer successful or failed preparation therefore supersedes an older in-flight result, even
+when collector completions arrive out of order.
 
 ## Dry-run and apply capabilities
 
@@ -57,14 +78,15 @@ on an execution adapter. The module contains no filesystem mutation API.
 
 Apply preparation returns a separate `ApplyReadyReport` plus `ApplyCapability`. The public engine
 API obtains issue and authorization times from its private wall clock; the frontend cannot extend
-a lifetime by supplying timestamps. Capability bytes
-come from `SystemRandomNumberGenerator`, remain private to the module, are not hash-derived, and
-are stored only in an engine-private registry. The registry binds them to the exact plan,
+a lifetime by supplying timestamps. Capability bytes come from `SystemRandomNumberGenerator`,
+remain private to the module, are not hash-derived, and are stored only in an engine-private
+registry. The registry binds them to the exact plan,
 overlay, epoch, deadline, and manifest. Authorization removes the registry entry before checking
 the supplied binding, so replay and wrong-binding attempts consume the capability. Expired,
-forged, and unknown capabilities fail closed. The resulting `ApplyAuthorization` also permits
-its manifest to be claimed once, forming the handoff to Phase 5 without making the editable
-overlay or dry-run output mutation-capable.
+forged, and unknown capabilities fail closed. The resulting `ApplyAuthorization` permits its
+manifest to be claimed once. Its internal-only initializer means Phase 5 can treat it as proof
+that the engine performed authoritative current collection and whole-plan revalidation, without
+making the editable overlay or dry-run output mutation-capable.
 
 ## Phase 5 boundary
 

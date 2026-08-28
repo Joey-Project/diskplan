@@ -15,9 +15,11 @@ public actor ExecutionPreparationEngine {
   private let randomBytes: @Sendable (Int) throws -> Data
   private let clock: @Sendable () -> Int64
   private var capabilities: [Data: CapabilityRecord] = [:]
+  private var preparationGeneration: UInt64 = 0
+  private var preparationGenerationExhausted = false
 
-  public init(evidenceSource: any RevalidationEvidenceSource) {
-    self.evidenceSource = evidenceSource
+  @_spi(DiskplanEngine) public init(collector: EngineRevalidationCollector) {
+    self.evidenceSource = collector
     self.randomBytes = { count in
       var generator = SystemRandomNumberGenerator()
       return Data((0..<count).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
@@ -59,18 +61,29 @@ public actor ExecutionPreparationEngine {
     issuedAtSeconds: Int64,
     lifetimeSeconds: Int64
   ) async throws -> PreparationResult {
+    guard !preparationGenerationExhausted else {
+      invalidateAllCapabilities()
+      throw ExecutionPreparationError.generationExhausted
+    }
+    let nextGeneration = preparationGeneration.addingReportingOverflow(1)
+    guard !nextGeneration.overflow else {
+      preparationGenerationExhausted = true
+      invalidateAllCapabilities()
+      throw ExecutionPreparationError.generationExhausted
+    }
+    preparationGeneration = nextGeneration.partialValue
+    let generation = preparationGeneration
+    invalidateAllCapabilities()
+    purgeExpired(at: issuedAtSeconds)
     guard lifetimeSeconds > 0,
       issuedAtSeconds.addingReportingOverflow(lifetimeSeconds).overflow == false
     else { throw ExecutionPreparationError.invalidLifetime }
-
     let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
-    invalidateAllCapabilities()
-    purgeExpired(at: issuedAtSeconds)
 
     let epochBytes = try entropy(count: 16)
     let epoch = try ExecutionEpochContext(
       epochID: epochBytes.map { String(format: "%02x", $0) }.joined(),
-      semanticReferenceTimeSeconds: plan.globalFacts.semanticReferenceTimeSeconds,
+      semanticReferenceTimeSeconds: issuedAtSeconds,
       issuedAtSeconds: issuedAtSeconds,
       deadlineSeconds: issuedAtSeconds + lifetimeSeconds
     )
@@ -79,8 +92,19 @@ public actor ExecutionPreparationEngine {
     let report: RevalidationReport
     do {
       let snapshot = try await evidenceSource.collectCurrentEvidence(for: request)
+      guard generationIsCurrent(generation) else {
+        throw ExecutionPreparationError.preparationSuperseded
+      }
       report = Revalidator.evaluate(request: request, snapshot: snapshot)
     } catch {
+      guard generationIsCurrent(generation) else {
+        throw ExecutionPreparationError.preparationSuperseded
+      }
+      if let error = error as? ExecutionPreparationError,
+        error == .preparationSuperseded
+      {
+        throw error
+      }
       let finding = RevalidationFinding(
         actionID: nil,
         subject: .collector,
@@ -101,10 +125,16 @@ public actor ExecutionPreparationEngine {
     guard report.isCurrent, let manifest = report.manifest else {
       return .rejected(report)
     }
+    guard generationIsCurrent(generation) else {
+      throw ExecutionPreparationError.preparationSuperseded
+    }
     switch mode {
     case .dryRun:
       return .dryRun(DryRunReport(revalidation: report))
     case .apply:
+      guard generationIsCurrent(generation) else {
+        throw ExecutionPreparationError.preparationSuperseded
+      }
       var token: Data?
       for _ in 0..<8 {
         let candidate = try entropy(count: 32)
@@ -114,6 +144,9 @@ public actor ExecutionPreparationEngine {
         }
       }
       guard let token else { throw ExecutionPreparationError.entropyFailure }
+      guard generationIsCurrent(generation) else {
+        throw ExecutionPreparationError.preparationSuperseded
+      }
       capabilities[token] = CapabilityRecord(
         planHash: plan.planHash,
         overlayHash: overlay.overlayHash,
@@ -175,12 +208,21 @@ public actor ExecutionPreparationEngine {
 
   private func invalidateAllCapabilities() { capabilities.removeAll(keepingCapacity: true) }
 
+  private func generationIsCurrent(_ generation: UInt64) -> Bool {
+    !preparationGenerationExhausted && generation == preparationGeneration
+  }
+
   private func purgeExpired(at now: Int64) {
     capabilities = capabilities.filter { $0.value.deadlineSeconds > now }
   }
 }
 
 enum Revalidator {
+  private struct WaiverRequirementKey: Hashable {
+    let actionID: ActionID
+    let consentHash: PolicyDigest
+  }
+
   static func evaluate(
     request: RevalidationRequest,
     snapshot: CurrentRevalidationSnapshot
@@ -195,6 +237,8 @@ enum Revalidator {
           actionID: extra, subject: .collector, kind: .unexpectedObservation))
     }
 
+    var policyBindings: [CurrentPolicyBinding] = []
+    var consentRequirements: [ExecutionConsentRequirement] = []
     let outcomes = actions.map { action in
       guard let current = currentByID[action.id] else {
         return ActionRevalidationOutcome(
@@ -204,7 +248,52 @@ enum Revalidator {
           ]
         )
       }
-      return evaluateAction(action, current: current)
+      var outcome = evaluateAction(action, current: current)
+      let policy = evaluateFreshPolicy(
+        action,
+        current: current,
+        request: request
+      )
+      outcome = ActionRevalidationOutcome(
+        actionID: outcome.actionID,
+        findings: (outcome.findings + policy.findings).sorted(by: findingPrecedes)
+      )
+      if let binding = policy.binding { policyBindings.append(binding) }
+      consentRequirements.append(contentsOf: policy.consentRequirements)
+      return outcome
+    }
+    policyBindings.sort { $0.actionID < $1.actionID }
+    consentRequirements.sort(by: consentRequirementPrecedes)
+    let expectedRequirementKeys = Set(
+      request.validatedOverlay.epochRequirements.map {
+        WaiverRequirementKey(actionID: $0.actionID, consentHash: $0.consentHash)
+      })
+    let currentRequirementKeys = Set(
+      consentRequirements.map {
+        WaiverRequirementKey(actionID: $0.actionID, consentHash: $0.consentHash)
+      })
+    if consentRequirements.count != request.validatedOverlay.epochRequirements.count
+      || expectedRequirementKeys.count != request.validatedOverlay.epochRequirements.count
+      || currentRequirementKeys != expectedRequirementKeys
+    {
+      globalFindings.append(
+        RevalidationFinding(
+          actionID: nil,
+          subject: .policyEvidence,
+          kind: .staleConsent
+        ))
+    }
+    if snapshot.captureID == request.plan.globalFacts.captureID
+      || policyBindings.contains(where: { $0.captureID != snapshot.captureID })
+      || Set(policyBindings.map(\.captureID)).count > 1
+      || Set(policyBindings.map(\.globalFactsHash)).count > 1
+    {
+      globalFindings.append(
+        RevalidationFinding(
+          actionID: nil,
+          subject: .policyEvidence,
+          kind: .policyEvidenceMismatch
+        ))
     }
 
     globalFindings.append(
@@ -279,17 +368,23 @@ enum Revalidator {
       let binding = manifestDigest(
         request: request,
         actionOutcomes: sortedOutcomes,
-        units: units
+        units: units,
+        currentCaptureID: snapshot.captureID,
+        policyBindings: policyBindings,
+        consentRequirements: consentRequirements
       )
       manifest = ExecutionManifest(
         planHash: request.plan.planHash,
         overlayHash: request.validatedOverlay.overlayHash,
         epoch: request.epoch,
+        currentCaptureID: snapshot.captureID,
         executionActionIDs: actionIDs,
         jitRevalidationActionIDs: jit,
         compoundReleaseUnits: units.filter {
           !selectedReleaseGroupIDs.isDisjoint(with: $0.allocationGroupIDs)
         },
+        currentPolicyBindings: policyBindings,
+        consentRequirements: consentRequirements,
         currentBindingHash: binding
       )
     } else {
@@ -572,6 +667,219 @@ enum Revalidator {
     return ActionRevalidationOutcome(actionID: action.id, findings: findings)
   }
 
+  private struct FreshPolicyResult {
+    let findings: [RevalidationFinding]
+    let binding: CurrentPolicyBinding?
+    let consentRequirements: [ExecutionConsentRequirement]
+  }
+
+  private static func evaluateFreshPolicy(
+    _ action: ActionDefinition,
+    current: CurrentActionEvidence,
+    request: RevalidationRequest
+  ) -> FreshPolicyResult {
+    let unavailable:
+      (RevalidationFailureKind, ObservationFailure?, UnknownReason?) ->
+        FreshPolicyResult = { kind, failure, reason in
+          FreshPolicyResult(
+            findings: [
+              RevalidationFinding(
+                actionID: action.id,
+                subject: .policyEvidence,
+                kind: kind,
+                observationFailure: failure,
+                unknownReason: reason
+              )
+            ],
+            binding: nil,
+            consentRequirements: []
+          )
+        }
+    let fresh: FreshPolicyEvidence
+    switch current.freshPolicyEvidence {
+    case .known(let value): fresh = value
+    case .absent: return unavailable(.missing, nil, nil)
+    case .unknown(let reason): return unavailable(.unknown, nil, reason)
+    case .unreadable(let failure): return unavailable(.unreadable, failure, nil)
+    case .failed(let failure): return unavailable(.collectionFailed, failure, nil)
+    }
+
+    let evidence = fresh.evidence
+    let facts = fresh.globalFacts
+    guard evidence.semanticReferenceTimeSeconds == request.epoch.semanticReferenceTimeSeconds,
+      facts.semanticReferenceTimeSeconds == request.epoch.semanticReferenceTimeSeconds,
+      evidence.captureID == facts.captureID,
+      evidence.captureID != request.plan.globalFacts.captureID,
+      evidence.globalFactsHash == facts.globalFactsHash,
+      evidence.policyVersion == request.plan.policyVersion,
+      evidence.schemaVersion == request.plan.schemaVersion,
+      facts.policyVersion == request.plan.policyVersion,
+      facts.schemaVersion == request.plan.schemaVersion,
+      Data(evidence.candidateID.utf8) == Data(action.evidence.candidateID.utf8),
+      evidence.namespaceBinding == action.prototype.namespaceBinding,
+      evidence.identity == current.targetIdentity,
+      freshContentMatchesCurrent(action, evidence: evidence, current: current.targetContent),
+      evidence.coverage == current.coverage.knownValue,
+      evidence.collectorStatus == current.collectorStatus,
+      evidence.activity == current.activity,
+      evidence.explicitProtection == current.explicitProtection,
+      evidence.providerState == current.providerState,
+      evidence.recoverability == current.recoverability,
+      evidence.dependencyState == current.dependencyState,
+      freshGitEvidenceMatchesCurrent(evidence, current: current.gitWorktree),
+      freshAccessPolicyMatchesCurrent(evidence, current: current.targetAccessPolicy)
+    else { return unavailable(.policyEvidenceMismatch, nil, nil) }
+
+    do {
+      let prototype = try ActionPrototype.build(
+        request: adapterRequest(for: action.prototype.adapterContract),
+        evidence: evidence
+      )
+      guard prototype == action.prototype else {
+        return unavailable(.policyEvidenceMismatch, nil, nil)
+      }
+      let evaluation = try OneVotePolicy.evaluate(
+        OneVotePolicyInputs.build(evidence: evidence, globalFacts: facts)
+      )
+      let currentPredicates: [WaiverPredicate]
+      switch evaluation.stageability {
+      case .stageable:
+        currentPredicates = []
+      case .requiresConsents(let predicates):
+        currentPredicates = Array(Set(predicates)).sorted()
+      case .blocked:
+        return unavailable(.policyThresholdCrossed, nil, nil)
+      }
+      let plannedPredicates: [WaiverPredicate]
+      switch action.evaluation.stageability {
+      case .stageable:
+        plannedPredicates = []
+      case .requiresConsents(let predicates):
+        plannedPredicates = Array(Set(predicates)).sorted()
+      case .blocked:
+        return unavailable(.policyThresholdCrossed, nil, nil)
+      }
+      guard currentPredicates == plannedPredicates else {
+        return unavailable(.staleConsent, nil, nil)
+      }
+
+      let consents = request.validatedOverlay.waiverConsents.filter {
+        $0.actionLineageID == action.lineageID
+      }
+      var requirements: [ExecutionConsentRequirement] = []
+      var findings: [RevalidationFinding] = []
+      for predicate in currentPredicates {
+        let matches = consents.filter { $0.predicate == predicate }
+        guard matches.count == 1, let consent = matches.first,
+          let epochRequirement = request.validatedOverlay.epochRequirements.first(where: {
+            $0.actionID == action.id && $0.consentHash == consent.consentHash
+          }),
+          epochRequirement.planHash == request.plan.planHash,
+          epochRequirement.evidenceHash == request.plan.evidenceHash,
+          epochRequirement.semanticReferenceTimeSeconds
+            == request.plan.globalFacts.semanticReferenceTimeSeconds
+        else {
+          findings.append(
+            RevalidationFinding(
+              actionID: action.id,
+              subject: .waiverConsent(predicate.kind),
+              kind: .staleConsent
+            ))
+          continue
+        }
+        requirements.append(
+          ExecutionConsentRequirement(
+            consentHash: consent.consentHash,
+            actionID: action.id,
+            planHash: epochRequirement.planHash,
+            planEvidenceHash: epochRequirement.evidenceHash,
+            overlayHash: request.validatedOverlay.overlayHash,
+            originalSemanticReferenceTimeSeconds:
+              epochRequirement.semanticReferenceTimeSeconds,
+            executionReferenceTimeSeconds: request.epoch.semanticReferenceTimeSeconds,
+            currentEvidenceID: evidence.evidenceID,
+            currentGlobalFactsHash: facts.globalFactsHash,
+            currentPredicate: predicate
+          ))
+      }
+      return FreshPolicyResult(
+        findings: findings,
+        binding: CurrentPolicyBinding(
+          actionID: action.id,
+          captureID: evidence.captureID,
+          evidenceID: evidence.evidenceID,
+          globalFactsHash: facts.globalFactsHash,
+          requiredWaivers: currentPredicates
+        ),
+        consentRequirements: requirements.sorted(by: consentRequirementPrecedes)
+      )
+    } catch {
+      return unavailable(
+        .policyEvidenceMismatch,
+        ObservationFailure(
+          code: String(reflecting: type(of: error)), collector: "fresh-policy-evaluation"),
+        nil
+      )
+    }
+  }
+
+  private static func adapterRequest(
+    for contract: ActionAdapterContract
+  ) -> ActionAdapterRequest {
+    switch contract {
+    case .genericRemove: return .genericRemove
+    case .gitWorktreeRemove: return .gitWorktreeRemove
+    case .gitWorktreeDiscardLocalChanges: return .gitWorktreeDiscardLocalChanges
+    case .codexCleanTemporary(let contract):
+      return .codexCleanTemporary(cleanupScopeID: contract.cleanupScopeID)
+    case .versionedArtifactRemove(let contract):
+      return .versionedArtifactRemove(
+        artifactKind: contract.artifactKind, version: contract.version)
+    case .completeReleaseSetRemove(let contract):
+      return .completeReleaseSetRemove(binding: contract.binding)
+    }
+  }
+
+  private static func freshAccessPolicyMatchesCurrent(
+    _ evidence: FrozenEvidenceSnapshot,
+    current: Observation<RequiredAccessPolicyBaseline>
+  ) -> Bool {
+    guard case .known(let accessPolicy) = evidence.accessPolicy,
+      case .known(let aclDigest) = evidence.aclDigest,
+      case .known(let providerState) = evidence.providerState,
+      case .known(let mountIdentity) = evidence.targetMountIdentity
+    else { return false }
+    return current
+      == .known(
+        RequiredAccessPolicyBaseline(
+          accessPolicyBytes: Data(accessPolicy.utf8),
+          aclDigest: aclDigest,
+          providerState: providerState,
+          mountIdentityBytes: Data(mountIdentity.utf8)
+        ))
+  }
+
+  private static func freshContentMatchesCurrent(
+    _ action: ActionDefinition,
+    evidence: FrozenEvidenceSnapshot,
+    current: Observation<ContentProtectionBaseline>
+  ) -> Bool {
+    switch action.prototype.protectedProperties.content.expectedBaseline {
+    case .requiredDigest:
+      return evidence.contentProtection == current
+    case .explicitlyNotApplicable:
+      return true
+    }
+  }
+
+  private static func freshGitEvidenceMatchesCurrent(
+    _ evidence: FrozenEvidenceSnapshot,
+    current: Observation<GitWorktreeEvidence>
+  ) -> Bool {
+    guard let gitWorktree = evidence.gitWorktree else { return current == .absent }
+    return current == .known(gitWorktree)
+  }
+
   private static func compareObservation<Value: Equatable & Sendable>(
     _ observation: Observation<Value>,
     expected: Value,
@@ -684,12 +992,17 @@ enum Revalidator {
   private static func manifestDigest(
     request: RevalidationRequest,
     actionOutcomes: [ActionRevalidationOutcome],
-    units: [CompoundReleaseUnit]
+    units: [CompoundReleaseUnit],
+    currentCaptureID: PolicyDigest,
+    policyBindings: [CurrentPolicyBinding],
+    consentRequirements: [ExecutionConsentRequirement]
   ) -> PolicyDigest {
     var encoder = BindingEncoder(domain: "diskplan-current-execution-binding-v1")
     encoder.data(request.plan.planHash.bytes)
     encoder.data(request.validatedOverlay.overlayHash.bytes)
+    encoder.data(currentCaptureID.bytes)
     encoder.string(request.epoch.epochID)
+    encoder.int64(request.epoch.semanticReferenceTimeSeconds)
     encoder.int64(request.epoch.issuedAtSeconds)
     encoder.int64(request.epoch.deadlineSeconds)
     encoder.array(actionOutcomes) { $0.actionID.digest.bytes }
@@ -699,7 +1012,43 @@ enum Revalidator {
       nested.array(unit.ownerActionIDs) { $0.digest.bytes }
       return nested.bytes
     }
+    encoder.array(policyBindings) { binding in
+      var nested = BindingEncoder(domain: "current-policy-binding-v1")
+      nested.data(binding.actionID.digest.bytes)
+      nested.data(binding.captureID.bytes)
+      nested.data(binding.evidenceID.bytes)
+      nested.data(binding.globalFactsHash.bytes)
+      nested.array(binding.requiredWaivers) { predicate in
+        encode(predicate: predicate)
+      }
+      return nested.bytes
+    }
+    encoder.array(consentRequirements) { requirement in
+      var nested = BindingEncoder(domain: "execution-consent-requirement-v1")
+      nested.data(requirement.consentHash.bytes)
+      nested.data(requirement.actionID.digest.bytes)
+      nested.data(requirement.planHash.bytes)
+      nested.data(requirement.planEvidenceHash.bytes)
+      nested.data(requirement.overlayHash.bytes)
+      nested.int64(requirement.originalSemanticReferenceTimeSeconds)
+      nested.int64(requirement.executionReferenceTimeSeconds)
+      nested.data(requirement.currentEvidenceID.bytes)
+      nested.data(requirement.currentGlobalFactsHash.bytes)
+      nested.data(encode(predicate: requirement.currentPredicate))
+      nested.string(request.epoch.epochID)
+      nested.int64(request.epoch.deadlineSeconds)
+      return nested.bytes
+    }
     return encoder.digest
+  }
+
+  private static func encode(predicate: WaiverPredicate) -> Data {
+    var encoder = BindingEncoder(domain: "waiver-predicate-v1")
+    encoder.string(predicate.kind.rawValue)
+    encoder.string(predicate.predicate)
+    encoder.string(predicate.valueBucket)
+    encoder.data(predicate.semanticEvidenceHash.bytes)
+    return encoder.bytes
   }
 
   private static func findingPrecedes(
@@ -744,12 +1093,24 @@ enum Revalidator {
       encoder.string("compound-release-unit")
       encoder.array(groupIDs) { Data($0.utf8) }
     case .collector: encoder.string("collector")
+    case .policyEvidence: encoder.string("policy-evidence")
+    case .waiverConsent(let kind):
+      encoder.string("waiver-consent")
+      encoder.string(kind.rawValue)
     }
     return encoder.bytes
   }
 
   private static func rawUTF8Precedes(_ lhs: String, _ rhs: String) -> Bool {
     Data(lhs.utf8).lexicographicallyPrecedes(Data(rhs.utf8))
+  }
+
+  private static func consentRequirementPrecedes(
+    _ lhs: ExecutionConsentRequirement,
+    _ rhs: ExecutionConsentRequirement
+  ) -> Bool {
+    if lhs.actionID != rhs.actionID { return lhs.actionID < rhs.actionID }
+    return lhs.consentHash < rhs.consentHash
   }
 }
 
