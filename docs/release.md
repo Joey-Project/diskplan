@@ -176,6 +176,55 @@ real sibling-engine handshake, and runs only this non-mutating real-data shape:
 diskplan --batch --profile full-audit --dry-run --no-history --no-audit-file --root <path>
 ```
 
+The batch parser accepts those options in any order, exactly once. It preserves
+the root as raw platform path bytes and rejects relative roots, duplicate or
+unknown options, other profiles, persistence, and mutation-capable combinations
+with exit 64. Batch mode does not initialize a terminal.
+
+Standard output is a bounded two-record NDJSON report. `batch_started` exactly
+binds the `full-audit`, dry-run, no-history, no-audit-file request and hex-encodes
+the raw root. It requests the engine-owned `safe-stageable-without-waiver`
+selection preset; the Rust frontend never infers selections from dispositions.
+A successful `batch_completed` record is emitted only after the
+engine returns both an authoritative immutable-plan proof and dry-run outcomes
+covering every action in an engine-acknowledged decision overlay with zero
+mutation attempts. Plan and overlay carry separate nonzero SHA-256 bindings. A finalized scan,
+including a scan with no observed candidates, is not an empty-plan success.
+The engine proof must also report zero history and audit-file persistence
+attempts; these are terminal proof fields, not parser-only switches.
+The frontend accepts completion only when every authority transition repeats the
+exact upstream binding: finalized scan session/checkpoint and evidence hashes,
+plan projection/evidence/plan IDs and hashes, acknowledged overlay ID/revision/
+hash, then dry-run plan/overlay references plus execution epoch, current-binding,
+sealed projection-manifest, and revalidation hashes. Counts are supplemental and
+cannot substitute for any binding. The scan checkpoint ID is the lowercase hex
+encoding of the final evidence SHA-256; a merely nonempty opaque checkpoint
+label is not accepted. Plan, overlay, and dry-run references each repeat the
+complete scan session/checkpoint/checkpoint-evidence/final-evidence binding.
+The summary keeps total plan actions separate from engine-authored cleanup
+candidates. Overlay selection is bounded by the full plan action set, not by the
+candidate count, because prerequisite-connected selections may add actions that
+are not themselves cleanup candidates.
+
+Batch exit statuses are stable: 0 means an authoritative dry-run completed; 64
+is command-line usage; 65 is an incomplete or invalid engine result (including
+scan-only); 69 means the sibling engine or authoritative batch protocol is
+unavailable; 70 is an invalid sibling identity or engine protocol failure; and
+74 is engine setup, report, or transport I/O failure. Interactive and handshake
+startup failures retain their legacy status 1. Protocol 1.3
+therefore fails closed with 69 until the protocol 1.4 batch adapter is available.
+The sibling setup boundary classifies unavailable, invalid identity/protocol,
+and other I/O failures as typed outcomes before selecting a batch exit status;
+an `io::ErrorKind` cannot reinterpret a semantic identity rejection.
+The India runner independently parses the retained NDJSON and rejects an empty,
+scan-only, mutation-reporting, or internally inconsistent terminal record even
+when the subprocess returned zero.
+The validator parses the supervisor status, then reads the report exactly once
+through a no-follow descriptor. A regular owner-private mode-0600 single-link
+object is required; identity, size, access policy, and selected flags are sealed
+with `fstat` before and after the bounded read. Its exact byte count and SHA-256
+must match the supervisor's retained-output proof before NDJSON is parsed.
+
 The command has an external wall-clock limit and a 1 MiB retained-output limit.
 The supervisor owns a separate process group, converts `HUP`, `INT`, and `TERM`
 into bounded TERM-to-KILL cleanup, and does not report success until descendants

@@ -132,6 +132,13 @@ if ! run_bounded "${TASK_ROOT}/full-audit-status.json" \
 fi
 AUDIT_STATUS="${BOUNDED_STATUS}"
 readonly AUDIT_STATUS
+if ! python3 "${SCRIPT_DIR}/validate_batch_report.py" \
+    "${AUDIT_OUTPUT}" \
+    "${AUDIT_ROOT}" \
+    "${AUDIT_STATUS}"; then
+    echo "India acceptance rejected an empty, scan-only, or invalid full-audit report" >&2
+    exit 1
+fi
 
 REPORT="${TASK_ROOT}/acceptance-report.txt"
 {

@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod batch;
+pub mod cli;
 pub mod tui;
 
 use std::ffi::{OsStr, OsString};
