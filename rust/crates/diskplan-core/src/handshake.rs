@@ -6,7 +6,7 @@ use diskplan_proto::diskplan::v1::{
 use thiserror::Error;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 2;
+pub const PROTOCOL_MINOR: u32 = 3;
 
 #[derive(Debug, PartialEq)]
 pub enum HandshakeResult {
@@ -42,7 +42,9 @@ pub fn rust_client_hello() -> Hello {
         optional_capabilities: vec![
             "canonical-binary-v1".into(),
             "plan-bootstrap".into(),
+            "raw-path-bytes-v1".into(),
             "scan-control-v1".into(),
+            "scan-stream-v1".into(),
         ],
         implementation: "diskplan-rust".into(),
     }

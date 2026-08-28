@@ -7,8 +7,8 @@ expression: "snapshot(&state, 80, 24)"
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Engine facts ────────────────────────────────────────────────────────────────┐
 │standard  1:23  9945/s                                                        │
-│825431 entries  37602 dirs  148 candidates                                    │
-│Observed 23.0 GiB  Estimate 4.5 GiB                                           │
+│825431 entries  37602 dirs  148 retained                                      │
+│Observed 23.0 GiB  Evidence only                                              │
 │Roots 4 complete / 1 partial  Budget 2000000                                  │
 │Root /Users/example/Library/Caches/com.example                                │
 │No completion percentage                                                      │
@@ -24,5 +24,5 @@ expression: "snapshot(&state, 80, 24)"
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────
-q cancel  Space pause/resume  p provisional plan  ? or / help
+q cancel  Space pause/resume  p provisional evidence  ? or / help
 scan is running

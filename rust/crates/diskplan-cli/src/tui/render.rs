@@ -1,3 +1,4 @@
+use diskplan_proto::diskplan::v1::ScanState;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -96,9 +97,17 @@ fn render_header(frame: &mut Frame<'_>, state: &AppState, area: Rect, title: &st
 }
 
 fn render_footer(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
-    let keys = match state.screen {
-        Screen::Scan => "q cancel  Space pause/resume  p provisional plan  ? or / help",
-        Screen::ProvisionalPlan => "q cancel  r resume + invalidate  ? help",
+    let keys = match (state.screen, state.scan_state) {
+        (
+            Screen::Scan,
+            ScanState::Finished | ScanState::FinalizedPartial | ScanState::Cancelled,
+        ) if state.scan_finalized => "q quit  ? or / help",
+        (
+            Screen::Scan,
+            ScanState::Finished | ScanState::FinalizedPartial | ScanState::Cancelled,
+        ) => "waiting for finalized evidence  ? or / help",
+        (Screen::Scan, _) => "q cancel  Space pause/resume  p provisional evidence  ? or / help",
+        (Screen::ProvisionalPlan, _) => "q cancel  r resume + invalidate  ? help",
     };
     let banner = state
         .banner
@@ -123,13 +132,12 @@ fn scan_wide(state: &AppState) -> Vec<Line<'static>> {
             progress.entries_per_second
         )),
         Line::from(format!(
-            "Entries {:<14} Directories {:<10} Candidates {}",
-            progress.entries, progress.directories, progress.candidates
+            "Entries {:<14} Directories {:<10} Retained evidence {}",
+            progress.entries, progress.directories, progress.retained_nodes
         )),
         Line::from(format!(
-            "Allocated observed {:<12} Reclaim estimate {}",
-            format_bytes(progress.allocated_bytes_observed),
-            format_bytes(progress.reclaim_estimate_bytes)
+            "Allocated observed {:<12} Classification deferred to plan phase",
+            format_bytes(progress.allocated_bytes_observed)
         )),
         Line::from(format!(
             "Complete roots {:<9} Partial roots {:<9} Structural budget {}",
@@ -156,13 +164,12 @@ fn scan_medium(state: &AppState) -> Vec<Line<'static>> {
             progress.entries_per_second
         )),
         Line::from(format!(
-            "{} entries  {} dirs  {} candidates",
-            progress.entries, progress.directories, progress.candidates
+            "{} entries  {} dirs  {} retained",
+            progress.entries, progress.directories, progress.retained_nodes
         )),
         Line::from(format!(
-            "Observed {}  Estimate {}",
-            format_bytes(progress.allocated_bytes_observed),
-            format_bytes(progress.reclaim_estimate_bytes)
+            "Observed {}  Evidence only",
+            format_bytes(progress.allocated_bytes_observed)
         )),
         Line::from(format!(
             "Roots {} complete / {} partial  Budget {}",
@@ -191,13 +198,12 @@ fn scan_compact(state: &AppState) -> Vec<Line<'static>> {
             progress.entries, progress.entries_per_second
         )),
         Line::from(format!(
-            "{} dirs • {} candidates",
-            progress.directories, progress.candidates
+            "{} dirs • {} retained",
+            progress.directories, progress.retained_nodes
         )),
         Line::from(format!(
-            "{} observed • {} estimate",
-            format_bytes(progress.allocated_bytes_observed),
-            format_bytes(progress.reclaim_estimate_bytes)
+            "{} observed • evidence only",
+            format_bytes(progress.allocated_bytes_observed)
         )),
         Line::from(format!(
             "roots {}/{} complete/partial",
@@ -289,15 +295,29 @@ fn render_help(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
         return;
     }
     let popup = centered_rect(70, 60, area);
-    let text = match state.screen {
-        Screen::Scan => vec![
-            Line::from("q      cancel once and wait for engine exit"),
-            Line::from("Space  pause/resume after engine acknowledgement"),
-            Line::from("p      pause and build a provisional plan"),
+    let text = match (state.screen, state.scan_state) {
+        (
+            Screen::Scan,
+            ScanState::Finished | ScanState::FinalizedPartial | ScanState::Cancelled,
+        ) if state.scan_finalized => vec![
+            Line::from("q      quit after finalized evidence"),
             Line::from("? /    close this contextual help"),
         ],
-        Screen::ProvisionalPlan => vec![
-            Line::from("q      cancel once and wait for engine exit"),
+        (
+            Screen::Scan,
+            ScanState::Finished | ScanState::FinalizedPartial | ScanState::Cancelled,
+        ) => vec![
+            Line::from("       waiting for finalized evidence"),
+            Line::from("? /    close this contextual help"),
+        ],
+        (Screen::Scan, _) => vec![
+            Line::from("q      cancel; press q again after finalized evidence"),
+            Line::from("Space  pause/resume after engine acknowledgement"),
+            Line::from("p      pause and checkpoint provisional evidence"),
+            Line::from("? /    close this contextual help"),
+        ],
+        (Screen::ProvisionalPlan, _) => vec![
+            Line::from("q      cancel; press q again after finalized evidence"),
             Line::from("r      resume and invalidate this projection"),
             Line::from("?      close this contextual help"),
         ],
@@ -399,14 +419,15 @@ mod tests {
                 elapsed_millis: 83_000,
                 entries: 825_431,
                 directories: 37_602,
-                candidates: 148,
+                candidates: 0,
                 allocated_bytes_observed: 24_696_061_952,
-                reclaim_estimate_bytes: 4_831_838_208,
+                reclaim_estimate_bytes: 0,
                 complete_roots: 4,
                 partial_roots: 1,
                 entries_per_second: 9_945,
                 current_root: "/Users/example/Library/Caches/com.example".into(),
                 structural_budget: 2_000_000,
+                retained_nodes: 148,
             }),
             banner: Some("scan is running".into()),
             ..AppState::default()

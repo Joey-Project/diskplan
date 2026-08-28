@@ -55,8 +55,8 @@ where
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use diskplan_proto::diskplan::v1::{
-        ControlAccepted, EngineEvent, ScanCancelled, ScanControlKind, ScanProgress, ScanState,
-        ScanStateChanged, engine_event,
+        ControlAccepted, EngineEvent, ScanCancelled, ScanCheckpointEvidence, ScanControlKind,
+        ScanFinalized, ScanMachineState, ScanProgress, ScanState, ScanStateChanged, engine_event,
     };
     use ratatui::backend::TestBackend;
 
@@ -126,11 +126,25 @@ mod tests {
             engine(11, 4, state_changed(ScanState::Cancelled, "scan cancelled")),
             engine(
                 12,
-                4,
+                0,
+                engine_event::Body::ScanFinalized(ScanFinalized {
+                    checkpoint: Some(ScanCheckpointEvidence {
+                        profile: "standard".into(),
+                        machine_state: ScanMachineState::Cancelled as i32,
+                        ..Default::default()
+                    }),
+                    reason: "scan cancelled".into(),
+                    ..Default::default()
+                }),
+            ),
+            engine(
+                13,
+                0,
                 engine_event::Body::ScanCancelled(ScanCancelled {
                     reason: "script complete".into(),
                 }),
             ),
+            key('q'),
             UiEvent::DriverExited(Ok(())),
         ];
         let mut source = ScriptedEventSource::new(events);
@@ -163,6 +177,7 @@ mod tests {
                 event_sequence: 1,
                 request_id: 99,
                 body: None,
+                ..Default::default()
             })),
             UiEvent::DriverExited(Ok(())),
         ];
@@ -211,6 +226,7 @@ mod tests {
             event_sequence: sequence,
             request_id,
             body: Some(body),
+            ..Default::default()
         }))
     }
 

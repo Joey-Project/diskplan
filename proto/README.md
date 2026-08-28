@@ -70,45 +70,115 @@ scripts/canonical-fixture.sh generate
 scripts/test-cross-language.sh
 ```
 
-## `scan-control-v1`
+## Phase 1 scan stream
 
-Protocol minor `1.2` adds a typed Phase 0 scan-control stream. The client sends
-`StartScanRequest` once and then `ScanControlRequest` values for pause, resume,
-pause-and-build-provisional-plan, or cancel. Every request has a non-zero,
-strictly increasing `request_id`; its envelope sequence must equal that request
-ID. The Swift engine keeps only a high-water mark: malformed embedded requests,
-replays, duplicates, and out-of-order IDs pass through the same bounded
-duplicate-aware path.
+Protocol minor `1.3` retains `scan-control-v1` and adds the independently
+negotiated `scan-stream-v1` and `raw-path-bytes-v1` capabilities. The client
+sends `StartScanRequest` once and then typed controls for pause, resume,
+checkpoint, provisional-evidence checkpoint, partial finalization, or cancel.
+The provisional-evidence operation uses
+`CHECKPOINT_PROVISIONAL_EVIDENCE`; the older
+`PAUSE_AND_BUILD_PROVISIONAL_PLAN` value remains decodable for minor-version
+compatibility but is rejected by the Phase 1 producer.
+Every request has a non-zero, strictly increasing `request_id`; its envelope
+sequence equals that request ID. Malformed embedded requests, replays,
+duplicates, and out-of-order IDs pass through the same bounded high-water path.
 
-The engine responds only with `EngineEvent`. Every event repeats its originating
-`request_id`, has an `event_sequence` that starts at one and increases by exactly
-one, and is framed in an envelope whose sequence equals the event sequence. The
-Rust session rejects gaps, replay, reordering, and envelope/event sequence
-disagreement before the TUI consumes an event.
+Every engine event has an `event_sequence` that starts at one and increases by
+exactly one, and its envelope sequence equals that event sequence. Direct
+acknowledgements repeat their non-zero request ID. Naturally produced scan
+events use `request_id = 0` and carry the stable, non-empty `scan_session_id`
+created for that scan. The Rust session validates both provenance forms, exact
+sequence continuity, and immutable scan-session identity before forwarding an
+event to the reducer.
 
-After that validation, the frontend bridge keeps semantic events in a bounded,
-lossless queue and coalesces only contiguous `ScanProgress` runs to their latest
-value. The reducer receives the exact number of omitted progress events and
-accepts only the corresponding strictly increasing sequence gap. It still
-rejects duplicate, out-of-order, unproven-gap, or malformed semantic events and
-stops the engine driver on such a protocol invariant failure.
+After the handshake, one serial Swift broker is the sole stdout writer. It
+keeps semantic events in a finite lossless queue and backpressures the scanner
+when that queue is full. Only the last member of one contiguous pending
+`ScanProgress` run may be replaced by fresher telemetry. Event sequence numbers
+are assigned at write time, so coalescing never creates a protocol gap and can
+never discard node evidence, state changes, control responses, checkpoints,
+finalization, cancellation, or failures.
 
-The reducer also keeps one finite active-request lifecycle. Every non-ack event
-must carry that known non-zero request ID and be valid for its accepted control
-phase. Accepted control/resulting-state combinations are exhaustive; plan
-invalidation must name the exact currently displayed plan. Unknown provenance,
-impossible transitions, and stale invalidations fail closed.
+Node observations are lossless stream events. Retained checkpoint nodes are
+also encoded as an ordered stream of `ScanCheckpointChunk` events before the
+matching ready or finalized event. Each chunk contains at most 4 MiB of
+canonical node records, well below the 16 MiB frame limit. A record is a
+four-byte unsigned big-endian length followed by the canonical protobuf bytes
+of one `ScannedNodeEvidence`; the chunk digest covers that exact concatenation.
+The terminal manifest declares protocol version, chunk and retained-node
+counts, entry and byte budgets, ordered chunk IDs and SHA-256 digests, the
+checkpoint-evidence digest, and the final evidence digest. The unchunked
+checkpoint payload and encoded manifest are independently capped at 4 MiB and
+2 MiB, while total retained-node payload is capped at 768 MiB and 10,000 entries.
+The checkpoint payload omits retained nodes but includes and is bound to the
+complete coverage/frontier projection: progress, coverage, completed and failed
+roots, machine state, and resumable/provisional state.
+Setup rejects root collections whose duplicated checkpoint root-binding
+projection exceeds 1 MiB, leaving headroom inside the 4 MiB unchunked
+checkpoint budget for terminal evidence instead of accepting a scan that can
+never finalize.
+
+The Rust receiver admits chunks only at exact contiguous indices, verifies
+every canonical record and digest, and rejects duplicates, gaps, interleaved
+checkpoint IDs, mismatched counts, or budget overruns. `ScanCheckpointReady`
+and `ScanFinalized` become visible to the reducer only after the manifest,
+checkpoint bytes, coverage/frontier mirror, ordered descriptors, aggregate
+counts, evidence digest, and final digest all agree. Chunks and manifests are
+semantic events and are never coalesced; only adjacent progress remains
+coalescible.
+
+The final evidence hash is SHA-256 over the ASCII domain
+`diskplan/scan-checkpoint-final/v1\0`, followed by these fields in order:
+manifest version (`u32` big-endian), length-prefixed checkpoint digest, chunk
+count (`u32`), retained-node count (`u64`), retained-node entry budget (`u32`),
+retained-node payload bytes (`u64`), the checkpoint/chunk/manifest maximum byte
+budgets (`u32` each), the total retained-node maximum byte budget (`u64`), then
+every descriptor in manifest order. A descriptor contributes its
+index (`u32`), length-prefixed UTF-8 chunk ID, node count (`u32`), payload bytes
+(`u64`), and length-prefixed digest. Every length prefix is an unsigned
+big-endian `u32`. `checkpoint_id` is the lowercase hexadecimal final digest;
+`chunk_id` is `<decimal-index>-<lowercase-payload-digest>`. The checkpoint
+digest is SHA-256 over `diskplan/scan-checkpoint-evidence/v1\0` followed by the
+exact canonical checkpoint protobuf bytes. Validating the manifest's mirrored
+frontier against that decoded payload therefore binds coverage and frontier to
+the same final hash without trusting presentation strings.
 
 Control state does not change speculatively in the frontend. A
 `ControlAccepted` acknowledges the request and supplies the resulting engine
-state; `ControlRejected` leaves the prior state intact. State, progress,
-provisional-plan projection, invalidation, cancellation, completion, and engine
-failure are separate event variants.
+state; `ControlRejected` leaves the prior state intact. Checkpoint and
+finalization events contain scanner evidence rather than plan symbols. The
+Phase 0 provisional-plan messages remain reserved for wire compatibility but
+are not emitted by the Phase 1 producer. A `ScanFinalized` event terminates the
+scan worker, not the engine process or negotiated session; later protocol
+requests remain valid until stdin closes. The Rust TUI retains the final
+checkpoint and enables `q` exit only after `ScanFinalized` has arrived, rather
+than treating the preceding terminal state-change event as final evidence.
+Cancelled scans follow the same rule: `ScanCancelled` reports status but does
+not close the driver; a subsequent explicit `q` exits the verified session.
 
-`ScanProgress` carries only engine facts: elapsed time, entry/directory/candidate
-counts, observed allocation, the current reclaim estimate, root coverage, rate,
-current root, profile, and structural budget. It deliberately has no completion
-percentage. `ProvisionalPlanReady` similarly carries engine-authored plan groups
-and reclaim projections. Rust may format these values for display but must not
-reclassify candidates, calculate reclaim, regroup plans, or construct paths or
-commands.
+A rejected `StartScanRequest` carries both the broad `ControlRejectCode` and,
+when rejection occurred while validating or constructing the scan, a stable
+`ScanSetupRejectCode`. Capability negotiation, profile/root/budget validation,
+duplicate root IDs, no-materialization policy installation, root discovery,
+and scanner initialization remain distinct. A control-plane rejection that
+happens before setup begins leaves the setup code unspecified.
+
+`ScanCheckpoint` preserves the frozen profile, raw resolved scope, structural
+budgets, root coverage and failures, retained nodes, process-activity evidence,
+collector configuration, global VM/swap/APFS facts, and progress facts. Phase 1
+does not classify candidates, calculate reclaim, or construct actions. Partial
+finalization and cancellation are typed evidence outcomes that a later planning
+phase may consume. The legacy progress `candidates` and
+`reclaim_estimate_bytes` fields are therefore always zero in this stream;
+authoritative byte observations remain in their typed evidence fields. An
+authoritatively empty resolved-root list is valid evidence and is not rewritten
+as a setup failure.
+
+Filesystem paths have two separate representations. `raw_absolute_path` and
+each raw component preserve uninterpreted filesystem bytes; `display_path` is
+an engine-authored projection for presentation only. Rust must not reconstruct
+an authoritative path from display text or use display strings for filesystem
+operations. The engine ignores `display_path` on an inbound scan-root request
+and replaces it in emitted evidence. Invalid UTF-8 and terminal control or
+format characters are rendered as byte escapes rather than passed through.

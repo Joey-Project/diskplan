@@ -4,8 +4,6 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use diskplan_proto::diskplan::v1::engine_event;
-
 use crate::{ClientError, EngineSession};
 
 use super::event::{EngineEventIngress, EngineEventStream, engine_event_channel};
@@ -86,6 +84,22 @@ fn run_engine(
     {
         return Err(ClientError::MissingScanControlCapability);
     }
+    if !session
+        .accepted()
+        .negotiated_capabilities
+        .iter()
+        .any(|capability| capability == "scan-stream-v1")
+    {
+        return Err(ClientError::MissingScanStreamCapability);
+    }
+    if !session
+        .accepted()
+        .negotiated_capabilities
+        .iter()
+        .any(|capability| capability == "raw-path-bytes-v1")
+    {
+        return Err(ClientError::MissingRawPathCapability);
+    }
     session.send_start_scan(1, "standard")?;
 
     loop {
@@ -103,16 +117,7 @@ fn run_engine(
 
         match session.read_engine_event_with_timeout(EVENT_POLL_INTERVAL) {
             Ok(event) => {
-                let terminal = matches!(
-                    event.body,
-                    Some(engine_event::Body::ScanCancelled(_))
-                        | Some(engine_event::Body::ScanFinished(_))
-                        | Some(engine_event::Body::EngineFailed(_))
-                );
                 if events.send_engine_event(event).is_err() {
-                    return session.shutdown();
-                }
-                if terminal {
                     return session.shutdown();
                 }
             }

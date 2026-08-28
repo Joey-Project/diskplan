@@ -63,7 +63,7 @@ superseded_by:
   `ESTALE` identity/type mismatches.
 - [x] Preserve active-frame provider, mount, and frontier coverage on cancellation.
 - [ ] Complete independent frozen-range review and PR delivery.
-- [ ] Integrate scanner evidence into the versioned IPC workstream.
+- [x] Integrate scanner evidence into the versioned IPC workstream.
 
 ## Current State
 

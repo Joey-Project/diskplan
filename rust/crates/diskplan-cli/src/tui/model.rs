@@ -1,6 +1,7 @@
 use crossterm::event::KeyEvent;
 use diskplan_proto::diskplan::v1::{
-    EngineEvent, ProvisionalPlanReady, ScanControlKind, ScanProgress, ScanState,
+    EngineEvent, ProvisionalPlanReady, ScanCheckpointEvidence, ScanControlKind, ScanProgress,
+    ScanState,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +49,8 @@ pub struct AppState {
     pub scan_state: ScanState,
     pub progress: Option<ScanProgress>,
     pub provisional_plan: Option<ProvisionalPlanReady>,
+    pub latest_checkpoint: Option<ScanCheckpointEvidence>,
+    pub scan_finalized: bool,
     pub pending_controls: Vec<PendingControl>,
     pub(super) active_request: Option<ActiveRequest>,
     pub help_visible: bool,
@@ -66,6 +69,8 @@ impl Default for AppState {
             scan_state: ScanState::Idle,
             progress: None,
             provisional_plan: None,
+            latest_checkpoint: None,
+            scan_finalized: false,
             pending_controls: vec![PendingControl {
                 request_id: 1,
                 kind: ScanControlKind::StartScan,
@@ -122,6 +127,9 @@ pub struct ControlCommand {
     pub kind: ScanControlKind,
 }
 
+// The bounded ingress queue keeps this inline union below a fixed memory
+// budget; boxing every high-rate scan event would add an allocation per event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum UiEvent {
     Key(KeyEvent),

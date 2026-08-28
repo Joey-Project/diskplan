@@ -340,6 +340,7 @@ mod tests {
                 control: 1,
                 resulting_state: ScanState::Running as i32,
             })),
+            ..Default::default()
         }
     }
 

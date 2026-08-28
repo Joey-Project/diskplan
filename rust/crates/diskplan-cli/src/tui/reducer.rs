@@ -1,5 +1,8 @@
 use crossterm::event::{KeyCode, KeyEventKind};
-use diskplan_proto::diskplan::v1::{ControlRejectCode, ScanControlKind, ScanState, engine_event};
+use diskplan_proto::diskplan::v1::{
+    ControlRejectCode, ScanControlKind, ScanMachineState, ScanSetupRejectCode, ScanState,
+    engine_event,
+};
 
 use super::model::{
     ActiveRequest, AppState, Effect, EngineDelivery, RequestPhase, Screen, TerminalState, UiEvent,
@@ -44,6 +47,32 @@ fn reduce_key(state: &mut AppState, code: KeyCode, kind: KeyEventKind) -> Vec<Ef
             state.help_visible = !state.help_visible;
             Vec::new()
         }
+        KeyCode::Char('q')
+            if state.scan_finalized
+                && matches!(
+                    state.scan_state,
+                    ScanState::Finished | ScanState::FinalizedPartial | ScanState::Cancelled
+                ) =>
+        {
+            let summary = state
+                .banner
+                .clone()
+                .unwrap_or_else(|| "scan evidence finalized".into());
+            state.terminal = Some(if state.scan_state == ScanState::Cancelled {
+                TerminalState::Cancelled(summary)
+            } else {
+                TerminalState::Finished(summary)
+            });
+            vec![Effect::StopDriver]
+        }
+        KeyCode::Char('q')
+            if matches!(
+                state.scan_state,
+                ScanState::Finished | ScanState::FinalizedPartial | ScanState::Cancelled
+            ) =>
+        {
+            Vec::new()
+        }
         KeyCode::Char('q') => request_once(state, ScanControlKind::CancelScan),
         KeyCode::Char(' ') if state.screen == Screen::Scan => match state.scan_state {
             ScanState::Running => request_once(state, ScanControlKind::PauseScan),
@@ -52,7 +81,7 @@ fn reduce_key(state: &mut AppState, code: KeyCode, kind: KeyEventKind) -> Vec<Ef
         },
         KeyCode::Char('p') if state.screen == Screen::Scan => match state.scan_state {
             ScanState::Running | ScanState::Paused => {
-                request_once(state, ScanControlKind::PauseAndBuildProvisionalPlan)
+                request_once(state, ScanControlKind::CheckpointProvisionalEvidence)
             }
             _ => Vec::new(),
         },
@@ -155,6 +184,14 @@ fn reduce_engine_event(state: &mut AppState, delivery: EngineDelivery) -> Vec<Ef
                 _ => RequestPhase::AwaitingStateConfirmation,
             };
             state.take_pending(event.request_id);
+            if pending.kind == ScanControlKind::ResumeScan
+                && state
+                    .latest_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.provisional)
+            {
+                state.latest_checkpoint = None;
+            }
             state.active_request = Some(ActiveRequest {
                 request_id: event.request_id,
                 kind: pending.kind,
@@ -211,6 +248,25 @@ fn reduce_engine_event(state: &mut AppState, delivery: EngineDelivery) -> Vec<Ef
                     ),
                 );
             }
+            let Ok(setup_code) = ScanSetupRejectCode::try_from(rejected.setup_code) else {
+                return protocol_failure(
+                    state,
+                    "engine returned an unknown scan setup rejection code".into(),
+                );
+            };
+            let setup_code_is_typed = setup_code != ScanSetupRejectCode::Unspecified;
+            if setup_code_is_typed
+                && (pending.kind != ScanControlKind::StartScan
+                    || !matches!(
+                        code,
+                        ControlRejectCode::MalformedRequest | ControlRejectCode::Unavailable
+                    ))
+            {
+                return protocol_failure(
+                    state,
+                    "engine returned inconsistent scan setup rejection provenance".into(),
+                );
+            }
             state.take_pending(event.request_id);
             if pending.kind == ScanControlKind::CancelScan {
                 state.cancel_requested = false;
@@ -219,7 +275,7 @@ fn reduce_engine_event(state: &mut AppState, delivery: EngineDelivery) -> Vec<Ef
         }
         Some(body) => {
             if event.request_id == 0 {
-                return protocol_failure(state, "non-ack event has zero request_id".into());
+                return reduce_natural_event(state, body);
             }
             let Some(origin) = state.active_request.clone() else {
                 return protocol_failure(
@@ -259,24 +315,231 @@ fn accepted_transition_is_valid(
             current == ScanState::Running && resulting == ScanState::Paused
         }
         ScanControlKind::ResumeScan => {
-            matches!(current, ScanState::Paused | ScanState::ProvisionalPlanReady)
-                && resulting == ScanState::Running
+            current == ScanState::Paused && resulting == ScanState::Running
         }
-        ScanControlKind::PauseAndBuildProvisionalPlan => {
+        ScanControlKind::PauseAndBuildProvisionalPlan => false,
+        ScanControlKind::CheckpointProvisionalEvidence => {
             matches!(current, ScanState::Running | ScanState::Paused)
-                && resulting == ScanState::BuildingProvisionalPlan
+                && resulting == ScanState::Paused
+        }
+        ScanControlKind::CheckpointScan => {
+            matches!(current, ScanState::Running | ScanState::Paused) && resulting == current
+        }
+        ScanControlKind::FinalizePartialScan => {
+            matches!(current, ScanState::Running | ScanState::Paused)
+                && resulting == ScanState::FinalizingPartial
         }
         ScanControlKind::CancelScan => {
-            matches!(
-                current,
-                ScanState::Running
-                    | ScanState::Paused
-                    | ScanState::BuildingProvisionalPlan
-                    | ScanState::ProvisionalPlanReady
-            ) && resulting == ScanState::Cancelling
+            matches!(current, ScanState::Running | ScanState::Paused)
+                && resulting == ScanState::Cancelling
         }
         ScanControlKind::Unspecified => false,
     }
+}
+
+fn reduce_natural_event(state: &mut AppState, body: engine_event::Body) -> Vec<Effect> {
+    match body {
+        engine_event::Body::ScanStateChanged(changed) => {
+            let Ok(next) = ScanState::try_from(changed.state) else {
+                return protocol_failure(state, "engine reported an unknown scan state".into());
+            };
+            if next == ScanState::Unspecified
+                || !natural_transition_is_valid(state.scan_state, next)
+            {
+                return protocol_failure(
+                    state,
+                    format!(
+                        "natural state transition {:?} -> {:?} is invalid",
+                        state.scan_state, next
+                    ),
+                );
+            }
+            state.scan_state = next;
+            if next == ScanState::Running
+                && state
+                    .latest_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.provisional)
+            {
+                state.latest_checkpoint = None;
+            }
+            state.banner = Some(changed.reason);
+            state.active_request = None;
+        }
+        engine_event::Body::ScanProgress(progress) => {
+            if state.scan_state != ScanState::Running {
+                return protocol_failure(
+                    state,
+                    "progress arrived while scan was not running".into(),
+                );
+            }
+            state.progress = Some(progress);
+            state.banner = Some("Scanning read-only evidence…".into());
+        }
+        engine_event::Body::ScanNodeObserved(observed) => {
+            if state.scan_state != ScanState::Running {
+                return protocol_failure(
+                    state,
+                    "node evidence arrived while scan was not running".into(),
+                );
+            }
+            let Some(node) = observed.node else {
+                return protocol_failure(state, "node event omitted typed evidence".into());
+            };
+            let Some(path) = node.path else {
+                return protocol_failure(state, "node event omitted raw path evidence".into());
+            };
+            if path.root_id.is_empty() || path.display_path.is_empty() {
+                return protocol_failure(state, "node event has incomplete path provenance".into());
+            }
+        }
+        engine_event::Body::ScanCheckpointChunk(_) => {
+            if !matches!(
+                state.scan_state,
+                ScanState::Running
+                    | ScanState::Paused
+                    | ScanState::Finished
+                    | ScanState::FinalizedPartial
+                    | ScanState::Cancelled
+            ) {
+                return protocol_failure(
+                    state,
+                    "checkpoint chunk arrived outside a checkpoint-capable scan state".into(),
+                );
+            }
+            // EngineSession validates and retains every chunk before the
+            // reducer sees it. Evidence becomes UI-visible only when the
+            // matching ready/finalized manifest has been verified.
+        }
+        engine_event::Body::ScanCheckpointReady(ready) => {
+            if !matches!(state.scan_state, ScanState::Running | ScanState::Paused) {
+                return protocol_failure(state, "checkpoint arrived outside an active scan".into());
+            }
+            let Some(checkpoint) = ready.checkpoint else {
+                return protocol_failure(state, "checkpoint event omitted evidence".into());
+            };
+            if checkpoint.profile.is_empty() {
+                return protocol_failure(state, "checkpoint omitted its scan profile".into());
+            }
+            if !checkpoint.resumable_in_process {
+                return protocol_failure(state, "active checkpoint is not resumable".into());
+            }
+            let provisional = checkpoint.provisional;
+            state.latest_checkpoint = Some(checkpoint);
+            state.banner = Some(if provisional {
+                "Provisional evidence checkpoint ready; resume to continue scanning".into()
+            } else {
+                "Evidence checkpoint ready".into()
+            });
+            state.active_request = None;
+        }
+        engine_event::Body::ScanFinalized(finalized) => {
+            let Some(checkpoint) = finalized.checkpoint else {
+                return protocol_failure(state, "finalized event omitted evidence".into());
+            };
+            if checkpoint.profile.is_empty() {
+                return protocol_failure(
+                    state,
+                    "finalized checkpoint omitted its scan profile".into(),
+                );
+            }
+            if checkpoint.resumable_in_process || checkpoint.provisional {
+                return protocol_failure(
+                    state,
+                    "finalized checkpoint claimed resumable or provisional evidence".into(),
+                );
+            }
+            let Ok(machine_state) = ScanMachineState::try_from(checkpoint.machine_state) else {
+                return protocol_failure(
+                    state,
+                    "finalized checkpoint has an unknown machine state".into(),
+                );
+            };
+            let next = match machine_state {
+                ScanMachineState::Complete => ScanState::Finished,
+                ScanMachineState::Partial => ScanState::FinalizedPartial,
+                ScanMachineState::Cancelled => ScanState::Cancelled,
+                ScanMachineState::Unspecified
+                | ScanMachineState::Ready
+                | ScanMachineState::Scanning => {
+                    return protocol_failure(
+                        state,
+                        "finalized checkpoint has a non-terminal machine state".into(),
+                    );
+                }
+            };
+            if !natural_transition_is_valid(state.scan_state, next) {
+                return protocol_failure(
+                    state,
+                    format!(
+                        "finalized checkpoint cannot transition {:?} -> {:?}",
+                        state.scan_state, next
+                    ),
+                );
+            }
+            state.scan_state = next;
+            state.latest_checkpoint = Some(checkpoint);
+            state.scan_finalized = true;
+            state.banner = Some(finalized.reason);
+            state.active_request = None;
+        }
+        engine_event::Body::ScanCancelled(cancelled) => {
+            if state.scan_state != ScanState::Cancelled || !state.scan_finalized {
+                return protocol_failure(
+                    state,
+                    "cancellation terminal arrived before finalized cancelled evidence".into(),
+                );
+            }
+            state.scan_state = ScanState::Cancelled;
+            state.banner = Some(cancelled.reason);
+        }
+        engine_event::Body::ScanFinished(_) => {
+            return protocol_failure(
+                state,
+                "protocol 1.3 received legacy ScanFinished without finalized evidence".into(),
+            );
+        }
+        engine_event::Body::EngineFailed(failed) => {
+            state.scan_state = ScanState::Failed;
+            let detail = format!("{}: {}", failed.code, failed.detail);
+            state.terminal = Some(TerminalState::Failed(detail.clone()));
+            state.banner = Some(detail);
+            return vec![Effect::StopDriver];
+        }
+        engine_event::Body::ControlAccepted(_) | engine_event::Body::ControlRejected(_) => {
+            return protocol_failure(state, "acknowledgement entered natural-event path".into());
+        }
+        engine_event::Body::ProvisionalPlanReady(_)
+        | engine_event::Body::ProvisionalPlanInvalidated(_) => {
+            return protocol_failure(
+                state,
+                "Phase 1 scan stream emitted an unsupported plan projection".into(),
+            );
+        }
+    }
+    Vec::new()
+}
+
+fn natural_transition_is_valid(current: ScanState, next: ScanState) -> bool {
+    current == next
+        || matches!(
+            (current, next),
+            (ScanState::Idle, ScanState::Running)
+                | (ScanState::Running, ScanState::Paused)
+                | (ScanState::Paused, ScanState::Running)
+                | (
+                    ScanState::Running | ScanState::Paused,
+                    ScanState::FinalizingPartial
+                )
+                | (ScanState::FinalizingPartial, ScanState::FinalizedPartial)
+                | (
+                    ScanState::Running | ScanState::Paused,
+                    ScanState::Cancelling
+                )
+                | (ScanState::Cancelling, ScanState::Cancelled)
+                | (ScanState::Running, ScanState::Finished)
+                | (ScanState::Running, ScanState::FinalizedPartial)
+        )
 }
 
 fn reduce_origin_event(
@@ -409,17 +672,11 @@ fn reduce_origin_event(
             }
             state.terminal = Some(TerminalState::Cancelled(cancelled.reason));
         }
-        engine_event::Body::ScanFinished(finished) => {
-            if !matches!(
-                origin.kind,
-                ScanControlKind::StartScan | ScanControlKind::ResumeScan
-            ) || origin.phase != RequestPhase::Steady
-                || state.scan_state != ScanState::Running
-            {
-                return invalid_origin_event(state, &origin, "ScanFinished");
-            }
-            state.scan_state = ScanState::Finished;
-            state.terminal = Some(TerminalState::Finished(finished.summary));
+        engine_event::Body::ScanFinished(_) => {
+            return protocol_failure(
+                state,
+                "protocol 1.3 received legacy ScanFinished without finalized evidence".into(),
+            );
         }
         engine_event::Body::EngineFailed(failed) => {
             state.scan_state = ScanState::Failed;
@@ -433,6 +690,12 @@ fn reduce_origin_event(
                 state,
                 "ack event bypassed acknowledgement validation".into(),
             );
+        }
+        engine_event::Body::ScanNodeObserved(_)
+        | engine_event::Body::ScanCheckpointChunk(_)
+        | engine_event::Body::ScanCheckpointReady(_)
+        | engine_event::Body::ScanFinalized(_) => {
+            return invalid_origin_event(state, &origin, "natural scan-stream event");
         }
     }
     Vec::new()
@@ -468,7 +731,10 @@ fn control_label(kind: ScanControlKind) -> &'static str {
         ScanControlKind::StartScan => "Start",
         ScanControlKind::PauseScan => "Pause",
         ScanControlKind::ResumeScan => "Resume",
-        ScanControlKind::PauseAndBuildProvisionalPlan => "Provisional plan",
+        ScanControlKind::PauseAndBuildProvisionalPlan => "Unsupported legacy provisional plan",
+        ScanControlKind::CheckpointProvisionalEvidence => "Provisional evidence",
+        ScanControlKind::CheckpointScan => "Checkpoint",
+        ScanControlKind::FinalizePartialScan => "Finalize partial scan",
         ScanControlKind::CancelScan => "Cancel",
         ScanControlKind::Unspecified => "Unknown control",
     }
@@ -479,8 +745,9 @@ mod tests {
     use crossterm::event::{KeyEvent, KeyEventState, KeyModifiers};
     use diskplan_proto::diskplan::v1::{
         ControlAccepted, ControlRejected, EngineEvent, EngineFailed, ProvisionalPlanInvalidated,
-        ProvisionalPlanReady, ScanCancelled, ScanFinished, ScanProgress, ScanState,
-        ScanStateChanged, engine_event,
+        ProvisionalPlanReady, ScanCancelled, ScanCheckpointChunk, ScanCheckpointEvidence,
+        ScanCheckpointReady, ScanFinalized, ScanFinished, ScanMachineState, ScanNodeObserved,
+        ScanProgress, ScanRootRequest, ScanState, ScanStateChanged, engine_event,
     };
 
     use super::super::model::PendingControl;
@@ -507,13 +774,13 @@ mod tests {
     }
 
     #[test]
-    fn reducer_table_applies_ack_then_plan_and_resume_invalidation() {
+    fn reducer_applies_ack_then_provisional_evidence_checkpoint() {
         let mut state = running_state();
         let effect = reduce(&mut state, key('p', KeyEventKind::Press));
         let Effect::SendControl(command) = effect[0] else {
             panic!("expected control effect");
         };
-        assert_eq!(command.kind, ScanControlKind::PauseAndBuildProvisionalPlan);
+        assert_eq!(command.kind, ScanControlKind::CheckpointProvisionalEvidence);
 
         reduce(
             &mut state,
@@ -522,78 +789,221 @@ mod tests {
                 command.request_id,
                 engine_event::Body::ControlAccepted(ControlAccepted {
                     control: command.kind as i32,
-                    resulting_state: ScanState::BuildingProvisionalPlan as i32,
+                    resulting_state: ScanState::Paused as i32,
                 }),
             ))),
         );
-        assert_eq!(state.scan_state, ScanState::BuildingProvisionalPlan);
+        assert_eq!(state.scan_state, ScanState::Paused);
         assert!(state.pending_controls.is_empty());
 
         reduce(
             &mut state,
             UiEvent::Engine(EngineDelivery::exact(engine_event(
                 2,
-                command.request_id,
+                0,
                 engine_event::Body::ScanStateChanged(ScanStateChanged {
-                    state: ScanState::BuildingProvisionalPlan as i32,
-                    reason: "building".into(),
-                }),
-            ))),
-        );
-        reduce(
-            &mut state,
-            UiEvent::Engine(EngineDelivery::exact(engine_event(
-                3,
-                command.request_id,
-                engine_event::Body::ScanStateChanged(ScanStateChanged {
-                    state: ScanState::ProvisionalPlanReady as i32,
-                    reason: "ready".into(),
-                }),
-            ))),
-        );
-        reduce(
-            &mut state,
-            UiEvent::Engine(EngineDelivery::exact(engine_event(
-                4,
-                command.request_id,
-                engine_event::Body::ProvisionalPlanReady(ProvisionalPlanReady {
-                    plan_id: "p1".into(),
-                    ..Default::default()
-                }),
-            ))),
-        );
-        assert_eq!(state.screen, Screen::ProvisionalPlan);
-
-        let resume = reduce(&mut state, key('r', KeyEventKind::Press));
-        assert_eq!(resume.len(), 1);
-        assert_eq!(state.screen, Screen::ProvisionalPlan);
-        let Effect::SendControl(resume_command) = resume[0] else {
-            panic!("expected resume control");
-        };
-        reduce(
-            &mut state,
-            UiEvent::Engine(EngineDelivery::exact(engine_event(
-                5,
-                resume_command.request_id,
-                engine_event::Body::ControlAccepted(ControlAccepted {
-                    control: ScanControlKind::ResumeScan as i32,
-                    resulting_state: ScanState::Running as i32,
+                    state: ScanState::Paused as i32,
+                    reason: "checkpoint requested".into(),
                 }),
             ))),
         );
         let effects = reduce(
             &mut state,
             UiEvent::Engine(EngineDelivery::exact(engine_event(
-                6,
-                resume_command.request_id,
-                engine_event::Body::ProvisionalPlanInvalidated(ProvisionalPlanInvalidated {
-                    previous_plan_id: "p1".into(),
+                3,
+                0,
+                engine_event::Body::ScanCheckpointReady(ScanCheckpointReady {
+                    checkpoint: Some(ScanCheckpointEvidence {
+                        profile: "standard".into(),
+                        resolved_roots: vec![ScanRootRequest {
+                            root_id: "fixture".into(),
+                            raw_absolute_path: b"/tmp/fixture".to_vec(),
+                            display_path: "/tmp/fixture".into(),
+                        }],
+                        resumable_in_process: true,
+                        provisional: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
                 }),
             ))),
         );
         assert!(effects.is_empty());
+        assert!(state.latest_checkpoint.as_ref().unwrap().provisional);
         assert_eq!(state.screen, Screen::Scan);
         assert!(state.provisional_plan.is_none());
+        assert_eq!(state.scan_state, ScanState::Paused);
+        assert!(
+            state
+                .banner
+                .as_deref()
+                .unwrap()
+                .contains("checkpoint ready")
+        );
+
+        let resume = reduce(&mut state, key('r', KeyEventKind::Press));
+        let Effect::SendControl(resume) = resume[0] else {
+            panic!("expected resume control");
+        };
+        reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                4,
+                resume.request_id,
+                engine_event::Body::ControlAccepted(ControlAccepted {
+                    control: ScanControlKind::ResumeScan as i32,
+                    resulting_state: ScanState::Running as i32,
+                }),
+            ))),
+        );
+        assert!(state.latest_checkpoint.is_none());
+    }
+
+    #[test]
+    fn finalized_scan_keeps_driver_alive_until_explicit_quit() {
+        let mut state = running_state();
+        state.scan_state = ScanState::FinalizingPartial;
+        let effects = reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                0,
+                engine_event::Body::ScanStateChanged(ScanStateChanged {
+                    state: ScanState::FinalizedPartial as i32,
+                    reason: "evidence finalized".into(),
+                }),
+            ))),
+        );
+        assert!(effects.is_empty());
+        let effects = reduce(&mut state, key('q', KeyEventKind::Press));
+        assert!(effects.is_empty(), "q must wait for ScanFinalized evidence");
+        assert!(state.terminal.is_none());
+
+        let effects = reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                2,
+                0,
+                engine_event::Body::ScanFinalized(ScanFinalized {
+                    checkpoint: Some(ScanCheckpointEvidence {
+                        profile: "standard".into(),
+                        resolved_roots: vec![ScanRootRequest {
+                            root_id: "fixture".into(),
+                            raw_absolute_path: b"/tmp/fixture".to_vec(),
+                            display_path: "/tmp/fixture".into(),
+                        }],
+                        machine_state: ScanMachineState::Partial as i32,
+                        ..Default::default()
+                    }),
+                    reason: "evidence finalized".into(),
+                    ..Default::default()
+                }),
+            ))),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.scan_state, ScanState::FinalizedPartial);
+        assert!(state.scan_finalized);
+        assert_eq!(
+            state.latest_checkpoint.as_ref().unwrap().machine_state,
+            ScanMachineState::Partial as i32
+        );
+        assert!(state.terminal.is_none());
+
+        let effects = reduce(&mut state, key('q', KeyEventKind::Press));
+        assert_eq!(effects, vec![Effect::StopDriver]);
+        assert!(matches!(state.terminal, Some(TerminalState::Finished(_))));
+    }
+
+    #[test]
+    fn finalized_cancellation_also_requires_explicit_quit() {
+        let mut state = running_state();
+        state.scan_state = ScanState::Cancelling;
+        assert!(
+            reduce(
+                &mut state,
+                UiEvent::Engine(EngineDelivery::exact(engine_event(
+                    1,
+                    0,
+                    engine_event::Body::ScanStateChanged(ScanStateChanged {
+                        state: ScanState::Cancelled as i32,
+                        reason: "scan cancelled".into(),
+                    }),
+                ))),
+            )
+            .is_empty()
+        );
+        assert!(
+            reduce(
+                &mut state,
+                UiEvent::Engine(EngineDelivery::exact(engine_event(
+                    2,
+                    0,
+                    engine_event::Body::ScanFinalized(ScanFinalized {
+                        checkpoint: Some(ScanCheckpointEvidence {
+                            profile: "standard".into(),
+                            machine_state: ScanMachineState::Cancelled as i32,
+                            ..Default::default()
+                        }),
+                        reason: "scan cancelled".into(),
+                        ..Default::default()
+                    }),
+                ))),
+            )
+            .is_empty()
+        );
+        assert!(
+            reduce(
+                &mut state,
+                UiEvent::Engine(EngineDelivery::exact(engine_event(
+                    3,
+                    0,
+                    engine_event::Body::ScanCancelled(ScanCancelled {
+                        reason: "scan cancelled".into(),
+                    }),
+                ))),
+            )
+            .is_empty()
+        );
+        assert!(state.scan_finalized);
+        assert!(state.terminal.is_none());
+
+        let effects = reduce(&mut state, key('q', KeyEventKind::Press));
+        assert_eq!(effects, vec![Effect::StopDriver]);
+        assert!(matches!(state.terminal, Some(TerminalState::Cancelled(_))));
+    }
+
+    #[test]
+    fn legacy_scan_finished_cannot_bypass_finalized_evidence() {
+        let mut active = running_state();
+        let effects = reduce(
+            &mut active,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                0,
+                engine_event::Body::ScanFinished(ScanFinished {
+                    summary: "legacy completion".into(),
+                }),
+            ))),
+        );
+        assert_eq!(effects, vec![Effect::StopDriver]);
+        assert!(!active.scan_finalized);
+        assert!(matches!(active.terminal, Some(TerminalState::Failed(_))));
+
+        let mut natural = running_state();
+        natural.active_request = None;
+        let effects = reduce(
+            &mut natural,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                0,
+                engine_event::Body::ScanFinished(ScanFinished {
+                    summary: "legacy completion".into(),
+                }),
+            ))),
+        );
+        assert_eq!(effects, vec![Effect::StopDriver]);
+        assert!(!natural.scan_finalized);
+        assert!(matches!(natural.terminal, Some(TerminalState::Failed(_))));
     }
 
     #[test]
@@ -668,6 +1078,7 @@ mod tests {
                     event_sequence: 1,
                     request_id: 0,
                     body: None,
+                    ..Default::default()
                 }),
             ),
             (
@@ -711,6 +1122,7 @@ mod tests {
                     code: ControlRejectCode::InvalidState as i32,
                     detail: "too late".into(),
                     current_state: ScanState::Running as i32,
+                    ..Default::default()
                 }),
             ))),
         );
@@ -720,6 +1132,49 @@ mod tests {
         assert!(!state.cancel_requested);
         assert!(state.pending_controls.is_empty());
         assert_eq!(state.scan_state, ScanState::Running);
+    }
+
+    #[test]
+    fn typed_start_setup_rejection_is_non_terminal_and_non_start_setup_code_fails() {
+        let mut start_state = AppState::default();
+        let effects = reduce(
+            &mut start_state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                1,
+                engine_event::Body::ControlRejected(ControlRejected {
+                    control: ScanControlKind::StartScan as i32,
+                    code: ControlRejectCode::MalformedRequest as i32,
+                    detail: "invalid root".into(),
+                    current_state: ScanState::Idle as i32,
+                    setup_code: ScanSetupRejectCode::InvalidRoot as i32,
+                }),
+            ))),
+        );
+        assert!(effects.is_empty());
+        assert!(start_state.terminal.is_none());
+        assert!(start_state.pending_controls.is_empty());
+
+        let mut control_state = pending_state(2, ScanControlKind::PauseScan);
+        let effects = reduce(
+            &mut control_state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                2,
+                engine_event::Body::ControlRejected(ControlRejected {
+                    control: ScanControlKind::PauseScan as i32,
+                    code: ControlRejectCode::Unavailable as i32,
+                    detail: "wrong provenance".into(),
+                    current_state: ScanState::Running as i32,
+                    setup_code: ScanSetupRejectCode::InvalidRoot as i32,
+                }),
+            ))),
+        );
+        assert_eq!(effects, vec![Effect::StopDriver]);
+        assert!(matches!(
+            control_state.terminal,
+            Some(TerminalState::Failed(_))
+        ));
     }
 
     #[test]
@@ -737,6 +1192,7 @@ mod tests {
                         code,
                         detail: "invalid rejection code".into(),
                         current_state: ScanState::Running as i32,
+                        ..Default::default()
                     }),
                 ))),
             );
@@ -760,6 +1216,9 @@ mod tests {
             ScanControlKind::ResumeScan,
             ScanControlKind::PauseAndBuildProvisionalPlan,
             ScanControlKind::CancelScan,
+            ScanControlKind::CheckpointScan,
+            ScanControlKind::FinalizePartialScan,
+            ScanControlKind::CheckpointProvisionalEvidence,
         ];
         let states = [
             ScanState::Unspecified,
@@ -772,6 +1231,8 @@ mod tests {
             ScanState::Cancelled,
             ScanState::Finished,
             ScanState::Failed,
+            ScanState::FinalizingPartial,
+            ScanState::FinalizedPartial,
         ];
         let valid = [
             (
@@ -790,19 +1251,14 @@ mod tests {
                 ScanState::Running,
             ),
             (
-                ScanControlKind::ResumeScan,
-                ScanState::ProvisionalPlanReady,
+                ScanControlKind::CheckpointProvisionalEvidence,
                 ScanState::Running,
-            ),
-            (
-                ScanControlKind::PauseAndBuildProvisionalPlan,
-                ScanState::Running,
-                ScanState::BuildingProvisionalPlan,
-            ),
-            (
-                ScanControlKind::PauseAndBuildProvisionalPlan,
                 ScanState::Paused,
-                ScanState::BuildingProvisionalPlan,
+            ),
+            (
+                ScanControlKind::CheckpointProvisionalEvidence,
+                ScanState::Paused,
+                ScanState::Paused,
             ),
             (
                 ScanControlKind::CancelScan,
@@ -815,14 +1271,24 @@ mod tests {
                 ScanState::Cancelling,
             ),
             (
-                ScanControlKind::CancelScan,
-                ScanState::BuildingProvisionalPlan,
-                ScanState::Cancelling,
+                ScanControlKind::CheckpointScan,
+                ScanState::Running,
+                ScanState::Running,
             ),
             (
-                ScanControlKind::CancelScan,
-                ScanState::ProvisionalPlanReady,
-                ScanState::Cancelling,
+                ScanControlKind::CheckpointScan,
+                ScanState::Paused,
+                ScanState::Paused,
+            ),
+            (
+                ScanControlKind::FinalizePartialScan,
+                ScanState::Running,
+                ScanState::FinalizingPartial,
+            ),
+            (
+                ScanControlKind::FinalizePartialScan,
+                ScanState::Paused,
+                ScanState::FinalizingPartial,
             ),
         ];
 
@@ -859,13 +1325,17 @@ mod tests {
     }
 
     #[test]
-    fn every_non_ack_variant_requires_the_active_nonzero_request() {
+    fn natural_events_reject_nonzero_request_ids() {
         let bodies = vec![
             engine_event::Body::ScanStateChanged(ScanStateChanged {
                 state: ScanState::Running as i32,
                 ..Default::default()
             }),
             engine_event::Body::ScanProgress(ScanProgress::default()),
+            engine_event::Body::ScanNodeObserved(ScanNodeObserved::default()),
+            engine_event::Body::ScanCheckpointChunk(ScanCheckpointChunk::default()),
+            engine_event::Body::ScanCheckpointReady(ScanCheckpointReady::default()),
+            engine_event::Body::ScanFinalized(ScanFinalized::default()),
             engine_event::Body::ProvisionalPlanReady(ProvisionalPlanReady::default()),
             engine_event::Body::ProvisionalPlanInvalidated(ProvisionalPlanInvalidated::default()),
             engine_event::Body::ScanCancelled(ScanCancelled::default()),
@@ -874,24 +1344,29 @@ mod tests {
         ];
 
         for (index, body) in bodies.into_iter().enumerate() {
-            for request_id in [0, 99] {
-                let mut state = running_state();
-                let effects = reduce(
-                    &mut state,
-                    UiEvent::Engine(EngineDelivery::exact(engine_event(
-                        1,
-                        request_id,
-                        body.clone(),
-                    ))),
-                );
-                assert_eq!(
-                    effects,
-                    vec![Effect::StopDriver],
-                    "body {index}, id {request_id}"
-                );
-                assert!(matches!(state.terminal, Some(TerminalState::Failed(_))));
-            }
+            let mut state = running_state();
+            let effects = reduce(
+                &mut state,
+                UiEvent::Engine(EngineDelivery::exact(engine_event(1, 99, body))),
+            );
+            assert_eq!(effects, vec![Effect::StopDriver], "body {index}");
+            assert!(matches!(state.terminal, Some(TerminalState::Failed(_))));
         }
+
+        let mut state = running_state();
+        let effects = reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                0,
+                engine_event::Body::ScanProgress(ScanProgress {
+                    profile: "standard".into(),
+                    ..Default::default()
+                }),
+            ))),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.progress.unwrap().profile, "standard");
     }
 
     #[test]
@@ -1045,6 +1520,7 @@ mod tests {
             event_sequence: sequence,
             request_id,
             body: Some(body),
+            ..Default::default()
         }
     }
 }
