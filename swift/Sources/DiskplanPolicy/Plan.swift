@@ -837,6 +837,7 @@ public enum ActionPostcondition: Equatable, Sendable {
 public enum TrustedNamespace: String, Equatable, Sendable {
   case ownerPrivate
   case explicitlyTrustedUserNamespace
+  case unverified
 }
 
 public enum ForceRequirement: String, Equatable, Sendable {
@@ -1113,6 +1114,7 @@ public struct ActionPrototype: Equatable, Sendable {
   ) throws -> Self {
     guard case .known(let identity) = evidence.identity,
       identity == evidence.namespaceBinding.targetIdentity,
+      evidence.namespaceBinding.trustedNamespace != .unverified,
       case .known(let contentBaseline) = evidence.contentProtection,
       case .known(let accessPolicy) = evidence.accessPolicy,
       case .known(let aclDigest) = evidence.aclDigest,
