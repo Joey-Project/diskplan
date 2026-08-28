@@ -29,6 +29,10 @@ logical and allocation evidence, private-reclaim credit, link count, clone/shari
 topology, and unavailable-state evidence before either traversal or exact byte
 credit is accepted. A mismatch is typed as unstable, provider-unverified evidence;
 the stale boundary and byte snapshot are never returned as known.
+Positive provider identity cannot substitute for a missing dataless or sync-root
+flag: both flags must remain known through the postflight, and a rejected provider
+boundary discards exact byte credit even when the storage counters themselves were
+read successfully.
 
 `ItemProbe`, root descriptors, child descriptors, mount comparisons, and close
 revalidation all use the same real-device, file-ID, and object-type namespace.
@@ -39,7 +43,9 @@ replacement mismatch are different observations both during inspection and at
 directory close. Close evidence carries identity and access policy as independent
 observations: an access-policy mismatch cannot erase a stable identity, and its
 `EAGAIN` remains attached to the access-policy field. Child-entry churn alone does
-not constitute root identity mutation.
+not constitute root identity mutation. Close-time access policy is bracketed by
+parent-slot and descriptor identity observations on both sides; a known policy is
+discarded if that identity bracket does not remain stable.
 The production backend never constructs descendant paths; only the configured root's
 parent path is path-opened to establish the descriptor-relative root slot. A root
 with unproved provider ownership is retained in provenance and root failures but is
@@ -103,7 +109,9 @@ resumable only while the original process retains its descriptor-bound scanner.
 Snapshots merge the active directory stack and every not-yet-completed root into
 top-level coverage and progress. A paused provisional result therefore remains
 `subtree_incomplete` while any frontier node or unstarted root exists, even though
-the already observed evidence itself is stable.
+the already observed evidence itself is stable. Cancellation merges every active
+frame's accumulated provider, mount, enumeration, and frontier coverage before it
+closes descriptors and clears the stack.
 
 Every `ScanResult.reference` binds the complete resolved scope, including failed and
 not-yet-started raw roots, the profile and resolver version, entry/depth/enumeration/

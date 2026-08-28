@@ -492,6 +492,20 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         : "provider, dataless, or sync-root state changed during provider inspection"
       return .failed(reason: reason, errorCode: EBUSY)
     }
+    guard beforeItem.isDataless.value != nil else {
+      return observation(
+        beforeItem.isDataless,
+        operation: "prove dataless state after provider inspection",
+        as: InspectedObject.self
+      )
+    }
+    guard beforeItem.isSyncRoot.value != nil else {
+      return observation(
+        beforeItem.isSyncRoot,
+        operation: "prove sync-root state after provider inspection",
+        as: InspectedObject.self
+      )
+    }
     let after = statSlotSeal(parent: parent, name: name)
     guard let afterSeal = after.value else { return after.erasingValue() }
     guard beforeSeal.accessPolicy == afterSeal.accessPolicy else {
@@ -500,7 +514,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     return .known(
       InspectedObject(
         identity: afterIdentity,
-        bytes: byteEvidence(afterItem),
+        bytes: boundary.preventsNormalDescent ? .unknown : byteEvidence(afterItem),
         storageTopology: topologyEvidence(afterItem),
         filesystemTimes: afterSeal.times,
         accessPolicy: .known(afterSeal.accessPolicy),
@@ -559,9 +573,38 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         Darwin.close(directory.slotBinding.parent.rawValue)
       }
     }
+    let identityBeforePolicy = closeIdentity(directory)
+    let accessPolicy = closeAccessPolicy(directory)
+    let identityAfterPolicy = closeIdentity(directory)
+    let bracketedIdentity = bracketedCloseIdentity(
+      beforePolicy: identityBeforePolicy,
+      afterPolicy: identityAfterPolicy
+    )
+    let bracketedAccessPolicy: Observation<AccessPolicyEvidence>
+    if bracketedIdentity.value != nil || accessPolicy.value == nil {
+      bracketedAccessPolicy = accessPolicy
+    } else {
+      bracketedAccessPolicy = .unknown(
+        reason: "access-policy observation was not bound to a stable directory identity"
+      )
+    }
     return DirectoryCloseEvidence(
-      identity: closeIdentity(directory),
-      accessPolicy: closeAccessPolicy(directory)
+      identity: bracketedIdentity,
+      accessPolicy: bracketedAccessPolicy
+    )
+  }
+
+  private func bracketedCloseIdentity(
+    beforePolicy: Observation<ObjectIdentity>,
+    afterPolicy: Observation<ObjectIdentity>
+  ) -> Observation<ObjectIdentity> {
+    if beforePolicy == afterPolicy { return beforePolicy }
+    if beforePolicy.value != nil, let afterIdentity = afterPolicy.value {
+      return .known(afterIdentity)
+    }
+    return .failed(
+      reason: "directory identity state changed while revalidating access policy",
+      errorCode: ESTALE
     )
   }
 

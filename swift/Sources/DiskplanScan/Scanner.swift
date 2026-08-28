@@ -476,6 +476,10 @@ public final class DeterministicScanner {
   private func closeOpenDirectories() -> Coverage {
     var closeCoverage = Coverage.complete
     while let frame = stack.popLast() {
+      closeCoverage = closeCoverage.merging(frame.coverage)
+      closeCoverage = closeCoverage.merging(
+        Coverage(completeness: .partial, reasons: [.subtreeIncomplete])
+      )
       closeCoverage = closeCoverage.merging(coverage(for: filesystem.close(frame.directory)))
     }
     pendingNameBytes = 0

@@ -285,6 +285,7 @@ private let fakeAccessPolicy = AccessPolicyEvidence(
 
 private func replacingItemEvidence(
   _ item: ItemStorageEvidence,
+  fileID: Capability<UInt64>? = nil,
   logicalBytes: Capability<UInt64>? = nil,
   sharing: SharingEvidence? = nil,
   isDataless: Capability<Bool>? = nil,
@@ -294,7 +295,7 @@ private func replacingItemEvidence(
     returnedAttributes: item.returnedAttributes,
     device: item.device,
     objectType: item.objectType,
-    fileID: item.fileID,
+    fileID: fileID ?? item.fileID,
     linkCount: item.linkCount,
     logicalBytes: logicalBytes ?? item.logicalBytes,
     nominalAllocatedBytes: item.nominalAllocatedBytes,
@@ -381,13 +382,14 @@ private func file(_ id: UInt64, bytes: UInt64, device: Int64 = 1) -> FakeNode {
 private func directory(
   _ id: UInt64,
   children: [RawPathComponent],
+  device: Int64 = 1,
   boundary: ProviderBoundary = .localOrUnindicated,
   openFailure: Observation<BoundDirectory>? = nil,
   enumerateFailure: Observation<DirectoryEnumeration>? = nil,
   closeFailure: DirectoryCloseEvidence? = nil
 ) -> FakeNode {
   FakeNode(
-    identity: ObjectIdentity(device: 1, fileID: id, objectType: .directory),
+    identity: ObjectIdentity(device: device, fileID: id, objectType: .directory),
     bytes: ItemByteEvidence(
       logical: .exact(0), nominalAllocated: .exact(0), immediatePrivateReclaim: .exact(0)
     ),
@@ -817,6 +819,60 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   #expect(cancelled.result.coverage.reasons.contains(.cancelled))
 }
 
+@Test func cancelPreservesProviderMountAndActiveFrontierCoverage() {
+  let provider = component("provider")
+  let providerRoot = RawPath(rootID: "root")
+  let providerFS = FakeFilesystem(
+    rootChildren: [provider],
+    nodes: [
+      providerRoot.appending(provider): directory(
+        2,
+        children: [],
+        boundary: .metadataOnly(reason: "sync root")
+      )
+    ]
+  )
+  let providerScope = try! ResolvedScanScope(
+    resolverVersion: 1,
+    profile: .deep,
+    roots: [providerFS.request],
+    budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 2),
+    maximumDurationNanoseconds: nil
+  )
+  let providerScanner = DeterministicScanner(
+    filesystem: providerFS,
+    scope: providerScope,
+    clock: FixedClock(times: [100])
+  )
+  _ = providerScanner.advance(maximumEntries: 1)
+  let providerCancelled = providerScanner.cancel()
+  #expect(providerCancelled.coverage.reasons.contains(.providerMetadataOnly))
+  #expect(providerCancelled.coverage.reasons.contains(.subtreeIncomplete))
+
+  let mount = component("mount")
+  let mountRoot = RawPath(rootID: "root")
+  let mountFS = FakeFilesystem(
+    rootChildren: [mount],
+    nodes: [mountRoot.appending(mount): directory(3, children: [], device: 2)]
+  )
+  let mountScope = try! ResolvedScanScope(
+    resolverVersion: 1,
+    profile: .deep,
+    roots: [mountFS.request],
+    budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 2),
+    maximumDurationNanoseconds: nil
+  )
+  let mountScanner = DeterministicScanner(
+    filesystem: mountFS,
+    scope: mountScope,
+    clock: FixedClock(times: [100])
+  )
+  _ = mountScanner.advance(maximumEntries: 1)
+  let mountCancelled = mountScanner.cancel()
+  #expect(mountCancelled.coverage.reasons.contains(.mountBoundary))
+  #expect(mountCancelled.coverage.reasons.contains(.subtreeIncomplete))
+}
+
 @Test func fakeTraversalDoesNotConstructOrOpenChildPaths() {
   let fileName = component("file")
   let root = RawPath(rootID: "root")
@@ -1197,6 +1253,108 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   }
 }
 
+@Test func authoritativeProviderEvidenceCannotOverrideUnknownSyncRootState() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-provider-sync-state-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  try FileManager.default.createDirectory(
+    at: rootURL.appendingPathComponent("child"),
+    withIntermediateDirectories: false
+  )
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let item = replacingItemEvidence(
+    fixtureItemEvidence(),
+    isSyncRoot: .unavailable("sync-root state unavailable")
+  )
+  let provider = LockedProviderOutcome(confirmedProviderEvidence())
+  let filesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { .known(policy) },
+    itemEvidenceReader: { _, _, _ in .known(item) },
+    providerEvidenceReader: { _, _, _, _ in provider.probe() }
+  )
+
+  let observation = filesystem.inspect(
+    parent: DirectoryHandle(rawValue: fd),
+    name: component("child"),
+    inheritedProviderBoundary: false,
+    requiresAuthoritativeProviderEvidence: false
+  )
+  guard case .unknown = observation else {
+    Issue.record("authoritative provider evidence overrode unknown sync-root state")
+    return
+  }
+  #expect(provider.callCount == 1)
+}
+
+@Test func rejectedProviderBoundaryCannotRetainExactByteCredit() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-provider-rejected-bytes-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  try FileManager.default.createDirectory(
+    at: rootURL.appendingPathComponent("child"),
+    withIntermediateDirectories: false
+  )
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let item = replacingItemEvidence(fixtureItemEvidence(), isDataless: .known(true))
+  let rejectedBoundary = FileProviderProbeOutcome.evidence(
+    FileProviderEvidence(
+      identity: .known(
+        ProviderIdentity(itemIdentifier: "fixture-item", domainIdentifier: "fixture-domain")
+      ),
+      identityDisposition: .confirmedProvider,
+      providerCapabilities: .unavailable("fixture"),
+      promisedMetadata: .unavailable("fixture"),
+      traversal: .doNotDescendDataless,
+      handling: .reportOnly,
+      hiddenBackingBytes: .unavailable("fixture"),
+      controlledNonMaterializationAcceptance: .unavailable("fixture")
+    )
+  )
+  let filesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { .known(policy) },
+    itemEvidenceReader: { _, _, _ in .known(item) },
+    providerEvidenceReader: { _, _, _, _ in rejectedBoundary }
+  )
+
+  let inspected = try #require(
+    filesystem.inspect(
+      parent: DirectoryHandle(rawValue: fd),
+      name: component("child"),
+      inheritedProviderBoundary: false,
+      requiresAuthoritativeProviderEvidence: false
+    ).value
+  )
+  #expect(inspected.providerBoundary.preventsNormalDescent)
+  guard case .unknown = inspected.bytes.logical else {
+    Issue.record("rejected provider boundary retained exact logical bytes")
+    return
+  }
+  guard case .unknown = inspected.bytes.nominalAllocated else {
+    Issue.record("rejected provider boundary retained exact allocated bytes")
+    return
+  }
+  guard case .unknown = inspected.bytes.immediatePrivateReclaim else {
+    Issue.record("rejected provider boundary retained exact reclaim bytes")
+    return
+  }
+}
+
 @Test func providerPostflightRejectsChangedPolicyStateAndExactByteCredit() throws {
   let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
   let rootURL = FileManager.default.temporaryDirectory
@@ -1428,6 +1586,70 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   }
 }
 
+@Test func closeAccessPolicyObservationIsBracketedByParentSlotIdentity() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("diskplan-close-bracket-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  try FileManager.default.createDirectory(
+    at: rootURL.appendingPathComponent("child"),
+    withIntermediateDirectories: false
+  )
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let parent = DirectoryHandle(rawValue: fd)
+  let name = component("child")
+  let normal = DarwinScanFilesystem(policy: policy)
+  let inspected = try #require(
+    normal.inspect(
+      parent: parent,
+      name: name,
+      inheritedProviderBoundary: false,
+      requiresAuthoritativeProviderEvidence: false
+    ).value
+  )
+  let accessPolicy = try #require(inspected.accessPolicy.value)
+  let directory = try #require(
+    normal.openDirectory(
+      parent: parent,
+      name: name,
+      expectedIdentity: inspected.identity,
+      expectedAccessPolicy: accessPolicy
+    ).value
+  )
+  let actualItem = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: name.bytes,
+      policy: policy
+    ).value
+  )
+  let actualFileID = try #require(actualItem.fileID.value)
+  let slotSequence = LockedItemEvidenceSequence([
+    actualItem,
+    replacingItemEvidence(actualItem, fileID: .known(actualFileID &+ 1)),
+  ])
+  let racingFilesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { .known(policy) },
+    itemEvidenceReader: { _, _, _ in slotSequence.read() }
+  )
+  let closeEvidence = racingFilesystem.close(directory)
+  guard case .failed(_, let identityCode) = closeEvidence.identity else {
+    Issue.record("post-policy parent-slot replacement was not detected")
+    return
+  }
+  #expect(identityCode == ESTALE)
+  guard case .unknown = closeEvidence.accessPolicy else {
+    Issue.record("replacement access policy was accepted as identity-bound")
+    return
+  }
+}
+
 @Test func configuredDarwinRootFailsClosedWithoutAuthoritativeProviderOwnership() throws {
   let installed = MaterializationPolicyInstaller().installBeforePathAccess()
   let policy = try #require(installed.value)
@@ -1463,12 +1685,8 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 2, retainedNodeCount: 10),
     maximumDurationNanoseconds: nil
   )
-  let gate = LockedPolicyGate(policy: policy)
   let scanner = DeterministicScanner(
-    filesystem: DarwinScanFilesystem(
-      policy: policy,
-      pathAccessValidator: { gate.validate() }
-    ),
+    filesystem: DarwinScanFilesystem(policy: policy),
     scope: scope,
     clock: FixedClock(times: [100])
   )
@@ -1480,5 +1698,4 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     return
   }
   #expect(code == ENODATA)
-  #expect(gate.callCount == 3)
 }

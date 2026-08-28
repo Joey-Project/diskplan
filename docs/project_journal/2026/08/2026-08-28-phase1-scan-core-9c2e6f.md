@@ -51,6 +51,11 @@ superseded_by:
   is unavailable instead of treating it as local evidence.
 - [x] Merge active stack and unstarted-root coverage into provisional snapshots.
 - [x] Preserve close-time identity and access-policy observations independently.
+- [x] Keep unknown sync-root state fail-closed after positive provider evidence and
+  discard exact byte credit at rejected provider boundaries.
+- [x] Bracket close-time access-policy observation with parent-slot identity before
+  and after the policy read.
+- [x] Preserve active-frame provider, mount, and frontier coverage on cancellation.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [ ] Integrate scanner evidence into the versioned IPC workstream.
 
@@ -63,7 +68,7 @@ superseded_by:
 
 ## Handoff
 
-- Phase: Phase 1 third frozen-review repair complete and validated.
+- Phase: Phase 1 fourth frozen-review repair complete and validated.
 - Next step: repeat independent frozen-range review, then prepare PR delivery.
 - Blocker: none for the scanner slice. The authoritative directory packed-attribute
   parser fix is integrated from foundation head
@@ -129,3 +134,17 @@ superseded_by:
   self-test, with controlled fixtures explicitly unavailable on this local host.
 - Strict Swift format lint, `git diff --check`, CI journal tests (17 tests), both
   journal validators, `bash -n`, and ShellCheck pass for the third repair range.
+- The fourth frozen review identified a sync-root unknown-state escape after
+  positive provider evidence, an unbracketed close-time policy read, and dropped
+  active-frame coverage during cancellation. The repair requires known dataless
+  and sync-root state after provider postflight, drops exact byte credit at rejected
+  boundaries, brackets policy with two descriptor/parent-slot identity reads, and
+  merges every active frame before close. Focused scanner tests pass all 36 tests.
+- After the fourth frozen-review repair, the complete Swift suite passes all 84
+  tests and the explicit Swift build with automatic dependency resolution disabled
+  succeeds. The macOS capability gate passes 32 focused tests plus the CLI
+  self-test; controlled File Provider and APFS volume-group fixtures remain
+  explicitly unavailable on this local host.
+- Strict Swift format lint on all changed Swift files, `git diff --check`, CI
+  journal tests (6 tests), the repository journal validator, and the bundled
+  project-journal validator pass for the fourth repair range.
