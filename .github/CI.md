@@ -29,6 +29,7 @@ authority.
 | --- | --- | --- |
 | `actions/checkout` | `v7` | `3d3c42e5aac5ba805825da76410c181273ba90b1` |
 | `actions/cache` | `v5.0.5` | `27d5ce7f107fe9357f9df03efb73ab90386fccae` |
+| `actions/download-artifact` | `v8` | `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` |
 | `actions/upload-artifact` | `v7.0.1` | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
 
 ## Release CI
@@ -36,13 +37,18 @@ authority.
 `release-ci.yml` adds a separate required macOS 26 Apple Silicon release lane.
 It validates release scripts, builds the Rust launcher and Swift engine into a
 deterministic arm64 archive, exercises the complete versioned install lifecycle,
-and uploads only the archive plus its SHA-256 sidecar. The best-effort macOS 14
-lane builds both components and retains the initial deployment-target evidence;
-it does not gate release.
+and uploads only the archive plus its SHA-256 sidecar. On tag events, the tag
+must be exactly `v` followed by the canonical SemVer stored in `release/VERSION`.
+The required lane also asserts the repository-pinned zlib compile/runtime version
+`1.2.12` before producing deterministic gzip bytes.
+The best-effort macOS 14 lane downloads that exact archive, verifies its sidecar,
+and runs the package lifecycle and live frontend/engine handshake on macOS 14.
+It does not rebuild with the older runner's Swift toolchain and does not gate
+release.
 
-The release workflow uses the same immutable `actions/checkout` and
-`actions/upload-artifact` pins listed above. The uploaded archive is already
-compressed, so artifact transport uses compression level zero.
+The release workflow uses the immutable checkout, upload, and download action
+pins listed above. The uploaded archive is already compressed, so artifact
+transport uses compression level zero.
 
 To update an action, resolve its release tag from the action's official GitHub
 repository, review the release and runtime requirement, replace the full SHA,

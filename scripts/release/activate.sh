@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/release-common.sh"
+diskplan_require_fs_helper
 
 PREFIX="${HOME:?HOME must be set}/.local"
 VERSION=""
@@ -29,13 +30,13 @@ done
 diskplan_validate_version "${VERSION}" || diskplan_die "version is invalid"
 PREFIX="$(diskplan_resolve_prefix "${PREFIX}")"
 readonly PREFIX VERSION
-readonly DESTINATION="${PREFIX}/libexec/diskplan/${VERSION}"
+diskplan_bind_prefix "${PREFIX}" existing
 diskplan_acquire_install_lock "${PREFIX}"
 trap diskplan_release_install_lock EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-diskplan_verify_bundle "${DESTINATION}"
+diskplan_verify_managed_bundle "${PREFIX}" "${VERSION}" -
 [[ "${DISKPLAN_VERIFIED_VERSION}" == "${VERSION}" ]] || diskplan_die "installed bundle version does not match its directory"
-diskplan_atomic_activate "${PREFIX}" "${VERSION}"
+diskplan_atomic_activate "${PREFIX}" "${VERSION}" "${DISKPLAN_VERIFIED_PROOF}"
 echo "Activated Diskplan ${VERSION}"

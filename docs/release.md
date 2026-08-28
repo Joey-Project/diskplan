@@ -1,9 +1,10 @@
 # Release Packaging And Local Install
 
 Diskplan publishes a versioned macOS arm64 archive containing the Rust `diskplan`
-launcher, its sibling Swift `diskplan-engine`, install lifecycle scripts, and
-deterministic identity metadata. The required release build runs on Apple Silicon
-macOS 26. macOS 14 remains a non-blocking deployment-compatibility build.
+launcher, its sibling Swift `diskplan-engine`, a narrow native filesystem helper,
+install lifecycle scripts, and deterministic identity metadata. The required
+release build runs on Apple Silicon macOS 26. macOS 14 remains a non-blocking
+deployment-compatibility build.
 
 ## Build
 
@@ -20,12 +21,25 @@ diskplan-<version>-macos-arm64.tar.gz
 diskplan-<version>-macos-arm64.tar.gz.sha256
 ```
 
-The packager executes both binaries with `--version-json` and rejects any
-product-version or protocol mismatch before it writes the archive. It also checks
-that both Mach-O binaries contain arm64 code. `manifest.json`, `protocol.json`,
+The packager first copies every executable through a no-follow file descriptor
+into a private staging directory. Identity, architecture, platform, and minimum
+macOS probes run only against those immutable staged bytes; the exact same bytes
+are then archived. It rejects any product-version, protocol, arm64, Mach-O
+platform, or minimum-deployment-target mismatch before publication.
+`manifest.json`, `protocol.json`,
 `VERSION`, and `SHA256SUMS` make the exact archive contents auditable. Tar entry
-ownership, modes, ordering, and timestamps plus the gzip timestamp are normalized,
-so the same input bytes and source revision produce the same archive bytes.
+ownership, modes, ordering, and timestamps plus every gzip header field and the
+compression level are pinned, so the same input bytes and source revision produce
+the same archive bytes. Release packaging deliberately pins both the compile-time
+and runtime zlib implementation to `1.2.12`; a toolchain change fails closed until
+that reproducibility input is reviewed and updated. The archive and its checksum
+sidecar are published as one verified output set using private, exclusive
+temporary files.
+
+`build-release.sh` accepts only a clean, stable source checkout. It binds the
+manifest revision to the exact Git tree and revalidates tracked and untracked
+build inputs before and after compilation. Release tags must be canonical SemVer
+and exactly equal `v$(cat release/VERSION)`.
 
 ## Install, Upgrade, And Rollback
 
@@ -53,16 +67,21 @@ The default layout is:
 ```
 
 The installer verifies the exact file set, checksums, metadata, arm64 slices,
-and the two process identities before publication. It stages a new immutable
-version under the destination filesystem, publishes it while holding the
-cooperating-installer lock, and atomically switches the launcher symlink. Existing
-versions are retained. Roll back by activating one verified installed version:
+actual modes and ownership, and process identities before publication. A narrow
+native filesystem helper holds no-follow descriptors for the managed ancestor
+chain. It rejects symbolic-link ancestors and access-policy drift, publishes a
+new immutable version with an exclusive same-filesystem rename, proves the
+published directory is the verified staging object, and conditionally replaces
+only the launcher leaf it observed. Existing versions are retained. Roll back by
+activating one verified installed version:
 
 ```sh
 ~/.local/libexec/diskplan/<old-version>/activate.sh <old-version>
 ```
 
-Remove one exact verified version without recursive cleanup:
+Remove one exact verified version without recursive cleanup. Deletion stays
+descriptor-relative to the directory object that was verified, so a pathname
+replacement cannot redirect it:
 
 ```sh
 ~/.local/libexec/diskplan/<version>/uninstall.sh <version>
@@ -81,7 +100,11 @@ scripts/release/test-release.sh /absolute/path/diskplan-<version>-macos-arm64.ta
 
 The test uses task-scoped temporary roots and covers deterministic repackaging,
 fresh and idempotent install, sibling-engine launch, checksum rejection, upgrade,
-rollback activation, protocol-major mismatch rejection, and exact uninstall.
+rollback activation, protocol-major mismatch rejection, and exact uninstall. Its
+adversarial cases cover symlinked prefix ancestors, replacement races, artifact
+mode drift, stale lifecycle locks, launcher activation races, hostile packager
+output leaves, closed-output timeouts, signal cancellation, and background
+descendants.
 
 ## India Host Acceptance
 
@@ -95,6 +118,9 @@ diskplan --batch --profile full-audit --dry-run --no-history --no-audit-file --r
 ```
 
 The command has an external wall-clock limit and a 1 MiB retained-output limit.
+The supervisor owns a separate process group, converts `HUP`, `INT`, and `TERM`
+into bounded TERM-to-KILL cleanup, and does not report success until descendants
+are gone. Closing output early cannot bypass the monotonic deadline.
 The normal report is printed to the shell. `--report <path>` is optional and a
 failure to persist it, including `ENOSPC`, is reported but does not change a
 successful acceptance result. This infrastructure intentionally exposes the

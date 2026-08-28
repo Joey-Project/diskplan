@@ -63,9 +63,34 @@ cleanup() {
     rm -rf -- "${TASK_ROOT}"
 }
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+ACTIVE_SUPERVISOR_PID=""
+forward_signal() {
+    local signal_name="$1"
+    local signal_status="$2"
+    local supervisor_pid="${ACTIVE_SUPERVISOR_PID}"
+    if [[ -n "${supervisor_pid}" ]]; then
+        /bin/kill -s "${signal_name}" "${supervisor_pid}" 2>/dev/null || true
+        wait "${supervisor_pid}" 2>/dev/null || true
+        ACTIVE_SUPERVISOR_PID=""
+    fi
+    exit "${signal_status}"
+}
+trap 'forward_signal HUP 129' HUP
+trap 'forward_signal INT 130' INT
+trap 'forward_signal TERM 143' TERM
+
+BOUNDED_STATUS=""
+run_bounded() {
+    local status_path="$1"
+    shift
+    python3 "${SCRIPT_DIR}/run_bounded.py" "$@" > "${status_path}" &
+    ACTIVE_SUPERVISOR_PID=$!
+    local bounded_status=0
+    wait "${ACTIVE_SUPERVISOR_PID}" || bounded_status=$?
+    ACTIVE_SUPERVISOR_PID=""
+    BOUNDED_STATUS="$(<"${status_path}")"
+    return "${bounded_status}"
+}
 
 readonly PREFIX="${TASK_ROOT}/prefix"
 "${BUNDLE}/install.sh" --prefix "${PREFIX}" "${BUNDLE}"
@@ -77,19 +102,21 @@ BUNDLE_MANIFEST_SHA256="$(/usr/bin/shasum -a 256 "${BUNDLE}/manifest.json" | /us
 readonly VERSION PROTOCOL_MAJOR PROTOCOL_MINOR SOURCE_REVISION BUNDLE_MANIFEST_SHA256
 
 HANDSHAKE_OUTPUT="${TASK_ROOT}/handshake.log"
-HANDSHAKE_STATUS="$(python3 "${SCRIPT_DIR}/run_bounded.py" \
+if ! run_bounded "${TASK_ROOT}/handshake-status.json" \
     --timeout-seconds 30 \
     --max-output-bytes 65536 \
     --output "${HANDSHAKE_OUTPUT}" \
-    -- "${PREFIX}/bin/diskplan" --handshake)" || {
-        echo "India acceptance handshake failed: ${HANDSHAKE_STATUS:-no status}" >&2
-        exit 1
-    }
+    -- "${PREFIX}/bin/diskplan" --handshake; then
+    echo "India acceptance handshake failed: ${BOUNDED_STATUS:-no status}" >&2
+    exit 1
+fi
+HANDSHAKE_STATUS="${BOUNDED_STATUS}"
+readonly HANDSHAKE_STATUS
 
 # This exact interface is intentionally dry-run-only. It may inspect real user
 # data but cannot request apply, persistent audit output, history, or spill.
 AUDIT_OUTPUT="${TASK_ROOT}/full-audit.log"
-AUDIT_STATUS="$(python3 "${SCRIPT_DIR}/run_bounded.py" \
+if ! run_bounded "${TASK_ROOT}/full-audit-status.json" \
     --timeout-seconds "${TIMEOUT_SECONDS}" \
     --max-output-bytes 1048576 \
     --output "${AUDIT_OUTPUT}" \
@@ -99,10 +126,12 @@ AUDIT_STATUS="$(python3 "${SCRIPT_DIR}/run_bounded.py" \
         --dry-run \
         --no-history \
         --no-audit-file \
-        --root "${AUDIT_ROOT}")" || {
-        echo "India acceptance full-audit dry-run failed: ${AUDIT_STATUS:-no status}" >&2
-        exit 1
-    }
+        --root "${AUDIT_ROOT}"; then
+    echo "India acceptance full-audit dry-run failed: ${BOUNDED_STATUS:-no status}" >&2
+    exit 1
+fi
+AUDIT_STATUS="${BOUNDED_STATUS}"
+readonly AUDIT_STATUS
 
 REPORT="${TASK_ROOT}/acceptance-report.txt"
 {

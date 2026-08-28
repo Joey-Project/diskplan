@@ -42,6 +42,50 @@ readonly BUNDLE
 
 readonly PREFIX="${TEST_ROOT}/prefix"
 
+# No-follow prefix traversal rejects redirection before any outside object changes.
+readonly OUTSIDE_SENTINEL="${TEST_ROOT}/outside-sentinel"
+mkdir "${OUTSIDE_SENTINEL}"
+/usr/bin/printf '%s\n' sentinel > "${OUTSIDE_SENTINEL}/sentinel"
+ln -s "${OUTSIDE_SENTINEL}" "${TEST_ROOT}/symlink-prefix"
+if "${BUNDLE}/install.sh" --prefix "${TEST_ROOT}/symlink-prefix" "${BUNDLE}" >/dev/null 2>&1; then
+    echo "symlink install prefix was accepted" >&2
+    exit 1
+fi
+[[ "$(<"${OUTSIDE_SENTINEL}/sentinel")" == "sentinel" ]]
+[[ -z "$(/usr/bin/find "${OUTSIDE_SENTINEL}" -mindepth 1 ! -name sentinel -print -quit)" ]]
+
+readonly SYMLINK_BIN_PREFIX="${TEST_ROOT}/symlink-bin-prefix"
+mkdir "${SYMLINK_BIN_PREFIX}" "${TEST_ROOT}/outside-bin"
+ln -s "${TEST_ROOT}/outside-bin" "${SYMLINK_BIN_PREFIX}/bin"
+if "${BUNDLE}/install.sh" --prefix "${SYMLINK_BIN_PREFIX}" "${BUNDLE}" >/dev/null 2>&1; then
+    echo "symlink managed bin directory was accepted" >&2
+    exit 1
+fi
+[[ -z "$(/usr/bin/find "${TEST_ROOT}/outside-bin" -mindepth 1 -print -quit)" ]]
+
+readonly SYMLINK_LIBEXEC_PREFIX="${TEST_ROOT}/symlink-libexec-prefix"
+mkdir "${SYMLINK_LIBEXEC_PREFIX}" "${SYMLINK_LIBEXEC_PREFIX}/bin" "${TEST_ROOT}/outside-libexec"
+ln -s "${TEST_ROOT}/outside-libexec" "${SYMLINK_LIBEXEC_PREFIX}/libexec"
+if "${BUNDLE}/install.sh" --prefix "${SYMLINK_LIBEXEC_PREFIX}" "${BUNDLE}" >/dev/null 2>&1; then
+    echo "symlink managed libexec directory was accepted" >&2
+    exit 1
+fi
+[[ -z "$(/usr/bin/find "${TEST_ROOT}/outside-libexec" -mindepth 1 -print -quit)" ]]
+
+# A dead, identity-bound lifecycle owner is recovered without manual broad cleanup.
+readonly STALE_PREFIX="${TEST_ROOT}/stale-prefix"
+STALE_PREFIX_IDENTITY="$("${BUNDLE}/diskplan-fs-helper" prepare-prefix "${STALE_PREFIX}")"
+readonly STALE_PREFIX_IDENTITY
+(
+    "${BUNDLE}/diskplan-fs-helper" acquire-lock \
+        "${STALE_PREFIX}" "${STALE_PREFIX_IDENTITY}" "${BASHPID}" >/dev/null
+)
+[[ -d "${STALE_PREFIX}/.diskplan-install.lock" ]]
+"${BUNDLE}/install.sh" --prefix "${STALE_PREFIX}" "${BUNDLE}" >/dev/null
+"${STALE_PREFIX}/libexec/diskplan/$(<"${BUNDLE}/VERSION")/uninstall.sh" \
+    --prefix "${STALE_PREFIX}" "$(<"${BUNDLE}/VERSION")" >/dev/null
+[[ ! -e "${STALE_PREFIX}/.diskplan-install.lock" ]]
+
 # The acceptance supervisor enforces both independent resource ceilings.
 set +e
 python3 "${SCRIPT_DIR}/run_bounded.py" \
@@ -72,6 +116,33 @@ readonly VERSION
 # Reinstalling identical bytes is idempotent and does not disturb activation.
 "${BUNDLE}/install.sh" --prefix "${PREFIX}" "${BUNDLE}"
 
+# Installed access-policy drift is distinct from content mismatch and fails closed.
+readonly INSTALLED_VERSION="${PREFIX}/libexec/diskplan/${VERSION}"
+/bin/chmod 0777 "${INSTALLED_VERSION}/diskplan-engine"
+if "${INSTALLED_VERSION}/activate.sh" --prefix "${PREFIX}" "${VERSION}" >/dev/null 2>&1; then
+    echo "world-writable installed engine was accepted" >&2
+    exit 1
+fi
+/bin/chmod 0755 "${INSTALLED_VERSION}/diskplan-engine"
+"${INSTALLED_VERSION}/activate.sh" --prefix "${PREFIX}" "${VERSION}" >/dev/null
+
+# A second hard link violates the immutable one-owner artifact policy.
+/bin/ln "${INSTALLED_VERSION}/protocol.json" "${TEST_ROOT}/protocol-hardlink"
+if "${INSTALLED_VERSION}/activate.sh" --prefix "${PREFIX}" "${VERSION}" >/dev/null 2>&1; then
+    echo "multiply-linked installed metadata was accepted" >&2
+    exit 1
+fi
+/bin/rm "${TEST_ROOT}/protocol-hardlink"
+"${INSTALLED_VERSION}/activate.sh" --prefix "${PREFIX}" "${VERSION}" >/dev/null
+
+# Supplying more than one positional bundle is always a usage error, including
+# when the first path is the install script's own bundle directory.
+set +e
+"${BUNDLE}/install.sh" --prefix "${PREFIX}" "${BUNDLE}" "${BUNDLE}" >/dev/null 2>&1
+DUPLICATE_BUNDLE_STATUS=$?
+set -e
+[[ "${DUPLICATE_BUNDLE_STATUS}" == "64" ]]
+
 # The archive is reproducible from the exact bundled inputs and source identity.
 mkdir "${TEST_ROOT}/repack"
 SOURCE_REVISION="$(/usr/bin/plutil -extract source_revision raw -o - "${BUNDLE}/manifest.json")"
@@ -79,6 +150,7 @@ readonly SOURCE_REVISION
 python3 "${SCRIPT_DIR}/package_bundle.py" \
     --frontend "${BUNDLE}/diskplan" \
     --engine "${BUNDLE}/diskplan-engine" \
+    --fs-helper "${BUNDLE}/diskplan-fs-helper" \
     --installer "${BUNDLE}/install.sh" \
     --activator "${BUNDLE}/activate.sh" \
     --uninstaller "${BUNDLE}/uninstall.sh" \
@@ -119,7 +191,27 @@ build_identity_binary() {
         '  }' \
         '  return 64;' \
         '}' > "${source}"
-    /usr/bin/xcrun clang -arch arm64 -Os "${source}" -o "${output}"
+    /usr/bin/xcrun clang -arch arm64 -mmacosx-version-min=14.0 -Os "${source}" -o "${output}"
+}
+
+build_fs_helper() {
+    local output="$1"
+    local version="$2"
+    local major="$3"
+    local minor="$4"
+    /usr/bin/xcrun clang \
+        -arch arm64 \
+        -mmacosx-version-min=14.0 \
+        -std=c11 \
+        -Os \
+        -Wall \
+        -Wextra \
+        -Werror \
+        "-DDISKPLAN_PRODUCT_VERSION=\"${version}\"" \
+        "-DDISKPLAN_PROTOCOL_MAJOR=${major}" \
+        "-DDISKPLAN_PROTOCOL_MINOR=${minor}" \
+        "${SCRIPT_DIR}/diskplan-fs-helper.c" \
+        -o "${output}"
 }
 
 make_fixture_bundle() {
@@ -133,10 +225,12 @@ make_fixture_bundle() {
     /usr/bin/plutil -replace protocol_major -integer "${major}" "${fixture}/protocol.json"
     build_identity_binary "${fixture}/diskplan" diskplan "${version}" "${major}" 2
     build_identity_binary "${fixture}/diskplan-engine" diskplan-engine "${version}" "${major}" 2
+    build_fs_helper "${fixture}/diskplan-fs-helper" "${version}" "${major}" 2
     mkdir "${output}"
     python3 "${SCRIPT_DIR}/package_bundle.py" \
         --frontend "${fixture}/diskplan" \
         --engine "${fixture}/diskplan-engine" \
+        --fs-helper "${fixture}/diskplan-fs-helper" \
         --installer "${SCRIPT_DIR}/install.sh" \
         --activator "${SCRIPT_DIR}/activate.sh" \
         --uninstaller "${SCRIPT_DIR}/uninstall.sh" \
@@ -176,9 +270,11 @@ mkdir "${SKEW_ROOT}" "${SKEW_ROOT}/output"
 /bin/cp "${REPO_ROOT}/release/protocol.json" "${SKEW_ROOT}/protocol.json"
 build_identity_binary "${SKEW_ROOT}/diskplan" diskplan 0.4.0 1 2
 build_identity_binary "${SKEW_ROOT}/diskplan-engine" diskplan-engine 0.4.1 1 2
+build_fs_helper "${SKEW_ROOT}/diskplan-fs-helper" 0.4.0 1 2
 if python3 "${SCRIPT_DIR}/package_bundle.py" \
     --frontend "${SKEW_ROOT}/diskplan" \
     --engine "${SKEW_ROOT}/diskplan-engine" \
+    --fs-helper "${SKEW_ROOT}/diskplan-fs-helper" \
     --installer "${SCRIPT_DIR}/install.sh" \
     --activator "${SCRIPT_DIR}/activate.sh" \
     --uninstaller "${SCRIPT_DIR}/uninstall.sh" \
@@ -196,5 +292,7 @@ fi
 "${PREFIX}/libexec/diskplan/0.2.0/uninstall.sh" --prefix "${PREFIX}" 0.2.0
 "${PREFIX}/libexec/diskplan/${VERSION}/uninstall.sh" --prefix "${PREFIX}" "${VERSION}"
 [[ ! -e "${PREFIX}/bin/diskplan" && ! -e "${PREFIX}/libexec/diskplan/${VERSION}" ]]
+[[ -d "${PREFIX}" && ! -e "${PREFIX}/bin" && ! -e "${PREFIX}/libexec" ]]
+[[ ! -e "${PREFIX}/.diskplan-install.lock" ]]
 
 echo "release package/install/upgrade/rollback/mixed-version tests passed"
