@@ -296,21 +296,129 @@ func processGroupSupervisorBoundsDescendantHeldEOFAndReportsDeadlineCleanup() as
 }
 
 @Test
-func processGroupSupervisorDetectsRedirectedDescendantBeforeLeaderRelease() async {
+func processGroupSupervisorDetectsRedirectedDescendantBeforeLeaderRelease() async throws {
+  let fixture = try RedirectedDescendantReadinessFixture(mode: .stableDescendant)
+  defer { fixture.cleanup() }
   let runner = FoundationProcessSnapshotRunner()
-  let result = await runner.run(
-    executableURL: URL(fileURLWithPath: "/bin/sh"),
-    arguments: ["-c", "(sleep 2 </dev/null >/dev/null 2>/dev/null) & exit 0"],
-    environment: BoundedLsofProcessActivityCollector.sanitizedEnvironment,
-    deadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 2_000_000_000,
-    maximumOutputBytes: 4_096
+  let shellArguments = fixture.shellArguments
+  let task = Task {
+    await runner.run(
+      executableURL: URL(fileURLWithPath: "/bin/sh"),
+      arguments: shellArguments,
+      environment: BoundedLsofProcessActivityCollector.sanitizedEnvironment,
+      deadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 2_000_000_000,
+      maximumOutputBytes: 4_096
+    )
+  }
+  let readiness = fixture.waitForReadiness(
+    deadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_000_000_000,
+    observer: DarwinProcessReadinessObserver()
   )
+  guard case .success(let validated) = readiness else {
+    task.cancel()
+    _ = await task.value
+    Issue.record("redirected-descendant readiness failed: \(readiness.failureDescription)")
+    return
+  }
+  let release = fixture.release(
+    validated,
+    observer: DarwinProcessReadinessObserver()
+  )
+  guard case .success = release else {
+    task.cancel()
+    _ = await task.value
+    Issue.record("redirected-descendant release failed: \(release.failureDescription)")
+    return
+  }
+
+  let result = await task.value
   guard case .supervisionFailed(let reason, _, let cleanup) = result else {
     Issue.record("expected the held leader generation to expose its redirected descendant")
     return
   }
   #expect(reason.contains("process group remained active"))
   #expect(cleanup.processGroupState == .quiescent)
+}
+
+@Test
+func redirectedDescendantReadinessHasABoundedTypedTimeout() throws {
+  let fixture = try RedirectedDescendantReadinessFixture(mode: .stableDescendant)
+  defer { fixture.cleanup() }
+
+  let result = fixture.waitForReadiness(
+    deadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 20_000_000,
+    observer: DarwinProcessReadinessObserver()
+  )
+
+  #expect(result == .failure(.timeout))
+}
+
+@Test
+func redirectedDescendantReadinessReportsEarlyExit() async throws {
+  let fixture = try RedirectedDescendantReadinessFixture(mode: .earlyDescendantExit)
+  defer { fixture.cleanup() }
+  let shellArguments = fixture.shellArguments
+  let task = Task {
+    await FoundationProcessSnapshotRunner().run(
+      executableURL: URL(fileURLWithPath: "/bin/sh"),
+      arguments: shellArguments,
+      environment: BoundedLsofProcessActivityCollector.sanitizedEnvironment,
+      deadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 2_000_000_000,
+      maximumOutputBytes: 4_096
+    )
+  }
+
+  let readiness = fixture.waitForReadiness(
+    deadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_000_000_000,
+    observer: DarwinProcessReadinessObserver()
+  )
+  guard case .failure(.earlyDescendantExit(_, _, let status)) = readiness else {
+    task.cancel()
+    _ = await task.value
+    Issue.record("expected typed early-descendant-exit readiness failure")
+    return
+  }
+  #expect(status == 42)
+  guard case .completed(let exitStatus, _, _) = await task.value else {
+    Issue.record("expected the early-exit fixture leader to complete")
+    return
+  }
+  #expect(exitStatus == 42)
+}
+
+@Test
+func redirectedDescendantReadinessRejectsWrongProcessGroup() {
+  let leaderPID: Int32 = 100
+  let descendantPID: Int32 = 101
+  let observer = FixedProcessReadinessObserver(observations: [
+    leaderPID: ProcessReadinessIdentity(
+      processID: leaderPID,
+      processGroupID: leaderPID,
+      startTimeSeconds: 10,
+      startTimeMicroseconds: 20
+    ),
+    descendantPID: ProcessReadinessIdentity(
+      processID: descendantPID,
+      processGroupID: 999,
+      startTimeSeconds: 30,
+      startTimeMicroseconds: 40
+    ),
+  ])
+
+  let result = RedirectedDescendantReadinessFixture.validate(
+    record: .ready(leaderProcessID: leaderPID, descendantProcessID: descendantPID),
+    observer: observer
+  )
+
+  #expect(
+    result
+      == .failure(
+        .wrongProcessGroup(
+          processID: descendantPID,
+          expectedProcessGroupID: leaderPID,
+          actualProcessGroupID: 999
+        ))
+  )
 }
 
 @Test
@@ -1431,6 +1539,395 @@ private final class DeterministicProcessGroupSnapshotTimer: ProcessGroupSnapshot
     guard isActive, !hasFired else { return }
     hasFired = true
     handler()
+  }
+}
+
+private enum RedirectedDescendantFixtureMode {
+  case stableDescendant
+  case earlyDescendantExit
+
+  var shellScript: String {
+    switch self {
+    case .stableDescendant:
+      return """
+        leader=$$
+        ready=$1
+        acknowledge=$2
+        (
+          exec /bin/sh -c '
+            leader=$1
+            ready=$2
+            exec </dev/null >/dev/null 2>/dev/null
+            printf "ready %s %s\\n" "$leader" "$$" > "$ready" || exit 91
+            exec /bin/sleep 30
+          ' diskplan-descendant "$leader" "$ready"
+        ) &
+        IFS= read -r token < "$acknowledge" || exit 92
+        [ "$token" = go ] || exit 93
+        exit 0
+        """
+    case .earlyDescendantExit:
+      return """
+        leader=$$
+        ready=$1
+        (
+          exec </dev/null >/dev/null 2>/dev/null
+          exit 42
+        ) &
+        child=$!
+        wait "$child"
+        status=$?
+        printf 'early-exit %s %s %s\\n' "$leader" "$child" "$status" > "$ready"
+        exit "$status"
+        """
+    }
+  }
+}
+
+private enum RedirectedDescendantReadinessRecord: Equatable, Sendable {
+  case ready(leaderProcessID: Int32, descendantProcessID: Int32)
+  case earlyExit(leaderProcessID: Int32, descendantProcessID: Int32, exitStatus: Int32)
+}
+
+private struct ProcessReadinessIdentity: Equatable, Sendable {
+  let processID: Int32
+  let processGroupID: Int32
+  let startTimeSeconds: UInt64
+  let startTimeMicroseconds: UInt64
+}
+
+private struct ValidatedRedirectedDescendantReadiness: Equatable, Sendable {
+  let record: RedirectedDescendantReadinessRecord
+  let leaderIdentity: ProcessReadinessIdentity
+  let descendantIdentity: ProcessReadinessIdentity
+}
+
+private enum RedirectedDescendantReadinessFailure: Error, Equatable {
+  case timeout
+  case malformedRecord
+  case earlyDescendantExit(
+    leaderProcessID: Int32,
+    descendantProcessID: Int32,
+    exitStatus: Int32
+  )
+  case observationFailed(processID: Int32, errorCode: Int32)
+  case identityChanged(processID: Int32)
+  case wrongProcessGroup(
+    processID: Int32,
+    expectedProcessGroupID: Int32,
+    actualProcessGroupID: Int32
+  )
+  case io(errorCode: Int32)
+}
+
+private protocol ProcessReadinessObserving: Sendable {
+  func observe(processID: Int32) -> Result<
+    ProcessReadinessIdentity, RedirectedDescendantReadinessFailure
+  >
+}
+
+private struct DarwinProcessReadinessObserver: ProcessReadinessObserving {
+  func observe(
+    processID: Int32
+  ) -> Result<ProcessReadinessIdentity, RedirectedDescendantReadinessFailure> {
+    var information = proc_bsdinfo()
+    errno = 0
+    let expectedSize = MemoryLayout<proc_bsdinfo>.size
+    let returnedSize = proc_pidinfo(
+      processID,
+      PROC_PIDTBSDINFO,
+      0,
+      &information,
+      Int32(expectedSize)
+    )
+    guard Int(returnedSize) == expectedSize, information.pbi_pid == UInt32(processID) else {
+      return .failure(
+        .observationFailed(
+          processID: processID,
+          errorCode: errno == 0 ? ESRCH : errno
+        ))
+    }
+    return .success(
+      ProcessReadinessIdentity(
+        processID: processID,
+        processGroupID: Int32(bitPattern: information.pbi_pgid),
+        startTimeSeconds: information.pbi_start_tvsec,
+        startTimeMicroseconds: information.pbi_start_tvusec
+      ))
+  }
+}
+
+private struct FixedProcessReadinessObserver: ProcessReadinessObserving {
+  let observations: [Int32: ProcessReadinessIdentity]
+
+  func observe(
+    processID: Int32
+  ) -> Result<ProcessReadinessIdentity, RedirectedDescendantReadinessFailure> {
+    guard let observation = observations[processID] else {
+      return .failure(.observationFailed(processID: processID, errorCode: ESRCH))
+    }
+    return .success(observation)
+  }
+}
+
+private final class RedirectedDescendantReadinessFixture {
+  private static let maximumRecordBytes = 256
+
+  let shellArguments: [String]
+  private let rootURL: URL
+  private let readyURL: URL
+  private let acknowledgementURL: URL
+  private var readyFileDescriptor: Int32 = -1
+  private var acknowledgementFileDescriptor: Int32 = -1
+
+  init(mode: RedirectedDescendantFixtureMode) throws {
+    rootURL = try makeTaskScopedTemporaryDirectory(label: "redirected-descendant")
+    readyURL = rootURL.appendingPathComponent("ready.fifo")
+    acknowledgementURL = rootURL.appendingPathComponent("acknowledge.fifo")
+    shellArguments = [
+      "-c",
+      mode.shellScript,
+      "diskplan-readiness-fixture",
+      readyURL.path,
+      acknowledgementURL.path,
+    ]
+
+    do {
+      try Self.makeFIFO(at: readyURL)
+      try Self.makeFIFO(at: acknowledgementURL)
+      readyFileDescriptor = try Self.openFIFO(at: readyURL)
+      acknowledgementFileDescriptor = try Self.openFIFO(at: acknowledgementURL)
+    } catch {
+      if readyFileDescriptor >= 0 { Darwin.close(readyFileDescriptor) }
+      if acknowledgementFileDescriptor >= 0 {
+        Darwin.close(acknowledgementFileDescriptor)
+      }
+      try? FileManager.default.removeItem(at: rootURL)
+      throw error
+    }
+  }
+
+  func cleanup() {
+    if readyFileDescriptor >= 0 {
+      Darwin.close(readyFileDescriptor)
+      readyFileDescriptor = -1
+    }
+    if acknowledgementFileDescriptor >= 0 {
+      Darwin.close(acknowledgementFileDescriptor)
+      acknowledgementFileDescriptor = -1
+    }
+    try? FileManager.default.removeItem(at: rootURL)
+  }
+
+  func waitForReadiness(
+    deadlineNanoseconds: UInt64,
+    observer: some ProcessReadinessObserving
+  ) -> Result<ValidatedRedirectedDescendantReadiness, RedirectedDescendantReadinessFailure> {
+    let record: RedirectedDescendantReadinessRecord
+    switch readRecord(deadlineNanoseconds: deadlineNanoseconds) {
+    case .success(let parsed):
+      record = parsed
+    case .failure(let failure):
+      return .failure(failure)
+    }
+    return Self.validate(record: record, observer: observer)
+  }
+
+  func release(
+    _ validated: ValidatedRedirectedDescendantReadiness,
+    observer: some ProcessReadinessObserving
+  ) -> Result<Void, RedirectedDescendantReadinessFailure> {
+    switch Self.validate(record: validated.record, observer: observer) {
+    case .success(let current) where current == validated:
+      break
+    case .success:
+      return .failure(
+        .identityChanged(processID: validated.descendantIdentity.processID)
+      )
+    case .failure(let failure):
+      return .failure(failure)
+    }
+
+    let acknowledgement = Data("go\n".utf8)
+    errno = 0
+    let written = acknowledgement.withUnsafeBytes { bytes in
+      Darwin.write(
+        acknowledgementFileDescriptor,
+        bytes.baseAddress,
+        bytes.count
+      )
+    }
+    guard written == acknowledgement.count else {
+      return .failure(.io(errorCode: errno == 0 ? EIO : errno))
+    }
+    return .success(())
+  }
+
+  static func validate(
+    record: RedirectedDescendantReadinessRecord,
+    observer: some ProcessReadinessObserving
+  ) -> Result<ValidatedRedirectedDescendantReadiness, RedirectedDescendantReadinessFailure> {
+    let leaderProcessID: Int32
+    let descendantProcessID: Int32
+    switch record {
+    case .ready(let leader, let descendant):
+      leaderProcessID = leader
+      descendantProcessID = descendant
+    case .earlyExit(let leader, let descendant, let status):
+      return .failure(
+        .earlyDescendantExit(
+          leaderProcessID: leader,
+          descendantProcessID: descendant,
+          exitStatus: status
+        ))
+    }
+    guard leaderProcessID > 0, descendantProcessID > 0,
+      leaderProcessID != descendantProcessID
+    else {
+      return .failure(.malformedRecord)
+    }
+
+    let firstLeader: ProcessReadinessIdentity
+    let firstDescendant: ProcessReadinessIdentity
+    let secondLeader: ProcessReadinessIdentity
+    let secondDescendant: ProcessReadinessIdentity
+    switch observer.observe(processID: leaderProcessID) {
+    case .success(let identity): firstLeader = identity
+    case .failure(let failure): return .failure(failure)
+    }
+    switch observer.observe(processID: descendantProcessID) {
+    case .success(let identity): firstDescendant = identity
+    case .failure(let failure): return .failure(failure)
+    }
+    switch observer.observe(processID: leaderProcessID) {
+    case .success(let identity): secondLeader = identity
+    case .failure(let failure): return .failure(failure)
+    }
+    switch observer.observe(processID: descendantProcessID) {
+    case .success(let identity): secondDescendant = identity
+    case .failure(let failure): return .failure(failure)
+    }
+
+    guard firstLeader == secondLeader else {
+      return .failure(.identityChanged(processID: leaderProcessID))
+    }
+    guard firstDescendant == secondDescendant else {
+      return .failure(.identityChanged(processID: descendantProcessID))
+    }
+    guard firstLeader.processGroupID == leaderProcessID else {
+      return .failure(
+        .wrongProcessGroup(
+          processID: leaderProcessID,
+          expectedProcessGroupID: leaderProcessID,
+          actualProcessGroupID: firstLeader.processGroupID
+        ))
+    }
+    guard firstDescendant.processGroupID == leaderProcessID else {
+      return .failure(
+        .wrongProcessGroup(
+          processID: descendantProcessID,
+          expectedProcessGroupID: leaderProcessID,
+          actualProcessGroupID: firstDescendant.processGroupID
+        ))
+    }
+    return .success(
+      ValidatedRedirectedDescendantReadiness(
+        record: record,
+        leaderIdentity: firstLeader,
+        descendantIdentity: firstDescendant
+      ))
+  }
+
+  private func readRecord(
+    deadlineNanoseconds: UInt64
+  ) -> Result<RedirectedDescendantReadinessRecord, RedirectedDescendantReadinessFailure> {
+    var bytes = Data()
+    while true {
+      let now = DispatchTime.now().uptimeNanoseconds
+      guard now < deadlineNanoseconds else { return .failure(.timeout) }
+      let remaining = deadlineNanoseconds - now
+      let roundedMilliseconds = max(UInt64(1), (remaining + 999_999) / 1_000_000)
+      let timeoutMilliseconds = Int32(min(UInt64(Int32.max), roundedMilliseconds))
+      var descriptor = pollfd(fd: readyFileDescriptor, events: Int16(POLLIN), revents: 0)
+      errno = 0
+      let pollResult = Darwin.poll(&descriptor, 1, timeoutMilliseconds)
+      if pollResult < 0 {
+        if errno == EINTR { continue }
+        return .failure(.io(errorCode: errno == 0 ? EIO : errno))
+      }
+      if pollResult == 0 { return .failure(.timeout) }
+      if descriptor.revents & Int16(POLLERR | POLLNVAL) != 0 {
+        return .failure(.io(errorCode: EIO))
+      }
+      guard descriptor.revents & Int16(POLLIN) != 0 else { continue }
+
+      var buffer = [UInt8](repeating: 0, count: Self.maximumRecordBytes)
+      errno = 0
+      let count = buffer.withUnsafeMutableBytes { buffer in
+        Darwin.read(readyFileDescriptor, buffer.baseAddress, buffer.count)
+      }
+      if count < 0 {
+        if errno == EINTR || errno == EAGAIN { continue }
+        return .failure(.io(errorCode: errno == 0 ? EIO : errno))
+      }
+      guard count > 0 else { return .failure(.io(errorCode: EPIPE)) }
+      bytes.append(contentsOf: buffer.prefix(count))
+      guard bytes.count <= Self.maximumRecordBytes else {
+        return .failure(.malformedRecord)
+      }
+      guard let newline = bytes.firstIndex(of: 0x0A) else { continue }
+      return Self.parseRecord(bytes.prefix(upTo: newline))
+    }
+  }
+
+  private static func parseRecord(
+    _ bytes: Data.SubSequence
+  ) -> Result<RedirectedDescendantReadinessRecord, RedirectedDescendantReadinessFailure> {
+    let fields = String(decoding: bytes, as: UTF8.self).split(separator: " ")
+    if fields.count == 3, fields[0] == "ready",
+      let leader = Int32(String(fields[1])), let descendant = Int32(String(fields[2]))
+    {
+      return .success(.ready(leaderProcessID: leader, descendantProcessID: descendant))
+    }
+    if fields.count == 4, fields[0] == "early-exit",
+      let leader = Int32(String(fields[1])), let descendant = Int32(String(fields[2])),
+      let status = Int32(String(fields[3]))
+    {
+      return .success(
+        .earlyExit(
+          leaderProcessID: leader,
+          descendantProcessID: descendant,
+          exitStatus: status
+        ))
+    }
+    return .failure(.malformedRecord)
+  }
+
+  private static func makeFIFO(at url: URL) throws {
+    errno = 0
+    guard Darwin.mkfifo(url.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+  }
+
+  private static func openFIFO(at url: URL) throws -> Int32 {
+    errno = 0
+    let descriptor = Darwin.open(url.path, O_RDWR | O_NONBLOCK | O_CLOEXEC)
+    guard descriptor >= 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    return descriptor
+  }
+}
+
+extension Result where Failure == RedirectedDescendantReadinessFailure {
+  fileprivate var failureDescription: String {
+    switch self {
+    case .success:
+      return "none"
+    case .failure(let failure):
+      return String(describing: failure)
+    }
   }
 }
 

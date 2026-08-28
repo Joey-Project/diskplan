@@ -71,6 +71,13 @@ superseded_by:
   held, bounded `proc_listpgrppids` enumeration distinguishes the held leader from descendants; the
   signal/enumeration syscall itself is serialized with identity-loss and release. Enumeration error,
   churn that fills the capped buffer, and lost identity remain typed unknown rather than absence.
+- The redirected-descendant regression fixture now uses task-scoped private readiness and
+  acknowledgement FIFOs instead of relying on shell scheduling. The descendant redirects all three
+  standard streams before publishing its PID, then blocks until the test validates the leader and
+  descendant PID, PGID, and `proc_bsdinfo` start generation twice. The acknowledgement path repeats
+  the full validation before allowing the leader to exit. Readiness timeout, early descendant exit,
+  malformed records, process-observation failure, identity change, wrong PGID, and FIFO failure stay
+  typed and distinct.
 
 ## Next Steps
 
@@ -146,3 +153,15 @@ superseded_by:
   slot was granted, `DiskplanScanTests` passed 79 of 79 and the serial full Swift gate passed 429 of
   429. Both original macOS 26 CI regression fixtures and the redirected-descendant lifecycle fixture
   ran in both gates; a final process query found no surviving test bundle, `sleep`, or `yes` process.
+- A later PR #15 macOS 26 run cleared both original residual-group failures but exposed that the
+  redirected-descendant test could let its shell leader exit before the public runner scheduled and
+  observed the background process. The replacement private-FIFO handshake removes that scheduling
+  assumption and validates the exact process generations before release. Static validation passed
+  strict `swift-format`, `swiftc -frontend -parse`, and `git diff --check`. A fresh read-only review
+  found no P0-P2. The first dynamic version still depended on a trapped signal interrupting the
+  leader's shell `wait`; the real fixture rejected that assumption. The final protocol instead keeps
+  the leader blocked directly on the acknowledgement FIFO, while the redirected descendant publishes
+  readiness and immediately `exec`s its stable sleeper generation. A post-fix read-only review found
+  no P0-P2. The exact real test then passed 10 consecutive sequential iterations, the supervisor and
+  readiness focus passed 20 of 20, `DiskplanScanTests` passed 82 of 82, and the serial full Swift gate
+  passed 432 of 432.
