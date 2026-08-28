@@ -60,36 +60,37 @@
  */
 
 struct artifact {
-    const char *name;
+    const char *path;
     mode_t mode;
     off_t maximum_size;
+    const char *role;
+    const char *compatibility_version;
 };
 
 #define MAX_BINARY_BYTES ((off_t)512 * 1024 * 1024)
 #define MAX_METADATA_BYTES ((off_t)64 * 1024)
 
-static const struct artifact k_artifacts[] = {
-    {"SHA256SUMS", 0644, MAX_METADATA_BYTES},
-    {"VERSION", 0644, 256},
-    {"activate.sh", 0755, MAX_METADATA_BYTES},
-    {"diskplan", 0755, MAX_BINARY_BYTES},
-    {"diskplan-engine", 0755, MAX_BINARY_BYTES},
-    {"diskplan-fs-helper", 0755, MAX_BINARY_BYTES},
-    {"install.sh", 0755, MAX_METADATA_BYTES},
-    {"manifest.json", 0644, MAX_METADATA_BYTES},
-    {"protocol.json", 0644, MAX_METADATA_BYTES},
-    {"release-common.sh", 0644, MAX_METADATA_BYTES},
-    {"uninstall.sh", 0755, MAX_METADATA_BYTES},
-};
+#include "bundle-contract.generated.h"
 
 static const size_t k_artifact_count = sizeof(k_artifacts) / sizeof(k_artifacts[0]);
+static const size_t k_bundle_directory_count =
+    sizeof(k_bundle_directories) / sizeof(k_bundle_directories[0]);
+#define ARTIFACT_COUNT (sizeof(k_artifacts) / sizeof(k_artifacts[0]))
+#define BUNDLE_DIRECTORY_COUNT \
+    (sizeof(k_bundle_directories) / sizeof(k_bundle_directories[0]))
 static const char *k_lock_name = ".diskplan-install.lock";
 
 static int cleanup_root_fd = -1;
 static int cleanup_stage_fd = -1;
 static char cleanup_stage_name[NAME_MAX + 1];
+static int cleanup_artifact_receipts[ARTIFACT_COUNT];
+static int cleanup_directory_receipts[BUNDLE_DIRECTORY_COUNT];
+static bool cleanup_receipts_initialized = false;
 #ifdef DISKPLAN_FS_HELPER_TESTING
 extern void diskplan_copy_test_hook(int source_fd);
+extern void diskplan_remove_test_hook(int parent_fd, const char *quarantine,
+                                      const char *original);
+extern void diskplan_delete_receipt_test_hook(int directory_fd);
 #endif
 static int emergency_prefix_fd = -1;
 static int emergency_lock_fd = -1;
@@ -907,22 +908,122 @@ static void close_managed(struct managed *managed) {
     managed->root = managed->libexec = managed->bin = managed->prefix = -1;
 }
 
-static int artifact_index(const char *name) {
+static int artifact_index(const char *path) {
     for (size_t index = 0; index < k_artifact_count; ++index) {
-        if (strcmp(name, k_artifacts[index].name) == 0) {
+        if (strcmp(path, k_artifacts[index].path) == 0) {
             return (int)index;
         }
     }
     return -1;
 }
 
-static int open_artifact(int directory, size_t index, int flags) {
-    int fd = openat(directory, k_artifacts[index].name,
-                    flags | O_NOFOLLOW | O_CLOEXEC);
+static int bundle_directory_index(const char *path) {
+    for (size_t index = 0; index < k_bundle_directory_count; ++index) {
+        if (strcmp(path, k_bundle_directories[index]) == 0) return (int)index;
+    }
+    return -1;
+}
+
+static bool descriptor_within_bundle_boundary(int root, int candidate) {
+    struct stat root_metadata, candidate_metadata;
+    struct statfs root_filesystem, candidate_filesystem;
+    return fstat(root, &root_metadata) == 0 &&
+           fstat(candidate, &candidate_metadata) == 0 &&
+           fstatfs(root, &root_filesystem) == 0 &&
+           fstatfs(candidate, &candidate_filesystem) == 0 &&
+           root_metadata.st_dev == candidate_metadata.st_dev &&
+           same_filesystem_id(root_filesystem.f_fsid, candidate_filesystem.f_fsid) &&
+           selected_mount_access_flags(&root_filesystem) ==
+               selected_mount_access_flags(&candidate_filesystem);
+}
+
+static void require_bundle_boundary(int root, int candidate) {
+    if (!descriptor_within_bundle_boundary(root, candidate))
+        fatal("bundle descendant crosses its root device, mount, or mount access policy");
+}
+
+static int open_bundle_directory(int root, const char *path, bool archive_source) {
+    int current = openat(root, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (current < 0) fatal_errno("cannot reopen bundle root descriptor");
+    struct stat original, reopened;
+    if (fstat(root, &original) != 0 || fstat(current, &reopened) != 0) {
+        close(current);
+        fatal_errno("cannot bind reopened bundle root descriptor");
+    }
+    if (!same_object(&original, &reopened)) {
+        close(current);
+        fatal("reopened bundle root identity changed");
+    }
+    require_bundle_boundary(root, current);
+    if (archive_source)
+        require_archive_directory_policy(current);
+    else
+        require_directory_policy(current, 0700, true);
+    if (*path == '\0') return current;
+    char copy[PATH_MAX];
+    if (strlen(path) >= sizeof(copy)) {
+        close(current);
+        fatal("bundle directory path exceeds PATH_MAX");
+    }
+    strcpy(copy, path);
+    char *cursor = copy;
+    for (;;) {
+        char *slash = strchr(cursor, '/');
+        if (slash != NULL) *slash = '\0';
+        int next = openat(current, cursor,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0) {
+            close(current);
+            fatal_errno("cannot open nested bundle directory without following links");
+        }
+        require_bundle_boundary(root, next);
+        if (archive_source)
+            require_archive_directory_policy(next);
+        else
+            require_directory_policy(next, 0700, true);
+        close(current);
+        current = next;
+        if (slash == NULL) return current;
+        cursor = slash + 1;
+    }
+}
+
+static int open_artifact_parent(int directory, size_t index, bool archive_source,
+                                char path[PATH_MAX], char **leaf) {
+    if (strlen(k_artifacts[index].path) >= PATH_MAX)
+        fatal("bundle artifact path exceeds PATH_MAX");
+    strcpy(path, k_artifacts[index].path);
+    *leaf = strrchr(path, '/');
+    int parent = -1;
+    if (*leaf == NULL) {
+        *leaf = path;
+        parent = dup(directory);
+    } else {
+        **leaf = '\0';
+        *leaf += 1;
+        parent = open_bundle_directory(directory, path, archive_source);
+    }
+    if (parent < 0) fatal_errno("cannot bind bundle artifact parent");
+    return parent;
+}
+
+static int open_artifact_kind(int directory, size_t index, int flags,
+                              bool archive_source) {
+    char path[PATH_MAX];
+    char *leaf = NULL;
+    int parent = open_artifact_parent(directory, index, archive_source, path, &leaf);
+    int fd = openat(parent, leaf, flags | O_NOFOLLOW | O_CLOEXEC);
+    require_bundle_boundary(directory, parent);
+    close(parent);
     if (fd < 0) {
         fatal_errno("cannot open bundle artifact without following links");
     }
-    require_regular_policy(fd, k_artifacts[index].mode);
+    if (archive_source)
+        require_archive_regular_policy(fd, k_artifacts[index].mode,
+                                       k_artifacts[index].path);
+    else
+        require_regular_policy(fd, k_artifacts[index].mode);
+    require_bundle_boundary(directory, fd);
     struct stat metadata;
     if (fstat(fd, &metadata) != 0) {
         close(fd);
@@ -935,82 +1036,94 @@ static int open_artifact(int directory, size_t index, int flags) {
     return fd;
 }
 
+static int open_artifact(int directory, size_t index, int flags) {
+    return open_artifact_kind(directory, index, flags, false);
+}
+
 static int open_archive_artifact(int directory, size_t index, int flags) {
-    int fd = openat(directory, k_artifacts[index].name,
-                    flags | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) {
-        fatal_errno("cannot open archive source artifact without following links");
-    }
-    require_archive_regular_policy(fd, k_artifacts[index].mode, k_artifacts[index].name);
-    struct stat metadata;
-    if (fstat(fd, &metadata) != 0) {
-        close(fd);
-        fatal_errno("cannot stat bounded archive source artifact");
-    }
-    if (metadata.st_size < 0 || metadata.st_size > k_artifacts[index].maximum_size) {
-        close(fd);
-        fatal("archive source artifact exceeds its packaged size limit");
-    }
-    return fd;
+    return open_artifact_kind(directory, index, flags, true);
 }
 
 static void require_exact_bundle_entries(int directory, bool allow_partial,
                                          bool archive_source) {
     bool seen[sizeof(k_artifacts) / sizeof(k_artifacts[0])] = {false};
-    int duplicate = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (duplicate < 0) {
-        fatal_errno("cannot reopen bundle directory descriptor");
-    }
-    struct stat original_metadata, reopened_metadata;
-    if (fstat(directory, &original_metadata) != 0 ||
-        fstat(duplicate, &reopened_metadata) != 0) {
-        close(duplicate);
-        fatal_errno("cannot bind reopened bundle directory descriptor");
-    }
-    if (!same_object(&original_metadata, &reopened_metadata)) {
-        close(duplicate);
-        fatal("reopened bundle directory identity changed");
-    }
-    DIR *stream = fdopendir(duplicate);
-    if (stream == NULL) {
-        close(duplicate);
-        fatal_errno("cannot enumerate bundle directory");
-    }
-    for (;;) {
-        errno = 0;
-        struct dirent *entry = readdir(stream);
-        if (entry == NULL) {
-            if (errno != 0) {
-                int saved = errno;
-                closedir(stream);
-                errno = saved;
-                fatal_errno("cannot complete bundle enumeration");
+    bool seen_directories[sizeof(k_bundle_directories) /
+                          sizeof(k_bundle_directories[0])] = {false};
+    for (size_t pass = 0; pass <= k_bundle_directory_count; ++pass) {
+        const char *relative = pass == 0 ? "" : k_bundle_directories[pass - 1];
+        int bound = pass == 0 ? open_bundle_directory(directory, "", archive_source)
+                              : open_bundle_directory(directory, relative, archive_source);
+        DIR *stream = fdopendir(bound);
+        if (stream == NULL) {
+            close(bound);
+            fatal_errno("cannot enumerate bundle directory");
+        }
+        for (;;) {
+            errno = 0;
+            struct dirent *entry = readdir(stream);
+            if (entry == NULL) {
+                if (errno != 0) {
+                    int saved = errno;
+                    closedir(stream);
+                    errno = saved;
+                    fatal_errno("cannot complete bundle enumeration");
+                }
+                break;
             }
-            break;
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+            if (strchr(entry->d_name, '/') != NULL || entry->d_name[0] == '\0') {
+                closedir(stream);
+                fatal("bundle entry name is not canonical");
+            }
+            char child[PATH_MAX];
+            int length = relative[0] == '\0'
+                             ? snprintf(child, sizeof(child), "%s", entry->d_name)
+                             : snprintf(child, sizeof(child), "%s/%s", relative,
+                                        entry->d_name);
+            if (length < 0 || (size_t)length >= sizeof(child)) {
+                closedir(stream);
+                fatal("bundle entry path exceeds PATH_MAX");
+            }
+            int artifact = artifact_index(child);
+            int nested = bundle_directory_index(child);
+            if (artifact >= 0) {
+                if (seen[artifact]) {
+                    closedir(stream);
+                    fatal("bundle directory repeats an artifact");
+                }
+                int fd = archive_source
+                             ? open_archive_artifact(directory, (size_t)artifact, O_RDONLY)
+                             : open_artifact(directory, (size_t)artifact, O_RDONLY);
+                close(fd);
+                seen[artifact] = true;
+            } else if (nested >= 0) {
+                if (seen_directories[nested]) {
+                    closedir(stream);
+                    fatal("bundle directory repeats a nested directory");
+                }
+                int fd = open_bundle_directory(directory, child, archive_source);
+                close(fd);
+                seen_directories[nested] = true;
+            } else {
+                closedir(stream);
+                fatal("bundle directory contains an unexpected entry");
+            }
         }
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        int index = artifact_index(entry->d_name);
-        if (index < 0 || seen[index]) {
-            closedir(stream);
-            fatal("bundle directory contains an unexpected or duplicate entry");
-        }
-        int fd = archive_source ? open_archive_artifact(directory, (size_t)index, O_RDONLY)
-                                : open_artifact(directory, (size_t)index, O_RDONLY);
-        close(fd);
-        seen[index] = true;
+        closedir(stream);
     }
-    closedir(stream);
     if (!allow_partial) {
         for (size_t index = 0; index < k_artifact_count; ++index) {
             if (!seen[index]) {
                 char message[256];
                 snprintf(message, sizeof(message), "%s bundle is missing artifact: %s",
                          archive_source ? "archive source" : "managed",
-                         k_artifacts[index].name);
+                         k_artifacts[index].path);
                 fatal(message);
             }
+        }
+        for (size_t index = 0; index < k_bundle_directory_count; ++index) {
+            if (!seen_directories[index]) fatal("bundle is missing a nested directory");
         }
     }
 }
@@ -1098,7 +1211,7 @@ static void capture_artifact_proof(int directory, size_t index, bool archive_sou
             fatal_errno("cannot restat bundle artifact");
         }
         if (archive_source)
-            require_archive_regular_policy(fd, k_artifacts[index].mode, k_artifacts[index].name);
+            require_archive_regular_policy(fd, k_artifacts[index].mode, k_artifacts[index].path);
         else
             require_regular_policy(fd, k_artifacts[index].mode);
         close(fd);
@@ -1124,6 +1237,23 @@ static void capture_artifact_proof(int directory, size_t index, bool archive_sou
     fatal("bundle artifact could not be proven stable");
 }
 
+static void capture_held_artifact_receipt(int fd, size_t index,
+                                          struct artifact_proof *proof) {
+    struct stat before, after;
+    if (fstat(fd, &before) != 0 || lseek(fd, 0, SEEK_SET) < 0)
+        fatal_errno("cannot begin held artifact receipt");
+    digest_artifact_fd(fd, k_artifacts[index].maximum_size, proof->sha256,
+                       &proof->content_size);
+    if (fstat(fd, &after) != 0 || lseek(fd, 0, SEEK_SET) < 0)
+        fatal_errno("cannot finish held artifact receipt");
+    require_regular_policy(fd, k_artifacts[index].mode);
+    if (!same_artifact_protected_properties(&before, &after) ||
+        !same_artifact_timestamps(&before, &after) ||
+        after.st_size != proof->content_size)
+        fatal("held artifact changed while its deletion receipt was captured");
+    proof->metadata = after;
+}
+
 static void bundle_proof(int directory, bool managed_exact, bool archive_source,
                          char output[256]) {
     if (archive_source)
@@ -1139,10 +1269,30 @@ static void bundle_proof(int directory, bool managed_exact, bool archive_source,
     if (CC_SHA256_Init(&digest) != 1) {
         fatal("cannot initialize bundle digest");
     }
+    struct stat nested_before[sizeof(k_bundle_directories) /
+                              sizeof(k_bundle_directories[0])];
+    for (size_t index = 0; index < k_bundle_directory_count; ++index) {
+        int nested = open_bundle_directory(directory, k_bundle_directories[index],
+                                           archive_source);
+        if (fstat(nested, &nested_before[index]) != 0) {
+            close(nested);
+            fatal_errno("cannot stat nested bundle directory");
+        }
+        close(nested);
+        hash_bytes(&digest, k_bundle_directories[index],
+                   strlen(k_bundle_directories[index]) + 1);
+        hash_u64(&digest, (uint64_t)nested_before[index].st_dev);
+        hash_u64(&digest, nested_before[index].st_ino);
+        hash_u64(&digest, nested_before[index].st_gen);
+        hash_u64(&digest, (uint64_t)nested_before[index].st_mode);
+        hash_u64(&digest, nested_before[index].st_uid);
+        hash_u64(&digest, nested_before[index].st_gid);
+        hash_u64(&digest, selected_access_flags(nested_before[index].st_flags));
+    }
     for (size_t index = 0; index < k_artifact_count; ++index) {
         struct artifact_proof proof;
         capture_artifact_proof(directory, index, archive_source, &proof);
-        hash_bytes(&digest, k_artifacts[index].name, strlen(k_artifacts[index].name) + 1);
+        hash_bytes(&digest, k_artifacts[index].path, strlen(k_artifacts[index].path) + 1);
         hash_u64(&digest, (uint64_t)proof.metadata.st_dev);
         hash_u64(&digest, proof.metadata.st_ino);
         hash_u64(&digest, proof.metadata.st_gen);
@@ -1174,6 +1324,18 @@ static void bundle_proof(int directory, bool managed_exact, bool archive_source,
         selected_access_flags(directory_before.st_flags) !=
             selected_access_flags(directory_after.st_flags)) {
         fatal("bundle directory identity or access policy changed");
+    }
+    for (size_t index = 0; index < k_bundle_directory_count; ++index) {
+        int nested = open_bundle_directory(directory, k_bundle_directories[index],
+                                           archive_source);
+        struct stat nested_after;
+        if (fstat(nested, &nested_after) != 0) {
+            close(nested);
+            fatal_errno("cannot restat nested bundle directory");
+        }
+        close(nested);
+        if (!same_directory_access(&nested_before[index], &nested_after))
+            fatal("nested bundle directory identity or access policy changed");
     }
     char identity[192];
     access_identity_string(directory, identity);
@@ -1489,29 +1651,417 @@ static void retire_owned_lock(struct managed *managed, const struct stat *metada
     disarm_emergency_lock();
 }
 
+static void split_relative_path(const char *relative, char parent[PATH_MAX],
+                                const char **leaf) {
+    if (strlen(relative) >= PATH_MAX) fatal("bundle relative path exceeds PATH_MAX");
+    strcpy(parent, relative);
+    char *separator = strrchr(parent, '/');
+    if (separator == NULL) {
+        *leaf = relative;
+        parent[0] = '\0';
+        return;
+    }
+    *separator = '\0';
+    *leaf = relative + (separator - parent) + 1;
+}
+
+static void create_nested_bundle_directories(int root) {
+    for (size_t index = 0; index < k_bundle_directory_count; ++index) {
+        char parent_path[PATH_MAX];
+        const char *leaf = NULL;
+        split_relative_path(k_bundle_directories[index], parent_path, &leaf);
+        int parent = open_bundle_directory(root, parent_path, false);
+        if (mkdirat(parent, leaf, 0700) != 0) {
+            close(parent);
+            fatal_errno("cannot create nested staged bundle directory");
+        }
+        int child = openat(parent, leaf,
+                           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (child < 0 || fchown(child, geteuid(), getegid()) != 0 ||
+            fchmod(child, 0700) != 0 || fsync(child) != 0 || fsync(parent) != 0) {
+            if (child >= 0) close(child);
+            close(parent);
+            fatal_errno("cannot bind nested staged bundle directory");
+        }
+        require_directory_policy(child, 0700, true);
+        close(child);
+        close(parent);
+    }
+}
+
+static void fatal_retained_quarantine(const char *quarantine, const char *reason) {
+    char message[512];
+    snprintf(message, sizeof(message),
+             "%s; retained the unverified object as %s",
+             reason, quarantine);
+    fatal(message);
+}
+
+static void remove_artifact_relative(int root, size_t index, int held,
+                                     const struct artifact_proof *receipt) {
+    char path[PATH_MAX];
+    char *leaf = NULL;
+    int parent = open_artifact_parent(root, index, false, path, &leaf);
+    require_regular_policy(held, k_artifacts[index].mode);
+    require_bundle_boundary(root, held);
+    struct stat before;
+    if (fstat(held, &before) != 0) fatal_errno("cannot stat bundle artifact before deletion");
+    unsigned char current_digest[CC_SHA256_DIGEST_LENGTH];
+    off_t current_size = 0;
+    if (lseek(held, 0, SEEK_SET) < 0) fatal_errno("cannot rewind artifact before deletion");
+    digest_artifact_fd(held, k_artifacts[index].maximum_size, current_digest,
+                       &current_size);
+    if (lseek(held, 0, SEEK_SET) < 0) fatal_errno("cannot restore artifact descriptor offset");
+    if (!same_artifact_protected_properties(&receipt->metadata, &before) ||
+        current_size != receipt->content_size ||
+        memcmp(current_digest, receipt->sha256, sizeof(current_digest)) != 0)
+        fatal("bundle artifact identity, access policy, or content changed after proof");
+    struct stat slot;
+    if (fstatat(parent, leaf, &slot, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !same_artifact_protected_properties(&before, &slot)) {
+        close(parent);
+        fatal("bundle artifact slot changed before deletion quarantine");
+    }
+
+    char nonce[33];
+    random_hex(nonce);
+    char quarantine[NAME_MAX + 1];
+    snprintf(quarantine, sizeof(quarantine), ".diskplan-artifact-remove-%s", nonce);
+    if (renameatx_np(parent, leaf, parent, quarantine, RENAME_EXCL) != 0) {
+        close(parent);
+        fatal_errno("cannot quarantine bundle artifact before deletion");
+    }
+#ifdef DISKPLAN_FS_HELPER_TESTING
+    diskplan_remove_test_hook(parent, quarantine, leaf);
+#endif
+    int rebound = openat(parent, quarantine,
+                         O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    struct stat after;
+    bool exact = rebound >= 0 && fstat(rebound, &after) == 0 &&
+                 same_artifact_protected_properties(&before, &after) &&
+                 descriptor_within_bundle_boundary(root, rebound);
+    if (!exact) {
+        if (rebound >= 0) close(rebound);
+        fatal_retained_quarantine(
+            quarantine,
+            "bundle artifact identity or access policy changed during deletion");
+    }
+    if (unlinkat(parent, quarantine, 0) != 0 || fsync(parent) != 0) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "cannot remove quarantined bundle artifact %s", quarantine);
+        close(parent);
+        fatal_errno(message);
+    }
+    close(rebound);
+    close(parent);
+}
+
+static void remove_nested_bundle_directories(
+    int root, int receipts[BUNDLE_DIRECTORY_COUNT]) {
+    for (size_t offset = k_bundle_directory_count; offset > 0; --offset) {
+        const char *relative = k_bundle_directories[offset - 1];
+        char parent_path[PATH_MAX];
+        const char *leaf = NULL;
+        split_relative_path(relative, parent_path, &leaf);
+        int parent = open_bundle_directory(root, parent_path, false);
+        int current = openat(parent, leaf,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int child = receipts[offset - 1];
+        if (current < 0 || child < 0) {
+            if (current >= 0) close(current);
+            close(parent);
+            fatal_errno("cannot bind nested bundle directory before deletion");
+        }
+        require_directory_policy(child, 0700, true);
+        require_bundle_boundary(root, child);
+        struct stat before, current_metadata;
+        if (fstat(child, &before) != 0 || fstat(current, &current_metadata) != 0)
+            fatal_errno("cannot stat nested bundle directory");
+        char before_access[192];
+        access_identity_string(child, before_access);
+        char current_access[192];
+        access_identity_string(current, current_access);
+        close(current);
+        if (!same_object(&before, &current_metadata) ||
+            strcmp(before_access, current_access) != 0) {
+            close(parent);
+            fatal("nested bundle directory changed after its proof receipt");
+        }
+        char nonce[33];
+        random_hex(nonce);
+        char quarantine[NAME_MAX + 1];
+        snprintf(quarantine, sizeof(quarantine), ".diskplan-directory-remove-%s", nonce);
+        if (renameatx_np(parent, leaf, parent, quarantine, RENAME_EXCL) != 0) {
+            close(child);
+            close(parent);
+            fatal_errno("cannot quarantine nested bundle directory before deletion");
+        }
+        int rebound = openat(parent, quarantine,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat after;
+        char after_access[192] = {0};
+        bool exact = rebound >= 0 && fstat(rebound, &after) == 0 &&
+                     descriptor_within_bundle_boundary(root, rebound);
+        if (exact) access_identity_string(rebound, after_access);
+        exact = exact && same_object(&before, &after) &&
+                strcmp(before_access, after_access) == 0 && directory_is_empty(rebound);
+        if (!exact) {
+            if (rebound >= 0) close(rebound);
+            close(child);
+            fatal_retained_quarantine(
+                quarantine,
+                "nested bundle directory identity or access policy changed during deletion");
+        }
+        if (unlinkat(parent, quarantine, AT_REMOVEDIR) != 0 || fsync(parent) != 0) {
+            char message[256];
+            snprintf(message, sizeof(message),
+                     "cannot remove quarantined nested directory %s", quarantine);
+            close(parent);
+            fatal_errno(message);
+        }
+        close(rebound);
+        close(child);
+        receipts[offset - 1] = -1;
+        close(parent);
+    }
+}
+
+static bool cleanup_acl_free(int fd) {
+    errno = 0;
+    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+    if (acl == NULL) return errno == ENOENT || errno == ENOTSUP;
+    acl_entry_t entry;
+    int result = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
+    acl_free(acl);
+    return result == 0;
+}
+
+static bool cleanup_safe_directory(int fd) {
+    struct stat metadata;
+    return fstat(fd, &metadata) == 0 && S_ISDIR(metadata.st_mode) &&
+           metadata.st_uid == geteuid() && metadata.st_gid == getegid() &&
+           (metadata.st_mode & 07777) == 0700 &&
+           selected_access_flags(metadata.st_flags) == 0 && cleanup_acl_free(fd);
+}
+
+static int try_open_cleanup_directory(int root, const char *path) {
+    int current = openat(root, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat root_metadata, reopened_metadata;
+    if (current < 0 || fstat(root, &root_metadata) != 0 ||
+        fstat(current, &reopened_metadata) != 0 ||
+        !same_object(&root_metadata, &reopened_metadata) ||
+        !cleanup_safe_directory(current) ||
+        !descriptor_within_bundle_boundary(root, current)) {
+        if (current >= 0) close(current);
+        return -1;
+    }
+    if (*path == '\0') return current;
+    char copy[PATH_MAX];
+    if (strlen(path) >= sizeof(copy)) {
+        close(current);
+        return -1;
+    }
+    strcpy(copy, path);
+    char *cursor = copy;
+    for (;;) {
+        char *slash = strchr(cursor, '/');
+        if (slash != NULL) *slash = '\0';
+        int next = openat(current, cursor,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        close(current);
+        if (next < 0 || !cleanup_safe_directory(next) ||
+            !descriptor_within_bundle_boundary(root, next)) {
+            if (next >= 0) close(next);
+            return -1;
+        }
+        current = next;
+        if (slash == NULL) return current;
+        cursor = slash + 1;
+    }
+}
+
+static bool cleanup_directory_empty(int directory);
+
+static void initialize_cleanup_receipts(void) {
+    for (size_t index = 0; index < ARTIFACT_COUNT; ++index)
+        cleanup_artifact_receipts[index] = -1;
+    for (size_t index = 0; index < BUNDLE_DIRECTORY_COUNT; ++index)
+        cleanup_directory_receipts[index] = -1;
+    cleanup_receipts_initialized = true;
+}
+
+static void close_cleanup_receipts(void) {
+    if (!cleanup_receipts_initialized) return;
+    for (size_t index = 0; index < ARTIFACT_COUNT; ++index) {
+        if (cleanup_artifact_receipts[index] >= 0)
+            close(cleanup_artifact_receipts[index]);
+        cleanup_artifact_receipts[index] = -1;
+    }
+    for (size_t index = 0; index < BUNDLE_DIRECTORY_COUNT; ++index) {
+        if (cleanup_directory_receipts[index] >= 0)
+            close(cleanup_directory_receipts[index]);
+        cleanup_directory_receipts[index] = -1;
+    }
+    cleanup_receipts_initialized = false;
+}
+
+static void cleanup_remove_safe_file(int root, int parent, const char *leaf,
+                                     const struct stat *before) {
+    char nonce[33];
+    random_hex(nonce);
+    char quarantine[NAME_MAX + 1];
+    snprintf(quarantine, sizeof(quarantine), ".partial-artifact-cleanup-%s", nonce);
+    if (renameatx_np(parent, leaf, parent, quarantine, RENAME_EXCL) != 0) return;
+    int rebound = openat(parent, quarantine,
+                         O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    struct stat after;
+    bool exact = rebound >= 0 && fstat(rebound, &after) == 0 &&
+                 same_artifact_protected_properties(before, &after) &&
+                 descriptor_within_bundle_boundary(root, rebound);
+    if (exact) {
+        (void)unlinkat(parent, quarantine, 0);
+    }
+    if (rebound >= 0) close(rebound);
+}
+
+static void cleanup_remove_safe_directory(int root, int parent, const char *leaf,
+                                          const struct stat *before) {
+    char nonce[33];
+    random_hex(nonce);
+    char quarantine[NAME_MAX + 1];
+    snprintf(quarantine, sizeof(quarantine), ".partial-directory-cleanup-%s", nonce);
+    if (renameatx_np(parent, leaf, parent, quarantine, RENAME_EXCL) != 0) return;
+    int rebound = openat(parent, quarantine,
+                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat after;
+    bool exact = rebound >= 0 && fstat(rebound, &after) == 0 &&
+                 same_directory_access(before, &after) && cleanup_safe_directory(rebound) &&
+                 descriptor_within_bundle_boundary(root, rebound) &&
+                 cleanup_directory_empty(rebound);
+    if (exact) {
+        (void)unlinkat(parent, quarantine, AT_REMOVEDIR);
+    }
+    if (rebound >= 0) close(rebound);
+}
+
+static void cleanup_partial_artifacts(int root) {
+    if (!cleanup_receipts_initialized) return;
+    for (size_t index = 0; index < k_artifact_count; ++index) {
+        if (cleanup_artifact_receipts[index] < 0) continue;
+        char parent_path[PATH_MAX];
+        const char *leaf = NULL;
+        split_relative_path(k_artifacts[index].path, parent_path, &leaf);
+        int parent = try_open_cleanup_directory(root, parent_path);
+        if (parent < 0) continue;
+        int file = openat(parent, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        struct stat metadata, receipt;
+        bool safe = file >= 0 && fstat(file, &metadata) == 0 &&
+                    fstat(cleanup_artifact_receipts[index], &receipt) == 0 &&
+                    same_artifact_protected_properties(&receipt, &metadata) &&
+                    S_ISREG(metadata.st_mode) && metadata.st_uid == geteuid() &&
+                    metadata.st_gid == getegid() && metadata.st_nlink == 1 &&
+                    (metadata.st_mode & 07777) == k_artifacts[index].mode &&
+                    selected_access_flags(metadata.st_flags) == 0 &&
+                    cleanup_acl_free(file) &&
+                    descriptor_within_bundle_boundary(root, file);
+        if (safe) cleanup_remove_safe_file(root, parent, leaf, &metadata);
+        if (file >= 0) close(file);
+        (void)fsync(parent);
+        close(parent);
+    }
+    for (size_t offset = k_bundle_directory_count; offset > 0; --offset) {
+        if (cleanup_directory_receipts[offset - 1] < 0) continue;
+        char parent_path[PATH_MAX];
+        const char *leaf = NULL;
+        split_relative_path(k_bundle_directories[offset - 1], parent_path, &leaf);
+        int parent = try_open_cleanup_directory(root, parent_path);
+        if (parent < 0) continue;
+        int child = openat(parent, leaf,
+                           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat metadata, receipt;
+        bool safe = child >= 0 && cleanup_safe_directory(child) &&
+                    fstat(child, &metadata) == 0 &&
+                    fstat(cleanup_directory_receipts[offset - 1], &receipt) == 0 &&
+                    same_directory_access(&receipt, &metadata) &&
+                    descriptor_within_bundle_boundary(root, child) &&
+                    cleanup_directory_empty(child);
+        if (safe) cleanup_remove_safe_directory(root, parent, leaf, &metadata);
+        if (child >= 0) close(child);
+        (void)fsync(parent);
+        close(parent);
+    }
+}
+
+static bool cleanup_directory_empty(int directory) {
+    int reopened = openat(directory, ".",
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (reopened < 0) return false;
+    DIR *stream = fdopendir(reopened);
+    if (stream == NULL) {
+        close(reopened);
+        return false;
+    }
+    bool empty = true;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(stream);
+        if (entry == NULL) {
+            if (errno != 0) empty = false;
+            break;
+        }
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            empty = false;
+            break;
+        }
+    }
+    closedir(stream);
+    return empty;
+}
+
 static void cleanup_partial_stage(void) {
     if (cleanup_root_fd < 0 || cleanup_stage_name[0] == '\0') {
         return;
     }
     if (cleanup_stage_fd < 0) {
-        cleanup_stage_fd = openat(cleanup_root_fd, cleanup_stage_name,
-                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (cleanup_stage_fd < 0) {
-            return;
-        }
+        close_cleanup_receipts();
+        close(cleanup_root_fd);
+        cleanup_root_fd = -1;
+        cleanup_stage_name[0] = '\0';
+        return;
     }
-    for (size_t index = 0; index < k_artifact_count; ++index) {
-        struct stat metadata;
-        if (fstatat(cleanup_stage_fd, k_artifacts[index].name, &metadata,
-                    AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(metadata.st_mode) &&
-            metadata.st_uid == geteuid()) {
-            (void)unlinkat(cleanup_stage_fd, k_artifacts[index].name, 0);
-        }
-    }
+    cleanup_partial_artifacts(cleanup_stage_fd);
+    close_cleanup_receipts();
     (void)fsync(cleanup_stage_fd);
+    struct stat held, slot;
+    bool exact = cleanup_safe_directory(cleanup_stage_fd) &&
+                 cleanup_directory_empty(cleanup_stage_fd) &&
+                 fstat(cleanup_stage_fd, &held) == 0 &&
+                 fstatat(cleanup_root_fd, cleanup_stage_name, &slot,
+                         AT_SYMLINK_NOFOLLOW) == 0 &&
+                 same_object(&held, &slot) && same_directory_access(&held, &slot) &&
+                 descriptor_within_bundle_boundary(cleanup_root_fd, cleanup_stage_fd);
+    char retired[NAME_MAX + 1] = {0};
+    if (exact) {
+        char nonce[33];
+        random_hex(nonce);
+        snprintf(retired, sizeof(retired), ".partial-stage-cleanup-%s", nonce);
+        if (renameatx_np(cleanup_root_fd, cleanup_stage_name, cleanup_root_fd, retired,
+                         RENAME_EXCL) == 0) {
+            int rebound = openat(cleanup_root_fd, retired,
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            struct stat after;
+            bool committed = rebound >= 0 && cleanup_safe_directory(rebound) &&
+                             cleanup_directory_empty(rebound) &&
+                             fstat(rebound, &after) == 0 && same_object(&held, &after) &&
+                             same_directory_access(&held, &after);
+            if (committed)
+                (void)unlinkat(cleanup_root_fd, retired, AT_REMOVEDIR);
+            if (rebound >= 0) close(rebound);
+        }
+    }
     close(cleanup_stage_fd);
     cleanup_stage_fd = -1;
-    (void)unlinkat(cleanup_root_fd, cleanup_stage_name, AT_REMOVEDIR);
     (void)fsync(cleanup_root_fd);
     cleanup_root_fd = -1;
     cleanup_stage_name[0] = '\0';
@@ -1524,9 +2074,14 @@ static void copy_file_stable(int source_directory, int destination_directory, si
         close(source);
         fatal_errno("cannot stat source artifact");
     }
-    int destination = openat(destination_directory, k_artifacts[index].name,
+    char destination_path[PATH_MAX];
+    char *destination_leaf = NULL;
+    int destination_parent = open_artifact_parent(
+        destination_directory, index, false, destination_path, &destination_leaf);
+    int destination = openat(destination_parent, destination_leaf,
                              O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
                              k_artifacts[index].mode);
+    close(destination_parent);
     if (destination < 0) {
         close(source);
         fatal_errno("cannot create staged artifact");
@@ -1575,7 +2130,7 @@ static void copy_file_stable(int source_directory, int destination_directory, si
         close(source);
         fatal_errno("cannot restat source artifact");
     }
-    require_archive_regular_policy(source, k_artifacts[index].mode, k_artifacts[index].name);
+    require_archive_regular_policy(source, k_artifacts[index].mode, k_artifacts[index].path);
     close(destination);
     close(source);
     if (!same_artifact_protected_properties(&before, &after) || before.st_size != consumed ||
@@ -1594,26 +2149,71 @@ static void copy_file_stable(int source_directory, int destination_directory, si
 }
 
 static void delete_exact_bundle(int root, int directory, const char *name, const char *proof) {
+    int artifact_receipts[ARTIFACT_COUNT];
+    int directory_receipts[BUNDLE_DIRECTORY_COUNT];
+    struct artifact_proof artifact_proofs[ARTIFACT_COUNT];
+    for (size_t index = 0; index < k_artifact_count; ++index)
+        artifact_receipts[index] = open_artifact(directory, index, O_RDONLY);
+    for (size_t index = 0; index < k_bundle_directory_count; ++index)
+        directory_receipts[index] = open_bundle_directory(
+            directory, k_bundle_directories[index], false);
     char actual[256];
     bundle_proof(directory, true, false, actual);
     if (strcmp(actual, proof) != 0) {
         fatal("bundle proof changed before deletion");
     }
+    for (size_t index = 0; index < k_artifact_count; ++index)
+        capture_held_artifact_receipt(artifact_receipts[index], index,
+                                      &artifact_proofs[index]);
+    char confirmed[256];
+    bundle_proof(directory, true, false, confirmed);
+    if (strcmp(actual, confirmed) != 0)
+        fatal("bundle changed while deletion receipts were captured");
+#ifdef DISKPLAN_FS_HELPER_TESTING
+    diskplan_delete_receipt_test_hook(directory);
+#endif
+    require_bundle_boundary(root, directory);
+    struct stat directory_before;
+    if (fstat(directory, &directory_before) != 0)
+        fatal_errno("cannot stat bundle directory before deletion quarantine");
+    char before_access[192];
+    access_identity_string(directory, before_access);
+    char nonce[33];
+    random_hex(nonce);
+    char quarantine[NAME_MAX + 1];
+    snprintf(quarantine, sizeof(quarantine), ".diskplan-bundle-remove-%s", nonce);
+    if (renameatx_np(root, name, root, quarantine, RENAME_EXCL) != 0)
+        fatal_errno("cannot quarantine bundle directory before deletion");
+    int rebound = openat(root, quarantine,
+                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat directory_after;
+    char after_access[192] = {0};
+    bool exact = rebound >= 0 && fstat(rebound, &directory_after) == 0 &&
+                 descriptor_within_bundle_boundary(root, rebound);
+    if (exact) access_identity_string(rebound, after_access);
+    exact = exact && same_object(&directory_before, &directory_after) &&
+            strcmp(before_access, after_access) == 0;
+    if (rebound >= 0) close(rebound);
+    if (!exact) {
+        fatal_retained_quarantine(
+            quarantine,
+            "bundle directory identity or access policy changed during deletion quarantine");
+    }
     size_t helper_index = (size_t)artifact_index("diskplan-fs-helper");
     for (size_t index = 0; index < k_artifact_count; ++index) {
         if (index == helper_index) continue;
-        int fd = open_artifact(directory, index, O_RDONLY);
-        close(fd);
-        if (unlinkat(directory, k_artifacts[index].name, 0) != 0) {
-            fatal_errno("cannot delete bundle artifact relative to its directory descriptor");
-        }
+        remove_artifact_relative(directory, index, artifact_receipts[index],
+                                 &artifact_proofs[index]);
+        close(artifact_receipts[index]);
+        artifact_receipts[index] = -1;
     }
-    int helper = open_artifact(directory, helper_index, O_RDONLY);
-    close(helper);
     if (emergency_prefix_fd >= 0 && emergency_lock_fd >= 0)
         emergency_lock_armed = true;
-    if (unlinkat(directory, k_artifacts[helper_index].name, 0) != 0)
-        fatal_errno("cannot delete filesystem helper as the final bundle artifact");
+    remove_artifact_relative(directory, helper_index, artifact_receipts[helper_index],
+                             &artifact_proofs[helper_index]);
+    close(artifact_receipts[helper_index]);
+    artifact_receipts[helper_index] = -1;
+    remove_nested_bundle_directories(directory, directory_receipts);
     if (fsync(directory) != 0) {
         fatal_errno("cannot sync emptied bundle directory");
     }
@@ -1631,9 +2231,31 @@ static void delete_exact_bundle(int root, int directory, const char *name, const
     if (strlen(identity) != identity_length || strncmp(identity, proof, identity_length) != 0) {
         fatal("bundle directory identity changed before removal");
     }
-    if (unlinkat(root, name, AT_REMOVEDIR) != 0 || fsync(root) != 0) {
-        fatal_errno("cannot remove empty bundle directory");
+    int final_rebound = openat(root, quarantine,
+                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat final_metadata;
+    char final_access[192] = {0};
+    bool final_exact = final_rebound >= 0 &&
+                       fstat(final_rebound, &final_metadata) == 0 &&
+                       descriptor_within_bundle_boundary(root, final_rebound) &&
+                       directory_is_empty(final_rebound);
+    if (final_exact) access_identity_string(final_rebound, final_access);
+    final_exact = final_exact && same_object(&directory_before, &final_metadata) &&
+                  strcmp(before_access, final_access) == 0;
+    if (!final_exact) {
+        if (final_rebound >= 0) close(final_rebound);
+        fatal_retained_quarantine(
+            quarantine,
+            "bundle root identity or access policy changed before final removal");
     }
+    if (unlinkat(root, quarantine, AT_REMOVEDIR) != 0 || fsync(root) != 0) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "cannot remove quarantined empty bundle directory %s", quarantine);
+        close(final_rebound);
+        fatal_errno(message);
+    }
+    close(final_rebound);
 }
 
 static void cmd_prepare_prefix(int argc, char **argv) {
@@ -1744,8 +2366,16 @@ static void cmd_stage_bundle(int argc, char **argv) {
                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (cleanup_stage_fd < 0 || fchmod(cleanup_stage_fd, 0700) != 0)
         fatal_errno("cannot bind staging directory");
+    initialize_cleanup_receipts();
+    create_nested_bundle_directories(cleanup_stage_fd);
+    for (size_t index = 0; index < k_bundle_directory_count; ++index) {
+        cleanup_directory_receipts[index] = open_bundle_directory(
+            cleanup_stage_fd, k_bundle_directories[index], false);
+    }
     for (size_t index = 0; index < k_artifact_count; ++index) {
         copy_file_stable(source, cleanup_stage_fd, index);
+        cleanup_artifact_receipts[index] = open_artifact(
+            cleanup_stage_fd, index, O_RDONLY);
     }
     if (fsync(cleanup_stage_fd) != 0) fatal_errno("cannot sync staged bundle");
     char source_after[256];
@@ -1756,6 +2386,7 @@ static void cmd_stage_bundle(int argc, char **argv) {
     bundle_proof(cleanup_stage_fd, true, false, staged_proof);
     printf("%s\t%s\n", cleanup_stage_name, staged_proof);
     close(source);
+    close_cleanup_receipts();
     close(cleanup_stage_fd);
     cleanup_stage_fd = -1;
     close(cleanup_root_fd);

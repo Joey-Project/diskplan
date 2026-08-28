@@ -1,9 +1,12 @@
 #define DISKPLAN_FS_HELPER_TESTING 1
+#include <sys/wait.h>
 #define main diskplan_fs_helper_program_main
 #include "diskplan-fs-helper.c"
 #undef main
 
 static bool copy_touch_enabled = false;
+static bool remove_replace_enabled = false;
+static bool delete_receipt_replace_enabled = false;
 
 void diskplan_copy_test_hook(int source_fd) {
     if (!copy_touch_enabled) return;
@@ -13,6 +16,40 @@ void diskplan_copy_test_hook(int source_fd) {
     times[1].tv_sec += 1;
     if (futimens(source_fd, times) != 0) abort();
     copy_touch_enabled = false;
+}
+
+void diskplan_remove_test_hook(int parent_fd, const char *quarantine,
+                               const char *original) {
+    (void)original;
+    if (!remove_replace_enabled) return;
+    if (renameat(parent_fd, quarantine, parent_fd, ".retained-owned-artifact") != 0)
+        abort();
+    int replacement = openat(parent_fd, quarantine,
+                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                             0644);
+    static const char bytes[] = "replacement\n";
+    if (replacement < 0 ||
+        write(replacement, bytes, sizeof(bytes) - 1) !=
+            (ssize_t)(sizeof(bytes) - 1) ||
+        close(replacement) != 0)
+        abort();
+    remove_replace_enabled = false;
+}
+
+void diskplan_delete_receipt_test_hook(int directory_fd) {
+    if (!delete_receipt_replace_enabled) return;
+    if (renameat(directory_fd, "VERSION", directory_fd, ".receipt-owned-version") != 0)
+        abort();
+    int replacement = openat(directory_fd, "VERSION",
+                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                             0644);
+    static const char bytes[] = "replacement\n";
+    if (replacement < 0 ||
+        write(replacement, bytes, sizeof(bytes) - 1) !=
+            (ssize_t)(sizeof(bytes) - 1) ||
+        close(replacement) != 0)
+        abort();
+    delete_receipt_replace_enabled = false;
 }
 
 static void test_fail(const char *message) {
@@ -179,7 +216,7 @@ static void test_copy_time_touch(const char *root) {
     int destination = open(destination_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (source < 0 || destination < 0) test_fail("cannot bind copy-time-touch fixture");
     size_t index = (size_t)artifact_index("VERSION");
-    int fixture = openat(source, k_artifacts[index].name,
+    int fixture = openat(source, k_artifacts[index].path,
                          O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
                          k_artifacts[index].mode);
     static const char bytes[] = "0.1.0\n";
@@ -206,6 +243,286 @@ static void test_copy_time_touch(const char *root) {
         test_fail("copy-time-touch changed copied content");
 }
 
+static void test_nested_artifact_copy(const char *root) {
+    char case_root[PATH_MAX], source_path[PATH_MAX], destination_path[PATH_MAX];
+    join_test_path(case_root, root, "nested-artifact-copy");
+    join_test_path(source_path, case_root, "source");
+    join_test_path(destination_path, case_root, "destination");
+    make_test_directory(case_root);
+    make_test_directory(source_path);
+    make_test_directory(destination_path);
+    int source = open(source_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int destination =
+        open(destination_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (source < 0 || destination < 0) test_fail("cannot bind nested-copy fixture");
+    create_nested_bundle_directories(source);
+    create_nested_bundle_directories(destination);
+    size_t index = (size_t)artifact_index("rules/builtin-v1.json");
+    char artifact_path[PATH_MAX];
+    char *leaf = NULL;
+    int parent = open_artifact_parent(source, index, false, artifact_path, &leaf);
+    int fixture = openat(parent, leaf,
+                         O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                         k_artifacts[index].mode);
+    static const char bytes[] = "{\"rules\":[]}\n";
+    if (fixture < 0 ||
+        write(fixture, bytes, sizeof(bytes) - 1) != (ssize_t)(sizeof(bytes) - 1) ||
+        fchmod(fixture, k_artifacts[index].mode) != 0 || fsync(fixture) != 0 ||
+        close(fixture) != 0) {
+        close(parent);
+        test_fail("cannot create nested-copy source artifact");
+    }
+    close(parent);
+    copy_file_stable(source, destination, index);
+    int copied = open_artifact(destination, index, O_RDONLY);
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    unsigned char expected_digest[CC_SHA256_DIGEST_LENGTH];
+    off_t size = 0;
+    digest_artifact_fd(copied, k_artifacts[index].maximum_size, digest, &size);
+    if (CC_SHA256(bytes, (CC_LONG)(sizeof(bytes) - 1), expected_digest) == NULL)
+        test_fail("cannot hash expected nested-copy content");
+    close(copied);
+    close(destination);
+    close(source);
+    if (size != (off_t)(sizeof(bytes) - 1) ||
+        memcmp(digest, expected_digest, sizeof(digest)) != 0)
+        test_fail("nested-copy changed copied content");
+}
+
+static void populate_exact_bundle(int directory) {
+    create_nested_bundle_directories(directory);
+    for (size_t index = 0; index < k_artifact_count; ++index) {
+        char path[PATH_MAX];
+        char *leaf = NULL;
+        int parent = open_artifact_parent(directory, index, false, path, &leaf);
+        int file = openat(parent, leaf,
+                          O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                          k_artifacts[index].mode);
+        static const char bytes[] = "fixture\n";
+        if (file < 0 || write(file, bytes, sizeof(bytes) - 1) != (ssize_t)(sizeof(bytes) - 1) ||
+            fchmod(file, k_artifacts[index].mode) != 0 || fsync(file) != 0 ||
+            close(file) != 0) {
+            close(parent);
+            test_fail("cannot populate exact bundle fixture");
+        }
+        close(parent);
+    }
+}
+
+static void test_exact_nested_bundle_lifecycle(const char *root) {
+    char case_root[PATH_MAX], source_path[PATH_MAX], destination_path[PATH_MAX];
+    join_test_path(case_root, root, "exact-nested-lifecycle");
+    join_test_path(source_path, case_root, "source");
+    join_test_path(destination_path, case_root, "0.1.0");
+    make_test_directory(case_root);
+    make_test_directory(source_path);
+    make_test_directory(destination_path);
+    int parent = open(case_root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int source = open(source_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int destination =
+        open(destination_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0 || source < 0 || destination < 0)
+        test_fail("cannot bind exact nested lifecycle fixture");
+    populate_exact_bundle(source);
+    create_nested_bundle_directories(destination);
+    require_exact_bundle_entries(source, false, true);
+    char source_proof[256];
+    bundle_proof(source, false, true, source_proof);
+    for (size_t index = 0; index < k_artifact_count; ++index)
+        copy_file_stable(source, destination, index);
+    require_exact_bundle_entries(destination, false, false);
+    char destination_proof[256];
+    bundle_proof(destination, true, false, destination_proof);
+
+    int extra = openat(destination, "unexpected",
+                       O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (extra < 0 || close(extra) != 0) test_fail("cannot create unexpected-entry fixture");
+    pid_t child = fork();
+    if (child < 0) test_fail("cannot fork unexpected-entry probe");
+    if (child == 0) {
+        int sink = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (sink >= 0) {
+            (void)dup2(sink, STDERR_FILENO);
+            close(sink);
+        }
+        require_exact_bundle_entries(destination, false, false);
+        _exit(0);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) == 0)
+        test_fail("unexpected or case-fold-colliding entry was accepted");
+    if (unlinkat(destination, "unexpected", 0) != 0)
+        test_fail("cannot remove unexpected-entry fixture");
+    require_exact_bundle_entries(destination, false, false);
+
+    delete_exact_bundle(parent, destination, "0.1.0", destination_proof);
+    struct stat removed;
+    if (fstatat(parent, "0.1.0", &removed, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT)
+        test_fail("exact nested bundle was not fully removed");
+    close(destination);
+    close(source);
+    close(parent);
+}
+
+static void test_partial_nested_cleanup(const char *root) {
+    char case_root[PATH_MAX], stage_path[PATH_MAX], sentinel_path[PATH_MAX];
+    join_test_path(case_root, root, "partial-nested-cleanup");
+    join_test_path(stage_path, case_root, ".install-stage-00000000000000000000000000000000");
+    join_test_path(sentinel_path, case_root, "sentinel");
+    make_test_directory(case_root);
+    make_test_directory(stage_path);
+    int parent = open(case_root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int stage = open(stage_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0 || stage < 0) test_fail("cannot bind partial-cleanup fixture");
+    create_nested_bundle_directories(stage);
+    size_t index = (size_t)artifact_index("rules/builtin-v1.json");
+    char artifact_path[PATH_MAX];
+    char *leaf = NULL;
+    int artifact_parent = open_artifact_parent(stage, index, false, artifact_path, &leaf);
+    int sentinel = open(sentinel_path,
+                        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    static const char bytes[] = "sentinel\n";
+    if (sentinel < 0 ||
+        write(sentinel, bytes, sizeof(bytes) - 1) != (ssize_t)(sizeof(bytes) - 1) ||
+        close(sentinel) != 0 || symlinkat(sentinel_path, artifact_parent, leaf) != 0) {
+        close(artifact_parent);
+        test_fail("cannot create partial-cleanup symlink fixture");
+    }
+    close(artifact_parent);
+    cleanup_root_fd = parent;
+    cleanup_stage_fd = stage;
+    strcpy(cleanup_stage_name, ".install-stage-00000000000000000000000000000000");
+    cleanup_partial_stage();
+    int retained = open(stage_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (retained < 0) test_fail("uncertain partial cleanup removed a retained stage");
+    close(retained);
+    int target = open(sentinel_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    char observed[sizeof(bytes)] = {0};
+    if (target < 0 || read(target, observed, sizeof(bytes) - 1) != (ssize_t)(sizeof(bytes) - 1) ||
+        close(target) != 0 || memcmp(observed, bytes, sizeof(bytes) - 1) != 0)
+        test_fail("partial cleanup followed a hostile symlink");
+}
+
+static void test_artifact_delete_replacement_is_retained(const char *root) {
+    char case_root[PATH_MAX];
+    join_test_path(case_root, root, "artifact-delete-replacement");
+    make_test_directory(case_root);
+    int directory = open(case_root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) test_fail("cannot bind artifact-delete replacement fixture");
+    size_t index = (size_t)artifact_index("VERSION");
+    int fixture = openat(directory, "VERSION",
+                         O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                         k_artifacts[index].mode);
+    static const char owned[] = "owned\n";
+    if (fixture < 0 ||
+        write(fixture, owned, sizeof(owned) - 1) != (ssize_t)(sizeof(owned) - 1) ||
+        close(fixture) != 0)
+        test_fail("cannot create artifact-delete replacement fixture");
+    int held = open_artifact(directory, index, O_RDONLY);
+    struct artifact_proof receipt;
+    capture_held_artifact_receipt(held, index, &receipt);
+    pid_t child = fork();
+    if (child < 0) test_fail("cannot fork artifact-delete replacement probe");
+    if (child == 0) {
+        int sink = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (sink >= 0) {
+            (void)dup2(sink, STDERR_FILENO);
+            close(sink);
+        }
+        remove_replace_enabled = true;
+        remove_artifact_relative(directory, index, held, &receipt);
+        _exit(0);
+    }
+    close(held);
+    int child_status = 0;
+    if (waitpid(child, &child_status, 0) != child || !WIFEXITED(child_status) ||
+        WEXITSTATUS(child_status) == 0)
+        test_fail("artifact replacement during deletion was accepted");
+    int retained = openat(directory, ".retained-owned-artifact",
+                          O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    char observed[sizeof(owned)] = {0};
+    if (retained < 0 ||
+        read(retained, observed, sizeof(owned) - 1) != (ssize_t)(sizeof(owned) - 1) ||
+        close(retained) != 0 || memcmp(observed, owned, sizeof(owned) - 1) != 0)
+        test_fail("owned artifact was deleted after quarantine replacement");
+    struct stat original_slot;
+    if (fstatat(directory, "VERSION", &original_slot, AT_SYMLINK_NOFOLLOW) == 0 ||
+        errno != ENOENT)
+        test_fail("replacement race unexpectedly repopulated the original artifact slot");
+    close(directory);
+}
+
+static void test_exact_delete_uses_preproof_receipts(const char *root) {
+    char case_root[PATH_MAX], bundle_path[PATH_MAX];
+    join_test_path(case_root, root, "exact-delete-receipts");
+    join_test_path(bundle_path, case_root, "0.1.0");
+    make_test_directory(case_root);
+    make_test_directory(bundle_path);
+    int parent = open(case_root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int bundle = open(bundle_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0 || bundle < 0) test_fail("cannot bind exact-delete receipt fixture");
+    populate_exact_bundle(bundle);
+    char proof[256];
+    bundle_proof(bundle, true, false, proof);
+    pid_t child = fork();
+    if (child < 0) test_fail("cannot fork exact-delete receipt probe");
+    if (child == 0) {
+        int sink = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (sink >= 0) {
+            (void)dup2(sink, STDERR_FILENO);
+            close(sink);
+        }
+        delete_receipt_replace_enabled = true;
+        delete_exact_bundle(parent, bundle, "0.1.0", proof);
+        _exit(0);
+    }
+    int child_status = 0;
+    if (waitpid(child, &child_status, 0) != child || !WIFEXITED(child_status) ||
+        WEXITSTATUS(child_status) == 0)
+        test_fail("exact deletion accepted a post-proof replacement");
+    int replacement = openat(bundle, "VERSION", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int owned = openat(bundle, ".receipt-owned-version",
+                       O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (replacement < 0 || owned < 0)
+        test_fail("exact deletion removed a replacement or its receipt-bound object");
+    close(replacement);
+    close(owned);
+    close(bundle);
+    close(parent);
+}
+
+static void test_partial_cleanup_requires_creation_receipt(const char *root) {
+    char case_root[PATH_MAX];
+    join_test_path(case_root, root, "partial-cleanup-receipts");
+    make_test_directory(case_root);
+    int directory = open(case_root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) test_fail("cannot bind partial receipt fixture");
+    size_t index = (size_t)artifact_index("VERSION");
+    int file = openat(directory, "VERSION",
+                      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (file < 0 || write(file, "owned\n", 6) != 6 || close(file) != 0)
+        test_fail("cannot create partial receipt artifact");
+    initialize_cleanup_receipts();
+    cleanup_artifact_receipts[index] = open_artifact(directory, index, O_RDONLY);
+    if (renameat(directory, "VERSION", directory, ".partial-owned-version") != 0)
+        test_fail("cannot retire partial receipt artifact");
+    int replacement = openat(directory, "VERSION",
+                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (replacement < 0 || write(replacement, "replacement\n", 12) != 12 ||
+        close(replacement) != 0)
+        test_fail("cannot create partial receipt replacement");
+    cleanup_partial_artifacts(directory);
+    int current = openat(directory, "VERSION", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int owned = openat(directory, ".partial-owned-version",
+                       O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (current < 0 || owned < 0)
+        test_fail("partial cleanup deleted an object without its creation receipt");
+    close(current);
+    close(owned);
+    close_cleanup_receipts();
+    close(directory);
+}
+
 int main(int argc, char **argv) {
     if (argc != 2 || argv[1][0] != '/') {
         fprintf(stderr, "usage: diskplan-fs-helper-tests /absolute/test/root\n");
@@ -221,6 +538,12 @@ int main(int argc, char **argv) {
     test_removed_managed_slot_repopulation(argv[1]);
     test_selected_access_flags();
     test_copy_time_touch(argv[1]);
-    puts("fs-helper ancestor, child-slot, mount, flags, and copy tests passed");
+    test_nested_artifact_copy(argv[1]);
+    test_exact_nested_bundle_lifecycle(argv[1]);
+    test_partial_nested_cleanup(argv[1]);
+    test_artifact_delete_replacement_is_retained(argv[1]);
+    test_exact_delete_uses_preproof_receipts(argv[1]);
+    test_partial_cleanup_requires_creation_receipt(argv[1]);
+    puts("fs-helper ancestor, child-slot, mount, flags, and nested lifecycle tests passed");
     return 0;
 }

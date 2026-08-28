@@ -8,7 +8,9 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,11 +37,137 @@ source_manifest = load_module(
 )
 
 
+def make_test_bundle(parent: Path, reverse: bool = False) -> Path:
+    bundle = parent / "diskplan-test"
+    bundle.mkdir(parents=True)
+    specs = [
+        packager.BundleArtifactSpec(
+            bundle_path="VERSION",
+            compatibility_version="product-v1",
+            maximum_bytes=256,
+            mode=0o644,
+            role="product-version",
+            source="@version-file",
+        ),
+        packager.BundleArtifactSpec(
+            bundle_path="rules/builtin-v1.json",
+            compatibility_version="diskplan.rules.v1",
+            maximum_bytes=1024,
+            mode=0o644,
+            role="declarative-rules",
+            source="rules/builtin-v1.json",
+        ),
+    ]
+    packager.make_bundle_directories(bundle, [item.bundle_path for item in specs])
+    payloads = {
+        "VERSION": b"0.1.0\n",
+        "rules/builtin-v1.json": b'{"rules":[],"schema_version":"diskplan.rules.v1"}\n',
+    }
+    artifacts = []
+    sequence = list(reversed(specs)) if reverse else specs
+    for spec in sequence:
+        artifacts.append(packager.write_bundle_artifact(bundle, spec, payloads[spec.bundle_path]))
+    artifacts.sort(key=lambda item: os.fsencode(item["path"]))
+    manifest = {
+        "architecture": "arm64",
+        "artifacts": artifacts,
+        "bundle_format": 1,
+        "deployment_target_macos": "14.0",
+        "excluded_inputs": [],
+        "manifest_schema_version": packager.MANIFEST_SCHEMA_VERSION,
+        "optional_capabilities": [],
+        "product_version": "0.1.0",
+        "protocol_major": 1,
+        "protocol_minor": 3,
+        "release_gate_macos": "26.0",
+        "required_capabilities": ["framing-v1"],
+        "source_revision": "0" * 40,
+    }
+    manifest_data = packager.canonical_json(manifest)
+    packager.write_private_file(bundle / "manifest.json", manifest_data, 0o644)
+    checksummed = [(item["path"], item["sha256"]) for item in artifacts]
+    checksummed.append(("manifest.json", packager.digest(manifest_data)))
+    sums = "".join(
+        f"{sha256}  {path}\n"
+        for path, sha256 in sorted(checksummed, key=lambda item: os.fsencode(item[0]))
+    ).encode("ascii")
+    packager.write_private_file(bundle / "SHA256SUMS", sums, 0o644)
+    packager.verify_bundle_tree(bundle)
+    return bundle
+
+
 class VersionMetadataTests(unittest.TestCase):
     def test_semver_rejects_numeric_prerelease_leading_zeroes(self) -> None:
         self.assertIsNone(packager.SEMVER.fullmatch("1.2.3-01"))
         self.assertIsNotNone(packager.SEMVER.fullmatch("1.2.3-0"))
         self.assertIsNotNone(packager.SEMVER.fullmatch("1.2.3-alpha.01a+001"))
+
+    def test_generated_native_contract_matches_canonical_json(self) -> None:
+        repository_root = SCRIPT_DIR.parent.parent
+        artifacts, _excluded = packager.load_bundle_contract(
+            repository_root / "release/bundle-contract.json"
+        )
+        self.assertEqual(
+            (SCRIPT_DIR / "bundle-contract.generated.h").read_bytes(),
+            packager.render_c_bundle_contract(artifacts),
+        )
+
+    def test_shell_contract_matches_canonical_json(self) -> None:
+        repository_root = SCRIPT_DIR.parent.parent
+        artifacts, _excluded = packager.load_bundle_contract(
+            repository_root / "release/bundle-contract.json"
+        )
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; diskplan_expected_artifact_contract',
+                "diskplan-contract-test",
+                str(SCRIPT_DIR / "release-common.sh"),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        expected = "".join(
+            f"{item.bundle_path}\t{item.mode:04o}\t{item.role}\t{item.compatibility_version}\n"
+            for item in artifacts
+        ).encode("ascii")
+        self.assertEqual(completed.stdout, expected)
+        self.assertEqual(completed.stderr, b"")
+        files = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; diskplan_expected_files',
+                "diskplan-contract-test",
+                str(SCRIPT_DIR / "release-common.sh"),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        expected_files = sorted(
+            [item.bundle_path for item in artifacts] + ["manifest.json", "SHA256SUMS"],
+            key=os.fsencode,
+        )
+        self.assertEqual(files.stdout.decode("ascii").splitlines(), expected_files)
+        directories = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; diskplan_expected_directories',
+                "diskplan-contract-test",
+                str(SCRIPT_DIR / "release-common.sh"),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(
+            directories.stdout.decode("ascii").splitlines(),
+            packager.bundle_directories(expected_files),
+        )
 
 
 class SourceManifestTests(unittest.TestCase):
@@ -71,6 +199,56 @@ class SourceManifestTests(unittest.TestCase):
             os.replace(replacement, source)
             with self.assertRaises(ValueError):
                 source_manifest.hash_regular(source, initial)
+
+
+class StagedFileTests(unittest.TestCase):
+    def test_timestamp_only_source_change_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                metadata = source.stat()
+                os.utime(
+                    source,
+                    ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000),
+                )
+                staged.assert_source_stable()
+            finally:
+                staged.close()
+
+    def test_same_size_source_content_change_is_rejected_even_with_restored_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"first\n")
+            original = source.stat()
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                source.write_bytes(b"other\n")
+                os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+                with self.assertRaisesRegex(ValueError, "source content changed"):
+                    staged.assert_source_stable()
+            finally:
+                staged.close()
+
+    def test_source_ancestor_replacement_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir()
+            source = parent / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                parent.rename(root / "original-parent")
+                parent.mkdir()
+                (parent / "source").write_bytes(b"replacement\n")
+                with self.assertRaisesRegex(ValueError, "bound directory slot was replaced"):
+                    staged.assert_source_stable()
+            finally:
+                staged.close()
 
     def test_hash_regular_rejects_content_drift_after_lstat(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -220,6 +398,44 @@ class PublicationTests(unittest.TestCase):
 
 
 class DeterministicGzipTests(unittest.TestCase):
+    def test_output_directory_must_be_exclusive_to_current_euid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            output.mkdir(mode=0o777)
+            output.chmod(0o777)
+            with self.assertRaisesRegex(ValueError, "non-group/world-writable"):
+                packager.open_output_directory(output)
+
+    def test_archive_rejects_ancestor_replacement_after_descriptor_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            bundle = make_test_bundle(root)
+            output.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "builtin-v1.json").write_bytes(b"unverified\n")
+            real_bind = packager.bind_verified_bundle
+
+            def bind_then_replace(path: Path) -> object:
+                verified = real_bind(path)
+                (bundle / "rules").rename(bundle / "retired-rules")
+                (bundle / "rules").symlink_to(outside, target_is_directory=True)
+                return verified
+
+            directory_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with mock.patch.object(
+                    packager,
+                    "bind_verified_bundle",
+                    side_effect=bind_then_replace,
+                ):
+                    with self.assertRaisesRegex(ValueError, "source ancestor was replaced"):
+                        packager.build_archive(bundle, directory_fd, "release.tar.gz")
+                self.assertEqual(list(output.iterdir()), [])
+            finally:
+                os.close(directory_fd)
+
     def test_header_level_and_archive_bytes_are_pinned(self) -> None:
         packager.require_pinned_zlib()
         archives: list[bytes] = []
@@ -227,11 +443,10 @@ class DeterministicGzipTests(unittest.TestCase):
             root = Path(temporary)
             for index in range(2):
                 parent = root / str(index)
-                bundle = parent / "diskplan-test"
                 output = parent / "output"
-                bundle.mkdir(parents=True)
+                bundle = make_test_bundle(parent, reverse=index == 1)
                 output.mkdir()
-                packager.write_private_file(bundle / "VERSION", b"0.1.0\n", 0o644)
+                os.utime(bundle / "VERSION", (100 + index, 200 + index))
                 directory_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
                 name, descriptor, _digest = packager.build_archive(
                     bundle, directory_fd, "release.tar.gz"
@@ -245,6 +460,10 @@ class DeterministicGzipTests(unittest.TestCase):
                     os.unlink(name, dir_fd=directory_fd)
                     os.close(directory_fd)
         self.assertEqual(archives[0], archives[1])
+        self.assertEqual(
+            packager.digest(archives[0]),
+            "43ebcb691de29cba425a9b33937d24d0cacc94b5074909d3cda659201adb79a1",
+        )
         self.assertEqual(archives[0][:10], packager.GZIP_HEADER)
         self.assertEqual(archives[0][4:8], b"\x00\x00\x00\x00")
         self.assertEqual(archives[0][8], 2)
@@ -255,6 +474,239 @@ class DeterministicGzipTests(unittest.TestCase):
         with mock.patch.object(packager.zlib, "ZLIB_RUNTIME_VERSION", "future"):
             with self.assertRaises(RuntimeError):
                 packager.require_pinned_zlib()
+
+
+class BundleManifestTests(unittest.TestCase):
+    def test_missing_artifact_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = make_test_bundle(Path(temporary))
+            (bundle / "VERSION").unlink()
+            with self.assertRaisesRegex(ValueError, "missing or extra"):
+                packager.verify_bundle_tree(bundle)
+
+    def test_tampered_artifact_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = make_test_bundle(Path(temporary))
+            (bundle / "VERSION").write_text("0.2.0\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                packager.verify_bundle_tree(bundle)
+
+    def test_extra_artifact_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = make_test_bundle(Path(temporary))
+            (bundle / "extra").write_text("unexpected\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "missing or extra"):
+                packager.verify_bundle_tree(bundle)
+
+    def test_manifest_case_fold_collision_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = make_test_bundle(Path(temporary))
+            manifest_path = bundle / "manifest.json"
+            manifest = json.loads(manifest_path.read_bytes())
+            duplicate = dict(manifest["artifacts"][1])
+            duplicate["path"] = "Rules/Builtin-v1.json"
+            manifest["artifacts"].append(duplicate)
+            manifest["artifacts"].sort(key=lambda item: os.fsencode(item["path"]))
+            manifest_path.write_bytes(packager.canonical_json(manifest))
+            with self.assertRaisesRegex(ValueError, "path collision"):
+                packager.verify_bundle_tree(bundle)
+
+    def test_manifest_schema_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = make_test_bundle(Path(temporary))
+            manifest_path = bundle / "manifest.json"
+            manifest = json.loads(manifest_path.read_bytes())
+            manifest["manifest_schema_version"] = "diskplan.bundle-manifest.v999"
+            manifest_path.write_bytes(packager.canonical_json(manifest))
+            with self.assertRaisesRegex(ValueError, "schema version"):
+                packager.verify_bundle_tree(bundle)
+
+    def test_contract_rejects_duplicate_case_folded_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            contract_path = Path(temporary) / "contract.json"
+            contract = {
+                "artifacts": [
+                    {
+                        "bundle_path": "rules/value",
+                        "compatibility_version": "rules-v1",
+                        "maximum_bytes": 10,
+                        "mode": "0644",
+                        "role": "declarative-rules",
+                        "source": "rules/value",
+                    },
+                    {
+                        "bundle_path": "Rules/value",
+                        "compatibility_version": "rules-v1",
+                        "maximum_bytes": 10,
+                        "mode": "0644",
+                        "role": "declarative-rules",
+                        "source": "Rules/value",
+                    },
+                ],
+                "excluded": [],
+                "schema_version": packager.CONTRACT_SCHEMA_VERSION,
+            }
+            contract_path.write_bytes(packager.canonical_compact_json(contract))
+            with self.assertRaisesRegex(ValueError, "case-fold-colliding"):
+                packager.load_bundle_contract(contract_path)
+
+
+class PackagingAssetsTests(unittest.TestCase):
+    def test_main_packages_the_exact_runtime_contract(self) -> None:
+        repository_root = SCRIPT_DIR.parent.parent
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            components = root / "components"
+            components.mkdir()
+            inputs = {}
+            for name in ("diskplan", "diskplan-engine", "diskplan-fs-helper"):
+                path = components / name
+                path.write_bytes(f"fake-{name}\n".encode("ascii"))
+                path.chmod(0o755)
+                inputs[name] = path
+            arguments = SimpleNamespace(
+                frontend=inputs["diskplan"],
+                engine=inputs["diskplan-engine"],
+                fs_helper=inputs["diskplan-fs-helper"],
+                installer=SCRIPT_DIR / "install.sh",
+                activator=SCRIPT_DIR / "activate.sh",
+                uninstaller=SCRIPT_DIR / "uninstall.sh",
+                common_library=SCRIPT_DIR / "release-common.sh",
+                version_file=repository_root / "release/VERSION",
+                protocol_metadata=repository_root / "release/protocol.json",
+                asset_root=repository_root,
+                bundle_contract=repository_root / "release/bundle-contract.json",
+                source_revision="1" * 40,
+                output_dir=output,
+                require_macho_arm64=False,
+            )
+
+            def identity(_file, component):
+                return {
+                    "component": component,
+                    "product_version": "0.1.0",
+                    "protocol_major": 1,
+                    "protocol_minor": 3,
+                }
+
+            helper = {
+                "component": "diskplan-fs-helper",
+                "product_version": "0.1.0",
+                "protocol_major": 1,
+                "protocol_minor": 3,
+                "helper_abi": 1,
+            }
+            with (
+                mock.patch.object(packager, "parse_args", return_value=arguments),
+                mock.patch.object(packager, "validate_macho_components"),
+                mock.patch.object(packager, "component_identity", side_effect=identity),
+                mock.patch.object(packager, "helper_identity", return_value=helper),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(packager.main(), 0)
+
+            archive = output / "diskplan-0.1.0-macos-arm64.tar.gz"
+            with tarfile.open(archive, "r:gz") as bundled:
+                names = bundled.getnames()
+                manifest_member = bundled.extractfile(
+                    "diskplan-0.1.0-macos-arm64/manifest.json"
+                )
+                self.assertIsNotNone(manifest_member)
+                manifest = json.load(manifest_member)
+            artifact_paths = [item["path"] for item in manifest["artifacts"]]
+            self.assertIn("rules/builtin-v1.json", artifact_paths)
+            self.assertIn("rules/user-policy-default-v1.json", artifact_paths)
+            self.assertIn("proto/diskplan/v1/ipc.proto", artifact_paths)
+            self.assertIn("proto/fixtures/canonical-binary-v1/evidence.bin", artifact_paths)
+            self.assertIn("runtime-capabilities.json", artifact_paths)
+            self.assertEqual(
+                manifest["optional_capabilities"],
+                [
+                    "audit-artifact-v1",
+                    "execution-record-artifact-v1",
+                    "history-artifact-v1",
+                    "saved-plan-artifact-v1",
+                ],
+            )
+            self.assertFalse(any("history.json" in name for name in names))
+            self.assertFalse(any("execution-record.json" in name for name in names))
+
+    def test_repository_asset_symlink_is_rejected_without_following(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            target.write_text("data\n", encoding="ascii")
+            (root / "link").symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "cannot safely open regular file"):
+                packager.require_safe_repository_source(root, "link")
+
+    def test_cleanup_does_not_delete_a_replacement_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original = root / "original"
+            original.write_bytes(b"owned\n")
+            held = os.open(original, os.O_RDONLY)
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                replacement = root / "replacement"
+                replacement.write_bytes(b"keep\n")
+                os.replace(replacement, original)
+                packager.unlink_if_same(directory, "original", held, 1024)
+                self.assertEqual(original.read_bytes(), b"keep\n")
+            finally:
+                os.close(directory)
+                os.close(held)
+
+    def test_cleanup_retains_both_objects_when_quarantine_is_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original = root / "original"
+            original.write_bytes(b"owned\n")
+            held = os.open(original, os.O_RDONLY)
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            real_rename = packager.rename_exclusive
+
+            def replace_quarantine(
+                source_fd: int,
+                source: str,
+                destination_fd: int,
+                destination: str,
+            ) -> None:
+                real_rename(source_fd, source, destination_fd, destination)
+                os.rename(
+                    destination,
+                    ".retained-owned",
+                    src_dir_fd=destination_fd,
+                    dst_dir_fd=destination_fd,
+                )
+                replacement = os.open(
+                    destination,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=destination_fd,
+                )
+                try:
+                    os.write(replacement, b"replacement\n")
+                finally:
+                    os.close(replacement)
+
+            try:
+                with mock.patch.object(
+                    packager,
+                    "rename_exclusive",
+                    side_effect=replace_quarantine,
+                ):
+                    with self.assertRaisesRegex(ValueError, "retained a replaced object"):
+                        packager.unlink_if_same(directory, "original", held, 1024)
+                self.assertEqual((root / ".retained-owned").read_bytes(), b"owned\n")
+                quarantines = list(root.glob(".diskplan-remove-*"))
+                self.assertEqual(len(quarantines), 1)
+                self.assertEqual(quarantines[0].read_bytes(), b"replacement\n")
+                self.assertFalse(original.exists())
+            finally:
+                os.close(directory)
+                os.close(held)
 
 
 class BoundedProbeTests(unittest.TestCase):

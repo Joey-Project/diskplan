@@ -104,6 +104,7 @@ readonly FS_HELPER="${WORK_ROOT}/diskplan-fs-helper"
 export CARGO_TARGET_DIR
 
 cd "${SOURCE_ROOT}"
+python3 "${SOURCE_ROOT}/scripts/release/generate_bundle_contract.py" check
 cargo build --locked --release --target aarch64-apple-darwin -p diskplan
 swift build \
     --disable-automatic-resolution \
