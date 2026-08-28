@@ -20,7 +20,7 @@ superseded_by:
 ## Current State
 
 - `DiskplanMacOS` exposes only the real-syscall policy installer publicly and re-reads the live process-wide dataless materialization policy immediately before every path-touching probe step.
-- The Darwin shim performs descriptor-relative, single-component, no-follow/beneath item probes, requests the real backing device with `FSOPT_RETURN_REALDEV`, and parses short kernel attribute results by returned masks and declared bounds before Swift receives a versioned wire representation.
+- The Darwin shim performs descriptor-relative, single-component, no-follow/beneath item probes, requests the real backing device with `FSOPT_RETURN_REALDEV`, and parses the directory/non-directory packed layouts with a bounds-checked cursor before Swift receives a versioned wire representation.
 - APFS evidence distinguishes logical bytes, nominal allocated bytes, immediate private reclaim, sharing flags, clone ID, and clone refcount. Conditional shared reclaim, snapshot attribution, and provider hidden backing remain unavailable/no-credit.
 - File Provider evidence uses public filesystem flags and provider identity. In-process metadata coordination is disabled and promised metadata is typed unavailable because a running accessor cannot be killed and reaped safely.
 - Provider identity is fail-closed: `NSFileNoSuchFileError` means identifier-absent, not local. Absent, permission, timeout, failure, and inconsistent results do not descend without positive sync-root or inherited provider-bound evidence.
@@ -40,7 +40,7 @@ superseded_by:
 - [x] Revalidate live materialization policy and bound provider identity by one subsecond-capable deadline.
 - [x] Separate object identity from materialization stability and use postflight evidence for traversal.
 - [x] Request real device identity and require a typed directory before any descent decision.
-- [x] Accept valid short Darwin attribute buffers without padding or crediting omitted fields.
+- [x] Parse type-dependent Darwin packed layouts, keep invalid defaults unavailable, and reject truncated physical slots.
 - [x] Disable unkillable in-process coordination and bind the derived parent path to the held parent FD identity.
 - [x] Make the identity timeout path close-and-discard so post-deadline callbacks cannot succeed.
 - [ ] Run independent review and real-host File Provider callback-zero acceptance.
@@ -57,10 +57,10 @@ superseded_by:
 - Accepted design: `docs/design/accepted-plan.md`.
 - Implementation contract: `docs/design/macos-capability-probes.md`.
 - Local `swift build` passed on macOS 26.6.1 with Swift 6.3.3.
-- Local `swift test --filter DiskplanMacOSTests` passed 29 focused tests, including APFS clone, live-policy mutation, child and parent replacement, child-hardlink parent mismatch, renamed-parent missing and unreadable classification, both same-object materialization directions, stable postflight traversal, real-device option, valid short/malformed kernel buffers, metadata-unavailable behavior, typed directory guards, the subsecond identity deadline, and the deterministic deadline-after-callback lock-order race.
-- Local full `swift test` passed all 40 tests after the deadline race fix.
+- Local `swift test --filter DiskplanMacOSTests` passed 32 focused tests, including APFS clone, live-policy mutation, child and parent replacement, child-hardlink parent mismatch, renamed-parent missing and unreadable classification, both same-object materialization directions, stable postflight traversal, real-device option, directory/non-directory packed buffers, unavailable invalid slots, truncated/impossible layouts, live directory/regular/symlink item probes, metadata-unavailable behavior, typed directory guards, the subsecond identity deadline, and the deterministic deadline-after-callback lock-order race.
+- Local full `swift test` passed all 43 tests after the packed-layout fix.
 - `swift-format lint` passed for the new Swift source, test, and probe-tool paths.
 - The C shim passed `clang -std=c11 -Wall -Wextra -Werror -fsyntax-only` against the active macOS SDK.
 - `bash -n` and ShellCheck 0.11.0 passed for `scripts/test-macos-capabilities.sh`.
 - Local `swift run diskplan-macos-probe --self-test` reports APFS logical/private evidence and `provider_identity_status: unavailable`, keeping absent provider identity non-authoritative.
-- The complete local `scripts/test-macos-capabilities.sh` gate passed its 29 focused tests and controlled CLI probe; it leaves both the extension-backed and real APFS volume-group India-host oracles as explicit `not-available` hooks and does not claim either gate passed.
+- The complete local `scripts/test-macos-capabilities.sh` gate passed its 32 focused tests and controlled CLI probe; it leaves both the extension-backed and real APFS volume-group India-host oracles as explicit `not-available` hooks and does not claim either gate passed.

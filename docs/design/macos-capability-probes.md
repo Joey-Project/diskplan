@@ -46,12 +46,24 @@ Each fact is `known`, `unsupported`, `permissionDenied`, `unavailable`, `failed`
 `inconsistent`. Returned-attribute masks decide whether a parsed value is known. A default
 value packed for an unsupported filesystem attribute never becomes evidence.
 
-The Darwin item buffer parser accepts a declared length shorter than the full requested layout
-when the returned masks omit the trailing attributes. It reads only fields whose returned bit is
-set and whose complete fixed-layout range is inside the declared length. An omitted bit stays
-unavailable even if a default byte range exists; a returned bit whose field is outside the
-declared length is malformed/inconsistent. The parser never pads a short kernel result or grants
-evidence from zero-initialized storage.
+The Darwin item buffer parser follows the packed layout used by `getattrlistat`. With
+`FSOPT_PACK_INVAL_ATTRS`, every requested common and extended-common attribute occupies its
+ordered, four-byte-aligned slot even when its returned bit is clear. A directory is different:
+Darwin omits the requested file-attribute group as a whole, so its extended-common fields begin
+immediately after the common group. Regular files, symbolic links, and other non-directories keep
+the file group. The parser therefore advances a bounds-checked cursor through the common group,
+selects the directory or non-directory shape from the returned object type, and requires the
+declared length to match the complete selected shape. If object type was not returned, the exact
+known shape length may guide parsing but does not become object-type evidence.
+
+Returned masks decide only whether a parsed value is evidence. An omitted bit stays unavailable
+even though `FSOPT_PACK_INVAL_ATTRS` placed a default value in its physical slot. A directory that
+claims returned file attributes, a type/length disagreement, an unknown returned bit, or any
+truncated physical slot is malformed/inconsistent. The parser never pads a short kernel result
+or grants evidence from default or zero-initialized storage. Consequently, missing identity or
+content-state signals remain typed unavailable; they are never reclassified as a missing object
+or an identity/content mismatch. Syscall errors, observed missing slots, unreadable slots, and
+revalidation mismatches retain their distinct higher-level outcomes.
 
 The item probe reports:
 
