@@ -5,8 +5,8 @@ use std::fmt;
 
 use super::types::{
     ActionId, ActionKindId, ActionKindProjection, ActionProjection, ByteValue, ForceRequirement,
-    PlanDisposition, PlanId, PlanProjection, ReleaseSetId, Stageability, TargetProjection,
-    WaiverId,
+    PlanDisposition, PlanId, PlanProjection, ReleaseSetId, ReleaseSetProjection, Stageability,
+    TargetProjection, WaiverId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -160,13 +160,21 @@ struct ActionGroup {
     key: GroupKey,
     kind: ActionKindProjection,
     action_indices: Vec<usize>,
+    sort_mode: SortMode,
+}
+
+struct ProjectionIndexes {
+    action_positions: HashMap<ActionId, usize>,
+    release_set_positions: HashMap<ReleaseSetId, usize>,
 }
 
 #[derive(Clone, Debug)]
 struct LoadedPlan {
     projection: PlanProjection,
     groups: Vec<ActionGroup>,
+    group_positions: HashMap<GroupKey, usize>,
     action_positions: HashMap<ActionId, usize>,
+    release_set_positions: HashMap<ReleaseSetId, usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -176,17 +184,27 @@ enum PlanState {
     Invalidated(InvalidatedPlan),
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct CacheMetrics {
+    pub row_cache_rebuilds: usize,
+    pub group_sorts: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct PlanModel {
     state: PlanState,
     expanded_dispositions: HashSet<PlanDisposition>,
     expanded_groups: HashSet<GroupKey>,
-    group_sorts: HashMap<GroupKey, SortMode>,
     filter: String,
+    visible_keys: Vec<RowKey>,
+    row_positions: HashMap<RowKey, usize>,
     cursor: Option<RowKey>,
     cursor_index_hint: usize,
     viewport_top: usize,
     viewport_height: usize,
+    #[cfg(test)]
+    cache_metrics: CacheMetrics,
 }
 
 impl Default for PlanModel {
@@ -195,36 +213,40 @@ impl Default for PlanModel {
             state: PlanState::Empty,
             expanded_dispositions: HashSet::new(),
             expanded_groups: HashSet::new(),
-            group_sorts: HashMap::new(),
             filter: String::new(),
+            visible_keys: Vec::new(),
+            row_positions: HashMap::new(),
             cursor: None,
             cursor_index_hint: 0,
             viewport_top: 0,
             viewport_height: 0,
+            #[cfg(test)]
+            cache_metrics: CacheMetrics::default(),
         }
     }
 }
 
 impl PlanModel {
     pub fn load(&mut self, projection: PlanProjection) -> Result<(), PlanModelError> {
-        validate_projection(&projection)?;
+        let indexes = validate_projection(&projection)?;
         let groups = build_groups(&projection);
-        let action_positions = projection
-            .actions
+        let group_positions = groups
             .iter()
             .enumerate()
-            .map(|(index, action)| (action.id.clone(), index))
+            .map(|(index, group)| (group.key.clone(), index))
             .collect();
         self.expanded_dispositions = groups.iter().map(|group| group.key.disposition).collect();
         self.expanded_groups = groups.iter().map(|group| group.key.clone()).collect();
-        self.group_sorts.clear();
         self.filter.clear();
         self.state = PlanState::Loaded(LoadedPlan {
             projection,
             groups,
-            action_positions,
+            group_positions,
+            action_positions: indexes.action_positions,
+            release_set_positions: indexes.release_set_positions,
         });
-        self.cursor = self.first_row_key();
+        self.rebuild_visible_keys();
+        self.cursor = self.visible_keys.first().cloned();
         self.cursor_index_hint = 0;
         self.viewport_top = 0;
         self.ensure_cursor_visible();
@@ -285,12 +307,7 @@ impl PlanModel {
     }
 
     pub fn row_count(&self) -> usize {
-        let mut count = 0;
-        self.walk_row_keys(|_, _| {
-            count += 1;
-            true
-        });
-        count
+        self.visible_keys.len()
     }
 
     /// Materializes only the current viewport, even when the plan is large.
@@ -298,18 +315,18 @@ impl PlanModel {
         if self.viewport_height == 0 {
             return Vec::new();
         }
-        let end = self.viewport_top.saturating_add(self.viewport_height);
-        let available = self.row_count().saturating_sub(self.viewport_top);
+        let end = self
+            .viewport_top
+            .saturating_add(self.viewport_height)
+            .min(self.visible_keys.len());
+        let available = end.saturating_sub(self.viewport_top);
         let mut rows = Vec::with_capacity(self.viewport_height.min(available));
-        self.walk_row_keys(|index, key| {
-            if index >= end {
-                return false;
-            }
-            if index >= self.viewport_top {
-                rows.push(self.materialize_row(key));
-            }
-            true
-        });
+        rows.extend(
+            self.visible_keys[self.viewport_top.min(end)..end]
+                .iter()
+                .cloned()
+                .map(|key| self.materialize_row(key)),
+        );
         rows
     }
 
@@ -364,6 +381,7 @@ impl PlanModel {
             RowKey::Action(_) => false,
         };
         if changed {
+            self.rebuild_visible_keys();
             self.reconcile_cursor(old_index);
         }
         changed
@@ -371,7 +389,12 @@ impl PlanModel {
 
     pub fn set_filter(&mut self, query: impl Into<String>) {
         let old_index = self.cursor_index().unwrap_or(self.cursor_index_hint);
-        self.filter = query.into().trim().to_lowercase();
+        let filter = query.into().trim().to_lowercase();
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        self.rebuild_visible_keys();
         self.reconcile_cursor(old_index);
     }
 
@@ -389,19 +412,37 @@ impl PlanModel {
             disposition,
             kind_id,
         };
-        let Some(loaded) = self.loaded() else {
-            return false;
-        };
-        if !loaded.groups.iter().any(|group| group.key == group_key) {
-            return false;
-        }
         let old_index = self.cursor_index().unwrap_or(self.cursor_index_hint);
-        if mode == SortMode::EngineOrder {
-            self.group_sorts.remove(&group_key);
-        } else {
-            self.group_sorts.insert(group_key, mode);
+        let changed = {
+            let PlanState::Loaded(loaded) = &mut self.state else {
+                return false;
+            };
+            let Some(group_position) = loaded.group_positions.get(&group_key).copied() else {
+                return false;
+            };
+            let group = &mut loaded.groups[group_position];
+            if group.sort_mode == mode {
+                false
+            } else {
+                group.sort_mode = mode;
+                group.action_indices.sort_by(|left, right| {
+                    compare_actions(
+                        &loaded.projection.actions[*left],
+                        &loaded.projection.actions[*right],
+                        mode,
+                    )
+                });
+                true
+            }
+        };
+        if changed {
+            #[cfg(test)]
+            {
+                self.cache_metrics.group_sorts += 1;
+            }
+            self.rebuild_visible_keys();
+            self.reconcile_cursor(old_index);
         }
-        self.reconcile_cursor(old_index);
         true
     }
 
@@ -417,6 +458,17 @@ impl PlanModel {
         loaded.projection.actions.get(*position)
     }
 
+    pub fn release_set(&self, release_set_id: &ReleaseSetId) -> Option<&ReleaseSetProjection> {
+        let loaded = self.loaded()?;
+        let position = loaded.release_set_positions.get(release_set_id)?;
+        loaded.projection.release_sets.get(*position)
+    }
+
+    #[cfg(test)]
+    pub(super) fn cache_metrics(&self) -> CacheMetrics {
+        self.cache_metrics
+    }
+
     fn loaded(&self) -> Option<&LoadedPlan> {
         match &self.state {
             PlanState::Loaded(loaded) => Some(loaded),
@@ -427,8 +479,9 @@ impl PlanModel {
     fn clear_view_state(&mut self) {
         self.expanded_dispositions.clear();
         self.expanded_groups.clear();
-        self.group_sorts.clear();
         self.filter.clear();
+        self.visible_keys.clear();
+        self.row_positions.clear();
         self.cursor = None;
         self.cursor_index_hint = 0;
         self.viewport_top = 0;
@@ -436,21 +489,6 @@ impl PlanModel {
 
     fn filter_is_active(&self) -> bool {
         !self.filter.is_empty()
-    }
-
-    fn action_matches_filter(&self, action: &ActionProjection) -> bool {
-        if !self.filter_is_active() {
-            return true;
-        }
-        let needle = &self.filter;
-        action.label.to_lowercase().contains(needle)
-            || action.kind.label.to_lowercase().contains(needle)
-            || action.kind.id.as_str().to_lowercase().contains(needle)
-            || action.disposition.label().to_lowercase().contains(needle)
-            || action
-                .blockers
-                .iter()
-                .any(|blocker| blocker.summary.to_lowercase().contains(needle))
     }
 
     fn disposition_expanded(&self, disposition: PlanDisposition) -> bool {
@@ -461,105 +499,35 @@ impl PlanModel {
         self.filter_is_active() || self.expanded_groups.contains(key)
     }
 
-    fn sorted_matching_indices(&self, group: &ActionGroup) -> Vec<usize> {
-        let Some(loaded) = self.loaded() else {
-            return Vec::new();
+    fn rebuild_visible_keys(&mut self) {
+        self.visible_keys = match &self.state {
+            PlanState::Loaded(loaded) => build_visible_keys(
+                loaded,
+                &self.expanded_dispositions,
+                &self.expanded_groups,
+                &self.filter,
+            ),
+            PlanState::Empty | PlanState::Invalidated(_) => Vec::new(),
         };
-        let mut indices: Vec<_> = group
-            .action_indices
+        self.row_positions = self
+            .visible_keys
             .iter()
-            .copied()
-            .filter(|index| self.action_matches_filter(&loaded.projection.actions[*index]))
+            .cloned()
+            .enumerate()
+            .map(|(index, key)| (key, index))
             .collect();
-        let mode = self
-            .group_sorts
-            .get(&group.key)
-            .copied()
-            .unwrap_or_default();
-        indices.sort_by(|left, right| {
-            compare_actions(
-                &loaded.projection.actions[*left],
-                &loaded.projection.actions[*right],
-                mode,
-            )
-        });
-        indices
-    }
-
-    fn walk_row_keys(&self, mut visitor: impl FnMut(usize, RowKey) -> bool) {
-        let Some(loaded) = self.loaded() else {
-            return;
-        };
-        let mut row_index = 0;
-        for disposition in PlanDisposition::ORDERED {
-            let groups: Vec<_> = loaded
-                .groups
-                .iter()
-                .filter(|group| group.key.disposition == disposition)
-                .map(|group| (group, self.sorted_matching_indices(group)))
-                .filter(|(_, indices)| !indices.is_empty())
-                .collect();
-            if groups.is_empty() {
-                continue;
-            }
-            if !visitor(row_index, RowKey::Disposition(disposition)) {
-                return;
-            }
-            row_index += 1;
-            if !self.disposition_expanded(disposition) {
-                continue;
-            }
-            for (group, action_indices) in groups {
-                let group_key = RowKey::ActionKind {
-                    disposition,
-                    kind_id: group.kind.id.clone(),
-                };
-                if !visitor(row_index, group_key) {
-                    return;
-                }
-                row_index += 1;
-                if !self.group_expanded(&group.key) {
-                    continue;
-                }
-                for action_index in action_indices {
-                    let key = RowKey::Action(loaded.projection.actions[action_index].id.clone());
-                    if !visitor(row_index, key) {
-                        return;
-                    }
-                    row_index += 1;
-                }
-            }
+        #[cfg(test)]
+        {
+            self.cache_metrics.row_cache_rebuilds += 1;
         }
     }
 
-    fn first_row_key(&self) -> Option<RowKey> {
-        self.row_key_at(0)
-    }
-
     fn row_key_at(&self, wanted: usize) -> Option<RowKey> {
-        let mut found = None;
-        self.walk_row_keys(|index, key| {
-            if index == wanted {
-                found = Some(key);
-                false
-            } else {
-                true
-            }
-        });
-        found
+        self.visible_keys.get(wanted).cloned()
     }
 
     fn index_of(&self, wanted: &RowKey) -> Option<usize> {
-        let mut found = None;
-        self.walk_row_keys(|index, key| {
-            if &key == wanted {
-                found = Some(index);
-                false
-            } else {
-                true
-            }
-        });
-        found
+        self.row_positions.get(wanted).copied()
     }
 
     fn cursor_index(&self) -> Option<usize> {
@@ -624,7 +592,12 @@ impl PlanModel {
                 };
                 let label = self
                     .loaded()
-                    .and_then(|loaded| loaded.groups.iter().find(|group| group.key == group_key))
+                    .and_then(|loaded| {
+                        loaded
+                            .group_positions
+                            .get(&group_key)
+                            .and_then(|position| loaded.groups.get(*position))
+                    })
                     .map(|group| group.kind.label.clone())
                     .unwrap_or_default();
                 ViewRow {
@@ -658,6 +631,70 @@ fn toggle_set<T: Eq + std::hash::Hash + Clone>(set: &mut HashSet<T>, value: T) -
     }
 }
 
+fn build_visible_keys(
+    loaded: &LoadedPlan,
+    expanded_dispositions: &HashSet<PlanDisposition>,
+    expanded_groups: &HashSet<GroupKey>,
+    filter: &str,
+) -> Vec<RowKey> {
+    let filter_active = !filter.is_empty();
+    let mut keys = Vec::with_capacity(
+        loaded
+            .projection
+            .actions
+            .len()
+            .saturating_add(loaded.groups.len())
+            .saturating_add(PlanDisposition::ORDERED.len()),
+    );
+    for disposition in PlanDisposition::ORDERED {
+        let disposition_expanded = filter_active || expanded_dispositions.contains(&disposition);
+        let mut emitted_disposition = false;
+        for group in loaded
+            .groups
+            .iter()
+            .filter(|group| group.key.disposition == disposition)
+        {
+            let has_match = group
+                .action_indices
+                .iter()
+                .any(|index| action_matches_filter(&loaded.projection.actions[*index], filter));
+            if !has_match {
+                continue;
+            }
+            if !emitted_disposition {
+                keys.push(RowKey::Disposition(disposition));
+                emitted_disposition = true;
+            }
+            if !disposition_expanded {
+                break;
+            }
+            keys.push(RowKey::ActionKind {
+                disposition,
+                kind_id: group.kind.id.clone(),
+            });
+            if filter_active || expanded_groups.contains(&group.key) {
+                keys.extend(group.action_indices.iter().filter_map(|index| {
+                    let action = &loaded.projection.actions[*index];
+                    action_matches_filter(action, filter).then(|| RowKey::Action(action.id.clone()))
+                }));
+            }
+        }
+    }
+    keys
+}
+
+fn action_matches_filter(action: &ActionProjection, filter: &str) -> bool {
+    filter.is_empty()
+        || action.label.to_lowercase().contains(filter)
+        || action.kind.label.to_lowercase().contains(filter)
+        || action.kind.id.as_str().to_lowercase().contains(filter)
+        || action.disposition.label().to_lowercase().contains(filter)
+        || action
+            .blockers
+            .iter()
+            .any(|blocker| blocker.summary.to_lowercase().contains(filter))
+}
+
 fn build_groups(projection: &PlanProjection) -> Vec<ActionGroup> {
     let mut groups = Vec::<ActionGroup>::new();
     let mut positions = HashMap::<GroupKey, usize>::new();
@@ -674,8 +711,18 @@ fn build_groups(projection: &PlanProjection) -> Vec<ActionGroup> {
                 key,
                 kind: action.kind.clone(),
                 action_indices: vec![action_index],
+                sort_mode: SortMode::EngineOrder,
             });
         }
+    }
+    for group in &mut groups {
+        group.action_indices.sort_by(|left, right| {
+            compare_actions(
+                &projection.actions[*left],
+                &projection.actions[*right],
+                SortMode::EngineOrder,
+            )
+        });
     }
     groups.sort_by(|left, right| {
         left.key
@@ -713,17 +760,20 @@ fn compare_bytes_descending(left: &ByteValue, right: &ByteValue) -> Ordering {
     }
 }
 
-fn validate_projection(projection: &PlanProjection) -> Result<(), PlanModelError> {
+fn validate_projection(projection: &PlanProjection) -> Result<ProjectionIndexes, PlanModelError> {
     if projection.id.as_str().trim().is_empty() {
         return Err(PlanModelError::EmptyPlanId);
     }
-    let mut action_ids = HashSet::new();
+    let mut action_positions = HashMap::with_capacity(projection.actions.len());
     let mut kinds = HashMap::<ActionKindId, ActionKindProjection>::new();
-    for action in &projection.actions {
+    for (action_position, action) in projection.actions.iter().enumerate() {
         if action.id.as_str().trim().is_empty() {
             return Err(PlanModelError::EmptyActionId);
         }
-        if !action_ids.insert(action.id.clone()) {
+        if action_positions
+            .insert(action.id.clone(), action_position)
+            .is_some()
+        {
             return Err(PlanModelError::DuplicateActionId(action.id.clone()));
         }
         if action.label.trim().is_empty() {
@@ -787,12 +837,16 @@ fn validate_projection(projection: &PlanProjection) -> Result<(), PlanModelError
         validate_targets(&action.id, &action.targets)?;
     }
 
-    let mut release_sets = HashSet::new();
-    for release_set in &projection.release_sets {
+    let mut release_set_positions = HashMap::with_capacity(projection.release_sets.len());
+    let mut release_memberships = Vec::with_capacity(projection.release_sets.len());
+    for (release_set_position, release_set) in projection.release_sets.iter().enumerate() {
         if release_set.id.as_str().trim().is_empty() {
             return Err(PlanModelError::EmptyReleaseSetId);
         }
-        if !release_sets.insert(release_set.id.clone()) {
+        if release_set_positions
+            .insert(release_set.id.clone(), release_set_position)
+            .is_some()
+        {
             return Err(PlanModelError::DuplicateReleaseSetId(
                 release_set.id.clone(),
             ));
@@ -800,9 +854,9 @@ fn validate_projection(projection: &PlanProjection) -> Result<(), PlanModelError
         if release_set.action_ids.is_empty() {
             return Err(PlanModelError::EmptyReleaseSet(release_set.id.clone()));
         }
-        let mut members = HashSet::new();
+        let mut members = HashSet::with_capacity(release_set.action_ids.len());
         for action_id in &release_set.action_ids {
-            if !action_ids.contains(action_id) {
+            if !action_positions.contains_key(action_id) {
                 return Err(PlanModelError::UnknownReleaseSetAction {
                     release_set_id: release_set.id.clone(),
                     action_id: action_id.clone(),
@@ -815,8 +869,10 @@ fn validate_projection(projection: &PlanProjection) -> Result<(), PlanModelError
                 });
             }
         }
+        release_memberships.push(members);
     }
 
+    let mut action_release_memberships = Vec::with_capacity(projection.actions.len());
     for action in &projection.actions {
         let mut prerequisite_ids = HashSet::new();
         for prerequisite in &action.prerequisites {
@@ -829,7 +885,7 @@ fn validate_projection(projection: &PlanProjection) -> Result<(), PlanModelError
             if prerequisite.action_id == action.id {
                 return Err(PlanModelError::SelfPrerequisite(action.id.clone()));
             }
-            if !action_ids.contains(&prerequisite.action_id) {
+            if !action_positions.contains_key(&prerequisite.action_id) {
                 return Err(PlanModelError::UnknownPrerequisite {
                     action_id: action.id.clone(),
                     prerequisite_id: prerequisite.action_id.clone(),
@@ -842,41 +898,34 @@ fn validate_projection(projection: &PlanProjection) -> Result<(), PlanModelError
                 });
             }
         }
-        let mut action_release_sets = HashSet::new();
+        let mut action_release_sets = HashSet::with_capacity(action.release_set_ids.len());
         for release_set_id in &action.release_set_ids {
-            if !release_sets.contains(release_set_id) {
+            let Some(release_set_position) = release_set_positions.get(release_set_id).copied()
+            else {
                 return Err(PlanModelError::UnknownActionReleaseSet {
                     action_id: action.id.clone(),
                     release_set_id: release_set_id.clone(),
                 });
-            }
+            };
             if !action_release_sets.insert(release_set_id) {
                 return Err(PlanModelError::DuplicateActionReleaseSet {
                     action_id: action.id.clone(),
                     release_set_id: release_set_id.clone(),
                 });
             }
-            let release_set = projection
-                .release_sets
-                .iter()
-                .find(|release_set| &release_set.id == release_set_id)
-                .expect("validated release set ID must resolve");
-            if !release_set.action_ids.contains(&action.id) {
+            if !release_memberships[release_set_position].contains(&action.id) {
                 return Err(PlanModelError::ReleaseSetMembershipMismatch {
                     action_id: action.id.clone(),
                     release_set_id: release_set_id.clone(),
                 });
             }
         }
+        action_release_memberships.push(action_release_sets);
     }
     for release_set in &projection.release_sets {
         for action_id in &release_set.action_ids {
-            let action = projection
-                .actions
-                .iter()
-                .find(|action| &action.id == action_id)
-                .expect("validated release set action ID must resolve");
-            if !action.release_set_ids.contains(&release_set.id) {
+            let action_position = action_positions[action_id];
+            if !action_release_memberships[action_position].contains(&release_set.id) {
                 return Err(PlanModelError::ReleaseSetMembershipMismatch {
                     action_id: action_id.clone(),
                     release_set_id: release_set.id.clone(),
@@ -884,7 +933,10 @@ fn validate_projection(projection: &PlanProjection) -> Result<(), PlanModelError
             }
         }
     }
-    Ok(())
+    Ok(ProjectionIndexes {
+        action_positions,
+        release_set_positions,
+    })
 }
 
 fn validate_targets(

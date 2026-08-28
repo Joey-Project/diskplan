@@ -521,8 +521,106 @@ fn release_set_membership_must_be_bidirectionally_consistent() {
 
     member.release_set_ids = vec![release_set.id.clone()];
     let mut consistent = projection(vec![member]);
-    consistent.release_sets = vec![release_set];
+    consistent.release_sets = vec![release_set.clone()];
     model.load(consistent).unwrap();
+    assert_eq!(model.release_set(&release_set.id), Some(&release_set));
+    assert_eq!(model.release_set(&ReleaseSetId::new("missing")), None);
+}
+
+#[test]
+fn render_queries_reuse_flattened_and_sorted_caches() {
+    let mut model = PlanModel::default();
+    model.load(representative_projection()).unwrap();
+    model.resize(3);
+    let loaded = model.cache_metrics();
+
+    for _ in 0..100 {
+        assert_eq!(model.row_count(), 9);
+        assert_eq!(model.visible_rows().len(), 3);
+        assert!(model.cursor().is_some());
+        assert!(model.action(&ActionId::new("ready-cache-a")).is_some());
+    }
+    assert_eq!(model.cache_metrics(), loaded);
+
+    model.set_filter("cache");
+    let filtered = model.cache_metrics();
+    assert_eq!(filtered.row_cache_rebuilds, loaded.row_cache_rebuilds + 1);
+    assert_eq!(filtered.group_sorts, loaded.group_sorts);
+    model.set_filter("cache");
+    for _ in 0..100 {
+        let _ = model.row_count();
+        let _ = model.visible_rows();
+    }
+    assert_eq!(model.cache_metrics(), filtered);
+
+    assert!(model.set_group_sort(
+        PlanDisposition::Ready,
+        ActionKindId::new("cache"),
+        SortMode::ImmediateReclaimDescending,
+    ));
+    let sorted = model.cache_metrics();
+    assert_eq!(sorted.row_cache_rebuilds, filtered.row_cache_rebuilds + 1);
+    assert_eq!(sorted.group_sorts, filtered.group_sorts + 1);
+    assert!(model.set_group_sort(
+        PlanDisposition::Ready,
+        ActionKindId::new("cache"),
+        SortMode::ImmediateReclaimDescending,
+    ));
+    for _ in 0..100 {
+        let _ = model.row_count();
+        let _ = model.visible_rows();
+    }
+    assert_eq!(model.cache_metrics(), sorted);
+}
+
+#[test]
+fn large_nonempty_release_set_index_loads_and_resolves_members() {
+    const COUNT: usize = 5_000;
+    let mut actions = Vec::with_capacity(COUNT);
+    let mut release_sets = Vec::with_capacity(COUNT);
+    for index in 0..COUNT {
+        let action_id = ActionId::new(format!("action-{index}"));
+        let release_set_id = ReleaseSetId::new(format!("release-{index}"));
+        let mut projected = action(
+            action_id.as_str(),
+            PlanDisposition::Conditional,
+            "clone",
+            "APFS clones",
+            1,
+            index as u64,
+            ByteValue::Known(index as u64),
+            &format!("/private/clone/{index}"),
+        );
+        projected.release_set_ids = vec![release_set_id.clone()];
+        actions.push(projected);
+        release_sets.push(ReleaseSetProjection {
+            id: release_set_id,
+            action_ids: vec![action_id],
+            shared_unlock: ByteValue::Known((index as u64) * 2),
+        });
+    }
+    let plan = PlanProjection {
+        id: PlanId::new("large-release-plan"),
+        actions,
+        release_sets,
+    };
+    let mut model = PlanModel::default();
+    model.load(plan).unwrap();
+
+    assert_eq!(model.row_count(), COUNT + 2);
+    for index in [0, COUNT / 2, COUNT - 1] {
+        let release_set = model
+            .release_set(&ReleaseSetId::new(format!("release-{index}")))
+            .unwrap();
+        assert_eq!(
+            release_set.action_ids,
+            vec![ActionId::new(format!("action-{index}"))]
+        );
+        assert_eq!(
+            release_set.shared_unlock,
+            ByteValue::Known((index as u64) * 2)
+        );
+    }
 }
 
 #[test]
