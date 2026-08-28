@@ -31,6 +31,19 @@ authority.
 | `actions/cache` | `v5.0.5` | `27d5ce7f107fe9357f9df03efb73ab90386fccae` |
 | `actions/upload-artifact` | `v7.0.1` | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
 
+## Release CI
+
+`release-ci.yml` adds a separate required macOS 26 Apple Silicon release lane.
+It validates release scripts, builds the Rust launcher and Swift engine into a
+deterministic arm64 archive, exercises the complete versioned install lifecycle,
+and uploads only the archive plus its SHA-256 sidecar. The best-effort macOS 14
+lane builds both components and retains the initial deployment-target evidence;
+it does not gate release.
+
+The release workflow uses the same immutable `actions/checkout` and
+`actions/upload-artifact` pins listed above. The uploaded archive is already
+compressed, so artifact transport uses compression level zero.
+
 To update an action, resolve its release tag from the action's official GitHub
 repository, review the release and runtime requirement, replace the full SHA,
 and update the adjacent version comment plus this table in the same change.

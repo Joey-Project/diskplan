@@ -78,3 +78,11 @@ scripts/canonical-fixture.sh generate
 ```
 
 IPC 与 canonical binary contract 见 [proto/README.md](proto/README.md)。
+
+## Release packaging
+
+Apple Silicon macOS 26 的 versioned archive、无 `sudo` 本地安装、升级/回滚、
+package lifecycle tests 与 India 主机 dry-run 验收入口见
+[docs/release.md](docs/release.md)。release bundle 中的 `diskplan` 默认只解析
+同一个 versioned directory 里的 sibling `diskplan-engine`；开发命令仍可显式传入
+engine 路径。

@@ -2,6 +2,7 @@ import DiskplanProto
 
 public let protocolMajor: UInt32 = 1
 public let protocolMinor: UInt32 = 2
+public let productVersion = "0.1.0"
 
 public enum HandshakeResult: Equatable {
     case accepted(Diskplan_V1_HelloAccepted)
