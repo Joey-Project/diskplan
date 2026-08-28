@@ -1,0 +1,83 @@
+---
+id: 20260828-9c2e71
+title: Phase 0 Controlled File Provider Fixture
+status: active
+created: 2026-08-28
+updated: 2026-08-28
+branch: wip/phase0-fileprovider-fixture
+pr:
+supersedes: []
+superseded_by:
+---
+
+# Phase 0 Controlled File Provider Fixture
+
+## Summary
+
+- Add the signed, real-host oracle needed to prove Diskplan's metadata-only File Provider
+  probing does not materialize dataless items.
+- Keep compile-only validation independent of signing and keep provisioning failures distinct
+  from product failures.
+
+## Current State
+
+- A deterministic Xcode project builds an `LSUIElement` host plus embedded replicated
+  File Provider extension against the repository's `DiskplanMacOS` package.
+- The hidden UUID domain exposes a real 64 KiB sentinel fetch path and a sealed dataless
+  directory that records any incorrect descent.
+- The App Group JSONL oracle, immutable recovery manifest, and post-registration ready overlay
+  are owner-private and UUID-scoped.
+- Lifecycle teardown is exact-domain and exact-extension only; cleanup is limited to validated
+  App Group run paths.
+- Control records use bounded descriptor-bound reads with distinct missing, unreadable, and
+  mismatch results. Cleanup atomically isolates the exact run directory and validates object
+  identity/access policy without treating directory child churn as replacement.
+- Recovery executes only the known signed host after physical-path, bundle/team identity, and
+  signature validation. Registration verifies the elected bundle ID resolves to the current
+  embedded extension.
+- Oracle closure uses bounded event quiescence rather than a fixed delay. The current gate is
+  explicitly probe-level; full scanner acceptance remains a later engine integration.
+- Local unsigned compile and support tests are available without provisioning.
+
+## Task List
+
+- [x] Add the host and embedded replicated extension targets without testing mode.
+- [x] Add deterministic item, fetch, enumeration, and callback-oracle behavior.
+- [x] Add manifest-bound setup, status, acceptance, teardown, and recovery commands.
+- [x] Add local unit, static-contract, shell, and unsigned build validation.
+- [x] Harden control-file reads, manifest-bound cleanup, recovery trust, registration election,
+  and quiet-window closure.
+- [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
+- [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
+- [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
+- [ ] Complete frozen-range review and land through the stacked Phase 0 PR chain.
+
+## Handoff
+
+- Phase: locally integrated with the reviewed macOS probe and Phase 0 foundation CI heads.
+- Next step: review the integrated fixture merge, then copy or check out the accepted head on the
+  India host and run the signed lifecycle.
+- Blocker semantics: exit 78 with `provisioning-profile` means team profiles for both bundle IDs
+  and the shared App Group are unavailable; it is not a non-materialization test result.
+
+## Evidence
+
+- Accepted architecture: `docs/design/accepted-plan.md`.
+- Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
+- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 13 targeted support tests pass
+  and cover
+  concurrent JSONL writers, manifest/ready validation, typed secure-read failures,
+  symlink-retaining cleanup, recursive cleanup, and bounded quiet-window closure.
+- `python3 scripts/test-fileprovider-fixture-registration.py`: 3 parser/physical-path election
+  tests pass.
+- `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
+  compiled successfully with signing disabled.
+- The resolved-only complete Swift gate passed 53 tests on the integrated tree. Canonical binary
+  generation and the Swift/Rust cross-language process tests also passed.
+- `scripts/test-macos-capabilities.sh`: 29 `DiskplanMacOS` tests and the live self-test passed;
+  the signed fixture and real-host APFS fixture remained explicitly unavailable without their
+  opt-in environment variables.
+- `swift format lint`, `bash -n`, ShellCheck, plist validation, the fixture static safety test,
+  and `git diff --check` passed.
+- Signed India acceptance was intentionally not run in this worktree. It remains the next
+  host-only gate and may return the documented provisioning-profile blocker.

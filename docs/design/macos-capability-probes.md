@@ -99,11 +99,13 @@ deadline but acquires the box lock before the timeout thread. A post-deadline re
 turn timeout into success. No metadata accessor or background coordination task is spawned, and
 the identity deadline is not represented as control over unrelated, unkillable in-process work.
 
-The India-host script hooks deliberately report the controlled extension fixture and true APFS
-volume-group identity fixture as not available until those fixtures exist. The latter must prove
-real-device identity across the relevant synthetic/real volume boundary; a local temporary-root
-unit test is not a substitute. No local unit result is presented as real non-materialization or
-cross-volume acceptance.
+The controlled extension fixture and callback-zero oracle are defined in
+[file-provider-fixture.md](file-provider-fixture.md). Local unsigned compilation and unit tests
+do not count as non-materialization acceptance; that result requires the signed lifecycle on
+the India host. The true APFS volume-group identity fixture remains unavailable until it can
+prove real-device identity across the relevant synthetic/real volume boundary; a local
+temporary-root unit test is not a substitute. No local result is presented as cross-volume
+acceptance.
 
 ## Controlled Probe
 
