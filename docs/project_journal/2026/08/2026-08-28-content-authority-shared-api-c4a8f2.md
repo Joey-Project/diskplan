@@ -75,10 +75,50 @@ superseded_by:
   covering four real compile-fail fixtures plus thirteen synthetic rejection
   cases, the shared-authority API passes 2/2, `DiskplanScanTests` passes 72/72,
   and the serial full Swift suite passes 458/458.
+- The next required macOS 26 run proved the semantic rejection and stderr EOF but
+  exposed nondeterministic ownership of the empty stdout pipe. Because the macOS 26
+  SDK exposes neither `pipe2` nor `SOCK_CLOEXEC`, the follow-up creates each capture
+  endpoint through `open(... | O_CLOEXEC)` on a private task-scoped FIFO, then
+  immediately unlinks the FIFO and its 0700 directory. Both endpoints therefore
+  receive CLOEXEC atomically at creation rather than through a pipe-to-fcntl window.
+  The compiler supervisor is launched with direct `posix_spawn`,
+  `POSIX_SPAWN_CLOEXEC_DEFAULT`, and exact `dup2` file actions for descriptors 1 and
+  2; the source writer descriptors are explicitly closed in the child actions and
+  by their parent close-once owners immediately after successful spawn. A
+  fixed supervisor forks the semantic compiler into a dedicated process group in
+  the supervisor's session,
+  holds the exited leader waitable so its PID/process-group ID cannot be reused,
+  and closes the supervisor's capture writers before waiting. It then sends
+  bounded TERM/KILL to that exact group and uses the macOS `proc_listpgrppids`
+  process-group view to prove that no live member remains before reaping the held
+  leader. TERM/KILL is necessary only when an independent group snapshot finds a
+  live descendant. macOS may reject signalling an otherwise empty group whose
+  only member is the held zombie; ESRCH or EPERM is accepted only when a second
+  bounded snapshot independently proves that no live descendant remains. Because
+  macOS omits a WNOWAIT zombie leader from that view and maps a
+  failed group query to the same zero result, zero is cross-checked with a fixed-cap
+  `proc_listallpids` snapshot that must contain the live supervisor, followed by
+  exact `getpgid` checks. EOF may arrive earlier, but the parent accepts EOF and the
+  semantic status only after the supervisor has confirmed group quiescence;
+  supervisor timeout/probe/setup exit codes remain typed infrastructure failures.
+  Separate retained-writer and already-silent descendant modes plus repeated
+  zero-output launches cover endpoint ownership and group quiescence independently.
+  A deterministic endpoint-creation hook launches unrelated long-lived processes
+  after every atomic endpoint open; the compiler must still reach EOF while all
+  unrelated processes remain alive, proving they did not inherit capture writers.
+  Dynamic validation on Apple Swift 6.3.3 passes the focused supervisor test,
+  including four concurrent unrelated-spawn hooks, 32 immediate zero-output
+  launches, retained-writer and already-silent descendants, and partial-launch
+  cleanup. All four semantic compile-fail fixtures, every synthetic infrastructure
+  rejection, the shared authority compile/use test, and all 72 DiskplanScan tests
+  pass. A fresh build and the full Swift suite pass all 459 tests with no timeout
+  or unexpected failure.
 
 ## Next Steps
 
-None for this workstream.
+1. Land and push the signed follow-up without manually rerunning CI.
+2. Let the required macOS 26 PR lane validate the same atomic endpoint and
+   process-group contract.
 
 ## Evidence
 
