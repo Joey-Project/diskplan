@@ -9,17 +9,31 @@ not classify files, select cleanup actions, or infer safety.
 The protected property during traversal is object identity: device, file ID, and
 object type for one descriptor-relative directory slot. The walker:
 
-1. binds each configured root to an open directory descriptor and stable identity;
-2. enumerates raw directory-entry bytes and sorts them lexicographically;
-3. inspects children relative to the held parent descriptor without following
+1. revalidates the live process no-materialization policy immediately before every
+   root/parent open, descriptor-relative path inspection, child open, and `readdir`;
+2. requires every configured root to pass the authoritative File Provider boundary
+   probe before the root itself is opened; absent or unavailable provider identity
+   does not become local evidence;
+3. binds each accepted root to an open directory descriptor and stable identity;
+4. enumerates raw directory-entry bytes into a bounded lexicographic retention set;
+5. inspects children relative to the held parent descriptor without following
    symbolic links;
-4. opens a child directory relative to that same descriptor and compares all three
-   identity fields before enumeration.
+6. opens a child directory relative to that same descriptor and compares all three
+   identity fields before enumeration; and
+7. retains the parent-slot descriptor, raw name, identity, and access-policy seal
+   until the directory closes, then revalidates the open descriptor and parent slot.
 
-A missing slot, unreadable slot, collector failure, and replacement mismatch are
-different observations. Child-entry churn alone does not constitute root identity
-mutation. The production backend never constructs child paths; only the explicitly
-configured root and its parent slot are path-opened to establish the root binding.
+`ItemProbe`, root descriptors, child descriptors, mount comparisons, and close
+revalidation all use the same real-device, file-ID, and object-type namespace.
+Ordinary `st_dev` is never compared with an `FSOPT_RETURN_REALDEV` identity.
+
+A missing slot, unreadable slot, access-policy mutation, collector failure, and
+replacement mismatch are different observations both during inspection and at
+directory close. Child-entry churn alone does not constitute root identity mutation.
+The production backend never constructs descendant paths; only the configured root's
+parent path is path-opened to establish the descriptor-relative root slot. A root
+with unproved provider ownership is retained in provenance and root failures but is
+never opened or treated as `localOrUnindicated`.
 
 ## Evidence model
 
@@ -47,7 +61,14 @@ and completed-directory replacement for downstream evidence storage. A bounded
 stable top-K view is retained by immediate-private-reclaim lower bound descending
 and raw path ascending. This is an evidence viewport, not a cleanup recommendation
 or the complete candidate corpus. Directories retain `subtree_incomplete` until a
-closed-directory event proves their current observed subtree complete.
+closed-directory event proves their current observed subtree complete and stable.
+
+Directory enumeration is bounded independently from result retention. Each profile
+binds a per-directory name-count ceiling and a global pending raw-name byte ceiling.
+The backend scans entries under the scan deadline while retaining only the
+lexicographically smallest names that fit both limits, so complete enumeration is
+stable under kernel enumeration permutations. Truncation and in-enumeration timeout
+are explicit partial coverage; they can never produce a complete root.
 
 ## Profiles and control
 
@@ -61,6 +82,12 @@ machine state.
 monotonic transcript for start, advance, pause, checkpoint, provisional snapshot,
 resume, partial finalization, completion, and cancellation. Checkpoints are
 resumable only while the original process retains its descriptor-bound scanner.
+
+Every `ScanResult.reference` binds the complete resolved scope, including failed and
+not-yet-started raw roots, the profile and resolver version, entry/depth/enumeration/
+pending-name/retention limits, the scan time limit, and the canonical collector
+configuration. A partial or failed scan therefore cannot be detached from omitted
+scope or weaker budgets while retaining the same provenance.
 
 Process activity is represented by a bounded collector protocol. The included
 parser accepts normalized `lsof -nP -F0pcfn` records and canonicalizes typed results;

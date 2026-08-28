@@ -11,12 +11,22 @@ public struct StructuralBudget: Equatable, Sendable {
   public let maximumEntriesPerRoot: UInt64
   public let maximumDepth: Int
   public let retainedNodeCount: Int
+  public let maximumEntriesPerDirectory: UInt64
+  public let maximumPendingNameBytes: UInt64
 
-  public init(maximumEntriesPerRoot: UInt64, maximumDepth: Int, retainedNodeCount: Int = 1_000) {
+  public init(
+    maximumEntriesPerRoot: UInt64,
+    maximumDepth: Int,
+    retainedNodeCount: Int = 1_000,
+    maximumEntriesPerDirectory: UInt64 = 100_000,
+    maximumPendingNameBytes: UInt64 = 16 * 1_024 * 1_024
+  ) {
     precondition(maximumDepth >= 0 && retainedNodeCount >= 0)
     self.maximumEntriesPerRoot = maximumEntriesPerRoot
     self.maximumDepth = maximumDepth
     self.retainedNodeCount = retainedNodeCount
+    self.maximumEntriesPerDirectory = maximumEntriesPerDirectory
+    self.maximumPendingNameBytes = maximumPendingNameBytes
   }
 }
 
@@ -102,7 +112,12 @@ public struct ScanRootResolver: Sendable {
     case .fullAudit:
       roots = environment.visibleLocalWritableVolumes
       budget = StructuralBudget(
-        maximumEntriesPerRoot: 100_000_000, maximumDepth: 128, retainedNodeCount: 10_000)
+        maximumEntriesPerRoot: 100_000_000,
+        maximumDepth: 128,
+        retainedNodeCount: 10_000,
+        maximumEntriesPerDirectory: 1_000_000,
+        maximumPendingNameBytes: 64 * 1_024 * 1_024
+      )
     }
     var seen = Set<String>()
     let canonical = roots.sorted {

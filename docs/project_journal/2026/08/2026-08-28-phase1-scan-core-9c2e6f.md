@@ -33,6 +33,15 @@ superseded_by:
 - [x] Add deterministic fake-filesystem and controlled temporary-root tests.
 - [x] Re-run the live Darwin temporary-root path after the authoritative directory
   packed-attribute parser fix is integrated.
+- [x] Gate every production path-touch boundary with live no-materialization policy
+  revalidation and fail configured roots closed on unverified provider ownership.
+- [x] Unify item, root, descriptor, mount, and close identity on real device/file ID/type.
+- [x] Retain parent-slot bindings through close and preserve close-time
+  missing/mismatch/unreadable/access-policy distinctions.
+- [x] Bound deterministic directory enumeration by count, pending raw-name bytes,
+  and the scan deadline with explicit partial coverage.
+- [x] Bind complete resolved raw scope, budgets, and collector configuration into
+  scan provenance.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [ ] Integrate scanner evidence into the versioned IPC workstream.
 
@@ -45,8 +54,8 @@ superseded_by:
 
 ## Handoff
 
-- Phase: Phase 1 validation against the reviewed foundation and macOS probes.
-- Next step: complete full Swift gates and independent review.
+- Phase: Phase 1 frozen-review repair complete and validated.
+- Next step: repeat independent frozen-range review, then prepare PR delivery.
 - Blocker: none for the scanner slice. The authoritative directory packed-attribute
   parser fix is integrated from foundation head
   `e2135d9c708d5515c3cd5b6f965908d60a4ed44b`; the scanner keeps the live gate strict
@@ -69,10 +78,21 @@ superseded_by:
 - After integrating foundation head `e2135d9c708d5515c3cd5b6f965908d60a4ed44b`,
   focused `DiskplanScanTests` pass all 21 tests, including descriptor-relative
   inspection of a controlled live directory root.
-- The complete Swift suite passes 69 tests, and the explicit Swift build with
-  automatic dependency resolution disabled succeeds.
+- Before the frozen-review repair, the complete Swift suite passed 69 tests and
+  the explicit Swift build with automatic dependency resolution disabled succeeded.
 - `scripts/test-macos-capabilities.sh` passes 32 focused macOS tests plus the CLI
   self-test. Controlled File Provider and APFS volume-group fixtures remain
   explicitly unavailable on this local host rather than being inferred as passes.
 - Scanner Swift format lint, CI journal tests (17 tests), both journal validators,
   `bash -n`, and ShellCheck pass for the relevant scanner/capability scope.
+- Frozen review identified six scanner safety gaps covering live path policy gates,
+  authoritative configured-root provider evidence, real-device identity namespace,
+  close-time parent-slot revalidation, bounded enumeration, and complete provenance.
+  The repair adds focused fake and controlled-live regressions for all six; the
+  focused scanner suite passes all 27 tests.
+- After the frozen-review repair, the complete Swift suite passes all 75 tests and
+  the explicit Swift build with automatic dependency resolution disabled succeeds.
+  `scripts/test-macos-capabilities.sh` passes its 32 focused macOS tests plus the
+  CLI self-test; unavailable controlled fixtures remain reported as unavailable.
+- Strict Swift format lint, `git diff --check`, CI journal tests (17 tests), both
+  journal validators, `bash -n`, and ShellCheck pass for the final repair range.

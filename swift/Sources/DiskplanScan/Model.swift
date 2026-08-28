@@ -178,6 +178,7 @@ public enum CoverageReason: String, CaseIterable, Equatable, Hashable, Sendable,
   case notRequestedByProfile = "not_requested_by_profile"
   case permissionDenied = "permission_denied"
   case providerMetadataOnly = "provider_metadata_only"
+  case providerStateUnverified = "provider_state_unverified"
   case subtreeIncomplete = "subtree_incomplete"
   case timedOut = "timed_out"
   case unreadable
@@ -212,15 +213,20 @@ public enum ProviderBoundary: Equatable, Sendable {
   case localOrUnindicated
   case metadataOnly(reason: String)
   case rejected(reason: String)
+  case unverified(reason: String)
 
   public var preventsNormalDescent: Bool {
-    if case .rejected = self { return true }
-    return false
+    switch self {
+    case .rejected, .unverified: true
+    case .localOrUnindicated, .metadataOnly: false
+    }
   }
 
   public var isProviderManaged: Bool {
-    if case .localOrUnindicated = self { return false }
-    return true
+    switch self {
+    case .metadataOnly, .rejected: true
+    case .localOrUnindicated, .unverified: false
+    }
   }
 }
 
@@ -419,11 +425,48 @@ public struct ScanProgress: Equatable, Sendable {
   public let retainedNodes: [ScannedNode]
 }
 
+public struct ScanCollectorConfiguration: Equatable, Sendable {
+  public let processActivityCollectorID: String
+  public let processActivityDeadlineNanoseconds: UInt64?
+  public let globalFactCollectorIDs: [String]
+
+  public init(
+    processActivityCollectorID: String,
+    processActivityDeadlineNanoseconds: UInt64?,
+    globalFactCollectorIDs: [String]
+  ) {
+    self.processActivityCollectorID = processActivityCollectorID
+    self.processActivityDeadlineNanoseconds = processActivityDeadlineNanoseconds
+    self.globalFactCollectorIDs = Array(Set(globalFactCollectorIDs)).sorted()
+  }
+
+  public static let precollectedOrUnavailable = Self(
+    processActivityCollectorID: "precollected-or-unavailable",
+    processActivityDeadlineNanoseconds: nil,
+    globalFactCollectorIDs: ["public-evidence-unavailable"]
+  )
+}
+
 public struct ScanReference: Equatable, Sendable {
   public let wallClock: Date
   public let monotonicNanoseconds: UInt64
-  public let profileID: String
-  public let resolverVersion: UInt32
+  public let resolvedScope: ResolvedScanScope
+  public let collectorConfiguration: ScanCollectorConfiguration
+
+  public var profileID: String { resolvedScope.profile.rawValue }
+  public var resolverVersion: UInt32 { resolvedScope.resolverVersion }
+
+  public init(
+    wallClock: Date,
+    monotonicNanoseconds: UInt64,
+    resolvedScope: ResolvedScanScope,
+    collectorConfiguration: ScanCollectorConfiguration
+  ) {
+    self.wallClock = wallClock
+    self.monotonicNanoseconds = monotonicNanoseconds
+    self.resolvedScope = resolvedScope
+    self.collectorConfiguration = collectorConfiguration
+  }
 }
 
 public enum GlobalFact<Value: Equatable & Sendable>: Equatable, Sendable {

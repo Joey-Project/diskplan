@@ -9,7 +9,8 @@ public struct NoMaterializationPolicy: Equatable, Sendable {
     lhs.installedValue == rhs.installedValue
   }
 
-  func revalidateLive() -> Capability<NoMaterializationPolicy> {
+  /// Re-reads the process policy immediately before a filesystem path access.
+  public func revalidateLive() -> Capability<NoMaterializationPolicy> {
     let result = readBack()
     guard result.result >= 0 else {
       return POSIXFailure.capability(
