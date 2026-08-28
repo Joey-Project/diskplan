@@ -8,8 +8,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly REPO_ROOT
 
 cd "${REPO_ROOT}"
-swift build --product diskplan-engine
-SWIFT_BIN_DIR="$(swift build --show-bin-path)"
+swift build --disable-automatic-resolution --product diskplan-engine
+SWIFT_BIN_DIR="$(swift build --disable-automatic-resolution --show-bin-path)"
 readonly SWIFT_BIN_DIR
 readonly ENGINE_BIN="${SWIFT_BIN_DIR}/diskplan-engine"
 if [[ ! -x "${ENGINE_BIN}" ]]; then
