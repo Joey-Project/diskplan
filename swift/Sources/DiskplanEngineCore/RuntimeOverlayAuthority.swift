@@ -59,14 +59,22 @@ enum RuntimeOverlayEditor {
   ) throws -> DecisionOverlay {
     try validateEditSet(edits)
     let actionByID = Dictionary(uniqueKeysWithValues: plan.actions.map { ($0.id, $0) })
-    let actionByLineage = Dictionary(uniqueKeysWithValues: plan.actions.map { ($0.lineageID, $0) })
     var selected = Set(current?.selectedActionIDs ?? [])
+    let selectedActions = selected.compactMap { actionByID[$0] }
+    guard selectedActions.count == selected.count else {
+      throw RuntimeOverlayEditRejection(
+        code: .invalidEdit,
+        summary: "the live overlay contains an unknown action"
+      )
+    }
+    let selectedActionsByLineage = Dictionary(grouping: selectedActions, by: \.lineageID)
     var consents: [ActionID: [WaiverPredicate: WaiverConsentCore]] = [:]
     for consent in current?.waiverConsents ?? [] {
-      guard let action = actionByLineage[consent.actionLineageID] else {
+      let lineageMatches = selectedActionsByLineage[consent.actionLineageID] ?? []
+      guard lineageMatches.count == 1, let action = lineageMatches.first else {
         throw RuntimeOverlayEditRejection(
           code: .invalidEdit,
-          summary: "the live overlay contains an unknown action lineage"
+          summary: "the live overlay consent does not resolve to one selected action"
         )
       }
       consents[action.id, default: [:]][consent.predicate] = consent
@@ -233,9 +241,14 @@ enum RuntimeOverlayEditor {
     let prerequisites = Dictionary(
       uniqueKeysWithValues: actions.map { ($0.id, Set($0.prerequisiteActionIDs)) }
     )
+    let lineageGroups = Dictionary(grouping: actions, by: \.lineageID)
     let stageable = Set(
       actions.compactMap { action in
-        if case .stageable = action.evaluation.stageability { return action.id }
+        if case .stageable = action.evaluation.stageability,
+          lineageGroups[action.lineageID]?.count == 1
+        {
+          return action.id
+        }
         return nil
       })
     return prerequisiteClosedSelection(

@@ -1,7 +1,7 @@
 ---
 id: 20260828-9c71b4
 title: Runtime Session Controller
-status: active
+status: completed
 created: 2026-08-28
 updated: 2026-08-28
 branch: wip/runtime-session-controller
@@ -61,13 +61,19 @@ superseded_by:
   display paths.
 - [x] Prove projected lineage and prerequisite action IDs exactly match the validated immutable
   plan instead of presentation items.
-- [x] Complete fresh post-dynamic review and hand the uncommitted slice to parent integration.
+- [x] Complete fresh post-dynamic review and create the signed feature commit.
+- [x] Merge integration baseline `87c86e9` with a signed merge commit and retain the exact reviewed
+  controller-owned file content.
+- [x] Complete the post-merge engine-target and stable full Swift gates.
+- [x] Fail closed for domain-valid duplicate action lineages in overlay admission and safe presets.
+- [x] Complete the landing review and prepare the workstream branch for push.
 
 ## Handoff
 
-- Phase: the minimum S0/S1 runtime controller slice is implemented and dynamically validated in
-  the linked worktree. It remains intentionally uncommitted for parent integration.
-- Next step: hand the uncommitted worktree to the integration owner.
+- Phase: the minimum S0/S1 runtime controller slice is complete. The signed feature commit is
+  `aaad3e5`, and integration baseline `87c86e9` is merged by signed commit `3f1b4a8`.
+- Next step: push `wip/runtime-session-controller` and open its PR through the parent integration
+  workstream.
 - Constraint: production policy evidence currently emits an unverified namespace binding. A legal
   empty plan is therefore expected until authoritative namespace evidence exists; the controller
   does not manufacture executable actions or claim action capabilities.
@@ -81,10 +87,11 @@ superseded_by:
 - Runtime protocol: `proto/diskplan/v1/ipc.proto`.
 - Static gates: `swift-format lint --strict`, `swiftc -parse`, and `git diff --check` pass for the
   controller-owned sources and tests.
-- Targeted dynamic gate: controller and receipt tests pass 11/11, including both fresh-review
-  correction sets and the exact immutable-plan graph mapping invariant.
-- Production target gate: `swift build --target DiskplanEngine` passes.
-- Stable full Swift gate: 463/463 tests pass after the review corrections.
+- Post-merge targeted dynamic gate: controller and receipt tests pass 12/12, including both
+  fresh-review correction sets, the exact immutable-plan graph mapping invariant, and duplicate
+  lineage admission.
+- Post-merge production target gate: `swift build --target DiskplanEngine` passes.
+- Post-merge stable full Swift gate: 504/504 tests pass after integrating the runtime collectors.
 - The initial fresh static review found one prerequisite-closure defect and two exact-binding
   defects. The corrected preset computes the maximal prerequisite-closed stageable subset; opaque
   consent IDs are length-checked and reversibly encoded without UTF-8 interpretation; namespace
@@ -98,3 +105,8 @@ superseded_by:
   It rechecked writer-ack receipt reachability, exact BuildPlan and action-graph binding, atomic
   overlay admission, namespace binding completeness, display-path safety, capability honesty, and
   fail-closed future Git projection.
+- The landing review identified one duplicate-lineage trap in a full-plan dictionary. Overlay
+  admission now resolves existing consent lineage only within the selected action set, and the safe
+  preset excludes every ambiguous lineage group before prerequisite closure. The focused regression
+  uses a domain-valid immutable plan with duplicate lineage actions and verifies both paths.
+- The post-fix fresh read-only review is clean with no P0-P2 findings.

@@ -1050,6 +1050,58 @@ import Testing
   }
 }
 
+@Test func controllerOverlayHandlesDomainValidDuplicateLineagesWithoutTrapping() throws {
+  let facts = try runtimeProjectionGlobalFacts()
+  let firstEvidence = try runtimeProjectionEvidence(
+    candidateID: "lineage-a",
+    path: "same-target",
+    object: 201,
+    facts: facts
+  )
+  let secondEvidence = try runtimeProjectionEvidence(
+    candidateID: "lineage-b",
+    path: "same-target",
+    object: 201,
+    facts: facts
+  )
+  let first = try runtimeProjectionAction(evidence: firstEvidence, facts: facts)
+  let second = try runtimeProjectionAction(evidence: secondEvidence, facts: facts)
+  #expect(first.lineageID == second.lineageID)
+  #expect(first.id != second.id)
+  let plan = try ImmutablePlan(
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1",
+    globalFacts: facts,
+    evidenceSnapshots: [firstEvidence, secondEvidence],
+    actions: [first, second],
+    releaseGraphBundle: nil
+  )
+  let current = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: [],
+    waiverConsents: [],
+    userNotes: []
+  )
+  _ = try DecisionOverlayValidator.validate(current, against: plan)
+
+  var notes = Diskplan_V1_ReplaceNotesEdit()
+  notes.userNotes = ["retained"]
+  var notesEdit = Diskplan_V1_DecisionOverlayEdit()
+  notesEdit.kind = .replaceNotes
+  notesEdit.edit = .replaceNotes(notes)
+  let edited = try RuntimeOverlayEditor.apply([notesEdit], to: current, plan: plan)
+  #expect(edited.selectedActionIDs.isEmpty)
+  #expect(edited.userNotes == ["retained"])
+
+  var preset = Diskplan_V1_ApplyBatchSelectionPresetEdit()
+  preset.preset = .safeStageableWithoutWaiver
+  var presetEdit = Diskplan_V1_DecisionOverlayEdit()
+  presetEdit.kind = .applyBatchSelectionPreset
+  presetEdit.edit = .applyBatchSelectionPreset(preset)
+  let safe = try RuntimeOverlayEditor.apply([presetEdit], to: current, plan: plan)
+  #expect(safe.selectedActionIDs.isEmpty)
+}
+
 @Test func controllerRejectsPartialReceiptWithoutExplicitAllowance() throws {
   let result = authorityScanResult(state: .partial)
   let session = seededAuthoritySession(result: result)
