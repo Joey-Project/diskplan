@@ -333,6 +333,44 @@ static void require_regular_policy(int fd, mode_t expected_mode) {
     }
 }
 
+static void require_archive_directory_policy(int fd) {
+    struct stat metadata;
+    if (fstat(fd, &metadata) != 0) {
+        fatal_errno("cannot stat archive source directory descriptor");
+    }
+    mode_t mode = metadata.st_mode & 07777;
+    if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != geteuid() ||
+        (metadata.st_gid != 0 && metadata.st_gid != getegid()) || fd_has_acl(fd) ||
+        (metadata.st_flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND)) != 0 ||
+        (mode & 0022) != 0) {
+        fatal("archive source directory owner or access policy is unsafe");
+    }
+}
+
+static void require_archive_regular_policy(int fd, mode_t expected_mode, const char *name) {
+    struct stat metadata;
+    if (fstat(fd, &metadata) != 0) {
+        fatal_errno("cannot stat archive source file descriptor");
+    }
+    if (!S_ISREG(metadata.st_mode)) fatal("archive source artifact is not a regular file");
+    if (metadata.st_uid != geteuid()) fatal("archive source artifact owner is unsafe");
+    if (metadata.st_gid != 0 && metadata.st_gid != getegid())
+        fatal("archive source artifact group is unsafe");
+    if (metadata.st_nlink != 1) fatal("archive source artifact link count is unsafe");
+    mode_t actual_mode = metadata.st_mode & 07777;
+    if ((actual_mode & 0700) != (expected_mode & 0700) ||
+        (actual_mode & (mode_t)~expected_mode) != 0) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "archive source artifact mode is unsafe: %s maximum=%04o actual=%04o", name,
+                 expected_mode, actual_mode);
+        fatal(message);
+    }
+    if (fd_has_acl(fd)) fatal("archive source artifact access-control list is unsafe");
+    if ((metadata.st_flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND)) != 0)
+        fatal("archive source artifact flags are unsafe");
+}
+
 static void validate_absolute_path(const char *path) {
     size_t length = strlen(path);
     if (length < 2 || path[0] != '/' || path[length - 1] == '/' || strchr(path, '\n') != NULL ||
@@ -496,11 +534,41 @@ static int open_artifact(int directory, size_t index, int flags) {
     return fd;
 }
 
-static void require_exact_bundle_entries(int directory, bool allow_partial) {
+static int open_archive_artifact(int directory, size_t index, int flags) {
+    int fd = openat(directory, k_artifacts[index].name,
+                    flags | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        fatal_errno("cannot open archive source artifact without following links");
+    }
+    require_archive_regular_policy(fd, k_artifacts[index].mode, k_artifacts[index].name);
+    struct stat metadata;
+    if (fstat(fd, &metadata) != 0) {
+        close(fd);
+        fatal_errno("cannot stat bounded archive source artifact");
+    }
+    if (metadata.st_size < 0 || metadata.st_size > k_artifacts[index].maximum_size) {
+        close(fd);
+        fatal("archive source artifact exceeds its packaged size limit");
+    }
+    return fd;
+}
+
+static void require_exact_bundle_entries(int directory, bool allow_partial,
+                                         bool archive_source) {
     bool seen[sizeof(k_artifacts) / sizeof(k_artifacts[0])] = {false};
-    int duplicate = dup(directory);
+    int duplicate = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (duplicate < 0) {
-        fatal_errno("cannot duplicate bundle directory descriptor");
+        fatal_errno("cannot reopen bundle directory descriptor");
+    }
+    struct stat original_metadata, reopened_metadata;
+    if (fstat(directory, &original_metadata) != 0 ||
+        fstat(duplicate, &reopened_metadata) != 0) {
+        close(duplicate);
+        fatal_errno("cannot bind reopened bundle directory descriptor");
+    }
+    if (!same_object(&original_metadata, &reopened_metadata)) {
+        close(duplicate);
+        fatal("reopened bundle directory identity changed");
     }
     DIR *stream = fdopendir(duplicate);
     if (stream == NULL) {
@@ -527,7 +595,8 @@ static void require_exact_bundle_entries(int directory, bool allow_partial) {
             closedir(stream);
             fatal("bundle directory contains an unexpected or duplicate entry");
         }
-        int fd = open_artifact(directory, (size_t)index, O_RDONLY);
+        int fd = archive_source ? open_archive_artifact(directory, (size_t)index, O_RDONLY)
+                                : open_artifact(directory, (size_t)index, O_RDONLY);
         close(fd);
         seen[index] = true;
     }
@@ -535,7 +604,11 @@ static void require_exact_bundle_entries(int directory, bool allow_partial) {
     if (!allow_partial) {
         for (size_t index = 0; index < k_artifact_count; ++index) {
             if (!seen[index]) {
-                fatal("bundle directory is missing an artifact");
+                char message[256];
+                snprintf(message, sizeof(message), "%s bundle is missing artifact: %s",
+                         archive_source ? "archive source" : "managed",
+                         k_artifacts[index].name);
+                fatal(message);
             }
         }
     }
@@ -560,9 +633,13 @@ static void hash_u64(CC_SHA256_CTX *context, uint64_t value) {
     hash_bytes(context, encoded, sizeof(encoded));
 }
 
-static void bundle_proof(int directory, bool managed_exact, char output[256]) {
-    require_directory_policy(directory, 0700, managed_exact);
-    require_exact_bundle_entries(directory, false);
+static void bundle_proof(int directory, bool managed_exact, bool archive_source,
+                         char output[256]) {
+    if (archive_source)
+        require_archive_directory_policy(directory);
+    else
+        require_directory_policy(directory, 0700, managed_exact);
+    require_exact_bundle_entries(directory, false, archive_source);
     struct stat directory_before;
     if (fstat(directory, &directory_before) != 0) {
         fatal_errno("cannot stat bundle directory");
@@ -573,7 +650,8 @@ static void bundle_proof(int directory, bool managed_exact, char output[256]) {
     }
     unsigned char buffer[64 * 1024];
     for (size_t index = 0; index < k_artifact_count; ++index) {
-        int fd = open_artifact(directory, index, O_RDONLY);
+        int fd = archive_source ? open_archive_artifact(directory, index, O_RDONLY)
+                                : open_artifact(directory, index, O_RDONLY);
         struct stat before;
         if (fstat(fd, &before) != 0) {
             close(fd);
@@ -610,7 +688,10 @@ static void bundle_proof(int directory, bool managed_exact, char output[256]) {
             close(fd);
             fatal_errno("cannot restat bundle artifact");
         }
-        require_regular_policy(fd, k_artifacts[index].mode);
+        if (archive_source)
+            require_archive_regular_policy(fd, k_artifacts[index].mode, k_artifacts[index].name);
+        else
+            require_regular_policy(fd, k_artifacts[index].mode);
         close(fd);
         if (!same_content_signals(&before, &after)) {
             fatal("bundle artifact changed while it was read");
@@ -621,8 +702,11 @@ static void bundle_proof(int directory, bool managed_exact, char output[256]) {
         fatal("cannot finalize bundle digest");
     }
     struct stat directory_after;
-    require_exact_bundle_entries(directory, false);
-    require_directory_policy(directory, 0700, managed_exact);
+    require_exact_bundle_entries(directory, false, archive_source);
+    if (archive_source)
+        require_archive_directory_policy(directory);
+    else
+        require_directory_policy(directory, 0700, managed_exact);
     if (fstat(directory, &directory_after) != 0) {
         fatal_errno("cannot restat bundle directory");
     }
@@ -969,7 +1053,7 @@ static void cleanup_partial_stage(void) {
 }
 
 static void copy_file_stable(int source_directory, int destination_directory, size_t index) {
-    int source = open_artifact(source_directory, index, O_RDONLY);
+    int source = open_archive_artifact(source_directory, index, O_RDONLY);
     struct stat before;
     if (fstat(source, &before) != 0) {
         close(source);
@@ -1003,19 +1087,20 @@ static void copy_file_stable(int source_directory, int destination_directory, si
             written += result;
         }
     }
-    if (count < 0 || fchmod(destination, k_artifacts[index].mode) != 0 ||
-        fsync(destination) != 0) {
+    if (count < 0 || fchown(destination, geteuid(), getegid()) != 0 ||
+        fchmod(destination, k_artifacts[index].mode) != 0 || fsync(destination) != 0) {
         close(destination);
         close(source);
         fatal_errno("cannot finish staged artifact");
     }
+    require_regular_policy(destination, k_artifacts[index].mode);
     struct stat after;
     if (fstat(source, &after) != 0) {
         close(destination);
         close(source);
         fatal_errno("cannot restat source artifact");
     }
-    require_regular_policy(source, k_artifacts[index].mode);
+    require_archive_regular_policy(source, k_artifacts[index].mode, k_artifacts[index].name);
     close(destination);
     close(source);
     if (!same_content_signals(&before, &after)) {
@@ -1025,7 +1110,7 @@ static void copy_file_stable(int source_directory, int destination_directory, si
 
 static void delete_exact_bundle(int root, int directory, const char *name, const char *proof) {
     char actual[256];
-    bundle_proof(directory, true, actual);
+    bundle_proof(directory, true, false, actual);
     if (strcmp(actual, proof) != 0) {
         fatal("bundle proof changed before deletion");
     }
@@ -1158,10 +1243,10 @@ static void cmd_stage_bundle(int argc, char **argv) {
     int lock = require_lock(managed.prefix, argv[4]);
     close(lock);
     int source = open_absolute_directory(argv[5], false);
-    require_directory_policy(source, 0, false);
-    require_exact_bundle_entries(source, false);
+    require_archive_directory_policy(source);
+    require_exact_bundle_entries(source, false, true);
     char source_before[256];
-    bundle_proof(source, false, source_before);
+    bundle_proof(source, false, true, source_before);
     char nonce[33];
     random_hex(nonce);
     snprintf(cleanup_stage_name, sizeof(cleanup_stage_name), ".install-stage-%s", nonce);
@@ -1178,11 +1263,11 @@ static void cmd_stage_bundle(int argc, char **argv) {
     }
     if (fsync(cleanup_stage_fd) != 0) fatal_errno("cannot sync staged bundle");
     char source_after[256];
-    bundle_proof(source, false, source_after);
+    bundle_proof(source, false, true, source_after);
     if (strcmp(source_before, source_after) != 0)
         fatal("source bundle changed while staging");
     char staged_proof[256];
-    bundle_proof(cleanup_stage_fd, true, staged_proof);
+    bundle_proof(cleanup_stage_fd, true, false, staged_proof);
     printf("%s\t%s\n", cleanup_stage_name, staged_proof);
     close(source);
     close(cleanup_stage_fd);
@@ -1200,7 +1285,7 @@ static void cmd_bundle_proof(int argc, char **argv) {
     close(lock);
     int bundle = open_named_bundle(managed.root, argv[5]);
     char proof[256];
-    bundle_proof(bundle, true, proof);
+    bundle_proof(bundle, true, false, proof);
     if (strcmp(argv[6], "-") != 0 && strcmp(argv[6], proof) != 0)
         fatal("bundle proof does not match expected identity and content");
     printf("%s\n", proof);
@@ -1217,7 +1302,7 @@ static void cmd_publish_version(int argc, char **argv) {
     close(lock);
     int stage = open_named_bundle(managed.root, argv[5]);
     char proof[256];
-    bundle_proof(stage, true, proof);
+    bundle_proof(stage, true, false, proof);
     if (strcmp(proof, argv[6]) != 0) fatal("staged bundle proof changed before publication");
     if (renameatx_np(managed.root, argv[5], managed.root, argv[7], RENAME_EXCL) != 0) {
         if (errno == EEXIST) {
@@ -1230,7 +1315,7 @@ static void cmd_publish_version(int argc, char **argv) {
     if (fsync(managed.root) != 0) fatal_errno("cannot sync published version directory");
     int published = open_named_bundle(managed.root, argv[7]);
     char published_proof[256];
-    bundle_proof(published, true, published_proof);
+    bundle_proof(published, true, false, published_proof);
     if (strcmp(proof, published_proof) != 0) fatal("published bundle identity proof changed");
     printf("%s\n", published_proof);
     close(published);
@@ -1265,7 +1350,7 @@ static void cmd_activate(int argc, char **argv) {
     close(lock);
     int bundle = open_named_bundle(managed.root, argv[5]);
     char proof[256];
-    bundle_proof(bundle, true, proof);
+    bundle_proof(bundle, true, false, proof);
     if (strcmp(proof, argv[6]) != 0) fatal("bundle proof changed before activation");
     close(bundle);
     char target[PATH_MAX];

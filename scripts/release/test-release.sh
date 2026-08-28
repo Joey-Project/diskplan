@@ -40,6 +40,12 @@ readonly BUNDLE_COUNT
 BUNDLE="$(/usr/bin/find "${TEST_ROOT}/extract" -mindepth 1 -maxdepth 1 -type d -print)"
 readonly BUNDLE
 
+# BSD tar applies the caller's 077 umask while retaining deterministic numeric
+# archive ownership. The installer accepts only this permission narrowing, then
+# normalizes every copied descriptor into its owner-private managed staging area.
+/bin/chmod 0700 "${BUNDLE}/uninstall.sh"
+/bin/chmod 0600 "${BUNDLE}/protocol.json"
+
 readonly PREFIX="${TEST_ROOT}/prefix"
 
 # No-follow prefix traversal rejects redirection before any outside object changes.
@@ -76,10 +82,11 @@ fi
 readonly STALE_PREFIX="${TEST_ROOT}/stale-prefix"
 STALE_PREFIX_IDENTITY="$("${BUNDLE}/diskplan-fs-helper" prepare-prefix "${STALE_PREFIX}")"
 readonly STALE_PREFIX_IDENTITY
-(
-    "${BUNDLE}/diskplan-fs-helper" acquire-lock \
-        "${STALE_PREFIX}" "${STALE_PREFIX_IDENTITY}" "${BASHPID}" >/dev/null
-)
+/bin/bash -c '"$1" acquire-lock "$2" "$3" "$$"; status=$?; exit "$status"' \
+    diskplan-stale-lock-owner \
+    "${BUNDLE}/diskplan-fs-helper" \
+    "${STALE_PREFIX}" \
+    "${STALE_PREFIX_IDENTITY}" >/dev/null
 [[ -d "${STALE_PREFIX}/.diskplan-install.lock" ]]
 "${BUNDLE}/install.sh" --prefix "${STALE_PREFIX}" "${BUNDLE}" >/dev/null
 "${STALE_PREFIX}/libexec/diskplan/$(<"${BUNDLE}/VERSION")/uninstall.sh" \
@@ -109,6 +116,9 @@ set -e
 "${BUNDLE}/install.sh" --prefix "${PREFIX}" "${BUNDLE}"
 VERSION="$(<"${BUNDLE}/VERSION")"
 readonly VERSION
+[[ "$(/usr/bin/stat -f '%Lp' "${PREFIX}/libexec/diskplan/${VERSION}/uninstall.sh")" == "755" ]]
+[[ "$(/usr/bin/stat -f '%Lp' "${PREFIX}/libexec/diskplan/${VERSION}/protocol.json")" == "644" ]]
+[[ "$(/usr/bin/stat -f '%g' "${PREFIX}/libexec/diskplan/${VERSION}/uninstall.sh")" == "$(/usr/bin/id -g)" ]]
 [[ "$(readlink "${PREFIX}/bin/diskplan")" == "../libexec/diskplan/${VERSION}/diskplan" ]]
 "${PREFIX}/bin/diskplan" --version-json | /usr/bin/grep -F "\"product_version\":\"${VERSION}\"" >/dev/null
 "${PREFIX}/bin/diskplan" --handshake | /usr/bin/grep -F "handshake ok:" >/dev/null

@@ -35,14 +35,20 @@ superseded_by:
 - Release publication treats the archive and checksum as one verified set, while
   lifecycle publication uses exclusive version-directory creation and a
   conditional launcher switch under a recoverable owner-identified lock.
+- Archive extraction is now a distinct trust boundary: numeric group `0` and
+  restrictive umask mode removal are accepted only for the source snapshot;
+  every copied artifact is normalized to the caller's uid/gid and exact mode in
+  owner-private staging before the strict managed policy and content proof run.
+- Repeated bundle enumeration reopens `.` relative to the held directory FD and
+  verifies object identity, avoiding the shared directory offset created by
+  `dup(2)` while preserving no-follow binding.
 
 ## Next Steps
 
 - Integrate the Phase 4/5 batch frontend so the documented `--batch --profile full-audit --dry-run --no-history --no-audit-file --root` acceptance seam becomes executable.
 - Run the signed integrated release bundle on `India-mac-mini-m4-hoteng`; do not run apply against existing user data.
-- Re-run the dynamic release lifecycle, cross-language, and deployment gates once
-  the coordinated build slot is available; the post-review hardening was prepared
-  while new builds were paused for host disk pressure.
+- Re-run the cross-language and deployment gates after the integrated frontend
+  and engine branches land.
 
 ## Evidence
 
@@ -53,5 +59,10 @@ superseded_by:
 - Pre-review local validation (head `9096a571`): 48 Swift tests; complete Rust
   workspace tests and clippy; four live Swift/Rust process tests; canonical and
   generated Protobuf checks; macOS 14 deployment-target check; 17 CI helper tests;
-  ShellCheck, actionlint, and both journal validators. Post-review dynamic gates
-  are intentionally pending the coordinated build slot.
+  ShellCheck, actionlint, and both journal validators.
+- Post-hardening macOS 26.6.1 Apple Silicon validation: 21 release helper tests;
+  clean deterministic arm64 archive build; complete archive/package/install/
+  upgrade/rollback/mixed-version/uninstall lifecycle; real sibling frontend and
+  engine handshake; Cargo workspace check and warning-free clippy; Bash syntax,
+  ShellCheck, Python bytecode compilation, actionlint, and C `-Wall -Wextra
+  -Werror` with the macOS 14 deployment target.

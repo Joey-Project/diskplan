@@ -67,12 +67,21 @@ The default layout is:
 ```
 
 The installer verifies the exact file set, checksums, metadata, arm64 slices,
-actual modes and ownership, and process identities before publication. A narrow
-native filesystem helper holds no-follow descriptors for the managed ancestor
-chain. It rejects symbolic-link ancestors and access-policy drift, publishes a
-new immutable version with an exclusive same-filesystem rename, proves the
-published directory is the verified staging object, and conditionally replaces
-only the launcher leaf it observed. Existing versions are retained. Roll back by
+source access policy, and process identities before publication. Deterministic
+tar headers use numeric root ownership; after an ordinary user extraction, the
+source must be owned by that user and may use only numeric group `0` or the
+caller's effective group. A restrictive extraction umask may remove group or
+other permission bits, but it cannot add permissions or alter owner bits. The
+native helper copies each no-follow descriptor into an owner-private staging
+directory, explicitly normalizes the copy to the caller's uid/gid and exact
+packaged mode, and revalidates type, owner, group, mode, link count, ACL, flags,
+size, and content before publication.
+
+The helper also holds no-follow descriptors for the managed ancestor chain. It
+rejects symbolic-link ancestors and access-policy drift, publishes a new
+immutable version with an exclusive same-filesystem rename, proves the published
+directory is the verified staging object, and conditionally replaces only the
+launcher leaf it observed. Existing versions are retained. Roll back by
 activating one verified installed version:
 
 ```sh
@@ -99,12 +108,13 @@ scripts/release/test-release.sh /absolute/path/diskplan-<version>-macos-arm64.ta
 ```
 
 The test uses task-scoped temporary roots and covers deterministic repackaging,
-fresh and idempotent install, sibling-engine launch, checksum rejection, upgrade,
-rollback activation, protocol-major mismatch rejection, and exact uninstall. Its
-adversarial cases cover symlinked prefix ancestors, replacement races, artifact
-mode drift, stale lifecycle locks, launcher activation races, hostile packager
-output leaves, closed-output timeouts, signal cancellation, and background
-descendants.
+fresh and idempotent install, restrictive extraction-mode normalization,
+sibling-engine launch, checksum rejection, upgrade, rollback activation,
+protocol-major mismatch rejection, and exact uninstall. Its adversarial cases
+cover symlinked prefix ancestors, replacement races, artifact mode drift, stale
+lifecycle locks on the system Bash 3.2 runtime, launcher activation races,
+hostile packager output leaves, closed-output timeouts, signal cancellation, and
+background descendants.
 
 ## India Host Acceptance
 
