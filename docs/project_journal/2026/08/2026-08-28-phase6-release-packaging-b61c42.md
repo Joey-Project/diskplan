@@ -72,8 +72,11 @@ superseded_by:
   access-policy, slot, filesystem/mount, and snapshot signal.
   Access safety and operational mutability are distinct: restrictive ancestor
   flags such as `SF_NOUNLINK` are accepted for traversal while sealed into the
-  identity proof, whereas the temporary parent, private launch directory, and
-  snapshot nodes that Diskplan mutates must have no restrictive flags. Benign
+  identity proof. Mutability is operation-specific: the temporary parent may
+  retain stable `SF_NOUNLINK` because Diskplan mutates only its child namespace,
+  while immutable/append flags that block child-entry changes are rejected. The
+  private launch directory and snapshot require self-mutability and therefore
+  reject `SF_NOUNLINK` and all other selected restrictive flags. Benign
   hidden/nodump flags remain outside the sealed security mask.
   Digest reads are expected-size/512-MiB bounded with distinct oversize and
   mismatch errors. Launch-directory creation and cleanup avoid recursive
@@ -148,3 +151,13 @@ superseded_by:
   and ignored hidden/nodump flags. Cargo formatting and locked offline metadata,
   both journal validators, and diff checks pass; dynamic validation remains with
   the paused integration checkpoint.
+- Integration's focused follow-up showed that the default owner-private temporary
+  parent also carries stable `SF_NOUNLINK`, while a flags-zero private parent
+  completed all eight focused launch cases. The second refinement separates
+  child-namespace mutability from self-mutability: stable parent `SF_NOUNLINK` is
+  accepted and exact-sealed, immutable/append parent flags are rejected, and a
+  launch root carrying `SF_NOUNLINK` remains ineligible for rename/removal. Static
+  regressions cover each case. Cargo formatting and locked offline metadata, both
+  journal validators, and `git diff --check` pass; no compilation or test binary
+  ran during this static-only refinement, and dynamic validation remains owned by
+  integration.

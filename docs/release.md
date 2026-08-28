@@ -122,10 +122,15 @@ mount/access signals, the snapshot descriptor, and the snapshot slot at the
 actual internal spawn boundary. No caller can retain a naked `Command` pathname.
 Restrictive ancestor flags such as `SF_NOUNLINK` are sealed into that identity
 proof and must remain stable, but do not by themselves make traversal unsafe.
-The separate operational-mutability check rejects restrictive flags only on the
-temporary parent, private launch directory, and snapshot objects that Diskplan
-must create, quarantine, rename, or remove. Benign `UF_HIDDEN` and `UF_NODUMP`
-remain outside the security-relevant flag mask.
+Operation-specific mutability checks distinguish changing a parent's child
+namespace from renaming or removing the object itself. The temporary parent may
+retain stable `SF_NOUNLINK` because Diskplan only creates and removes child
+entries there, but immutable or append-only parent flags fail closed. The
+private launch directory and snapshot must themselves remain mutable, so
+`SF_NOUNLINK`, immutable, append-only, or other selected restrictive flags on
+those objects are rejected. All selected flags remain exact-sealed across
+revalidation; benign `UF_HIDDEN` and `UF_NODUMP` remain outside the
+security-relevant flag mask.
 Native macOS Mach-O execution through `/dev/fd/<fd>` is rejected with `EACCES`,
 so the private snapshot pathname remains an internal implementation detail and
 is revalidated immediately before and after the single operational `spawn()`.

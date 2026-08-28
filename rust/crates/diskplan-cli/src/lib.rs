@@ -39,10 +39,22 @@ const MAX_ENGINE_BYTES: u64 = 512 * 1024 * 1024;
 const DARWIN_UF_NODUMP: u32 = 0x0000_0001;
 #[cfg(test)]
 const DARWIN_UF_HIDDEN: u32 = 0x0000_8000;
-#[cfg(test)]
+const DARWIN_UF_IMMUTABLE: u32 = 0x0000_0002;
+const DARWIN_UF_APPEND: u32 = 0x0000_0004;
+const DARWIN_UF_DATAVAULT: u32 = 0x0000_0080;
+const DARWIN_SF_IMMUTABLE: u32 = 0x0002_0000;
+const DARWIN_SF_APPEND: u32 = 0x0004_0000;
+const DARWIN_SF_RESTRICTED: u32 = 0x0008_0000;
 const DARWIN_SF_NOUNLINK: u32 = 0x0010_0000;
-const SECURITY_RELEVANT_FILE_FLAGS: u32 =
-    0x0000_0002 | 0x0000_0004 | 0x0000_0080 | 0x0002_0000 | 0x0004_0000 | 0x0008_0000 | 0x0010_0000;
+const SECURITY_RELEVANT_FILE_FLAGS: u32 = DARWIN_UF_IMMUTABLE
+    | DARWIN_UF_APPEND
+    | DARWIN_UF_DATAVAULT
+    | DARWIN_SF_IMMUTABLE
+    | DARWIN_SF_APPEND
+    | DARWIN_SF_RESTRICTED
+    | DARWIN_SF_NOUNLINK;
+const CHILD_NAMESPACE_BLOCKING_FLAGS: u32 =
+    DARWIN_UF_IMMUTABLE | DARWIN_UF_APPEND | DARWIN_SF_IMMUTABLE | DARWIN_SF_APPEND;
 
 type FrameResult = Result<Option<Vec<u8>>, FrameError>;
 
@@ -162,11 +174,21 @@ fn selected_security_file_flags(flags: u32) -> u32 {
     flags & SECURITY_RELEVANT_FILE_FLAGS
 }
 
-fn require_operational_mutability(flags: u32, label: &str) -> io::Result<()> {
+fn require_child_namespace_mutability(flags: u32, label: &str) -> io::Result<()> {
+    if flags & CHILD_NAMESPACE_BLOCKING_FLAGS != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{label} flags prevent child namespace mutation"),
+        ));
+    }
+    Ok(())
+}
+
+fn require_self_mutability(flags: u32, label: &str) -> io::Result<()> {
     if flags != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{label} has restrictive filesystem flags"),
+            format!("{label} flags prevent object rename or removal"),
         ));
     }
     Ok(())
@@ -312,7 +334,7 @@ impl LaunchNamespace {
             Mode::empty(),
         )?);
         let engine_identity = EngineObjectIdentity::from_file(&engine_file)?;
-        require_operational_mutability(engine_identity.flags, "engine launch snapshot")?;
+        require_self_mutability(engine_identity.flags, "engine launch snapshot")?;
         let engine_sha256 = digest_file(&engine_file, engine_identity.size)?;
         if engine_sha256 != source_sha256 {
             return Err(io::Error::new(
@@ -344,7 +366,7 @@ impl LaunchNamespace {
     fn revalidate(&self) -> io::Result<()> {
         self.revalidate_directories()?;
         let engine_identity = EngineObjectIdentity::from_file(&self.engine_file)?;
-        require_operational_mutability(engine_identity.flags, "engine launch snapshot")?;
+        require_self_mutability(engine_identity.flags, "engine launch snapshot")?;
         if engine_identity != self.engine_identity
             || digest_file(&self.engine_file, self.engine_identity.size)? != self.engine_sha256
         {
@@ -365,7 +387,7 @@ impl LaunchNamespace {
             Mode::empty(),
         )?);
         let launch_slot_identity = EngineObjectIdentity::from_file(&launch_slot)?;
-        require_operational_mutability(launch_slot_identity.flags, "engine launch snapshot slot")?;
+        require_self_mutability(launch_slot_identity.flags, "engine launch snapshot slot")?;
         if launch_slot_identity != self.engine_identity
             || digest_file(&launch_slot, self.engine_identity.size)? != self.engine_sha256
         {
@@ -414,7 +436,7 @@ fn revalidate_directory_bindings(
         let launch_root = index + 1 == directories.len();
         let current_identity = LaunchDirectoryIdentity::from_file(&binding.file, launch_root)?;
         if launch_root {
-            require_operational_mutability(current_identity.flags, "engine launch directory")?;
+            require_self_mutability(current_identity.flags, "engine launch directory")?;
         }
         if current_identity != binding.identity {
             return Err(io::Error::new(
@@ -435,10 +457,7 @@ fn revalidate_directory_bindings(
         };
         let reopened_identity = LaunchDirectoryIdentity::from_file(&reopened, launch_root)?;
         if launch_root {
-            require_operational_mutability(
-                reopened_identity.flags,
-                "engine launch directory slot",
-            )?;
+            require_self_mutability(reopened_identity.flags, "engine launch directory slot")?;
         }
         if reopened_identity != binding.identity {
             return Err(io::Error::new(
@@ -522,7 +541,7 @@ fn cleanup_bound_engine_snapshot(
         }
     };
     let matches = match EngineObjectIdentity::from_file(&quarantined).and_then(|identity| {
-        require_operational_mutability(identity.flags, "quarantined engine launch snapshot")?;
+        require_self_mutability(identity.flags, "quarantined engine launch snapshot")?;
         Ok(identity == *expected_identity
             && digest_file(&quarantined, expected_identity.size)? == expected_sha256)
     }) {
@@ -612,7 +631,9 @@ fn cleanup_bound_launch_directory(
         .get(directories.len().saturating_sub(2))
         .expect("launch root has a parent");
     selected_file_access_flags(&parent.file)
-        .and_then(|flags| require_operational_mutability(flags, "engine launch parent directory"))
+        .and_then(|flags| {
+            require_child_namespace_mutability(flags, "engine launch parent directory")
+        })
         .map_err(|source| LaunchCleanupError::DirectoryRemoval {
             path: path.to_path_buf(),
             source,
@@ -658,10 +679,9 @@ fn cleanup_bound_launch_directory(
     };
     let quarantine_identity = match LaunchDirectoryIdentity::from_file(&quarantined, true) {
         Ok(identity) => {
-            if let Err(proof_error) = require_operational_mutability(
-                identity.flags,
-                "quarantined engine launch directory",
-            ) {
+            if let Err(proof_error) =
+                require_self_mutability(identity.flags, "quarantined engine launch directory")
+            {
                 let restore = restore_quarantined_slot(&parent.file, &quarantine, leaf_name);
                 return Err(LaunchCleanupError::DirectoryRemoval {
                     path: path.to_path_buf(),
@@ -767,7 +787,7 @@ fn create_launch_directory(temporary_parent: &Path) -> io::Result<LaunchDirector
     let parent = bindings
         .last()
         .expect("absolute temporary parent has a root binding");
-    require_operational_mutability(parent.identity.flags, "engine launch parent directory")?;
+    require_child_namespace_mutability(parent.identity.flags, "engine launch parent directory")?;
     let mut selected_name = None;
     for _ in 0..64 {
         let name = random_scoped_name("diskplan-engine-launch.")?;
@@ -799,7 +819,7 @@ fn create_launch_directory(temporary_parent: &Path) -> io::Result<LaunchDirector
     )?;
     child.set_permissions(std::fs::Permissions::from_mode(0o700))?;
     let identity = LaunchDirectoryIdentity::from_file(&child, true)?;
-    require_operational_mutability(identity.flags, "engine launch directory")?;
+    require_self_mutability(identity.flags, "engine launch directory")?;
     let reopened = File::from(openat(
         &parent.file,
         &name,
@@ -807,7 +827,7 @@ fn create_launch_directory(temporary_parent: &Path) -> io::Result<LaunchDirector
         Mode::empty(),
     )?);
     let reopened_identity = LaunchDirectoryIdentity::from_file(&reopened, true)?;
-    require_operational_mutability(reopened_identity.flags, "engine launch directory slot")?;
+    require_self_mutability(reopened_identity.flags, "engine launch directory slot")?;
     if reopened_identity != identity {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1092,11 +1112,13 @@ mod bound_engine_tests {
     }
 
     #[test]
-    fn stable_restrictive_ancestor_flags_are_safe_but_remain_sealed() {
+    fn parent_nounlink_is_safe_for_child_namespace_mutation_but_remains_sealed() {
         let expected = directory_identity(DARWIN_SF_NOUNLINK, false);
         expected
             .require_safe_access(false)
             .expect("stable restrictive ancestor flag must not deny traversal");
+        require_child_namespace_mutability(expected.flags, "temporary parent")
+            .expect("nounlink on parent does not prevent child entry mutation");
 
         let mut drifted = expected.clone();
         drifted.flags = 0;
@@ -1107,19 +1129,27 @@ mod bound_engine_tests {
     }
 
     #[test]
-    fn mutable_nodes_reject_every_restrictive_flag() {
+    fn launch_root_nounlink_is_not_self_mutable() {
         let owner_private = directory_identity(DARWIN_SF_NOUNLINK, true);
         owner_private
             .require_safe_access(true)
             .expect("restrictive flags are separate from access safety");
+        let error = require_self_mutability(owner_private.flags, "launch root")
+            .expect_err("nounlink launch root must not be renamed or removed");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
 
-        for bit in 0..u32::BITS {
-            let flag = 1_u32 << bit;
-            if SECURITY_RELEVANT_FILE_FLAGS & flag != 0 {
-                let error = require_operational_mutability(flag, "mutable test node")
-                    .expect_err("mutable node must reject restrictive flags");
-                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-            }
+    #[test]
+    fn immutable_and_append_parent_flags_block_child_namespace_mutation() {
+        for flag in [
+            DARWIN_UF_IMMUTABLE,
+            DARWIN_UF_APPEND,
+            DARWIN_SF_IMMUTABLE,
+            DARWIN_SF_APPEND,
+        ] {
+            let error = require_child_namespace_mutability(flag, "temporary parent")
+                .expect_err("immutable/append parent must reject child namespace mutation");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         }
     }
 
