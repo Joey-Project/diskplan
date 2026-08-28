@@ -217,15 +217,20 @@ completion, and exact absence is observed after those completions. A reboot is t
 barrier for a predecessor whose authoritative completion remains unknown. Legacy immediate-
 predecessor records are recursively flattened, terminal failures are pruned only after their durable
 completion is merged, duplicates must agree, and the complete cohort is capped at 64 operations.
+When a prepared or authoritatively failed leaf still carries active predecessors, successor
+publication also carries that non-active leaf as an exact merge tombstone. Recovery prunes the
+tombstone only after the old leaf has successfully merged, so a gate-durable/leaf-overwrite crash
+cannot turn a valid predecessor chain into an unrelated-operation mismatch.
 This also keeps a timed-out PlugInKit removal from an older run from later unregistering the shared
 extension path after a newer run starts. Unrelated operation UUIDs remain a typed mismatch.
 
 Mutation-journal reads protect object identity (`st_dev`, `st_ino`, and `st_gen`),
 owner/group/mode/ACL access policy, and exact JSON bytes as separate properties. Size, mtime, or
-ctime drift triggers bounded reread/restat plus canonical-name revalidation after the last descriptor
-read; equal bytes on the same object with the same access policy are accepted. Byte drift, identity
-replacement, policy drift, missing canonical entry, unavailable lookup, and an unstable final
-revalidation window retain distinct typed results.
+ctime drift triggers bounded reread/restat. The reader finishes all held-descriptor byte, metadata,
+and ACL checks before one final `fstatat` canonical-name seal; no descriptor-only observation follows
+that seal. Equal bytes on the same object with the same access policy are accepted. Byte drift,
+identity replacement, policy drift, missing canonical entry, unavailable lookup, and an unstable
+final revalidation window retain distinct typed results.
 
 Same-boot absence polling is never terminal evidence for an unresolved add. Even an
 authoritatively completed compensating removal cannot clear an earlier add whose original

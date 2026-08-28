@@ -138,6 +138,8 @@ superseded_by:
   authoritative successor completion plus exact absence, including the shared extension path.
 - [x] Attribute late predecessor callbacks by operation UUID, require post-completion absence for
   every same-boot dispatched removal, and recursively retain legacy predecessor cohorts.
+- [x] Carry prepared/failed removal leaves with active predecessors as merge tombstones until the
+  pre-overwrite leaf durably merges after a successor-gate crash.
 - [x] Add manifestless prepare rollback, pre-prepare shell recovery, and durable empty-event creation.
 - [x] Seal exact event bytes and held events/window identities, enforce strict JSONL framing, and bind the oracle to one boot session.
 - [x] Treat ctime/mtime as control-byte revalidation triggers and keep content, identity, and access-policy failures distinct.
@@ -145,6 +147,8 @@ superseded_by:
   journals.
 - [x] Revalidate mutation-journal generation, bytes, and access policy through the final canonical
   name lookup, with distinct missing, identity, unavailable, and unstable results.
+- [x] Make canonical-name `fstatat` the final journal-read seal after every descriptor/content/ACL
+  check, including post-preliminary-lookup replacement detection.
 - [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
 - [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
 - [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
@@ -162,7 +166,7 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --no-parallel`: all 143 Swift tests pass. External-mutation
+- `swift test --no-parallel`: all 145 Swift tests pass. External-mutation
   tests cover same-boot late success, authoritative failure and success-plus-remove, injected boot
   changes, reboot-absent and reboot-present reconciliation, independent recovery instances,
   cross-run gate exclusion, extension-add parity, prepared-state nondispatch recovery, successful
@@ -183,9 +187,11 @@ superseded_by:
   recovery before any deletion. Follow-up regressions also cover exact cleanup-staging replacement,
   predecessor-to-successor mutation recovery, durable domain/extension removal predecessor cohorts,
   operation-ID-attributed late predecessor completion, recursive legacy-chain recovery,
+  prepared/failed leaf merge tombstones across successor-gate crashes,
   timestamp-only mutation-journal revalidation, true initial/final-window byte drift, final-window
-  ACL and identity drift, typed final-name missing/unavailable results, bounded unstable-window
-  failure, manifestless prepare rollback, first-event durability,
+  ACL drift, post-preliminary-lookup identity replacement caught by the final name seal, typed
+  final-name missing/unavailable results, bounded unstable-window failure, manifestless prepare
+  rollback, first-event durability,
   exact sealed-byte and canonical-entry drift, strict JSONL framing, boot-session rejection,
   metadata-only ctime changes, distinct content/access-policy changes, and cross-boot PID reuse.
 - `python3 scripts/test-fileprovider-fixture-registration.py`: 13 parser/physical-path election,
@@ -197,7 +203,7 @@ superseded_by:
   are recorded as authoritative completion.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
   compiled successfully with signing disabled.
-- The resolved-only complete serial Swift gate passed all 143 tests on the integrated tree. The
+- The resolved-only complete serial Swift gate passed all 145 tests on the integrated tree. The
   unrelated subsecond macOS probe deadline test timed out in one concurrent run but immediately
   passed its focused rerun and the complete serial run.
   Canonical binary generation and the Swift/Rust cross-language process tests passed.

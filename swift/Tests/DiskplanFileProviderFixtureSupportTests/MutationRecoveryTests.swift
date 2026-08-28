@@ -393,7 +393,7 @@ func pendingGateFinalLookupSeparatesMissingFromUnavailable() throws {
 }
 
 @Test
-func pendingGateReplacementInFinalLookupWindowIsIdentityMutation() throws {
+func pendingGatePostLookupReplacementIsCaughtByFinalNameSeal() throws {
   let fixture = try TemporaryMutationJournal()
   defer { fixture.remove() }
   let ordinary = try fixture.journal(boot: firstBoot)
@@ -402,7 +402,7 @@ func pendingGateReplacementInFinalLookupWindowIsIdentityMutation() throws {
 
   let replacing = try fixture.journal(
     boot: firstBoot,
-    beforeFinalRecordLookup: { directory, name, _ in
+    afterInitialRecordLookup: { directory, name, _ in
       guard name == ".fileprovider-pending-run.json" else { return }
       guard unlinkat(directory, name, 0) == 0 else { throw POSIXError(.EIO) }
       let replacement = openat(
@@ -529,6 +529,71 @@ func replacementDomainRemovalGateRetainsDispatchedPredecessorAcrossCrash() throw
   try ordinary.confirmFinished(.domainRemove, observed: .absent)
   try ordinary.requireClear()
   #expect(try fixture.evidenceNames().isEmpty)
+}
+
+@Test
+func preparedRemovalLeafWithActivePredecessorMergesAfterSuccessorGateCrash() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  let activeID = try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 10)
+  try ordinary.markDispatched(
+    .domainRemove,
+    operationID: activeID,
+    nowNanoseconds: 20
+  )
+  let preparedID = try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 30)
+
+  let crashing = try fixture.journal(
+    boot: firstBoot,
+    failureInjection: .afterGateBeforeState
+  )
+  #expect(throws: ExternalMutationJournalError.operationFailed("injected-after-gate", errno: EIO)) {
+    try crashing.beginRemovalAttempt(.domainRemove, nowNanoseconds: 40)
+  }
+
+  let recovered = try #require(try ordinary.state(.domainRemove))
+  #expect(recovered.phase == .prepared)
+  #expect(recovered.operationID != preparedID)
+  #expect(recovered.unresolvedPredecessorOperationIDs == [activeID])
+}
+
+@Test
+func failedRemovalLeafWithActivePredecessorMergesAfterSuccessorGateCrash() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  let activeID = try ordinary.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 10)
+  try ordinary.markDispatched(
+    .extensionRemove,
+    operationID: activeID,
+    nowNanoseconds: 20
+  )
+  let failedID = try ordinary.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 30)
+  try ordinary.markDispatched(
+    .extensionRemove,
+    operationID: failedID,
+    nowNanoseconds: 40
+  )
+  try ordinary.recordOriginalCompletion(
+    .extensionRemove,
+    operationID: failedID,
+    completion: .failed,
+    nowNanoseconds: 50
+  )
+
+  let crashing = try fixture.journal(
+    boot: firstBoot,
+    failureInjection: .afterGateBeforeState
+  )
+  #expect(throws: ExternalMutationJournalError.operationFailed("injected-after-gate", errno: EIO)) {
+    try crashing.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 60)
+  }
+
+  let recovered = try #require(try ordinary.state(.extensionRemove))
+  #expect(recovered.phase == .prepared)
+  #expect(recovered.operationID != failedID)
+  #expect(recovered.unresolvedPredecessorOperationIDs == [activeID])
 }
 
 @Test
@@ -806,6 +871,12 @@ private struct TemporaryMutationJournal {
         _ name: String,
         _ descriptor: Int32
       ) throws -> Void = { _, _, _ in },
+    afterInitialRecordLookup:
+      @escaping @Sendable (
+        _ directory: Int32,
+        _ name: String,
+        _ descriptor: Int32
+      ) throws -> Void = { _, _, _ in },
     beforeFinalRecordLookup:
       @escaping @Sendable (
         _ directory: Int32,
@@ -821,6 +892,7 @@ private struct TemporaryMutationJournal {
       currentBootGeneration: boot,
       failureInjection: failureInjection,
       afterInitialRecordRead: afterInitialRecordRead,
+      afterInitialRecordLookup: afterInitialRecordLookup,
       beforeFinalRecordLookup: beforeFinalRecordLookup,
       injectedFinalLookupErrno: injectedFinalLookupErrno
     )

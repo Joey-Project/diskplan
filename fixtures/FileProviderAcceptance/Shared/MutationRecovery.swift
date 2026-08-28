@@ -220,12 +220,12 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     guard version == other.version, binding == other.binding, kind == other.kind
     else { throw ExternalMutationJournalError.stateMismatch }
     if operationID != other.operationID {
-      if unresolvedPredecessors.contains(where: { $0.operationID == other.operationID }) {
+      if allPredecessors.contains(where: { $0.operationID == other.operationID }) {
         var successor = self
         try successor.mergePredecessor(other)
         return successor
       }
-      if other.unresolvedPredecessors.contains(where: { $0.operationID == operationID }) {
+      if other.allPredecessors.contains(where: { $0.operationID == operationID }) {
         var successor = other
         try successor.mergePredecessor(self)
         return successor
@@ -244,7 +244,10 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
       throw ExternalMutationJournalError.stateMismatch
     }
     var result = phase.rank >= other.phase.rank ? self : other
-    result.predecessorStates = mergedPredecessors
+    result.predecessorStates = mergedPredecessors.filter {
+      $0.phase == .dispatched || $0.phase == .originalSucceeded
+    }
+    result.predecessorOperationID = result.predecessorStates?.last?.operationID
     return result
   }
 
@@ -267,12 +270,18 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     allPredecessors.filter { $0.phase == .dispatched || $0.phase == .originalSucceeded }
   }
 
-  fileprivate var unresolvedRemovalOperations: [ExternalMutationPredecessorState] {
-    var result = unresolvedPredecessors
-    if phase == .dispatched || phase == .originalSucceeded {
+  fileprivate var removalSuccessorCohort: [ExternalMutationPredecessorState] {
+    var result = allPredecessors
+    if phase == .dispatched || phase == .originalSucceeded || !unresolvedPredecessors.isEmpty {
       result.append(ExternalMutationPredecessorState(self))
     }
     return result
+  }
+
+  fileprivate var unresolvedRemovalOperations: [ExternalMutationPredecessorState] {
+    removalSuccessorCohort.filter {
+      $0.phase == .dispatched || $0.phase == .originalSucceeded
+    }
   }
 
   fileprivate var hasPotentialLateEffect: Bool {
@@ -302,7 +311,7 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     }
     var values = successorValues.filter { $0.operationID != state.operationID }
     var inheritedPrefix: [ExternalMutationPredecessorState] = []
-    for inherited in state.allPredecessors where inherited.phase != .originalFailed {
+    for inherited in state.unresolvedPredecessors {
       if let existing = values.first(where: { $0.operationID == inherited.operationID }) {
         if predecessorStates != nil, state.predecessorStates != nil, existing != inherited {
           throw ExternalMutationJournalError.stateMismatch
@@ -315,7 +324,6 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
     if state.phase == .dispatched || state.phase == .originalSucceeded {
       values.append(ExternalMutationPredecessorState(state))
     }
-    values.removeAll { $0.phase == .originalFailed }
     guard values.count <= Self.maximumPredecessors,
       Set(values.map(\.operationID)).count == values.count
     else { throw ExternalMutationJournalError.malformedState }
@@ -410,9 +418,10 @@ struct ExternalMutationPredecessorState: Codable, Equatable, Sendable {
   func validate() throws {
     guard try normalizeBootGeneration(bootGeneration) == bootGeneration,
       beganNanoseconds > 0,
-      phase == .dispatched || phase == .originalSucceeded || phase == .originalFailed,
-      dispatchedNanoseconds != nil,
-      dispatchedNanoseconds! >= beganNanoseconds,
+      phase == .prepared || phase == .dispatched || phase == .originalSucceeded
+        || phase == .originalFailed,
+      (phase == .prepared) == (dispatchedNanoseconds == nil),
+      dispatchedNanoseconds == nil || dispatchedNanoseconds! >= beganNanoseconds,
       (phase == .originalSucceeded || phase == .originalFailed)
         == (completionNanoseconds != nil),
       completionNanoseconds == nil || completionNanoseconds! >= dispatchedNanoseconds!
@@ -504,6 +513,8 @@ public struct ExternalMutationJournal: Sendable {
   private let failureInjection: ExternalMutationJournalFailureInjection
   private let afterInitialRecordRead:
     @Sendable (_ directory: Int32, _ name: String, _ descriptor: Int32) throws -> Void
+  private let afterInitialRecordLookup:
+    @Sendable (_ directory: Int32, _ name: String, _ descriptor: Int32) throws -> Void
   private let beforeFinalRecordLookup:
     @Sendable (_ directory: Int32, _ name: String, _ descriptor: Int32) throws -> Void
   private let injectedFinalLookupErrno: @Sendable (_ directory: Int32, _ name: String) -> Int32?
@@ -519,6 +530,7 @@ public struct ExternalMutationJournal: Sendable {
       currentBootGeneration: currentBootGeneration,
       failureInjection: .none,
       afterInitialRecordRead: { _, _, _ in },
+      afterInitialRecordLookup: { _, _, _ in },
       beforeFinalRecordLookup: { _, _, _ in },
       injectedFinalLookupErrno: { _, _ in nil }
     )
@@ -530,6 +542,12 @@ public struct ExternalMutationJournal: Sendable {
     currentBootGeneration: String,
     failureInjection: ExternalMutationJournalFailureInjection,
     afterInitialRecordRead:
+      @escaping @Sendable (
+        _ directory: Int32,
+        _ name: String,
+        _ descriptor: Int32
+      ) throws -> Void = { _, _, _ in },
+    afterInitialRecordLookup:
       @escaping @Sendable (
         _ directory: Int32,
         _ name: String,
@@ -549,6 +567,7 @@ public struct ExternalMutationJournal: Sendable {
     self.currentBootGeneration = try normalizeBootGeneration(currentBootGeneration)
     self.failureInjection = failureInjection
     self.afterInitialRecordRead = afterInitialRecordRead
+    self.afterInitialRecordLookup = afterInitialRecordLookup
     self.beforeFinalRecordLookup = beforeFinalRecordLookup
     self.injectedFinalLookupErrno = injectedFinalLookupErrno
     try binding.validate(runDirectory: runDirectory)
@@ -587,7 +606,7 @@ public struct ExternalMutationJournal: Sendable {
     guard !kind.isAdd else { throw ExternalMutationJournalError.invalidTransition }
     try finalizeProvablyInactive()
     var records = try loadRecords()
-    let predecessors = records[kind]?.unresolvedRemovalOperations ?? []
+    let predecessors = records[kind]?.removalSuccessorCohort ?? []
     guard predecessors.count <= ExternalMutationRecoveryState.maximumPredecessors else {
       throw ExternalMutationJournalError.unresolvedExternalMutation(
         kind,
@@ -884,34 +903,63 @@ public struct ExternalMutationJournal: Sendable {
         throw ExternalMutationJournalError.contentChanged
       }
       try requireMutationJournalNoExtendedACL(descriptor)
-      try beforeFinalRecordLookup(directory, name, descriptor)
 
-      if let injectedErrno = injectedFinalLookupErrno(directory, name) {
-        try throwFinalMutationRecordLookupError(injectedErrno)
-      }
-      var nameMetadata = stat()
-      guard fstatat(directory, name, &nameMetadata, AT_SYMLINK_NOFOLLOW) == 0 else {
+      var initialNameMetadata = stat()
+      guard fstatat(directory, name, &initialNameMetadata, AT_SYMLINK_NOFOLLOW) == 0 else {
         try throwFinalMutationRecordLookupError(errno)
       }
-      try requireSameMutationRecordObject(descriptorMetadata, nameMetadata)
-      try requireMutationJournalNoExtendedACL(descriptor)
+      try requireSameMutationRecordObject(descriptorMetadata, initialNameMetadata)
+      guard descriptorMetadata.st_size == initialNameMetadata.st_size else {
+        throw ExternalMutationJournalError.contentChanged
+      }
+      if mutationRecordMetadataChanged(descriptorMetadata, initialNameMetadata) {
+        guard attempt == 0 else {
+          throw ExternalMutationJournalError.revalidationUnstable
+        }
+        stableData = candidate
+        stableMetadata = initialNameMetadata
+        continue
+      }
+      try afterInitialRecordLookup(directory, name, descriptor)
+
+      guard lseek(descriptor, 0, SEEK_SET) == 0 else {
+        throw ExternalMutationJournalError.revalidationUnavailable(
+          "final-rewind-state", errno: errno)
+      }
+      let finalCandidate = try readExact(
+        descriptor: descriptor,
+        size: Int(descriptorMetadata.st_size)
+      )
       var finalDescriptorMetadata = stat()
       guard fstat(descriptor, &finalDescriptorMetadata) == 0 else {
         throw ExternalMutationJournalError.revalidationUnavailable(
           "final-restat-state", errno: errno)
       }
-      try requireSameMutationRecordObject(nameMetadata, finalDescriptorMetadata)
-      guard descriptorMetadata.st_size == nameMetadata.st_size,
-        nameMetadata.st_size == finalDescriptorMetadata.st_size
+      try requireSameMutationRecordObject(descriptorMetadata, finalDescriptorMetadata)
+      guard descriptorMetadata.st_size == finalDescriptorMetadata.st_size,
+        candidate == finalCandidate
       else { throw ExternalMutationJournalError.contentChanged }
+      try requireMutationJournalNoExtendedACL(descriptor)
+      try beforeFinalRecordLookup(directory, name, descriptor)
 
-      let finalWindowDrift =
-        mutationRecordMetadataChanged(
-          descriptorMetadata,
-          nameMetadata
-        ) || mutationRecordMetadataChanged(nameMetadata, finalDescriptorMetadata)
+      if let injectedErrno = injectedFinalLookupErrno(directory, name) {
+        try throwFinalMutationRecordLookupError(injectedErrno)
+      }
+      var finalNameMetadata = stat()
+      guard fstatat(directory, name, &finalNameMetadata, AT_SYMLINK_NOFOLLOW) == 0 else {
+        try throwFinalMutationRecordLookupError(errno)
+      }
+      try requireSameMutationRecordObject(finalDescriptorMetadata, finalNameMetadata)
+      guard finalDescriptorMetadata.st_size == finalNameMetadata.st_size else {
+        throw ExternalMutationJournalError.contentChanged
+      }
+
+      let finalWindowDrift = mutationRecordMetadataChanged(
+        finalDescriptorMetadata,
+        finalNameMetadata
+      )
       if !finalWindowDrift {
-        guard let decoded = try? JSONDecoder().decode(T.self, from: candidate) else {
+        guard let decoded = try? JSONDecoder().decode(T.self, from: finalCandidate) else {
           throw ExternalMutationJournalError.malformedState
         }
         return decoded
@@ -919,8 +967,8 @@ public struct ExternalMutationJournal: Sendable {
       guard attempt == 0 else {
         throw ExternalMutationJournalError.revalidationUnstable
       }
-      stableData = candidate
-      stableMetadata = finalDescriptorMetadata
+      stableData = finalCandidate
+      stableMetadata = finalNameMetadata
     }
     throw ExternalMutationJournalError.revalidationUnstable
   }
