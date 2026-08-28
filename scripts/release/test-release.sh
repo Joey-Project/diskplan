@@ -126,8 +126,24 @@ readonly VERSION
 # Reinstalling identical bytes is idempotent and does not disturb activation.
 "${BUNDLE}/install.sh" --prefix "${PREFIX}" "${BUNDLE}"
 
-# Installed access-policy drift is distinct from content mismatch and fails closed.
+# Timestamp churn is only a bounded rehash trigger and does not change the
+# identity/access-policy/SHA-256 bundle proof.
 readonly INSTALLED_VERSION="${PREFIX}/libexec/diskplan/${VERSION}"
+/usr/bin/touch "${INSTALLED_VERSION}/protocol.json"
+"${INSTALLED_VERSION}/activate.sh" --prefix "${PREFIX}" "${VERSION}" >/dev/null
+
+# In-place content drift changes the SHA-256 proof even if the object identity
+# and access policy remain unchanged. Restoring the exact bytes restores proof.
+/bin/cp "${INSTALLED_VERSION}/protocol.json" "${TEST_ROOT}/protocol-original"
+/usr/bin/printf '\n' >> "${INSTALLED_VERSION}/protocol.json"
+if "${INSTALLED_VERSION}/activate.sh" --prefix "${PREFIX}" "${VERSION}" >/dev/null 2>&1; then
+    echo "content-mutated installed metadata was accepted" >&2
+    exit 1
+fi
+/bin/cat "${TEST_ROOT}/protocol-original" > "${INSTALLED_VERSION}/protocol.json"
+"${INSTALLED_VERSION}/activate.sh" --prefix "${PREFIX}" "${VERSION}" >/dev/null
+
+# Installed access-policy drift is distinct from content mismatch and fails closed.
 /bin/chmod 0777 "${INSTALLED_VERSION}/diskplan-engine"
 if "${INSTALLED_VERSION}/activate.sh" --prefix "${PREFIX}" "${VERSION}" >/dev/null 2>&1; then
     echo "world-writable installed engine was accepted" >&2
@@ -223,6 +239,24 @@ build_fs_helper() {
         "${SCRIPT_DIR}/diskplan-fs-helper.c" \
         -o "${output}"
 }
+
+build_fs_helper_tests() {
+    local output="$1"
+    /usr/bin/xcrun clang \
+        -arch arm64 \
+        -mmacosx-version-min=14.0 \
+        -std=c11 \
+        -Os \
+        -Wall \
+        -Wextra \
+        -Werror \
+        "${SCRIPT_DIR}/diskplan-fs-helper-tests.c" \
+        -o "${output}"
+}
+
+build_fs_helper_tests "${TEST_ROOT}/diskplan-fs-helper-tests"
+mkdir "${TEST_ROOT}/fs-helper-test-root"
+"${TEST_ROOT}/diskplan-fs-helper-tests" "${TEST_ROOT}/fs-helper-test-root"
 
 make_fixture_bundle() {
     local version="$1"

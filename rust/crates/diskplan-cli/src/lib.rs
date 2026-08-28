@@ -2,10 +2,13 @@
 
 pub mod tui;
 
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,6 +20,8 @@ use diskplan_proto::diskplan::v1::{
     StartScanRequest, envelope,
 };
 use prost::Message;
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 use thiserror::Error;
 
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -25,8 +30,243 @@ const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const EXIT_OBSERVATION_GRACE: Duration = Duration::from_millis(50);
 const HANDSHAKE_SEQUENCE: u64 = 1;
 const FRAME_QUEUE_CAPACITY: usize = 1;
+const MAX_ENGINE_BYTES: u64 = 512 * 1024 * 1024;
 
 type FrameResult = Result<Option<Vec<u8>>, FrameError>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EngineObjectIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    link_count: u64,
+    size: u64,
+}
+
+impl EngineObjectIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
+        if !metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine is not a regular file",
+            ));
+        }
+        let mode = metadata.mode();
+        if mode & 0o022 != 0 || mode & 0o111 == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "engine access policy is unsafe",
+            ));
+        }
+        if metadata.nlink() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine must have exactly one filesystem link",
+            ));
+        }
+        if metadata.size() > MAX_ENGINE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine exceeds the executable size limit",
+            ));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            link_count: metadata.nlink(),
+            size: metadata.size(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LaunchDirectoryIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+}
+
+impl LaunchDirectoryIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
+        if !metadata.file_type().is_dir() || metadata.mode() & 0o777 != 0o700 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private engine launch directory access policy is unsafe",
+            ));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BoundEngine {
+    source_file: Arc<File>,
+    source_identity: EngineObjectIdentity,
+    source_sha256: [u8; 32],
+    launch_root: Arc<TempDir>,
+    launch_root_identity: LaunchDirectoryIdentity,
+    launch_file: Arc<File>,
+    launch_identity: EngineObjectIdentity,
+    launch_sha256: [u8; 32],
+    launch_path: PathBuf,
+}
+
+impl BoundEngine {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        // Protected properties: the descriptor fixes object identity, exact Unix
+        // metadata fixes the launch access policy, and SHA-256 fixes content.
+        // The pathname is never used again after this no-follow open.
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        let source_identity = EngineObjectIdentity::from_metadata(&file.metadata()?)?;
+        let source_sha256 = digest_file(&file)?;
+        if EngineObjectIdentity::from_metadata(&file.metadata()?)? != source_identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine identity or access policy changed while binding content",
+            ));
+        }
+        let launch_root = tempfile::Builder::new()
+            .prefix("diskplan-engine-launch.")
+            .tempdir()?;
+        std::fs::set_permissions(launch_root.path(), std::fs::Permissions::from_mode(0o700))?;
+        let launch_root_identity =
+            LaunchDirectoryIdentity::from_metadata(&launch_root.path().symlink_metadata()?)?;
+        let launch_path = launch_root.path().join("diskplan-engine");
+        let mut launch_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&launch_path)?;
+        copy_exact_file(&file, &mut launch_file, source_identity.size)?;
+        launch_file.flush()?;
+        launch_file.set_permissions(std::fs::Permissions::from_mode(0o500))?;
+        launch_file.sync_all()?;
+        let launch_identity = EngineObjectIdentity::from_metadata(&launch_file.metadata()?)?;
+        let launch_sha256 = digest_file(&launch_file)?;
+        if launch_sha256 != source_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private engine launch snapshot does not match bound source content",
+            ));
+        }
+        if EngineObjectIdentity::from_metadata(&file.metadata()?)? != source_identity
+            || digest_file(&file)? != source_sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine changed while creating its private launch snapshot",
+            ));
+        }
+        Ok(Self {
+            source_file: Arc::new(file),
+            source_identity,
+            source_sha256,
+            launch_root: Arc::new(launch_root),
+            launch_root_identity,
+            launch_file: Arc::new(launch_file),
+            launch_identity,
+            launch_sha256,
+            launch_path,
+        })
+    }
+
+    pub fn command(&self) -> io::Result<Command> {
+        self.revalidate()?;
+        Ok(Command::new(&self.launch_path))
+    }
+
+    pub fn revalidate(&self) -> io::Result<()> {
+        let current = EngineObjectIdentity::from_metadata(&self.source_file.metadata()?)?;
+        if current != self.source_identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bound engine identity or access policy changed",
+            ));
+        }
+        if digest_file(&self.source_file)? != self.source_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bound engine content changed",
+            ));
+        }
+        if LaunchDirectoryIdentity::from_metadata(&self.launch_root.path().symlink_metadata()?)?
+            != self.launch_root_identity
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private engine launch directory identity or access policy changed",
+            ));
+        }
+        let launch_current = EngineObjectIdentity::from_metadata(&self.launch_file.metadata()?)?;
+        if launch_current != self.launch_identity
+            || digest_file(&self.launch_file)? != self.launch_sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private engine launch snapshot changed",
+            ));
+        }
+        let launch_slot = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&self.launch_path)?;
+        if EngineObjectIdentity::from_metadata(&launch_slot.metadata()?)? != self.launch_identity
+            || digest_file(&launch_slot)? != self.launch_sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private engine launch pathname no longer selects the bound snapshot",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn copy_exact_file(source: &File, destination: &mut File, expected_size: u64) -> io::Result<()> {
+    let mut reader = source.try_clone()?;
+    reader.seek(SeekFrom::Start(0))?;
+    let copied = io::copy(&mut reader.take(expected_size + 1), destination)?;
+    if copied != expected_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "engine size changed while creating its private launch snapshot",
+        ));
+    }
+    Ok(())
+}
+
+fn digest_file(file: &File) -> io::Result<[u8; 32]> {
+    let mut reader = file.try_clone()?;
+    reader.seek(SeekFrom::Start(0))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest.finalize().into())
+}
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -107,6 +347,18 @@ impl EngineSession {
 
     pub fn connect_with_timeout(engine: &Path, timeout: Duration) -> Result<Self, ClientError> {
         let mut command = Command::new(engine);
+        Self::spawn_command(&mut command, timeout)
+    }
+
+    pub fn connect_bound(engine: &BoundEngine) -> Result<Self, ClientError> {
+        Self::connect_bound_with_timeout(engine, DEFAULT_HANDSHAKE_TIMEOUT)
+    }
+
+    pub fn connect_bound_with_timeout(
+        engine: &BoundEngine,
+        timeout: Duration,
+    ) -> Result<Self, ClientError> {
+        let mut command = engine.command()?;
         Self::spawn_command(&mut command, timeout)
     }
 
@@ -504,6 +756,13 @@ fn spawn_reaper() -> io::Result<SyncSender<Child>> {
 
 pub fn handshake_with_engine(engine: &Path) -> Result<Vec<String>, ClientError> {
     let session = EngineSession::connect(engine)?;
+    let capabilities = session.accepted().negotiated_capabilities.clone();
+    session.shutdown()?;
+    Ok(capabilities)
+}
+
+pub fn handshake_with_bound_engine(engine: &BoundEngine) -> Result<Vec<String>, ClientError> {
+    let session = EngineSession::connect_bound(engine)?;
     let capabilities = session.accepted().negotiated_capabilities.clone();
     session.shutdown()?;
     Ok(capabilities)

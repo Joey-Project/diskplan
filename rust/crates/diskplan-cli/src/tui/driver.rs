@@ -1,12 +1,11 @@
 use std::io;
-use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use diskplan_proto::diskplan::v1::engine_event;
 
-use crate::{ClientError, EngineSession};
+use crate::{BoundEngine, ClientError, EngineSession};
 
 use super::event::{EngineEventIngress, EngineEventStream, engine_event_channel};
 use super::model::ControlCommand;
@@ -25,8 +24,8 @@ pub struct EngineDriver {
 }
 
 impl EngineDriver {
-    pub fn spawn(engine: &Path) -> io::Result<(Self, EngineEventStream)> {
-        let engine = engine.to_owned();
+    pub fn spawn(engine: &BoundEngine) -> io::Result<(Self, EngineEventStream)> {
+        let engine = engine.clone();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = engine_event_channel(SEMANTIC_EVENT_CAPACITY)?;
         let worker = thread::Builder::new()
@@ -73,11 +72,11 @@ impl Drop for EngineDriver {
 }
 
 fn run_engine(
-    engine: &Path,
+    engine: &BoundEngine,
     commands: Receiver<DriverCommand>,
     events: &EngineEventIngress,
 ) -> Result<(), ClientError> {
-    let mut session = EngineSession::connect(engine)?;
+    let mut session = EngineSession::connect_bound(engine)?;
     if !session
         .accepted()
         .negotiated_capabilities

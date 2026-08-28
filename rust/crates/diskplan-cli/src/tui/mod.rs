@@ -17,6 +17,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use thiserror::Error;
 
+use crate::BoundEngine;
+
 use self::app::run_application;
 use self::driver::EngineDriver;
 use self::event::TerminalEventSource;
@@ -28,6 +30,11 @@ pub enum TuiError {
 }
 
 pub async fn run(engine: &Path) -> Result<(), TuiError> {
+    let engine = BoundEngine::open(engine)?;
+    run_bound(&engine).await
+}
+
+pub async fn run_bound(engine: &BoundEngine) -> Result<(), TuiError> {
     let (mut driver, engine_events) = EngineDriver::spawn(engine)?;
     let mut guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;

@@ -77,12 +77,17 @@ directory, explicitly normalizes the copy to the caller's uid/gid and exact
 packaged mode, and revalidates type, owner, group, mode, link count, ACL, flags,
 size, and content before publication.
 
-The helper also holds no-follow descriptors for the managed ancestor chain. It
-rejects symbolic-link ancestors and access-policy drift, publishes a new
-immutable version with an exclusive same-filesystem rename, proves the published
-directory is the verified staging object, and conditionally replaces only the
-launcher leaf it observed. Existing versions are retained. Roll back by
-activating one verified installed version:
+The helper also holds no-follow descriptors for the complete managed ancestor
+chain. It reopens every child slot relative to its retained parent and
+revalidates object identity, owner/group/mode/flags/ACL access policy, device,
+filesystem identity, mount boundary, and security-relevant mount flags. An
+ancestor replacement or mount-over therefore fails closed. Bundle content proof
+uses artifact identity, access policy, size, and SHA-256; mtime and ctime changes
+only trigger one bounded reopen and rehash and are never treated as content
+proof. The helper publishes a new immutable version with an exclusive
+same-filesystem rename, proves the published directory is the verified staging
+object, and conditionally replaces only the launcher leaf it observed. Existing
+versions are retained. Roll back by activating one verified installed version:
 
 ```sh
 ~/.local/libexec/diskplan/<old-version>/activate.sh <old-version>
@@ -99,6 +104,15 @@ replacement cannot redirect it:
 Use `--prefix /absolute/path` with any lifecycle script for an isolated install.
 The installer never calls `sudo`, modifies TCC, or removes an older version.
 
+The Rust launcher opens the selected engine once with `O_NOFOLLOW`, binds its
+object identity, access policy, and SHA-256, then creates one bounded exact copy
+inside an owner-private launch directory. The exact product/protocol identity
+probe and operational session both execute that same retained snapshot. Before
+each launch it revalidates the source descriptor, snapshot descriptor, private
+directory, and snapshot pathname slot. Replacing the original engine pathname
+between launches cannot redirect execution; unlink or hard-link drift
+separately invalidates the source one-link policy.
+
 ## Release Tests
 
 Validate an already-built archive with:
@@ -113,8 +127,9 @@ sibling-engine launch, checksum rejection, upgrade, rollback activation,
 protocol-major mismatch rejection, and exact uninstall. Its adversarial cases
 cover symlinked prefix ancestors, replacement races, artifact mode drift, stale
 lifecycle locks on the system Bash 3.2 runtime, launcher activation races,
-hostile packager output leaves, closed-output timeouts, signal cancellation, and
-background descendants.
+hostile packager output leaves, engine probe-to-launch replacement, ancestor and
+mount-boundary revalidation, timestamp-only churn, SHA-256 content drift,
+closed-output timeouts, signal cancellation, and background descendants.
 
 ## India Host Acceptance
 

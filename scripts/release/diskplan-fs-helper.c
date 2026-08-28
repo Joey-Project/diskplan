@@ -2,6 +2,7 @@
 
 #include <CommonCrypto/CommonDigest.h>
 #include <sys/acl.h>
+#include <sys/mount.h>
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -44,10 +45,12 @@
  *
  * - Object identity is st_dev + st_ino + st_gen from descriptors opened with
  *   O_NOFOLLOW, or from fstatat(AT_SYMLINK_NOFOLLOW) for a symlink leaf.
- * - Content stability is an exact SHA-256 tree proof plus stable size, mode,
- *   owner, link count, mtime, and ctime before/after every descriptor read.
+ * - Content stability is an exact SHA-256 tree proof plus stable size. Mtime
+ *   and ctime only trigger one bounded reopen and rehash; they are not proof.
  * - Access policy is the effective-UID owner, exact managed modes, one link for
- *   regular files, no extended ACL, and no immutable/append flags.
+ *   regular files, no extended ACL, no immutable/append flags, and stable
+ *   mount access flags. Managed-prefix traversal retains every ancestor and
+ *   revalidates each child slot, filesystem identity, and mount boundary.
  *
  * Directory child churn is not itself treated as content mutation. Exact entry
  * enumeration and the per-leaf signals above establish the selected property.
@@ -373,8 +376,8 @@ static void require_archive_regular_policy(int fd, mode_t expected_mode, const c
 
 static void validate_absolute_path(const char *path) {
     size_t length = strlen(path);
-    if (length < 2 || path[0] != '/' || path[length - 1] == '/' || strchr(path, '\n') != NULL ||
-        strstr(path, "//") != NULL) {
+    if (length < 2 || length >= PATH_MAX || path[0] != '/' || path[length - 1] == '/' ||
+        strchr(path, '\n') != NULL || strstr(path, "//") != NULL) {
         fatal("path must be a normalized single-line absolute path other than /");
     }
     const char *cursor = path + 1;
@@ -387,6 +390,261 @@ static void validate_absolute_path(const char *path) {
         }
         cursor = slash == NULL ? cursor + component_length : slash + 1;
     }
+}
+
+struct directory_binding {
+    int fd;
+    char *name;
+    struct stat metadata;
+    fsid_t filesystem_id;
+    fsid_t parent_filesystem_id;
+    unsigned long mount_access_flags;
+    char *acl_text;
+    dev_t parent_device;
+    bool crosses_device;
+    bool crosses_mount;
+};
+
+struct path_binding {
+    struct directory_binding *entries;
+    size_t count;
+    size_t capacity;
+};
+
+static char *directory_acl_text(int fd) {
+    errno = 0;
+    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+    if (acl == NULL) {
+        if (errno == ENOENT || errno == ENOTSUP) {
+            char *empty = strdup("");
+            if (empty == NULL) fatal_errno("cannot allocate empty ACL binding");
+            return empty;
+        }
+        fatal_errno("cannot read directory access-control list");
+    }
+    ssize_t length = 0;
+    char *text = acl_to_text(acl, &length);
+    if (text == NULL || length < 0) {
+        if (text != NULL) acl_free(text);
+        acl_free(acl);
+        fatal_errno("cannot serialize directory access-control list");
+    }
+    char *copy = strndup(text, (size_t)length);
+    acl_free(text);
+    acl_free(acl);
+    if (copy == NULL) fatal_errno("cannot allocate directory ACL binding");
+    return copy;
+}
+
+static bool same_directory_access(const struct stat *left, const struct stat *right) {
+    return same_object(left, right) && S_ISDIR(right->st_mode) &&
+           left->st_mode == right->st_mode && left->st_uid == right->st_uid &&
+           left->st_gid == right->st_gid && left->st_flags == right->st_flags;
+}
+
+static bool same_filesystem_id(fsid_t left, fsid_t right) {
+    return memcmp(&left, &right, sizeof(left)) == 0;
+}
+
+static unsigned long selected_mount_access_flags(const struct statfs *metadata) {
+    return (unsigned long)metadata->f_flags &
+           (MNT_RDONLY | MNT_NOEXEC | MNT_NOSUID | MNT_NODEV);
+}
+
+static void append_directory_binding(struct path_binding *binding, int fd, const char *name,
+                                     dev_t parent_device, fsid_t parent_filesystem_id) {
+    if (binding->count >= binding->capacity)
+        fatal("absolute path contains too many components");
+    struct directory_binding *entry = &binding->entries[binding->count];
+    if (fstat(fd, &entry->metadata) != 0 || !S_ISDIR(entry->metadata.st_mode))
+        fatal_errno("cannot bind directory component metadata");
+    struct statfs filesystem;
+    if (fstatfs(fd, &filesystem) != 0)
+        fatal_errno("cannot bind directory component filesystem");
+    entry->fd = fd;
+    entry->name = name == NULL ? NULL : strdup(name);
+    if (name != NULL && entry->name == NULL)
+        fatal_errno("cannot allocate directory component binding");
+    entry->acl_text = directory_acl_text(fd);
+    entry->filesystem_id = filesystem.f_fsid;
+    entry->parent_filesystem_id = parent_filesystem_id;
+    entry->mount_access_flags = selected_mount_access_flags(&filesystem);
+    entry->parent_device = parent_device;
+    entry->crosses_device = entry->metadata.st_dev != parent_device;
+    entry->crosses_mount = !same_filesystem_id(entry->filesystem_id, parent_filesystem_id);
+    binding->count += 1;
+}
+
+enum path_binding_result {
+    PATH_BINDING_MATCHES,
+    PATH_BINDING_MISSING,
+    PATH_BINDING_MISMATCH,
+    PATH_BINDING_FAILED,
+};
+
+static enum path_binding_result path_binding_failure(int saved_errno) {
+    errno = saved_errno;
+    return PATH_BINDING_FAILED;
+}
+
+static enum path_binding_result check_path_binding(const struct path_binding *binding) {
+    if (binding->count == 0) return PATH_BINDING_MISMATCH;
+    dev_t previous_device = 0;
+    fsid_t previous_filesystem_id;
+    memset(&previous_filesystem_id, 0, sizeof(previous_filesystem_id));
+    for (size_t index = 0; index < binding->count; ++index) {
+        const struct directory_binding *entry = &binding->entries[index];
+        struct stat current;
+        struct statfs current_filesystem;
+        if (fstat(entry->fd, &current) != 0) return path_binding_failure(errno);
+        if (!same_directory_access(&entry->metadata, &current))
+            return PATH_BINDING_MISMATCH;
+        if (fstatfs(entry->fd, &current_filesystem) != 0)
+            return path_binding_failure(errno);
+        if (!same_filesystem_id(entry->filesystem_id, current_filesystem.f_fsid) ||
+            entry->mount_access_flags != selected_mount_access_flags(&current_filesystem))
+            return PATH_BINDING_MISMATCH;
+        char *acl_text = directory_acl_text(entry->fd);
+        bool acl_matches = strcmp(entry->acl_text, acl_text) == 0;
+        free(acl_text);
+        if (!acl_matches) return PATH_BINDING_MISMATCH;
+
+        int reopened;
+        struct stat slot_metadata = {0};
+        if (index == 0)
+            reopened = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        else {
+            if (fstatat(binding->entries[index - 1].fd, entry->name, &slot_metadata,
+                        AT_SYMLINK_NOFOLLOW) != 0) {
+                if (errno == ENOENT) return PATH_BINDING_MISSING;
+                return path_binding_failure(errno);
+            }
+            if (!same_directory_access(&entry->metadata, &slot_metadata))
+                return PATH_BINDING_MISMATCH;
+            reopened = openat(binding->entries[index - 1].fd, entry->name,
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        }
+        if (reopened < 0) {
+            if (errno == ENOENT) return PATH_BINDING_MISSING;
+            if (errno == ELOOP || errno == ENOTDIR) return PATH_BINDING_MISMATCH;
+            return path_binding_failure(errno);
+        }
+        struct stat reopened_metadata;
+        struct statfs reopened_filesystem;
+        if (fstat(reopened, &reopened_metadata) != 0) {
+            int saved = errno;
+            close(reopened);
+            return path_binding_failure(saved);
+        }
+        bool matches = same_directory_access(&entry->metadata, &reopened_metadata) &&
+                       (index == 0 || same_object(&slot_metadata, &reopened_metadata));
+        if (matches && fstatfs(reopened, &reopened_filesystem) != 0) {
+            int saved = errno;
+            close(reopened);
+            return path_binding_failure(saved);
+        }
+        if (matches)
+            matches = same_filesystem_id(entry->filesystem_id,
+                                         reopened_filesystem.f_fsid) &&
+                      entry->mount_access_flags ==
+                          selected_mount_access_flags(&reopened_filesystem);
+        if (matches) {
+            char *reopened_acl = directory_acl_text(reopened);
+            matches = strcmp(entry->acl_text, reopened_acl) == 0;
+            free(reopened_acl);
+        }
+        int close_result = close(reopened);
+        if (!matches) return PATH_BINDING_MISMATCH;
+        if (close_result != 0) return path_binding_failure(errno);
+        dev_t current_parent_device = index == 0 ? current.st_dev : previous_device;
+        fsid_t current_parent_filesystem_id =
+            index == 0 ? current_filesystem.f_fsid : previous_filesystem_id;
+        if (entry->parent_device != current_parent_device ||
+            entry->crosses_device != (current.st_dev != current_parent_device) ||
+            !same_filesystem_id(entry->parent_filesystem_id,
+                                current_parent_filesystem_id) ||
+            entry->crosses_mount != !same_filesystem_id(current_filesystem.f_fsid,
+                                                        current_parent_filesystem_id))
+            return PATH_BINDING_MISMATCH;
+        previous_device = current.st_dev;
+        previous_filesystem_id = current_filesystem.f_fsid;
+    }
+    return PATH_BINDING_MATCHES;
+}
+
+static void require_current_path_binding(const struct path_binding *binding) {
+    switch (check_path_binding(binding)) {
+        case PATH_BINDING_MATCHES:
+            return;
+        case PATH_BINDING_MISSING:
+            fatal("managed prefix ancestor or child slot is missing");
+            return;
+        case PATH_BINDING_MISMATCH:
+            fatal("managed prefix ancestor identity, access policy, or mount boundary changed");
+            return;
+        case PATH_BINDING_FAILED:
+            fatal_errno("cannot revalidate managed prefix ancestor chain");
+            return;
+    }
+}
+
+static void close_path_binding(struct path_binding *binding) {
+    for (size_t index = binding->count; index > 0; --index) {
+        struct directory_binding *entry = &binding->entries[index - 1];
+        if (entry->fd >= 0) close(entry->fd);
+        free(entry->name);
+        free(entry->acl_text);
+    }
+    free(binding->entries);
+    binding->entries = NULL;
+    binding->count = binding->capacity = 0;
+}
+
+static struct path_binding bind_absolute_directory(const char *path, bool create) {
+    validate_absolute_path(path);
+    struct path_binding binding = {0};
+    binding.capacity = strlen(path) + 1;
+    binding.entries = calloc(binding.capacity, sizeof(*binding.entries));
+    if (binding.entries == NULL) fatal_errno("cannot allocate absolute path binding");
+    int current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (current < 0) fatal_errno("cannot open filesystem root");
+    struct stat root_metadata;
+    struct statfs root_filesystem;
+    if (fstat(current, &root_metadata) != 0) fatal_errno("cannot stat filesystem root");
+    if (fstatfs(current, &root_filesystem) != 0)
+        fatal_errno("cannot stat filesystem root mount");
+    append_directory_binding(&binding, current, NULL, root_metadata.st_dev,
+                             root_filesystem.f_fsid);
+
+    char *copy = strdup(path + 1);
+    if (copy == NULL) fatal_errno("cannot allocate path buffer");
+    char *state = NULL;
+    for (char *component = strtok_r(copy, "/", &state); component != NULL;
+         component = strtok_r(NULL, "/", &state)) {
+        int next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0 && errno == ENOENT && create) {
+            bool created = mkdirat(current, component, 0755) == 0;
+            if (!created && errno != EEXIST) fatal_errno("cannot create path component");
+            next = openat(current, component,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (created && next >= 0 && fchmod(next, 0755) != 0)
+                fatal_errno("cannot set path component mode");
+            if (fsync(current) != 0) fatal_errno("cannot sync created path component");
+        }
+        if (next < 0) fatal_errno("cannot open path component without following links");
+        struct stat slot, child;
+        if (fstatat(current, component, &slot, AT_SYMLINK_NOFOLLOW) != 0 ||
+            fstat(next, &child) != 0 || !same_object(&slot, &child) ||
+            !S_ISDIR(slot.st_mode))
+            fatal("directory child slot identity changed while binding");
+        append_directory_binding(&binding, next, component,
+                                 binding.entries[binding.count - 1].metadata.st_dev,
+                                 binding.entries[binding.count - 1].filesystem_id);
+        current = next;
+    }
+    free(copy);
+    require_current_path_binding(&binding);
+    return binding;
 }
 
 static int open_absolute_directory(const char *path, bool create) {
@@ -455,6 +713,7 @@ static int ensure_directory_at(int parent, const char *name, mode_t mode, bool s
 }
 
 struct managed {
+    struct path_binding prefix_path;
     int prefix;
     int bin;
     int libexec;
@@ -464,6 +723,7 @@ struct managed {
 static void close_managed(struct managed *managed);
 
 static void managed_identity_string(const struct managed *managed, char output[1024]) {
+    require_current_path_binding(&managed->prefix_path);
     require_directory_policy(managed->prefix, 0, false);
     require_directory_policy(managed->bin, 0755, false);
     require_directory_policy(managed->libexec, 0755, false);
@@ -477,12 +737,18 @@ static void managed_identity_string(const struct managed *managed, char output[1
     require_directory_policy(managed->bin, 0755, false);
     require_directory_policy(managed->libexec, 0755, false);
     require_directory_policy(managed->root, 0700, true);
+    require_current_path_binding(&managed->prefix_path);
     snprintf(output, 1024, "v1|%s|%s|%s|%s", prefix, bin, libexec, root);
 }
 
 static struct managed open_managed(const char *path, const char *prefix_identity, bool create) {
-    struct managed result = {-1, -1, -1, -1};
-    result.prefix = open_absolute_directory(path, create);
+    struct managed result = {.prefix_path = {0},
+                             .prefix = -1,
+                             .bin = -1,
+                             .libexec = -1,
+                             .root = -1};
+    result.prefix_path = bind_absolute_directory(path, create);
+    result.prefix = result.prefix_path.entries[result.prefix_path.count - 1].fd;
     require_directory_policy(result.prefix, 0, false);
     result.bin = ensure_directory_at(result.prefix, "bin", 0755, true, create);
     result.libexec = ensure_directory_at(result.prefix, "libexec", 0755, true, create);
@@ -499,10 +765,11 @@ static struct managed open_managed(const char *path, const char *prefix_identity
 }
 
 static void close_managed(struct managed *managed) {
+    require_current_path_binding(&managed->prefix_path);
     if (managed->root >= 0) close(managed->root);
     if (managed->libexec >= 0) close(managed->libexec);
     if (managed->bin >= 0) close(managed->bin);
-    if (managed->prefix >= 0) close(managed->prefix);
+    close_path_binding(&managed->prefix_path);
     managed->root = managed->libexec = managed->bin = managed->prefix = -1;
 }
 
@@ -633,6 +900,95 @@ static void hash_u64(CC_SHA256_CTX *context, uint64_t value) {
     hash_bytes(context, encoded, sizeof(encoded));
 }
 
+static bool same_artifact_protected_properties(const struct stat *left,
+                                               const struct stat *right) {
+    return same_object(left, right) && left->st_mode == right->st_mode &&
+           left->st_uid == right->st_uid && left->st_gid == right->st_gid &&
+           left->st_nlink == right->st_nlink && left->st_flags == right->st_flags;
+}
+
+static bool same_artifact_timestamps(const struct stat *left, const struct stat *right) {
+    return timespec_equal(left->st_mtimespec, right->st_mtimespec) &&
+           timespec_equal(left->st_ctimespec, right->st_ctimespec);
+}
+
+static void digest_artifact_fd(int fd, off_t maximum_size,
+                               unsigned char output[CC_SHA256_DIGEST_LENGTH], off_t *size) {
+    CC_SHA256_CTX digest;
+    if (CC_SHA256_Init(&digest) != 1) fatal("cannot initialize artifact digest");
+    unsigned char buffer[64 * 1024];
+    ssize_t count;
+    off_t consumed = 0;
+    while ((count = read(fd, buffer, sizeof(buffer))) > 0) {
+        consumed += count;
+        if (consumed > maximum_size) fatal("bundle artifact grew beyond its packaged size limit");
+        hash_bytes(&digest, buffer, (size_t)count);
+    }
+    if (count < 0) fatal_errno("cannot read bundle artifact");
+    if (CC_SHA256_Final(output, &digest) != 1) fatal("cannot finalize artifact digest");
+    *size = consumed;
+}
+
+struct artifact_proof {
+    struct stat metadata;
+    off_t content_size;
+    unsigned char sha256[CC_SHA256_DIGEST_LENGTH];
+};
+
+static void capture_artifact_proof(int directory, size_t index, bool archive_source,
+                                   struct artifact_proof *proof) {
+    struct stat first_before = {0};
+    unsigned char first_digest[CC_SHA256_DIGEST_LENGTH] = {0};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        int fd = archive_source ? open_archive_artifact(directory, index, O_RDONLY)
+                                : open_artifact(directory, index, O_RDONLY);
+        struct stat before;
+        if (fstat(fd, &before) != 0) {
+            close(fd);
+            fatal_errno("cannot stat bundle artifact");
+        }
+        if (attempt == 0)
+            first_before = before;
+        else if (!same_artifact_protected_properties(&first_before, &before)) {
+            close(fd);
+            fatal("bundle artifact identity or access policy changed before bounded rehash");
+        }
+
+        off_t content_size = 0;
+        unsigned char content_digest[CC_SHA256_DIGEST_LENGTH];
+        digest_artifact_fd(fd, k_artifacts[index].maximum_size, content_digest, &content_size);
+        struct stat after;
+        if (fstat(fd, &after) != 0) {
+            close(fd);
+            fatal_errno("cannot restat bundle artifact");
+        }
+        if (archive_source)
+            require_archive_regular_policy(fd, k_artifacts[index].mode, k_artifacts[index].name);
+        else
+            require_regular_policy(fd, k_artifacts[index].mode);
+        close(fd);
+        if (!same_artifact_protected_properties(&before, &after))
+            fatal("bundle artifact identity or access policy changed while hashing");
+        bool stable_observation = before.st_size == after.st_size &&
+                                  after.st_size == content_size &&
+                                  same_artifact_timestamps(&before, &after);
+        if (attempt == 0) {
+            memcpy(first_digest, content_digest, sizeof(first_digest));
+            if (!stable_observation) continue;
+        } else {
+            if (memcmp(first_digest, content_digest, sizeof(first_digest)) != 0)
+                fatal("bundle artifact content changed during bounded rehash");
+            if (!stable_observation)
+                fatal("bundle artifact timestamps did not stabilize during bounded rehash");
+        }
+        proof->metadata = after;
+        proof->content_size = content_size;
+        memcpy(proof->sha256, content_digest, sizeof(proof->sha256));
+        return;
+    }
+    fatal("bundle artifact could not be proven stable");
+}
+
 static void bundle_proof(int directory, bool managed_exact, bool archive_source,
                          char output[256]) {
     if (archive_source)
@@ -648,54 +1004,20 @@ static void bundle_proof(int directory, bool managed_exact, bool archive_source,
     if (CC_SHA256_Init(&digest) != 1) {
         fatal("cannot initialize bundle digest");
     }
-    unsigned char buffer[64 * 1024];
     for (size_t index = 0; index < k_artifact_count; ++index) {
-        int fd = archive_source ? open_archive_artifact(directory, index, O_RDONLY)
-                                : open_artifact(directory, index, O_RDONLY);
-        struct stat before;
-        if (fstat(fd, &before) != 0) {
-            close(fd);
-            fatal_errno("cannot stat bundle artifact");
-        }
+        struct artifact_proof proof;
+        capture_artifact_proof(directory, index, archive_source, &proof);
         hash_bytes(&digest, k_artifacts[index].name, strlen(k_artifacts[index].name) + 1);
-        hash_u64(&digest, (uint64_t)before.st_dev);
-        hash_u64(&digest, before.st_ino);
-        hash_u64(&digest, before.st_gen);
-        hash_u64(&digest, (uint64_t)before.st_mode);
-        hash_u64(&digest, before.st_uid);
-        hash_u64(&digest, before.st_gid);
-        hash_u64(&digest, before.st_size);
-        hash_u64(&digest, before.st_mtimespec.tv_sec);
-        hash_u64(&digest, before.st_mtimespec.tv_nsec);
-        hash_u64(&digest, before.st_ctimespec.tv_sec);
-        hash_u64(&digest, before.st_ctimespec.tv_nsec);
-        ssize_t count;
-        off_t consumed = 0;
-        while ((count = read(fd, buffer, sizeof(buffer))) > 0) {
-            consumed += count;
-            if (consumed > k_artifacts[index].maximum_size) {
-                close(fd);
-                fatal("bundle artifact grew beyond its packaged size limit");
-            }
-            hash_bytes(&digest, buffer, (size_t)count);
-        }
-        if (count < 0) {
-            close(fd);
-            fatal_errno("cannot read bundle artifact");
-        }
-        struct stat after;
-        if (fstat(fd, &after) != 0) {
-            close(fd);
-            fatal_errno("cannot restat bundle artifact");
-        }
-        if (archive_source)
-            require_archive_regular_policy(fd, k_artifacts[index].mode, k_artifacts[index].name);
-        else
-            require_regular_policy(fd, k_artifacts[index].mode);
-        close(fd);
-        if (!same_content_signals(&before, &after)) {
-            fatal("bundle artifact changed while it was read");
-        }
+        hash_u64(&digest, (uint64_t)proof.metadata.st_dev);
+        hash_u64(&digest, proof.metadata.st_ino);
+        hash_u64(&digest, proof.metadata.st_gen);
+        hash_u64(&digest, (uint64_t)proof.metadata.st_mode);
+        hash_u64(&digest, proof.metadata.st_uid);
+        hash_u64(&digest, proof.metadata.st_gid);
+        hash_u64(&digest, proof.metadata.st_nlink);
+        hash_u64(&digest, proof.metadata.st_flags);
+        hash_u64(&digest, (uint64_t)proof.content_size);
+        hash_bytes(&digest, proof.sha256, sizeof(proof.sha256));
     }
     unsigned char result[CC_SHA256_DIGEST_LENGTH];
     if (CC_SHA256_Final(result, &digest) != 1) {

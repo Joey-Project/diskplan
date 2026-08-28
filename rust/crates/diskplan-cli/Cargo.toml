@@ -10,11 +10,13 @@ crossterm.workspace = true
 diskplan-core = { path = "../diskplan-core" }
 diskplan-proto = { path = "../diskplan-proto" }
 futures-util.workspace = true
+libc.workspace = true
 prost.workspace = true
 ratatui.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-tempfile.workspace = true

@@ -42,6 +42,18 @@ superseded_by:
 - Repeated bundle enumeration reopens `.` relative to the held directory FD and
   verifies object identity, avoiding the shared directory offset created by
   `dup(2)` while preserving no-follow binding.
+- Managed-prefix traversal now retains the complete root-to-prefix descriptor
+  chain and revalidates every child slot, object/access-policy identity,
+  device/filesystem boundary, and security-relevant mount flags. Missing,
+  mismatched, and failed revalidation remain distinct outcomes.
+- The frontend binds the no-follow engine source by identity, access policy, and
+  SHA-256, creates one bounded owner-private executable snapshot, and uses that
+  same snapshot for the product/protocol probe and operational session. Source,
+  private-directory, snapshot-descriptor, and snapshot-slot drift fail closed.
+- Bundle proof no longer hashes timestamps. Mtime or ctime movement triggers at
+  most one reopen and rehash; final proof binds identity, access policy, size,
+  and SHA-256, so benign `touch` churn is accepted while content or policy drift
+  is rejected.
 
 ## Next Steps
 
@@ -66,3 +78,11 @@ superseded_by:
   engine handshake; Cargo workspace check and warning-free clippy; Bash syntax,
   ShellCheck, Python bytecode compilation, actionlint, and C `-Wall -Wextra
   -Werror` with the macOS 14 deployment target.
+- Review-follow-up pre-landing validation: the production helper and white-box
+  harness compile for arm64 with the macOS 14 deployment target and `-Werror`;
+  ancestor replacement, ancestor access-policy drift, and mount-boundary
+  mismatch regressions pass; complete Rust workspace tests and check pass;
+  warning-free workspace Clippy passes; 21 release Python tests, Bash syntax,
+  ShellCheck 0.11.0, actionlint 1.7.12, Python bytecode compilation, zlib pin,
+  and diff checks pass. The initial `/dev/fd` launch design was rejected by a
+  real macOS `EACCES` result and replaced by the verified private snapshot path.

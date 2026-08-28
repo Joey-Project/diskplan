@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use diskplan::BoundEngine;
 use diskplan_core::handshake::{PROTOCOL_MAJOR, PROTOCOL_MINOR};
 
 const USAGE: &str = "usage: diskplan [--handshake] [diskplan-engine]";
@@ -39,19 +39,23 @@ async fn main() {
             std::process::exit(1);
         }),
     };
-    verify_engine_identity(&engine).unwrap_or_else(|error| {
+    let bound_engine = BoundEngine::open(&engine).unwrap_or_else(|error| {
+        eprintln!("diskplan: cannot bind engine object: {error}");
+        std::process::exit(1);
+    });
+    verify_engine_identity(&bound_engine, &engine).unwrap_or_else(|error| {
         eprintln!("diskplan: engine identity check failed: {error}");
         std::process::exit(1);
     });
     if handshake_only {
-        match diskplan::handshake_with_engine(&engine) {
+        match diskplan::handshake_with_bound_engine(&bound_engine) {
             Ok(capabilities) => println!("handshake ok: {}", capabilities.join(",")),
             Err(error) => {
                 eprintln!("handshake failed: {error}");
                 std::process::exit(1);
             }
         }
-    } else if let Err(error) = diskplan::tui::run(&engine).await {
+    } else if let Err(error) = diskplan::tui::run_bound(&bound_engine).await {
         eprintln!("diskplan: {error}");
         std::process::exit(1);
     }
@@ -138,12 +142,13 @@ fn expected_engine_identity() -> String {
     )
 }
 
-fn verify_engine_identity(engine: &Path) -> std::io::Result<()> {
-    let output = Command::new(engine).arg("--version-json").output()?;
+fn verify_engine_identity(engine: &BoundEngine, label: &Path) -> std::io::Result<()> {
+    let output = engine.command()?.arg("--version-json").output()?;
+    engine.revalidate()?;
     if !output.status.success() {
         return Err(std::io::Error::other(format!(
             "{} --version-json exited {}",
-            engine.display(),
+            label.display(),
             output.status
         )));
     }
@@ -152,7 +157,7 @@ fn verify_engine_identity(engine: &Path) -> std::io::Result<()> {
             std::io::ErrorKind::InvalidData,
             format!(
                 "{} does not exactly match frontend version {} and protocol {}.{}",
-                engine.display(),
+                label.display(),
                 env!("CARGO_PKG_VERSION"),
                 PROTOCOL_MAJOR,
                 PROTOCOL_MINOR
@@ -175,6 +180,7 @@ fn usage(program: &std::ffi::OsStr) -> ! {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     #[cfg(unix)]
     #[test]
@@ -207,13 +213,18 @@ mod tests {
         symlink(version_two.join("diskplan"), &replacement).expect("replacement activation");
         fs::rename(&replacement, &active).expect("atomic activation switch");
 
-        assert_eq!(selected, version_one.join("diskplan-engine"));
+        assert_eq!(
+            selected,
+            fs::canonicalize(version_one.join("diskplan-engine"))
+                .expect("canonical first engine path")
+        );
         assert_eq!(
             sibling_engine_for_loaded_executable(
                 &fs::canonicalize(&active).expect("new activation path")
             )
             .expect("new active engine"),
-            version_two.join("diskplan-engine")
+            fs::canonicalize(version_two.join("diskplan-engine"))
+                .expect("canonical second engine path")
         );
     }
 
@@ -239,5 +250,70 @@ mod tests {
             expected.as_bytes(),
             b"unexpected diagnostics"
         ));
+    }
+
+    #[test]
+    fn bound_engine_launches_probe_object_after_path_replacement() {
+        let root = tempfile::tempdir().expect("temporary engine root");
+        let engine = root.path().join("diskplan-engine");
+        fs::copy(
+            std::env::current_exe().expect("current test executable"),
+            &engine,
+        )
+        .expect("copy original executable");
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755))
+            .expect("set original executable mode");
+        let bound = BoundEngine::open(&engine).expect("bind original engine object");
+        let probe = bound
+            .command()
+            .expect("revalidate bound engine before probe")
+            .arg("--help")
+            .output()
+            .expect("launch bound probe object");
+        assert!(probe.status.success());
+
+        let replacement = root.path().join("replacement");
+        fs::copy("/usr/bin/false", &replacement).expect("copy replacement executable");
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755))
+            .expect("set replacement executable mode");
+        let retained = root.path().join("retained-probe-object");
+        fs::rename(&engine, &retained).expect("retain original engine link policy");
+        fs::rename(&replacement, &engine).expect("replace original engine path");
+
+        let output = bound
+            .command()
+            .expect("revalidate the retained probe object")
+            .arg("--help")
+            .output()
+            .expect("launch the retained probe object");
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn bound_engine_revalidation_rejects_in_place_content_drift() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().expect("temporary engine root");
+        let engine = root.path().join("diskplan-engine");
+        fs::copy(
+            std::env::current_exe().expect("current test executable"),
+            &engine,
+        )
+        .expect("copy original executable");
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755))
+            .expect("set original executable mode");
+        let bound = BoundEngine::open(&engine).expect("bind original engine object");
+
+        let mut writer = fs::OpenOptions::new()
+            .append(true)
+            .open(&engine)
+            .expect("open bound engine for test mutation");
+        writer.write_all(b"drift").expect("mutate engine content");
+        writer.sync_all().expect("sync engine mutation");
+
+        let error = bound
+            .revalidate()
+            .expect_err("content drift must invalidate bound engine");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }
