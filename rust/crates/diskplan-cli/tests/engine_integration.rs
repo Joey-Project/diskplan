@@ -1021,21 +1021,53 @@ fn fake_engine_timeout_is_bounded_and_process_is_terminated() {
 fn timeout_terminates_and_reaps_the_engine_process_group() {
     let root = tempfile::tempdir().unwrap();
     let descendant_pid_path = root.path().join("descendant.pid");
+    let staged_pid_path = root.path().join("descendant.pid.staging");
+    let accepted = encode_frame(&accepted_envelope(
+        1,
+        1,
+        1,
+        &[
+            "canonical-binary-v1",
+            "framing-v1",
+            "plan-bootstrap",
+            "scan-control-v1",
+        ],
+    ));
     let body = format!(
-        "sleep 10 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
-        descendant_pid_path.display()
+        "sleep 10 &\n\
+         descendant_pid=$!\n\
+         printf '%s\\n' \"$descendant_pid\" > '{}'\n\
+         mv '{}' '{}'\n\
+         printf '%b' '{}'\n\
+         wait\n",
+        staged_pid_path.display(),
+        staged_pid_path.display(),
+        descendant_pid_path.display(),
+        shell_bytes(&accepted),
     );
     let path = write_fake_engine(&root, &body);
 
-    let error = EngineSession::connect_with_timeout(&path, PROCESS_GROUP_TEST_TIMEOUT)
-        .err()
-        .expect("silent engine must time out");
-    assert!(matches!(error, ClientError::Timeout { .. }));
-    let descendant_pid: u32 = fs::read_to_string(&descendant_pid_path)
-        .expect("fake engine must record its descendant PID")
-        .trim()
-        .parse()
-        .unwrap();
+    // The accepted handshake is the readiness barrier: the fake engine closes the
+    // staged PID record and atomically publishes it before emitting the response.
+    // This removes scheduler latency from the timeout under test while retaining a
+    // bounded, typed handshake failure if the engine exits or frames incorrectly.
+    let mut session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+        .expect("fake engine must publish its descendant before accepting the handshake");
+    let descendant_pid = read_published_process_id(&descendant_pid_path)
+        .expect("the readiness handshake must bind a complete descendant PID record");
+
+    session.send_start_scan(2, "standard").unwrap();
+    let error = session
+        .read_engine_event_with_timeout(PROCESS_GROUP_TEST_TIMEOUT)
+        .expect_err("silent engine must time out after the readiness handshake");
+    assert!(matches!(
+        error,
+        ClientError::Timeout {
+            phase: "engine event",
+            timeout: PROCESS_GROUP_TEST_TIMEOUT,
+        }
+    ));
+    drop(session);
     assert!(
         wait_for_pid_exit(descendant_pid, Duration::from_secs(2)),
         "descendant process {descendant_pid} survived engine-session cleanup"
@@ -1119,10 +1151,10 @@ fn handshake_helper_rejects_trailing_bytes_and_extra_frames_on_shutdown() {
     let trailing_body = format!("{}printf '%s' 'oops'\n", emit_then_drain(&accepted, false));
     let (_root, path) = fake_engine_script(&trailing_body);
     let error = handshake_with_engine(&path).expect_err("trailing bytes must fail shutdown");
-    assert!(matches!(
-        error,
-        ClientError::Frame(FrameError::Oversized { .. })
-    ));
+    assert!(
+        matches!(error, ClientError::Frame(FrameError::Oversized { .. })),
+        "unexpected trailing-byte shutdown error: {error:?}"
+    );
 
     let extra_frame_body = format!(
         "{}printf '%b' '{}'\n",
@@ -1353,6 +1385,25 @@ fn write_fake_engine(root: &TempDir, body: &str) -> PathBuf {
 
 fn shell_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect()
+}
+
+fn read_published_process_id(path: &Path) -> Result<u32, String> {
+    let bytes = fs::read(path).map_err(|error| format!("PID publication read failed: {error}"))?;
+    let record = bytes
+        .strip_suffix(b"\n")
+        .ok_or_else(|| "PID publication framing error: missing final newline".to_owned())?;
+    if record.is_empty() || record.contains(&b'\n') {
+        return Err("PID publication framing error: expected exactly one record".to_owned());
+    }
+    let value = std::str::from_utf8(record)
+        .map_err(|error| format!("PID publication framing error: {error}"))?;
+    let process_id = value
+        .parse::<u32>()
+        .map_err(|error| format!("PID publication parse error: {error}"))?;
+    if process_id == 0 {
+        return Err("PID publication parse error: process ID is zero".to_owned());
+    }
+    Ok(process_id)
 }
 
 fn wait_for_pid_exit(process_id: u32, timeout: Duration) -> bool {
