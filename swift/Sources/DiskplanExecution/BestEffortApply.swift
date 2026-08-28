@@ -794,10 +794,17 @@ public actor BestEffortApplyCoordinator {
       case .prerequisiteFailed: return .skippedPrerequisite
       }
     }
-    guard case .succeeded = adapterOutcome, case .satisfied = postVerification else {
-      return .failed
+    if case .succeeded = adapterOutcome {
+      switch postVerification {
+      case .satisfied:
+        return .succeeded
+      case .expectedResidual:
+        return .partiallySucceeded
+      default:
+        return .failed
+      }
     }
-    return .succeeded
+    return .failed
   }
 
   private func unitStatus(
@@ -817,7 +824,11 @@ public actor BestEffortApplyCoordinator {
     if steps.allSatisfy({ $0.status == .expired }) { return .expired }
     if steps.allSatisfy({ $0.status == .superseded }) { return .superseded }
     if steps.allSatisfy({ $0.status == .cancelled }) { return .cancelled }
-    if steps.contains(where: { $0.status == .succeeded }) { return .partiallyFailed }
+    if steps.contains(where: {
+      $0.status == .succeeded || $0.status == .partiallySucceeded
+    }) {
+      return .partiallyFailed
+    }
     return .failed
   }
 

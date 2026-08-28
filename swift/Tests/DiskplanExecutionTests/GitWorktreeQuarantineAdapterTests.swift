@@ -178,7 +178,7 @@ func gitAdministrativeCleanupFailureIsTypedResidualAfterRootDeletion() async thr
   let adapter = testAdapter(gitOutcome: .failed(ExecutionAdapterFailure(code: "git-prune-failed")))
 
   guard
-    case .failed(let failure) = await adapter.apply(
+    case .succeeded(let detailCode) = await adapter.apply(
       fixture.removeOperation,
       context: gitTestContext()
     )
@@ -186,7 +186,7 @@ func gitAdministrativeCleanupFailureIsTypedResidualAfterRootDeletion() async thr
     Issue.record("Git metadata cleanup failure must report a partial residual")
     return
   }
-  #expect(failure.code == "git-administrative-metadata-residual")
+  #expect(detailCode == "git-worktree-removed-with-administrative-residual")
   #expect(!slotExists(fixture.worktree))
   guard
     case .some(.removedWithAdministrativeResidual(let residual)) =
@@ -196,6 +196,7 @@ func gitAdministrativeCleanupFailureIsTypedResidualAfterRootDeletion() async thr
     return
   }
   #expect(residual.failure.code == "git-prune-failed")
+  #expect(await adapter.postverify(fixture.removeOperation) == .expectedResidual(residual.failure))
   #expect(
     residual.registrationID
       == fixture.registration.registrationID
@@ -218,6 +219,63 @@ func gitWorktreeDeadlineStopsBeforeMutation() async throws {
     ) == .timedOut
   )
   #expect(slotExists(fixture.worktree))
+}
+
+@Test
+func gitWorktreeDeadlineAfterRootDeletionLeavesTypedAdministrativeResidual() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let clock = LockedGitTestClock()
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeAdministrativeCleanup = { clock.set(5) }
+  let adapter = testAdapter(hooks: hooks)
+
+  #expect(
+    await adapter.apply(
+      fixture.removeOperation,
+      context: MutationExecutionContext(
+        deadlineSeconds: 5,
+        nowSeconds: { clock.value() },
+        finalDescriptorPreflight: { _ in .verified }
+      )
+    ) == .succeeded(detailCode: "git-worktree-removed-with-administrative-residual")
+  )
+  #expect(!slotExists(fixture.worktree))
+  guard
+    case .some(.removedWithAdministrativeResidual(let residual)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("missing deadline administrative residual")
+    return
+  }
+  #expect(residual.failure.code == "git-administrative-cleanup-deadline")
+  #expect(await adapter.postverify(fixture.removeOperation) == .expectedResidual(residual.failure))
+}
+
+@Test
+func gitWorktreeCancellationAfterRootDeletionLeavesTypedAdministrativeResidual() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeAdministrativeCleanup = {
+    withUnsafeCurrentTask { task in task?.cancel() }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let outcome = await Task {
+    await adapter.apply(fixture.removeOperation, context: gitTestContext())
+  }.value
+  #expect(outcome == .succeeded(detailCode: "git-worktree-removed-with-administrative-residual"))
+  #expect(!slotExists(fixture.worktree))
+  guard
+    case .some(.removedWithAdministrativeResidual(let residual)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("missing cancellation administrative residual")
+    return
+  }
+  #expect(residual.failure.code == "git-administrative-cleanup-cancelled")
+  #expect(await adapter.postverify(fixture.removeOperation) == .expectedResidual(residual.failure))
 }
 
 @Test
@@ -450,6 +508,23 @@ private struct GitQuarantineFixture: @unchecked Sendable {
 
 private enum GitFixtureError: Error {
   case invalidContract
+}
+
+private final class LockedGitTestClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var now: Int64 = 0
+
+  func set(_ value: Int64) {
+    lock.lock()
+    now = value
+    lock.unlock()
+  }
+
+  func value() -> Int64 {
+    lock.lock()
+    defer { lock.unlock() }
+    return now
+  }
 }
 
 private func testAdapter(

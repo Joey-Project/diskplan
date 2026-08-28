@@ -39,8 +39,10 @@ superseded_by:
   owner steps; target absence alone cannot claim shared-space release.
 - Git worktree removal now uses exclusive same-filesystem quarantine, descriptor identity and
   subtree verification, typed restore/retained recovery, and post-removal administrative
-  cleanup. The production composition router cannot send Git or unconfigured specialized
-  actions through generic removal.
+  cleanup. Administrative cancellation, deadline, or failure after root deletion is a typed
+  partial/expected residual, and no new cleanup process starts after cancellation or expiry.
+  The production composition router cannot send Git or unconfigured specialized actions
+  through generic removal.
 - Authorization is registry/generation-backed until its single claim, so any newer preparation
   revokes an older unconsumed authorization.
 - Shell/TUI events require no persistence. Optional audit failures, including `ENOSPC`, are
@@ -75,6 +77,10 @@ superseded_by:
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Detailed contract: `docs/design/best-effort-apply.md`.
 - Phase 4 boundary: `docs/design/revalidation-and-dry-run.md`.
-- Focused `swift test --filter DiskplanExecutionTests`: 59 tests passed.
-- Full `swift test`: 130 tests passed.
+- Focused `swift test --filter DiskplanExecutionTests`: 62 tests passed.
+- Serial full `swift test --no-parallel`: 133 tests passed.
+- Parallel `swift test`: all Phase 5 execution tests passed, but the pre-existing
+  `boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy` timing assertion failed in two
+  full concurrent runs and passed when run alone; no production change was made for this
+  parallel-only flake.
 - Production `swift build -c release --product diskplan-engine`: passed.

@@ -52,6 +52,29 @@ func adapterCancellationDoesNotStopAnIndependentUnit() async throws {
 }
 
 @Test
+func expectedAdministrativeResidualProducesTypedPartialUnit() async throws {
+  let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
+  let authorization = try await makeAuthorization(plan: fixture.plan, overlay: fixture.overlay)
+  let residual = ExecutionAdapterFailure(
+    code: "git-prune-failed",
+    exitStatus: 1
+  )
+  let adapter = RecordingMutationAdapter(
+    postOutcomes: [fixture.action.id: .expectedResidual(residual)]
+  )
+  let report = await BestEffortApplyCoordinator(
+    adapter: adapter,
+    eventSink: RecordingEventSink(),
+    auditSink: nil,
+    clock: { 202 }
+  ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
+
+  #expect(report.unitOutcomes.first?.status == .partiallyFailed)
+  #expect(report.unitOutcomes.first?.steps.first?.status == .partiallySucceeded)
+  #expect(report.unitOutcomes.first?.steps.first?.postVerification == .expectedResidual(residual))
+}
+
+@Test
 func jitIdentityReplacementRejectsBeforeMutation() async throws {
   let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
   let replacement = ObjectIdentity(

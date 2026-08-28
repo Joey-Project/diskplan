@@ -46,6 +46,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     var beforePostQuarantineVerification: @Sendable () -> Void = {}
     var beforeRestore: @Sendable () -> Void = {}
     var beforeRecursiveDelete: @Sendable () -> Void = {}
+    var beforeAdministrativeCleanup: @Sendable () -> Void = {}
   }
 
   typealias GitRunner =
@@ -147,8 +148,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         switch disposition {
         case .removed:
           return sourceIsAbsent(target)
-        case .removedWithAdministrativeResidual:
-          return .notSatisfied(code: "git-administrative-metadata-residual")
+        case .removedWithAdministrativeResidual(let residual):
+          return .expectedResidual(residual.failure)
         case .quarantineRetained:
           return .notSatisfied(code: "verified-quarantine-retained")
         case .restoredAfterVerificationFailure:
@@ -343,6 +344,22 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           ))
       }
 
+      hooks.beforeAdministrativeCleanup()
+      if Task.isCancelled {
+        return await recordAdministrativeResidual(
+          target: target,
+          administrative: administrative,
+          failure: ExecutionAdapterFailure(code: "git-administrative-cleanup-cancelled")
+        )
+      }
+      if context.isExpired {
+        return await recordAdministrativeResidual(
+          target: target,
+          administrative: administrative,
+          failure: ExecutionAdapterFailure(code: "git-administrative-cleanup-deadline")
+        )
+      }
+
       let administrativeOutcome = await gitRunner(
         [
           Data("git".utf8), Data("--git-dir=.".utf8), Data("worktree".utf8),
@@ -356,21 +373,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           administrativeOutcome,
           defaultCode: "git-administrative-cleanup-failed"
         )
-        let residual = GitWorktreeAdministrativeResidual(
-          registrationID: administrative.registration.registrationID,
-          administrativeDirectoryIdentity:
-            administrative.registration.administrativeDirectoryIdentity,
-          commonDirectoryIdentity: administrative.registration.commonDirectoryIdentity,
+        return await recordAdministrativeResidual(
+          target: target,
+          administrative: administrative,
           failure: failure
         )
-        await results.set(.removedWithAdministrativeResidual(residual), for: target.actionID)
-        return .failed(
-          ExecutionAdapterFailure(
-            code: "git-administrative-metadata-residual",
-            errno: failure.errno,
-            exitStatus: failure.exitStatus,
-            terminatingSignal: failure.terminatingSignal
-          ))
       }
 
       await results.set(.removed, for: target.actionID)
@@ -380,6 +387,22 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     } catch {
       return .failed(ExecutionAdapterFailure(code: String(reflecting: type(of: error))))
     }
+  }
+
+  private func recordAdministrativeResidual(
+    target: BoundMutationTarget,
+    administrative: GitAdministrativeBinding,
+    failure: ExecutionAdapterFailure
+  ) async -> AdapterOperationOutcome {
+    let residual = GitWorktreeAdministrativeResidual(
+      registrationID: administrative.registration.registrationID,
+      administrativeDirectoryIdentity:
+        administrative.registration.administrativeDirectoryIdentity,
+      commonDirectoryIdentity: administrative.registration.commonDirectoryIdentity,
+      failure: failure
+    )
+    await results.set(.removedWithAdministrativeResidual(residual), for: target.actionID)
+    return .succeeded(detailCode: "git-worktree-removed-with-administrative-residual")
   }
 
   private func discard(

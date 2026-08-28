@@ -94,9 +94,11 @@ exact root into an exclusive same-filesystem quarantine slot, proves the held so
 destination descriptors name the same object, and repeats coverage before recursive native
 deletion. Verification failure attempts an exclusive restore; restore collision or deletion
 failure retains a typed recovery locator. Only after root deletion may Git prune administrative
-metadata, and that cleanup can produce an explicit residual without changing the root-deletion
-result. Dirty-worktree discard uses only its dedicated typed Git reset/clean operation and
-verifies the authorized clean successor. Neither Git operation can route to generic removal.
+metadata. Cancellation and deadline are checked again before that follow-up starts; a skipped
+or failed cleanup produces an explicit typed residual and a partially successful step without
+changing the root-deletion result. Dirty-worktree discard uses only its dedicated typed Git
+reset/clean operation and verifies the authorized clean successor. Neither Git operation can
+route to generic removal.
 
 `EngineExecutionComposition` is the production Phase 4/5 factory. It binds one sealed collector
 to the preparation engine, final descriptor verification, JIT/release verification, and a typed
@@ -120,6 +122,11 @@ the compound result partial or failed. The unit
 status is derived from all steps, preserving success, partial failure, failure, cancellation,
 prerequisite skip, JIT rejection, and epoch expiry. Target absence is the generic adapter's
 authoritative ordinary postcondition; free-space deltas are not used as success proof.
+
+An expected residual is distinct from an unsatisfied destructive postcondition. The adapter
+returns the successful root mutation separately, post-verification carries the typed residual
+failure, the step is `partiallySucceeded`, and the containing unit is `partiallyFailed` so every
+downstream prerequisite remains blocked.
 
 There is no rollback. Failures, cancellations, post-verification uncertainty, and expected
 residuals remain observable, and the next ordinary scan is the recovery source of truth.

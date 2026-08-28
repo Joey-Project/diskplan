@@ -192,6 +192,7 @@ public enum ExecutionNotStartedReason: String, Equatable, Sendable {
 
 public enum PostVerificationOutcome: Equatable, Sendable {
   case satisfied
+  case expectedResidual(ExecutionAdapterFailure)
   case missing
   case notSatisfied(code: String)
   case unknown(UnknownReason)
@@ -258,6 +259,7 @@ public protocol ExecutionMutationAdapter: Sendable {
 
 public enum ExecutionStepStatus: String, Equatable, Sendable {
   case succeeded
+  case partiallySucceeded
   case failed
   case cancelled
   case expired
@@ -452,6 +454,7 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
   private static func postverifyLabel(_ outcome: PostVerificationOutcome) -> String {
     switch outcome {
     case .satisfied: return "satisfied"
+    case .expectedResidual(let failure): return "expected-residual:\(failure.code)"
     case .missing: return "missing"
     case .notSatisfied(let code): return "not-satisfied:\(code)"
     case .unknown(let reason): return "unknown:\(String(describing: reason))"
