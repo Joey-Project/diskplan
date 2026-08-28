@@ -547,6 +547,67 @@ func storageGraphRejectsEmptyOwnersImpossibleCountsAndEscapedPaths() throws {
 }
 
 @Test
+func storageGraphInvalidDiagnosticsArePermutationInvariant() throws {
+  let foreignFacts = globalFacts(configuration: Data("foreign".utf8))
+  let invalidCandidates = [
+    storageCandidate("z", ["z"], 1, facts: foreignFacts),
+    storageCandidate("a", ["a"], 1, facts: foreignFacts),
+  ]
+  for candidates in [invalidCandidates, Array(invalidCandidates.reversed())] {
+    #expect(throws: PolicyModelError.invalidStorageGraph("candidate-binding:a")) {
+      try StorageReleaseGraph(
+        globalFacts: globalFacts(),
+        candidates: candidates,
+        fileObjects: [],
+        allocationGroups: []
+      )
+    }
+  }
+
+  let owner = storageCandidate("owner", ["owner"], 1)
+  let outsidePath = try RawTargetPath(components: [Data("outside".utf8)])
+  let invalidFiles = ["z-file", "a-file"].map { fileID in
+    FileObjectNode(
+      provenance: graphProvenance(),
+      id: fileID,
+      observedOwners: [FileOwnerLink(candidateID: owner.id, path: outsidePath)],
+      linkCount: .known(1)
+    )
+  }
+  for files in [invalidFiles, Array(invalidFiles.reversed())] {
+    #expect(throws: PolicyModelError.invalidStorageGraph("owner-outside-candidate:a-file")) {
+      try StorageReleaseGraph(
+        globalFacts: globalFacts(),
+        candidates: [owner],
+        fileObjects: files,
+        allocationGroups: []
+      )
+    }
+  }
+
+  let invalidGroups = ["z-group", "a-group"].map { groupID in
+    AllocationGroupNode(
+      provenance: graphProvenance(facts: foreignFacts),
+      id: groupID,
+      ownerFileObjectIDs: ["missing"],
+      cloneRefCount: .known(1),
+      sharedBytes: .known(1),
+      snapshotBlocker: .known(false)
+    )
+  }
+  for groups in [invalidGroups, Array(invalidGroups.reversed())] {
+    #expect(throws: PolicyModelError.invalidStorageGraph("group-provenance:a-group")) {
+      try StorageReleaseGraph(
+        globalFacts: globalFacts(),
+        candidates: [],
+        fileObjects: [],
+        allocationGroups: groups
+      )
+    }
+  }
+}
+
+@Test
 func completeCloneAndHardlinkGraphCreditsSharedBytesOnce() throws {
   let graph = try completeStorageGraph()
   let evaluated = try evaluateGraph(graph, selectedCandidateIDs: ["a", "b"])
@@ -2266,6 +2327,102 @@ func overlappingReleaseSetsExecuteAsOneCompleteComponent() throws {
 }
 
 @Test
+func releaseComponentManifestScalesForOneOwnerAcrossManyGroups() throws {
+  let groupCount = 512
+  let graph = try manyConnectedReleaseGroupsGraph(groupCount: groupCount)
+  let owner = try makeAction(
+    evidence: try #require(graph.candidates.first?.evidence),
+    facts: graph.globalFacts
+  )
+  let bindings = [CandidateActionBinding(candidateID: "owner", action: owner)]
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let component = try #require(bundle.manifest.connectedComponents.first)
+  #expect(bundle.releaseSets.count == groupCount)
+  #expect(bundle.manifest.connectedComponents.count == 1)
+  #expect(component.allocationGroupIDs.count == groupCount)
+  #expect(component.candidateIDs == ["owner"])
+}
+
+@Test
+func completeReleasePlanRejectsLeaveAndReenterContraction() throws {
+  let graph = try releaseContractionGraph()
+  let actionByCandidate = try contractionCandidateActions(graph: graph)
+  let bindings = graph.candidates.map {
+    CandidateActionBinding(candidateID: $0.id, action: actionByCandidate[$0.id]!)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let release = try #require(bundle.releaseSets.first)
+  let owners = release.ownerCandidateIDs.map { actionByCandidate[$0]! }
+  let anchor = try #require(owners.first { $0.evidence.candidateID == "a" })
+  let aggregate = try makeAction(
+    evidence: anchor.evidence,
+    facts: graph.globalFacts,
+    prerequisites: owners,
+    request: .completeReleaseSetRemove(binding: release.actionBinding)
+  )
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try makePlan(
+      actions: Array(actionByCandidate.values) + [aggregate],
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: bundle
+    )
+  }
+}
+
+@Test
+func disjointReleaseContractionsPreserveCrossComponentPrerequisites() throws {
+  let graph = try crossComponentReleaseGraph()
+  let actionByCandidate = try crossComponentCandidateActions(graph: graph)
+  let bindings = graph.candidates.map {
+    CandidateActionBinding(candidateID: $0.id, action: actionByCandidate[$0.id]!)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let aggregates = try bundle.releaseSets.map { release -> ActionDefinition in
+    let owners = release.ownerCandidateIDs.map { actionByCandidate[$0]! }
+    let anchorCandidateID = release.allocationGroupID == "group-one" ? "a" : "c"
+    let anchor = try #require(
+      owners.first { $0.evidence.candidateID == anchorCandidateID })
+    return try makeAction(
+      evidence: anchor.evidence,
+      facts: graph.globalFacts,
+      prerequisites: owners,
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
+    )
+  }
+  let plan = try makePlan(
+    actions: Array(actionByCandidate.values) + aggregates,
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: plan.actions.map(\.id),
+    waiverConsents: [],
+    userNotes: []
+  )
+  let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
+  let x = try #require(actionByCandidate["x"])
+  let xIndex = try #require(validated.executionSteps.firstIndex { $0.action.id == x.id })
+  let componentIndices = validated.executionSteps.indices.filter {
+    !validated.executionSteps[$0].releaseSets.isEmpty
+  }
+  #expect(componentIndices.count == 2)
+  #expect(try #require(componentIndices.first) < xIndex)
+  #expect(xIndex < (try #require(componentIndices.last)))
+}
+
+@Test
 func completeReleaseLineageIgnoresReferenceEpochButBindsSemanticTopology() throws {
   func aggregateAction(
     facts: FrozenGlobalFacts,
@@ -3642,6 +3799,153 @@ private func overlappingReleaseComponentGraph(
       ),
     ]
   )
+}
+
+private func manyConnectedReleaseGroupsGraph(
+  groupCount: Int,
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let owner = storageCandidate("owner", ["owner"], 0, facts: facts)
+  let files = try (0..<groupCount).map { index -> FileObjectNode in
+    let path = try RawTargetPath(
+      components: [Data("owner".utf8), Data("file-\(index)".utf8)])
+    return FileObjectNode(
+      provenance: graphProvenance(facts: facts),
+      id: "file-\(index)",
+      observedOwners: [FileOwnerLink(candidateID: owner.id, path: path)],
+      linkCount: .known(1)
+    )
+  }
+  let groups = (0..<groupCount).map { index in
+    allocationGroup(
+      "group-\(index)",
+      owners: ["file-\(index)"],
+      refCount: 1,
+      bytes: 1,
+      facts: facts
+    )
+  }
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: [owner],
+    fileObjects: files,
+    allocationGroups: groups
+  )
+}
+
+private func releaseContractionGraph(
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let a = storageCandidate(
+    "a", ["a"], 10,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "clone")],
+    facts: facts
+  )
+  let b = storageCandidate("b", ["b"], 20, facts: facts)
+  let x = storageCandidate("x", ["x"], 0, facts: facts)
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: [a, b, x],
+    fileObjects: [a, b].map { candidate in
+      FileObjectNode(
+        provenance: graphProvenance(facts: facts),
+        id: "file-\(candidate.id)",
+        observedOwners: [
+          FileOwnerLink(candidateID: candidate.id, path: candidate.target)
+        ],
+        linkCount: .known(1)
+      )
+    },
+    allocationGroups: [
+      allocationGroup(
+        "clone", owners: ["file-a", "file-b"], refCount: 2, bytes: 100,
+        facts: facts
+      )
+    ]
+  )
+}
+
+private func contractionCandidateActions(
+  graph: StorageReleaseGraph
+) throws -> [String: ActionDefinition] {
+  let evidenceByCandidate = Dictionary(
+    uniqueKeysWithValues: graph.candidates.map { ($0.id, $0.evidence) })
+  let b = try makeAction(
+    evidence: evidenceByCandidate["b"]!, facts: graph.globalFacts)
+  let x = try makeAction(
+    evidence: evidenceByCandidate["x"]!, facts: graph.globalFacts,
+    prerequisites: [b]
+  )
+  let a = try makeAction(
+    evidence: evidenceByCandidate["a"]!, facts: graph.globalFacts,
+    prerequisites: [x]
+  )
+  return ["a": a, "b": b, "x": x]
+}
+
+private func crossComponentReleaseGraph(
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let a = storageCandidate(
+    "a", ["a"], 10,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-one")],
+    facts: facts
+  )
+  let b = storageCandidate("b", ["b"], 20, facts: facts)
+  let c = storageCandidate(
+    "c", ["c"], 30,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-two")],
+    facts: facts
+  )
+  let d = storageCandidate("d", ["d"], 40, facts: facts)
+  let x = storageCandidate("x", ["x"], 0, facts: facts)
+  let releaseOwners = [a, b, c, d]
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: releaseOwners + [x],
+    fileObjects: releaseOwners.map { candidate in
+      FileObjectNode(
+        provenance: graphProvenance(facts: facts),
+        id: "file-\(candidate.id)",
+        observedOwners: [
+          FileOwnerLink(candidateID: candidate.id, path: candidate.target)
+        ],
+        linkCount: .known(1)
+      )
+    },
+    allocationGroups: [
+      allocationGroup(
+        "group-one", owners: ["file-a", "file-b"], refCount: 2, bytes: 100,
+        facts: facts
+      ),
+      allocationGroup(
+        "group-two", owners: ["file-c", "file-d"], refCount: 2, bytes: 200,
+        facts: facts
+      ),
+    ]
+  )
+}
+
+private func crossComponentCandidateActions(
+  graph: StorageReleaseGraph
+) throws -> [String: ActionDefinition] {
+  let evidenceByCandidate = Dictionary(
+    uniqueKeysWithValues: graph.candidates.map { ($0.id, $0.evidence) })
+  let a = try makeAction(
+    evidence: evidenceByCandidate["a"]!, facts: graph.globalFacts)
+  let b = try makeAction(
+    evidence: evidenceByCandidate["b"]!, facts: graph.globalFacts)
+  let x = try makeAction(
+    evidence: evidenceByCandidate["x"]!, facts: graph.globalFacts,
+    prerequisites: [b]
+  )
+  let c = try makeAction(
+    evidence: evidenceByCandidate["c"]!, facts: graph.globalFacts,
+    prerequisites: [x]
+  )
+  let d = try makeAction(
+    evidence: evidenceByCandidate["d"]!, facts: graph.globalFacts)
+  return ["a": a, "b": b, "c": c, "d": d, "x": x]
 }
 
 private func replaceGroup(

@@ -91,6 +91,11 @@ superseded_by:
   in its JIT execution contract. Evaluation freezes the exact ActionID for every graph candidate,
   including private-only candidates outside all release groups, so bundle construction rejects
   omitted, substituted, or blocked action mappings.
+- Release-component discovery uses deterministic union-find over canonical raw-UTF8 group and
+  candidate identities, so one owner connecting many groups cannot cause repeated queue growth.
+  Immutable-plan construction rejects an aggregate whose owner contraction introduces a
+  leave-and-reenter cycle; overlay validation repeats the proof for all selected components at
+  once, preserving acyclic cross-component prerequisite direction.
 - Complete-release lineage now binds stable semantic topology and stable owner lineages without
   current graph/evidence/action/epoch data. Reference-time-only advancement preserves lineage,
   while an owner-topology change invalidates it. Current graph and owner action bindings remain
@@ -112,6 +117,9 @@ superseded_by:
   array-front removal and full ready-set sorting. Overlay validation canonicalizes every
   error-producing selection, lineage, consent, and waiver traversal, and full topology bindings
   canonicalize file and owner arrays at the encoder boundary.
+- Storage-graph construction canonicalizes candidate, file-object, and allocation-group inputs
+  by raw UTF-8 ID before any ID-bearing validation, making the first typed invalid diagnostic
+  invariant under input permutation.
 
 ## Task List
 
@@ -145,6 +153,8 @@ superseded_by:
 - [x] Close follow-up builder authority, prerequisite multiplicity, duplicate-survivor,
   connected release-component, deterministic diagnostic, topology encoding, and wide-DAG
   complexity findings.
+- [x] Bound release-component discovery, reject non-convex aggregate contractions before
+  projection, and canonicalize StorageGraph diagnostics before observable validation.
 
 ## Handoff
 
@@ -160,8 +170,8 @@ superseded_by:
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
   overlay consent binding, public API construction boundaries, and forged vote/tier rejection;
-  the latest focused run passed all 58 tests.
-- The final full local serial `swift test --no-parallel` run passed all 86 tests, including
-  all 58 focused policy tests; `swift build -c release` also completed successfully.
+  the latest focused run passed all 62 tests.
+- The final full local serial `swift test --no-parallel` run passed all 90 tests, including
+  all 62 focused policy tests; `swift build -c release` also completed successfully.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.

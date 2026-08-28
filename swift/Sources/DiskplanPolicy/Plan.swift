@@ -2289,6 +2289,14 @@ public struct ImmutablePlan: Equatable, Sendable {
       else {
         throw PolicyModelError.invalidActionContract
       }
+      guard
+        actionContractionsPreserveAcyclicity(
+          [Set(releaseSet.ownerActionIDs + [action.id])],
+          actions: canonicalActions
+        )
+      else {
+        throw PolicyModelError.invalidActionContract
+      }
     }
     let duplicateFacts = evidence.flatMap { snapshot in
       snapshot.semanticReviewFacts.compactMap { fact -> (String, String, String)? in
@@ -2787,6 +2795,16 @@ public enum DecisionOverlayValidator {
       plan: plan,
       actionByID: actionByID
     )
+    guard
+      actionContractionsPreserveAcyclicity(
+        releaseComponents.map {
+          Set($0.aggregateActions.map(\.id) + $0.owners.map(\.id))
+        },
+        actions: selectedActions
+      )
+    else {
+      throw PolicyModelError.invalidActionContract
+    }
     var replacementActionID: [ActionID: ActionID] = [:]
     for component in releaseComponents {
       for replacedID in component.aggregateActions.map(\.id) + component.owners.map(\.id) {
@@ -3176,6 +3194,53 @@ private struct PolicyMinHeap<Element: Comparable> {
   }
 }
 
+private func actionContractionsPreserveAcyclicity(
+  _ components: [Set<ActionID>],
+  actions: [ActionDefinition]
+) -> Bool {
+  let actionIDs = Set(actions.map(\.id))
+  var representativeByActionID: [ActionID: ActionID] = [:]
+  for component in components where !component.isEmpty {
+    guard component.isSubset(of: actionIDs), let representative = component.min() else {
+      return false
+    }
+    for actionID in component {
+      if let existing = representativeByActionID[actionID], existing != representative {
+        return false
+      }
+      representativeByActionID[actionID] = representative
+    }
+  }
+  let mappedID: (ActionID) -> ActionID = {
+    representativeByActionID[$0] ?? $0
+  }
+  let contractedIDs = Set(actions.map { mappedID($0.id) })
+  var dependents: [ActionID: Set<ActionID>] = [:]
+  var indegree = Dictionary(uniqueKeysWithValues: contractedIDs.map { ($0, 0) })
+  for action in actions {
+    let dependentID = mappedID(action.id)
+    for prerequisite in action.prerequisiteActionIDs {
+      let prerequisiteID = mappedID(prerequisite)
+      guard prerequisiteID != dependentID else { continue }
+      if dependents[prerequisiteID, default: []].insert(dependentID).inserted {
+        indegree[dependentID, default: 0] += 1
+      }
+    }
+  }
+  var ready = PolicyMinHeap(indegree.filter { $0.value == 0 }.map(\.key))
+  var visited = 0
+  while let next = ready.popMin() {
+    visited += 1
+    for dependent in dependents[next] ?? [] {
+      indegree[dependent, default: 0] -= 1
+      if indegree[dependent] == 0 {
+        ready.insert(dependent)
+      }
+    }
+  }
+  return visited == contractedIDs.count
+}
+
 enum PolicyBindings {
   static func digest(
     kind: String,
@@ -3507,69 +3572,84 @@ private func connectedReleaseComponents(
   let canonicalSets = releaseSets.sorted {
     rawStringPrecedes($0.allocationGroupID, $1.allocationGroupID)
   }
-  let setByGroupID = Dictionary(
-    uniqueKeysWithValues: canonicalSets.map {
-      (Data($0.allocationGroupID.utf8), $0)
-    }
-  )
-  let groupsByCandidate = Dictionary(
-    grouping: canonicalSets.flatMap { releaseSet in
-      releaseSet.ownerCandidateIDs.map {
-        (Data($0.utf8), Data(releaseSet.allocationGroupID.utf8))
-      }
+  var unionFind = ReleaseComponentUnionFind(count: canonicalSets.count)
+  let groupIndicesByCandidate = Dictionary(
+    grouping: canonicalSets.enumerated().flatMap { index, releaseSet in
+      releaseSet.ownerCandidateIDs.map { (Data($0.utf8), index) }
     },
     by: \.0
-  ).mapValues { Set($0.map(\.1)) }
-
-  var remaining = Set(setByGroupID.keys)
-  var components: [ReleaseGraphComponentManifest] = []
-  while let start = remaining.sorted(by: { $0.lexicographicallyPrecedes($1) }).first {
-    var queue = [start]
-    var groupKeys = Set<Data>()
-    var candidateKeys = Set<Data>()
-    while let groupKey = queue.first {
-      queue.removeFirst()
-      guard groupKeys.insert(groupKey).inserted,
-        let releaseSet = setByGroupID[groupKey]
-      else { continue }
-      remaining.remove(groupKey)
-      for candidateID in releaseSet.ownerCandidateIDs {
-        let candidateKey = Data(candidateID.utf8)
-        candidateKeys.insert(candidateKey)
-        for linkedGroup in groupsByCandidate[candidateKey] ?? []
-        where !groupKeys.contains(linkedGroup) {
-          queue.append(linkedGroup)
-        }
-      }
-      queue.sort { $0.lexicographicallyPrecedes($1) }
+  ).mapValues { entries in
+    entries.map(\.1).sorted()
+  }
+  for candidateKey in groupIndicesByCandidate.keys.sorted(by: {
+    $0.lexicographicallyPrecedes($1)
+  }) {
+    guard let indices = groupIndicesByCandidate[candidateKey],
+      let first = indices.first
+    else { continue }
+    for index in indices.dropFirst() {
+      unionFind.union(first, index)
     }
+  }
+  var groupIndicesByRoot: [Int: [Int]] = [:]
+  for index in canonicalSets.indices {
+    groupIndicesByRoot[unionFind.find(index), default: []].append(index)
+  }
 
-    let orderedGroupKeys = groupKeys.sorted { $0.lexicographicallyPrecedes($1) }
+  return groupIndicesByRoot.values.map { groupIndices in
+    let orderedSets = groupIndices.sorted().map { canonicalSets[$0] }
+    let candidateKeys = Set(
+      orderedSets.flatMap { $0.ownerCandidateIDs.map { Data($0.utf8) } })
     let topologyDigest = PolicyBindings.digest(kind: "release-component-topology") {
       encoder in
-      encoder.array(orderedGroupKeys) { groupKey in
+      encoder.array(orderedSets) { releaseSet in
         var nested = PolicyBindingEncoder()
-        guard let releaseSet = setByGroupID[groupKey] else { return nested.data }
         nested.string(releaseSet.allocationGroupID)
         nested.data(encodeReleaseTopologyExpectation(releaseSet.topologyExpectation))
         nested.array(releaseSet.ownerCandidateIDs) { Data($0.utf8) }
         return nested.data
       }
     }
-    components.append(
-      ReleaseGraphComponentManifest(
-        allocationGroupIDs: orderedGroupKeys.compactMap {
-          setByGroupID[$0]?.allocationGroupID
-        },
-        candidateIDs: candidateKeys.sorted { $0.lexicographicallyPrecedes($1) }.map {
-          String(decoding: $0, as: UTF8.self)
-        },
-        topologyDigest: topologyDigest
-      )
+    return ReleaseGraphComponentManifest(
+      allocationGroupIDs: orderedSets.map(\.allocationGroupID),
+      candidateIDs: candidateKeys.sorted { $0.lexicographicallyPrecedes($1) }.map {
+        String(decoding: $0, as: UTF8.self)
+      },
+      topologyDigest: topologyDigest
     )
-  }
-  return components.sorted { left, right in
+  }.sorted { left, right in
     rawStringArrayPrecedes(left.allocationGroupIDs, right.allocationGroupIDs)
+  }
+}
+
+private struct ReleaseComponentUnionFind {
+  private var parents: [Int]
+
+  init(count: Int) {
+    parents = Array(0..<count)
+  }
+
+  mutating func find(_ index: Int) -> Int {
+    var root = index
+    while parents[root] != root {
+      root = parents[root]
+    }
+    var current = index
+    while parents[current] != current {
+      let next = parents[current]
+      parents[current] = root
+      current = next
+    }
+    return root
+  }
+
+  mutating func union(_ lhs: Int, _ rhs: Int) {
+    let leftRoot = find(lhs)
+    let rightRoot = find(rhs)
+    guard leftRoot != rightRoot else { return }
+    let lower = min(leftRoot, rightRoot)
+    let higher = max(leftRoot, rightRoot)
+    parents[higher] = lower
   }
 }
 
