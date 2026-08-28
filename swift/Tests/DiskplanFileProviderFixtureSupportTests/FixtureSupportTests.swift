@@ -1,0 +1,367 @@
+import Darwin
+import Foundation
+import Testing
+
+@testable import DiskplanFileProviderFixtureSupport
+
+@Test
+func sentinelHasExactStableSize() {
+  let first = FixtureContract.sentinelContents()
+  #expect(first.count == 65_536)
+  #expect(first == FixtureContract.sentinelContents())
+  #expect(
+    String(decoding: first.prefix(31), as: UTF8.self).hasPrefix("diskplan-file-provider-fixture"))
+}
+
+@Test
+func domainRoundTripsOnlyExactUUIDSuffix() throws {
+  let runID = UUID()
+  let identifier = FixtureContract.domainIdentifier(runID: runID)
+  #expect(FixtureContract.runID(domainIdentifier: identifier) == runID)
+  #expect(FixtureContract.runID(domainIdentifier: "other-(runID)") == nil)
+  #expect(FixtureContract.runID(domainIdentifier: identifier + "-extra") == nil)
+}
+
+@Test
+func oracleAssignsMonotonicSequenceUnderOneLockedFile() throws {
+  let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: container) }
+  try FileManager.default.createDirectory(at: container, withIntermediateDirectories: false)
+  let runID = UUID()
+  let root = container.appendingPathComponent("runs").appendingPathComponent(runID.uuidString)
+  let log = OracleLog(runDirectory: root)
+  for kind in [OracleEventKind.itemMetadata, .fetchContents] {
+    try log.append(
+      OracleEvent(
+        runID: runID,
+        domainIdentifier: FixtureContract.domainIdentifier(runID: runID),
+        itemIdentifier: FixtureContract.sentinelIdentifier,
+        kind: kind,
+        processID: 1,
+        monotonicNanoseconds: 10
+      )
+    )
+  }
+  let events = try log.events()
+  #expect(events.map(\.sequence) == [1, 2])
+  #expect(events.map(\.kind) == [.itemMetadata, .fetchContents])
+}
+
+@Test
+func oracleSerializesConcurrentWriters() async throws {
+  let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: container) }
+  try FileManager.default.createDirectory(at: container, withIntermediateDirectories: false)
+  let runID = UUID()
+  let root = container.appendingPathComponent("runs").appendingPathComponent(runID.uuidString)
+  let log = OracleLog(runDirectory: root)
+  try await withThrowingTaskGroup(of: Void.self) { group in
+    for index in 0..<32 {
+      group.addTask {
+        try log.append(
+          OracleEvent(
+            runID: runID,
+            domainIdentifier: FixtureContract.domainIdentifier(runID: runID),
+            itemIdentifier: String(index),
+            kind: .itemMetadata,
+            processID: 1,
+            monotonicNanoseconds: UInt64(index)
+          )
+        )
+      }
+    }
+    try await group.waitForAll()
+  }
+  let events = try log.events()
+  #expect(events.count == 32)
+  #expect(events.map(\.sequence) == Array(1...32))
+}
+
+@Test
+func manifestRejectsPathsOutsideItsRunUUID() {
+  let runID = UUID()
+  let manifest = FixtureManifest(
+    runID: runID,
+    taskRoot: "/private/tmp/other",
+    appPath: "/tmp/fixture.app",
+    extensionPath: "/tmp/fixture.app/Contents/PlugIns/fixture.appex",
+    appGroupRunPath: "/tmp/group/runs/other"
+  )
+  #expect(throws: FixtureContractError.unsafePath) { try manifest.validate() }
+}
+
+@Test
+func readyOverlayIsBoundToManifestAndExactFixtureNames() throws {
+  let runID = UUID()
+  let runComponent = runID.uuidString.lowercased()
+  let manifest = FixtureManifest(
+    runID: runID,
+    taskRoot: "/private/tmp/group/runs/\(runComponent)",
+    appPath: "/tmp/fixture.app",
+    extensionPath: "/tmp/fixture.app/Contents/PlugIns/fixture.appex",
+    appGroupRunPath: "/private/tmp/group/runs/\(runComponent)"
+  )
+  let parent = "/Users/test/Library/CloudStorage/fixture"
+  let ready = FixtureReadyState(
+    runID: runID,
+    sentinelPath: "\(parent)/\(FixtureContract.sentinelName)",
+    sealedDirectoryPath: "\(parent)/\(FixtureContract.sealedDirectoryName)"
+  )
+  try ready.validate(manifest: manifest)
+
+  let wrongName = FixtureReadyState(
+    runID: runID,
+    sentinelPath: "\(parent)/other.txt",
+    sealedDirectoryPath: "\(parent)/\(FixtureContract.sealedDirectoryName)"
+  )
+  #expect(throws: FixtureContractError.invalidManifest) {
+    try wrongName.validate(manifest: manifest)
+  }
+}
+
+@Test
+func oracleWindowCountsOnlyForbiddenEventsInsideBounds() {
+  let runID = UUID()
+  let window = OracleWindow(beginNanoseconds: 20, endNanoseconds: 30)
+  let events = [
+    OracleEvent(
+      runID: runID, domainIdentifier: "d", itemIdentifier: "i", kind: .fetchContents, processID: 1,
+      monotonicNanoseconds: 19),
+    OracleEvent(
+      runID: runID, domainIdentifier: "d", itemIdentifier: "i", kind: .fetchContents, processID: 1,
+      monotonicNanoseconds: 20),
+    OracleEvent(
+      runID: runID, domainIdentifier: "d", itemIdentifier: "i", kind: .rootEnumeration,
+      processID: 1, monotonicNanoseconds: 25),
+    OracleEvent(
+      runID: runID, domainIdentifier: "d", itemIdentifier: "i", kind: .deleteItem, processID: 1,
+      monotonicNanoseconds: 31),
+  ]
+  let rejected = events.filter {
+    window.contains($0) && FixtureContract.forbiddenEventKinds.contains($0.kind)
+  }
+  #expect(rejected.count == 1)
+}
+
+@Test
+func secureManifestReadKeepsMissingSymlinkAndAccessMismatchDistinct() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+
+  do {
+    _ = try SecureFixtureStorage.readManifest(
+      at: manifestURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+    Issue.record("missing manifest unexpectedly loaded")
+  } catch let error as FixtureControlReadError {
+    #expect(error == .missing(.manifest))
+  }
+
+  let target = fixture.runDirectory.appendingPathComponent("target.json")
+  try fixture.manifestData.write(to: target)
+  try FileManager.default.createSymbolicLink(at: manifestURL, withDestinationURL: target)
+  do {
+    _ = try SecureFixtureStorage.readManifest(
+      at: manifestURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+    Issue.record("symlink manifest unexpectedly loaded")
+  } catch let error as FixtureControlReadError {
+    #expect(error == .mismatch(.manifest, .objectType))
+  }
+  try FileManager.default.removeItem(at: manifestURL)
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  guard chmod(manifestURL.path, 0o644) == 0 else { throw POSIXError(.EIO) }
+  do {
+    _ = try SecureFixtureStorage.readManifest(
+      at: manifestURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+    Issue.record("public manifest unexpectedly loaded")
+  } catch let error as FixtureControlReadError {
+    #expect(error == .mismatch(.manifest, .accessPolicy))
+  }
+}
+
+@Test
+func secureManifestReadClassifiesMalformedContentAsMismatch() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(Data("not-json".utf8), to: manifestURL)
+  do {
+    _ = try SecureFixtureStorage.readManifest(
+      at: manifestURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+    Issue.record("malformed manifest unexpectedly loaded")
+  } catch let error as FixtureControlReadError {
+    #expect(error == .mismatch(.manifest, .malformed))
+  }
+}
+
+@Test
+func secureManifestReadKeepsUnreadableOversizeAndSemanticMismatchDistinct() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  guard chmod(manifestURL.path, 0o000) == 0 else { throw POSIXError(.EIO) }
+  do {
+    _ = try SecureFixtureStorage.readManifest(
+      at: manifestURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+    Issue.record("unreadable manifest unexpectedly loaded")
+  } catch let error as FixtureControlReadError {
+    if case .unreadable(.manifest, _) = error {
+      // Expected typed unreadable result.
+    } else {
+      Issue.record("expected unreadable, observed \(error)")
+    }
+  }
+
+  guard chmod(manifestURL.path, 0o600) == 0 else { throw POSIXError(.EIO) }
+  try FileManager.default.removeItem(at: manifestURL)
+  try fixture.writePrivate(
+    Data(count: SecureFixtureStorage.maximumControlBytes + 1),
+    to: manifestURL
+  )
+  do {
+    _ = try SecureFixtureStorage.readManifest(
+      at: manifestURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+    Issue.record("oversize manifest unexpectedly loaded")
+  } catch let error as FixtureControlReadError {
+    #expect(error == .mismatch(.manifest, .sizeLimit))
+  }
+
+  try FileManager.default.removeItem(at: manifestURL)
+  let otherRoot = "/private/tmp/other/\(fixture.runID.uuidString.lowercased())"
+  let semanticMismatch = FixtureManifest(
+    runID: fixture.runID,
+    taskRoot: fixture.runDirectory.path,
+    appPath: "/private/tmp/fixture.app",
+    extensionPath: "/private/tmp/fixture.app/Contents/PlugIns/fixture.appex",
+    appGroupRunPath: otherRoot
+  )
+  try fixture.writePrivate(try JSONEncoder().encode(semanticMismatch), to: manifestURL)
+  do {
+    _ = try SecureFixtureStorage.readManifest(
+      at: manifestURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+    Issue.record("semantic mismatch unexpectedly loaded")
+  } catch let error as FixtureControlReadError {
+    #expect(error == .mismatch(.manifest, .semantic))
+  }
+}
+
+@Test
+func cleanupRemovesOnlyTheBoundPrivateRunTree() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  try fixture.writePrivate(
+    Data("event\n".utf8),
+    to: fixture.runDirectory.appendingPathComponent("events.jsonl")
+  )
+  let nested = fixture.runDirectory.appendingPathComponent("nested")
+  try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
+  guard chmod(nested.path, 0o700) == 0 else { throw POSIXError(.EIO) }
+  try fixture.writePrivate(Data("value".utf8), to: nested.appendingPathComponent("value"))
+
+  try SecureFixtureStorage.cleanupRun(
+    manifestURL: manifestURL,
+    expectedRunDirectory: fixture.runDirectory
+  )
+  #expect(!FileManager.default.fileExists(atPath: fixture.runDirectory.path))
+}
+
+@Test
+func cleanupRejectsSymlinkAndRestoresManifestForRecovery() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  try FileManager.default.createSymbolicLink(
+    at: fixture.runDirectory.appendingPathComponent("unexpected-link"),
+    withDestinationURL: FileManager.default.temporaryDirectory
+  )
+  do {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: manifestURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+    Issue.record("cleanup unexpectedly followed or removed a symlink")
+  } catch let error as FixtureCleanupError {
+    #expect(error == .treeMismatch("unexpected-link"))
+  }
+  #expect(FileManager.default.fileExists(atPath: manifestURL.path))
+  _ = try SecureFixtureStorage.readManifest(
+    at: manifestURL,
+    expectedRunDirectory: fixture.runDirectory
+  )
+}
+
+@Test
+func oracleCloseWaitsForABoundedQuietWindow() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.append(
+    OracleEvent(
+      runID: fixture.runID,
+      domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+      itemIdentifier: FixtureContract.sentinelIdentifier,
+      kind: .itemMetadata,
+      processID: 1,
+      monotonicNanoseconds: 1
+    )
+  )
+  try log.writeWindow(OracleWindow(beginNanoseconds: 1))
+  let result = try log.closeWindowAfterQuiescence(
+    quietMilliseconds: 50,
+    timeoutMilliseconds: 500
+  )
+  #expect(result.eventCount == 1)
+  #expect(result.lastSequence == 1)
+  #expect(try log.window().endNanoseconds != nil)
+}
+
+private struct TemporaryFixtureRun {
+  let container: URL
+  let runID: UUID
+  let runDirectory: URL
+  let manifestData: Data
+
+  init() throws {
+    container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    runID = UUID()
+    let runs = container.appendingPathComponent("runs")
+    runDirectory = runs.appendingPathComponent(runID.uuidString.lowercased())
+    try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
+    guard chmod(container.path, 0o700) == 0, chmod(runs.path, 0o700) == 0,
+      chmod(runDirectory.path, 0o700) == 0
+    else { throw POSIXError(.EIO) }
+    let manifest = FixtureManifest(
+      runID: runID,
+      taskRoot: runDirectory.path,
+      appPath: "/private/tmp/fixture.app",
+      extensionPath: "/private/tmp/fixture.app/Contents/PlugIns/fixture.appex",
+      appGroupRunPath: runDirectory.path
+    )
+    manifestData = try JSONEncoder().encode(manifest)
+  }
+
+  func writePrivate(_ data: Data, to url: URL) throws {
+    try data.write(to: url, options: .withoutOverwriting)
+    guard chmod(url.path, 0o600) == 0 else { throw POSIXError(.EIO) }
+  }
+
+  func remove() { try? FileManager.default.removeItem(at: container) }
+}

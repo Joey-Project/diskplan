@@ -72,9 +72,10 @@ subsecond durations. Coordination runs away from the caller thread. Timeout canc
 coordinator, closes heap-owned completion boxes to late writes, and returns a typed report-only,
 non-descending result.
 
-The India-host script hook deliberately reports the controlled extension fixture as
-not available until a real File Provider extension and callback-zero oracle exist. No local
-unit result is presented as real non-materialization acceptance.
+The controlled extension fixture and callback-zero oracle are defined in
+[file-provider-fixture.md](file-provider-fixture.md). Local unsigned compilation and unit tests
+do not count as non-materialization acceptance; that result requires the signed lifecycle on
+the India host.
 
 ## Controlled Probe
 

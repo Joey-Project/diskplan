@@ -12,15 +12,9 @@ cd "$repo_root"
 swift test --filter DiskplanMacOSTests
 swift run diskplan-macos-probe --self-test
 
-if [[ ${DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT:-} == "" ]]; then
-  echo "file-provider-fixture: not-available (set DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT on India-mac-mini-m4-hoteng)"
+if [[ ${DISKPLAN_RUN_FILE_PROVIDER_FIXTURE:-0} != 1 ]]; then
+  echo "file-provider-fixture: not-available (set DISKPLAN_RUN_FILE_PROVIDER_FIXTURE=1 on India-mac-mini-m4-hoteng)"
   exit 0
 fi
 
-if [[ ! -d ${DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT} ]]; then
-  echo "file-provider-fixture: configured root is not a directory" >&2
-  exit 1
-fi
-
-echo "file-provider-fixture: hook-present, controlled extension callback oracle not implemented"
-exit 77
+scripts/fileprovider-fixture.sh accept
