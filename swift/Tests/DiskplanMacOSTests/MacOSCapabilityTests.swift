@@ -411,6 +411,41 @@ func boundProviderProbeTypesIdentityTimeoutWithoutMetadataWork() throws {
 }
 
 @Test
+func repeatedIdentityTimeoutsRetainOneBoundedOutstandingRequestUntilLateCompletion() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let starter = HeldIdentityStarter()
+  let probe = FileProviderBoundaryProbe(
+    operations: FileProviderProbeOperations(startIdentity: starter.start)
+  )
+
+  for _ in 0..<8 {
+    let outcome = probe.probe(
+      parentFileDescriptor: fixture.parentFD,
+      rawName: fixture.rawName,
+      policy: try injectedPolicy(),
+      timeout: .milliseconds(2)
+    )
+    #expect(outcome == .rejected(.timedOut(stage: .identityLookup)))
+  }
+  #expect(starter.startCount == 1)
+
+  starter.releaseHeldAndCompleteFuture(with: .identifierAbsent)
+  let recovered = probe.probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  guard case .evidence(let evidence) = recovered else {
+    Issue.record("expected a new request after the original late callback, got \(recovered)")
+    return
+  }
+  #expect(evidence.identityDisposition == .identifierAbsent)
+  #expect(starter.startCount == 2)
+}
+
+@Test
 func deadlineResultBoxDiscardsCompletionAfterTimeoutBeforeCloseLock() {
   let box = DeadlineResultBox<Int>()
   let callbackRan = LockedFlag()
@@ -929,6 +964,39 @@ private final class LockedEvidenceSequence: @unchecked Sendable {
       }
       return .known(values.removeFirst())
     }
+  }
+}
+
+private final class HeldIdentityStarter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var held: (@Sendable (ProviderIdentityOperationResult) -> Void)?
+  private var immediate: ProviderIdentityOperationResult?
+  private var starts = 0
+
+  var startCount: Int { lock.withLock { starts } }
+
+  func start(
+    _ url: URL,
+    _ completion: @escaping @Sendable (ProviderIdentityOperationResult) -> Void
+  ) {
+    _ = url
+    let result = lock.withLock { () -> ProviderIdentityOperationResult? in
+      starts += 1
+      if let immediate { return immediate }
+      held = completion
+      return nil
+    }
+    if let result { completion(result) }
+  }
+
+  func releaseHeldAndCompleteFuture(with result: ProviderIdentityOperationResult) {
+    let completion = lock.withLock {
+      immediate = result
+      let value = held
+      held = nil
+      return value
+    }
+    completion?(result)
   }
 }
 

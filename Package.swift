@@ -12,6 +12,10 @@ let package = Package(
     .library(name: "DiskplanEngineCore", targets: ["DiskplanEngineCore"]),
     .library(name: "DiskplanPolicy", targets: ["DiskplanPolicy"]),
     .library(name: "DiskplanExecution", targets: ["DiskplanExecution"]),
+    .library(
+      name: "DiskplanFileProviderFixtureSupport",
+      targets: ["DiskplanFileProviderFixtureSupport"]
+    ),
     .executable(name: "diskplan-engine", targets: ["DiskplanEngine"]),
     .executable(name: "diskplan-macos-probe", targets: ["DiskplanMacOSProbe"]),
   ],
@@ -63,6 +67,10 @@ let package = Package(
       name: "DiskplanExecution",
       dependencies: ["DiskplanPolicy"],
       path: "swift/Sources/DiskplanExecution"
+    ),
+    .target(
+      name: "DiskplanFileProviderFixtureSupport",
+      path: "fixtures/FileProviderAcceptance/Shared"
     ),
     .executableTarget(
       name: "DiskplanEngine",
@@ -119,6 +127,11 @@ let package = Package(
       name: "DiskplanExecutionTests",
       dependencies: ["DiskplanExecution", "DiskplanPolicy"],
       path: "swift/Tests/DiskplanExecutionTests"
+    ),
+    .testTarget(
+      name: "DiskplanFileProviderFixtureSupportTests",
+      dependencies: ["DiskplanFileProviderFixtureSupport"],
+      path: "swift/Tests/DiskplanFileProviderFixtureSupportTests"
     ),
   ]
 )

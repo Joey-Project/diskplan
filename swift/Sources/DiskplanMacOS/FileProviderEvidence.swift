@@ -127,13 +127,24 @@ struct FileProviderProbeOperations: Sendable {
 
   let startIdentity: IdentityStarter
   let readItem: ItemReader
+  private let identityCoordinator: IdentityOperationCoordinator
 
   init(
     startIdentity: @escaping IdentityStarter,
-    readItem: @escaping ItemReader = FileProviderProbeOperations.productionItemReader
+    readItem: @escaping ItemReader = FileProviderProbeOperations.productionItemReader,
+    identityCoordinator: IdentityOperationCoordinator = IdentityOperationCoordinator()
   ) {
     self.startIdentity = startIdentity
     self.readItem = readItem
+    self.identityCoordinator = identityCoordinator
+  }
+
+  @discardableResult
+  func startBoundedIdentity(
+    at url: URL,
+    completion: @escaping @Sendable (ProviderIdentityOperationResult) -> Void
+  ) -> Bool {
+    identityCoordinator.start(at: url, using: startIdentity, completion: completion)
   }
 
   private static let productionItemReader: ItemReader = {
@@ -193,6 +204,41 @@ struct FileProviderProbeOperations: Sendable {
     },
     readItem: productionItemReader
   )
+}
+
+/// Bounds non-cancellable File Provider identity requests to one outstanding callback. A timeout
+/// deliberately retains the slot until the original callback arrives; a permanently held request
+/// therefore consumes one bounded slot instead of allowing repeated scans to accumulate workers.
+final class IdentityOperationCoordinator: @unchecked Sendable {
+  private let lock = NSLock()
+  private var activeToken: UUID?
+
+  func start(
+    at url: URL,
+    using starter: FileProviderProbeOperations.IdentityStarter,
+    completion: @escaping @Sendable (ProviderIdentityOperationResult) -> Void
+  ) -> Bool {
+    let token = UUID()
+    lock.lock()
+    guard activeToken == nil else {
+      lock.unlock()
+      return false
+    }
+    activeToken = token
+    lock.unlock()
+
+    starter(url) { [self] result in
+      lock.lock()
+      guard activeToken == token else {
+        lock.unlock()
+        return
+      }
+      activeToken = nil
+      lock.unlock()
+      completion(result)
+    }
+    return true
+  }
 }
 
 final class DeadlineResultBox<Value: Sendable>: @unchecked Sendable {
@@ -414,7 +460,9 @@ public struct FileProviderBoundaryProbe: Sendable {
     let identityPolicy = policy.revalidateLive()
     guard identityPolicy.value != nil else { return .failure(policyRejection(identityPolicy)) }
     let identityBox = DeadlineResultBox<ProviderIdentityOperationResult>()
-    operations.startIdentity(url) { result in identityBox.complete(result) }
+    guard operations.startBoundedIdentity(at: url, completion: identityBox.complete) else {
+      return .failure(.timedOut(stage: .identityLookup))
+    }
     guard let identity = identityBox.wait(until: deadline.dispatchTime) else {
       return .failure(.timedOut(stage: .identityLookup))
     }
