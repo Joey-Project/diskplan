@@ -1,0 +1,10 @@
+xcode=26.6
+rust=1.95.0
+protoc=35.1
+protoc-darwin-arm64-sha256=193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2
+swift-protobuf=1.38.0
+swift-protobuf-revision=f6506eaa86ed2e01cb0ae14a75035b7fdbf0918f
+shellcheck=0.11.0
+shellcheck-darwin-arm64-sha256=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+actionlint=1.7.12
+actionlint-darwin-arm64-sha256=aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f

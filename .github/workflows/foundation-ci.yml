@@ -1,0 +1,145 @@
+name: Foundation CI
+
+on:
+  push:
+    branches:
+      - main
+      - "wip/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foundation-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  required-macos-26-arm64:
+    name: Required / macOS 26 Apple Silicon
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      # actions/checkout v7. Update the SHA and version comment together.
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Assert release runner
+        run: scripts/ci/assert-macos-runner.sh minimum 26 arm64
+
+      - name: Configure task-scoped build paths
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/diskplan-cargo-target" >> "$GITHUB_ENV"
+          echo "DISKPLAN_DEPLOYMENT_TARGET_DIR=$RUNNER_TEMP/diskplan-deployment-target" >> "$GITHUB_ENV"
+
+      - name: Select pinned Xcode
+        run: scripts/ci/select-xcode.sh
+
+      # actions/cache v5.0.5. Cache only immutable dependency downloads; lockfiles
+      # and generated-source checks remain authoritative, and build outputs are not cached.
+      - name: Restore dependency downloads
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        with:
+          path: |
+            ~/.cargo/git/db
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/Library/Caches/org.swift.swiftpm/repositories
+          key: foundation-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ hashFiles('Cargo.lock', 'Package.resolved') }}
+
+      - name: Bootstrap pinned tools
+        run: scripts/ci/bootstrap-macos-tools.sh foundation
+
+      - name: Report toolchain
+        run: |
+          sw_vers
+          uname -m
+          swift --version
+          rustc --version
+          cargo --version
+          protoc --version
+          protoc-gen-swift --version
+          shellcheck --version
+          actionlint -version
+
+      - name: Validate workflows and shell scripts
+        run: scripts/ci/validate-repository.sh
+
+      - name: Validate project journals
+        run: |
+          python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py'
+          python3 scripts/ci/validate_journals.py
+
+      - name: Build and test Swift foundation
+        run: |
+          swift build
+          swift test
+
+      - name: Check Rust foundation
+        run: |
+          cargo fmt --all -- --check
+          cargo check --locked --workspace --all-targets
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Check generated Protobuf sources
+        run: scripts/proto-codegen.sh check
+
+      - name: Check canonical fixture
+        run: scripts/canonical-fixture.sh check
+
+      - name: Test real Swift and Rust processes
+        run: scripts/test-cross-language.sh
+
+      - name: Assert deployment target
+        run: scripts/test-deployment-target.sh aarch64-apple-darwin
+
+      - name: Write bounded failure diagnostics
+        if: always()
+        continue-on-error: true
+        run: scripts/ci/write-diagnostics.sh "$RUNNER_TEMP/diskplan-ci/runner.txt"
+
+      # actions/upload-artifact v7.0.1. Upload only the small environment manifest,
+      # never build trees, dependency caches, source archives, or broad logs.
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: foundation-ci-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/diskplan-ci/runner.txt
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+  best-effort-macos-14-arm64:
+    name: Best effort / macOS 14 deployment compatibility
+    runs-on: macos-14
+    continue-on-error: true
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      # actions/checkout v7. Update the SHA and version comment together.
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Assert compatibility runner
+        run: scripts/ci/assert-macos-runner.sh exact 14 arm64
+
+      - name: Configure task-scoped build path
+        run: echo "DISKPLAN_DEPLOYMENT_TARGET_DIR=$RUNNER_TEMP/diskplan-deployment-target" >> "$GITHUB_ENV"
+
+      - name: Install pinned Rust toolchain
+        run: scripts/ci/bootstrap-macos-tools.sh rust-only
+
+      - name: Assert Rust CLI deployment target
+        run: scripts/test-deployment-target.sh aarch64-apple-darwin
