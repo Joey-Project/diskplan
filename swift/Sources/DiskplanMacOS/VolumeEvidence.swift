@@ -72,7 +72,14 @@ public struct VolumeProbe: Sendable {
     fileDescriptor: Int32,
     policy: NoMaterializationPolicy
   ) -> Capability<VolumeCapabilityEvidence> {
-    _ = policy
+    let livePolicy = policy.revalidateLive()
+    guard livePolicy.status == .known else {
+      return Capability(
+        status: livePolicy.status,
+        detail: livePolicy.detail,
+        errorCode: livePolicy.errorCode
+      )
+    }
     var raw = dp_volume_evidence_v1()
     guard dp_probe_volume_fd(fileDescriptor, &raw) == 0 else {
       return POSIXFailure.capability(errno, operation: "fgetattrlist volume capabilities")

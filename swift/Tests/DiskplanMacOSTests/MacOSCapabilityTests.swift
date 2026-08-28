@@ -1,8 +1,9 @@
 import CDiskplanMacOS
 import Darwin
-import DiskplanMacOS
 import Foundation
 import Testing
+
+@testable import DiskplanMacOS
 
 @Test
 func noMaterializationPolicyIsSetThenReadBack() throws {
@@ -32,6 +33,36 @@ func noMaterializationPolicyRejectsInconsistentReadback() {
     readBack: { (Int32(IOPOL_MATERIALIZE_DATALESS_FILES_ON), 0) }
   )
   #expect(installer.installBeforePathAccess().status == .inconsistent)
+}
+
+@Test
+func pathProbeRereadsLiveMaterializationPolicyInsteadOfTrustingToken() throws {
+  final class State: @unchecked Sendable {
+    let lock = NSLock()
+    var reads = 0
+  }
+  let state = State()
+  let installer = MaterializationPolicyInstaller(
+    setOff: { (0, 0) },
+    readBack: {
+      state.lock.withLock {
+        state.reads += 1
+        let value =
+          state.reads == 1
+          ? Int32(IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+          : Int32(IOPOL_MATERIALIZE_DATALESS_FILES_ON)
+        return (value, 0)
+      }
+    }
+  )
+  let policy = try #require(installer.installBeforePathAccess().value)
+  let result = ItemProbe().probe(
+    parentFileDescriptor: -1,
+    rawName: Data("unused".utf8),
+    policy: policy
+  )
+  #expect(result.status == .inconsistent)
+  #expect(state.lock.withLock { state.reads } == 2)
 }
 
 @Test
@@ -139,7 +170,7 @@ func datalessDirectoriesNeverDescendButMaterializedProviderDirectoriesDo() throw
   let materializedItem = try ItemWireV1.parse(materialized)
   let materializedDecision = FileProviderBoundaryProbe.decideBoundary(
     item: materializedItem,
-    identityDisposition: .confirmedLocal,
+    identityDisposition: .identifierAbsent,
     inheritedProviderBoundary: true
   )
   #expect(materializedDecision.traversal == .descendMetadataOnlyProviderBoundary)
@@ -160,8 +191,7 @@ func indeterminateProviderIdentityFailsClosedUnlessBoundaryEvidenceIsPositive() 
     .permissionDenied, .unavailable, .failed, .inconsistent,
   ]
   for status in failureStatuses {
-    let identity = Capability<ProviderIdentity>(status: status, detail: "fixture")
-    let disposition = FileProviderBoundaryProbe.identityDisposition(for: identity)
+    let disposition = ProviderIdentityDisposition.indeterminate(status)
     #expect(disposition == .indeterminate(status))
 
     let unverified = FileProviderBoundaryProbe.decideBoundary(
@@ -189,35 +219,160 @@ func indeterminateProviderIdentityFailsClosedUnlessBoundaryEvidenceIsPositive() 
 }
 
 @Test
-func authoritativeProviderIdentityResultsChooseProviderOrLocalTraversal() throws {
+func absentIdentifierNeverAuthorizesLocalTraversal() throws {
   var wire = validWire()
   wire.store(UInt32(2), at: 32)
   let item = try ItemWireV1.parse(wire)
 
-  let confirmedLocal = FileProviderBoundaryProbe.identityDisposition(
-    for: Capability<ProviderIdentity>(
-      status: .unsupported,
-      detail: "URL is not owned by a File Provider"
-    )
-  )
-  #expect(confirmedLocal == .confirmedLocal)
+  let absent = ProviderIdentityDisposition.identifierAbsent
   #expect(
     FileProviderBoundaryProbe.decideBoundary(
       item: item,
-      identityDisposition: confirmedLocal
-    ).traversal == .descendLocal
+      identityDisposition: absent
+    ).traversal == .doNotDescendUnverifiedProviderOwnership
   )
 
-  let confirmedProvider = FileProviderBoundaryProbe.identityDisposition(
-    for: .known(ProviderIdentity(itemIdentifier: "item", domainIdentifier: "domain"))
-  )
-  #expect(confirmedProvider == .confirmedProvider)
   #expect(
     FileProviderBoundaryProbe.decideBoundary(
       item: item,
-      identityDisposition: confirmedProvider
+      identityDisposition: .confirmedProvider
     ).traversal == .descendMetadataOnlyProviderBoundary
   )
+}
+
+@Test
+func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let reads = LockedCounter()
+  let policy = try injectedPolicy(counter: reads)
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in
+      DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(5)) {
+        completion(.identifierAbsent)
+      }
+    },
+    makeMetadataCoordinator: { ImmediateMetadataCoordinator() }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: policy,
+    timeout: .milliseconds(100)
+  )
+  guard case .evidence(let evidence) = outcome else {
+    Issue.record("expected bound evidence, got \(outcome)")
+    return
+  }
+  #expect(evidence.identityDisposition == .identifierAbsent)
+  #expect(evidence.traversal == .doNotDescendUnverifiedProviderOwnership)
+  #expect(reads.value >= 10)
+}
+
+@Test
+func boundProviderProbeTypesIdentityTimeoutWithoutMetadataStart() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let metadataCreated = LockedFlag()
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, _ in },
+    makeMetadataCoordinator: {
+      metadataCreated.set()
+      return ImmediateMetadataCoordinator()
+    }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(2)
+  )
+  #expect(outcome == .rejected(.timedOut(stage: .identityLookup)))
+  #expect(!metadataCreated.value)
+  #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
+func boundProviderProbeCancelsBlockingMetadataAtSharedDeadline() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let coordinator = BlockingMetadataCoordinator()
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in completion(.identifierAbsent) },
+    makeMetadataCoordinator: { coordinator }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(10)
+  )
+  #expect(outcome == .rejected(.timedOut(stage: .metadata)))
+  #expect(coordinator.cancelled)
+  #expect(outcome.handling == .reportOnly)
+}
+
+@Test
+func boundProviderProbeKeepsMissingUnreadableAndFailureDistinct() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let probe = FileProviderBoundaryProbe()
+  let missing = probe.probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: Data("missing".utf8),
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(10)
+  )
+  #expect(missing == .rejected(.missing(stage: .preflight)))
+
+  let unreadable = probe.rejection(
+    for: Capability<Bool>(status: .permissionDenied, detail: "fixture", errorCode: EACCES),
+    stage: .preflight
+  )
+  let failed = probe.rejection(
+    for: Capability<Bool>(status: .failed, detail: "fixture", errorCode: EIO),
+    stage: .preflight
+  )
+  #expect(unreadable == .unreadable(stage: .preflight, errorCode: EACCES))
+  #expect(
+    failed
+      == .failed(stage: .preflight, status: .failed, detail: "fixture", errorCode: EIO)
+  )
+  #expect(FileProviderProbeOutcome.rejected(unreadable).handling == .reportOnly)
+  #expect(
+    FileProviderProbeOutcome.rejected(failed).traversal
+      == .doNotDescendUnverifiedProviderOwnership
+  )
+}
+
+@Test
+func boundProviderProbeDetectsReplacementAcrossFoundationOperations() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let replacement = fixture.root.appendingPathComponent("replacement")
+  try Data([2]).write(to: replacement)
+  let renamed = LockedFlag()
+  let operations = FileProviderProbeOperations(
+    startIdentity: { url, completion in
+      if rename(replacement.path, url.path) == 0 { renamed.set() }
+      completion(.identifierAbsent)
+    },
+    makeMetadataCoordinator: { ImmediateMetadataCoordinator() }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  #expect(renamed.value)
+  guard case .rejected(.identityMismatch(let stage, let expected, let observed)) = outcome else {
+    Issue.record("expected identity mismatch, got \(outcome)")
+    return
+  }
+  #expect(stage == .postflight)
+  #expect(expected != observed)
+  #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
 }
 
 @Test
@@ -324,4 +479,86 @@ extension Data {
       replaceSubrange(offset..<offset + bytes.count, with: bytes)
     }
   }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage = 0
+
+  var value: Int { lock.withLock { storage } }
+
+  func increment() {
+    lock.withLock { storage += 1 }
+  }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage = false
+
+  var value: Bool { lock.withLock { storage } }
+
+  func set() {
+    lock.withLock { storage = true }
+  }
+}
+
+private final class ImmediateMetadataCoordinator: FileProviderMetadataCoordinating,
+  @unchecked Sendable
+{
+  func collect(url _: URL) -> Capability<[String: String]> { .known([:]) }
+  func cancel() {}
+}
+
+private final class BlockingMetadataCoordinator: FileProviderMetadataCoordinating,
+  @unchecked Sendable
+{
+  private let lock = NSLock()
+  private let release = DispatchSemaphore(value: 0)
+  private var wasCancelled = false
+
+  var cancelled: Bool { lock.withLock { wasCancelled } }
+
+  func collect(url _: URL) -> Capability<[String: String]> {
+    release.wait()
+    return .known([:])
+  }
+
+  func cancel() {
+    lock.withLock { wasCancelled = true }
+    release.signal()
+  }
+}
+
+private struct BoundProbeFixture {
+  let root: URL
+  let parentFD: Int32
+  let rawName = Data("item".utf8)
+
+  init() throws {
+    root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString,
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    try Data([1]).write(to: root.appendingPathComponent("item"))
+    parentFD = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard parentFD >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+  }
+
+  func close() {
+    Darwin.close(parentFD)
+    try? FileManager.default.removeItem(at: root)
+  }
+}
+
+private func injectedPolicy(counter: LockedCounter? = nil) throws -> NoMaterializationPolicy {
+  let installer = MaterializationPolicyInstaller(
+    setOff: { (0, 0) },
+    readBack: {
+      counter?.increment()
+      return (Int32(IOPOL_MATERIALIZE_DATALESS_FILES_OFF), 0)
+    }
+  )
+  return try #require(installer.installBeforePathAccess().value)
 }

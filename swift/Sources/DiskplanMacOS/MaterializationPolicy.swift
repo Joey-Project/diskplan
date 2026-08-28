@@ -3,6 +3,29 @@ import Darwin
 
 public struct NoMaterializationPolicy: Equatable, Sendable {
   fileprivate let installedValue: Int32
+  fileprivate let readBack: MaterializationPolicyInstaller.Getter
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.installedValue == rhs.installedValue
+  }
+
+  func revalidateLive() -> Capability<NoMaterializationPolicy> {
+    let result = readBack()
+    guard result.result >= 0 else {
+      return POSIXFailure.capability(
+        result.error,
+        operation: "read back live process dataless materialization policy"
+      )
+    }
+    let off = Int32(IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+    guard result.result & Int32(IOPOL_MATERIALIZE_DATALESS_FILES_BASIC_MASK) == off else {
+      return Capability(
+        status: .inconsistent,
+        detail: "live materialization policy did not report OFF"
+      )
+    }
+    return .known(self)
+  }
 }
 
 public struct MaterializationPolicyInstaller: Sendable {
@@ -12,15 +35,22 @@ public struct MaterializationPolicyInstaller: Sendable {
   private let setOff: Setter
   private let readBack: Getter
 
-  public init(
-    setOff: @escaping Setter = {
-      let result = dp_set_materialization_off()
-      return (result, result == 0 ? 0 : errno)
-    },
-    readBack: @escaping Getter = {
-      let result = dp_get_materialization_policy()
-      return (result, result >= 0 ? 0 : errno)
-    }
+  public init() {
+    self.init(
+      setOff: {
+        let result = dp_set_materialization_off()
+        return (result, result == 0 ? 0 : errno)
+      },
+      readBack: {
+        let result = dp_get_materialization_policy()
+        return (result, result >= 0 ? 0 : errno)
+      }
+    )
+  }
+
+  init(
+    setOff: @escaping Setter,
+    readBack: @escaping Getter
   ) {
     self.setOff = setOff
     self.readBack = readBack
@@ -48,6 +78,8 @@ public struct MaterializationPolicyInstaller: Sendable {
         detail: "materialization policy readback did not report OFF"
       )
     }
-    return .known(NoMaterializationPolicy(installedValue: readResult.result))
+    return .known(
+      NoMaterializationPolicy(installedValue: readResult.result, readBack: readBack)
+    )
   }
 }

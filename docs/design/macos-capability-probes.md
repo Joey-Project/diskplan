@@ -7,13 +7,26 @@ This document describes the Phase 0 implementation boundary for the accepted
 
 The engine must install `IOPOL_MATERIALIZE_DATALESS_FILES_OFF` at process scope and verify
 the readback before it performs any path access. Probe entry points require the resulting
-`NoMaterializationPolicy` token.
+`NoMaterializationPolicy` token and re-read the live process policy immediately before every
+path-touching step. The token is not proof that the current policy is still OFF. The protected
+access-policy property assumes Diskplan is the only code in its process that changes this
+process-wide policy; another same-process thread can still race the readback and syscall, so
+the engine must centralize policy mutation and never turn materialization back on while probing.
 
 Item metadata is collected from a held parent directory descriptor with a single raw-name
 component. The C shim rejects empty names, separators, NUL, `.` and `..`, and uses
 `FSOPT_NOFOLLOW | FSOPT_RESOLVE_BENEATH`. The protected property is the selected pathname
 slot beneath the already-bound parent; this probe does not claim to bind an entire ancestor
 chain or make later pathname use race-free.
+
+File Provider operations accept the same held parent descriptor and raw single-component name,
+not an arbitrary URL. The implementation derives a Foundation URL internally, verifies its
+filesystem-representation round trip, probes the raw slot through both the held parent and the
+derived parent path, and compares no-follow device, file ID, and object type before and after
+Foundation operations. Missing, unreadable, other failures, and identity mismatch remain
+distinct typed rejections. The scanner remains responsible for binding the inherited parent
+namespace. These point-in-time checks detect an observed replacement; they do not exclude a
+hostile transient swap and restoration entirely between checks.
 
 ## Typed Availability
 
@@ -41,16 +54,23 @@ metadata-only `NSFileCoordinator` access, and promised resource values. It does 
 provider-name or provider-path table and never reads item contents.
 
 Provider identity is interpreted as an explicit disposition. A returned identity is
-`confirmedProvider`; the public API's `NSFileNoSuchFileError` result is `confirmedLocal`.
-Permission denial, timeout/unavailability, lookup failure, and inconsistent callbacks are
-`indeterminate`, never local. With no positive sync-root or inherited provider-bound evidence,
-an indeterminate result is `doNotDescendUnverifiedProviderOwnership` and report-only. Positive
+`confirmedProvider`. `NSFileNoSuchFileError` means only `identifierAbsent`: the item may still
+be provider-owned but not yet assigned an identifier. Permission denial, timeout/unavailability,
+lookup failure, and inconsistent callbacks are `indeterminate`. Neither absent nor indeterminate
+identity authorizes local descent. With no positive sync-root or inherited provider-bound
+evidence, the result is `doNotDescendUnverifiedProviderOwnership` and report-only. Positive
 provider-bound evidence permits metadata-only descent but never changes report-only handling.
 
 - A dataless directory is `doNotDescendDataless` and report-only.
 - A materialized provider directory is `descendMetadataOnlyProviderBoundary` and report-only;
   its provider-bound state is passed back as `inheritedProviderBoundary` for descendants.
-- A local directory is `descendLocal` with normal handling.
+- This Phase 0 API never invents proven-local ancestry; a future scanner contract may supply
+  that evidence separately.
+
+Identity lookup and synchronous metadata coordination share one monotonic deadline, including
+subsecond durations. Coordination runs away from the caller thread. Timeout cancels the
+coordinator, closes heap-owned completion boxes to late writes, and returns a typed report-only,
+non-descending result.
 
 The India-host script hook deliberately reports the controlled extension fixture as
 not available until a real File Provider extension and callback-zero oracle exist. No local

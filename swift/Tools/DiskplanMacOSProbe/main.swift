@@ -45,13 +45,28 @@ guard let evidence = item.value, let volumeEvidence = volume.value else {
   exit(1)
 }
 
-let provider = FileProviderBoundaryProbe().probe(url: file, item: evidence, policy: policy)
+let provider = FileProviderBoundaryProbe().probe(
+  parentFileDescriptor: parentFD,
+  rawName: Data("sample.bin".utf8),
+  policy: policy
+)
+let providerIdentityStatus: String
+let providerFixtureAcceptance: String
+switch provider {
+case .evidence(let providerEvidence):
+  providerIdentityStatus = providerEvidence.identity.status.rawValue
+  providerFixtureAcceptance =
+    providerEvidence.controlledNonMaterializationAcceptance.status.rawValue
+case .rejected:
+  providerIdentityStatus = "rejected"
+  providerFixtureAcceptance = "unavailable"
+}
 let fields = [
   "\"materialization_policy\":\"off\"",
   "\"filesystem\":\"\(volumeEvidence.filesystemType)\"",
   "\"logical_status\":\"\(evidence.logicalBytes.status.rawValue)\"",
   "\"private_reclaim_status\":\"\(evidence.immediatePrivateReclaimBytes.status.rawValue)\"",
-  "\"provider_identity_status\":\"\(provider.identity.status.rawValue)\"",
-  "\"provider_fixture_acceptance\":\"\(provider.controlledNonMaterializationAcceptance.status.rawValue)\"",
+  "\"provider_identity_status\":\"\(providerIdentityStatus)\"",
+  "\"provider_fixture_acceptance\":\"\(providerFixtureAcceptance)\"",
 ]
 print("{\(fields.joined(separator: ","))}")

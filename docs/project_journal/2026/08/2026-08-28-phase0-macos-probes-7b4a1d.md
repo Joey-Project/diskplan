@@ -19,11 +19,12 @@ superseded_by:
 
 ## Current State
 
-- `DiskplanMacOS` requires a verified process-wide dataless materialization policy token before volume, item, or provider path probes.
+- `DiskplanMacOS` exposes only the real-syscall policy installer publicly and re-reads the live process-wide dataless materialization policy immediately before every path-touching probe step.
 - The Darwin shim performs descriptor-relative, single-component, no-follow/beneath item probes and bounds-checks fixed attribute buffers before Swift parses a versioned wire representation.
 - APFS evidence distinguishes logical bytes, nominal allocated bytes, immediate private reclaim, sharing flags, clone ID, and clone refcount. Conditional shared reclaim, snapshot attribution, and provider hidden backing remain unavailable/no-credit.
 - File Provider evidence uses public filesystem flags, provider identity, immediate metadata-only coordination, and promised values. Dataless directories do not descend; materialized provider directories may descend metadata-only while remaining report-only.
-- Provider identity is fail-closed: only a returned provider identity or the API's authoritative not-provider result continues ordinary classification. Permission, timeout, failure, and inconsistent results do not descend without positive sync-root or inherited provider-bound evidence.
+- Provider identity is fail-closed: `NSFileNoSuchFileError` means identifier-absent, not local. Absent, permission, timeout, failure, and inconsistent results do not descend without positive sync-root or inherited provider-bound evidence.
+- File Provider Foundation operations are derived from the held parent FD/raw slot, identity-sealed before and after, run metadata coordination off the caller thread, and share one monotonic identity-plus-metadata deadline.
 - The controlled CLI accepts only `--self-test`, creates its own temporary root, and has no arbitrary-path mode.
 
 ## Task List
@@ -34,6 +35,8 @@ superseded_by:
 - [x] Add deterministic malformed/mask/degradation tests and an APFS clone fixture.
 - [x] Add a controlled local probe and India-host File Provider fixture hook.
 - [x] Make indeterminate File Provider identity report-only and non-descending.
+- [x] Bind Foundation URL operations to the descriptor-relative slot and preserve typed replacement/failure evidence.
+- [x] Revalidate live materialization policy and bound identity/metadata by one subsecond-capable deadline.
 - [ ] Run independent review and real-host File Provider callback-zero acceptance.
 
 ## Handoff
@@ -47,9 +50,10 @@ superseded_by:
 - Accepted design: `docs/design/accepted-plan.md`.
 - Implementation contract: `docs/design/macos-capability-probes.md`.
 - Local `swift build` passed on macOS 26.6.1 with Swift 6.3.3.
-- Local `swift test --filter DiskplanMacOSTests` passed 11 focused tests, including real APFS `clonefile`, no-follow symlink fixtures, and all indeterminate identity/flags/inherited combinations.
-- Local full `swift test` passed all 22 Swift tests after the fail-closed provider disposition fix.
+- Local `swift test --filter DiskplanMacOSTests` passed 17 focused tests, including APFS clone, live-policy mutation, raw-slot replacement, typed failure, subsecond deadline, and blocking coordinator cancellation fixtures.
+- Local full `swift test` passed all 28 tests after the frozen-review changes.
 - `swift-format lint` passed for the new Swift source, test, and probe-tool paths.
+- The C shim passed `clang -std=c11 -Wall -Wextra -Werror -fsyntax-only` against the active macOS SDK.
 - `bash -n` and ShellCheck 0.11.0 passed for `scripts/test-macos-capabilities.sh`.
-- Local `swift run diskplan-macos-probe --self-test` reported APFS logical/private evidence as known, local provider identity as unsupported, and controlled provider acceptance as unavailable.
-- `scripts/test-macos-capabilities.sh` leaves the extension-backed India-host oracle as an explicit hook; it does not claim that gate passed.
+- Local `swift run diskplan-macos-probe --self-test` reports APFS logical/private evidence and `provider_identity_status: unavailable`, keeping absent provider identity non-authoritative.
+- The complete local `scripts/test-macos-capabilities.sh` gate passed its 17 focused tests and controlled CLI probe; it leaves the extension-backed India-host oracle as an explicit `not-available` hook and does not claim that gate passed.

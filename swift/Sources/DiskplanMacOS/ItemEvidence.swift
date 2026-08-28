@@ -235,7 +235,14 @@ public struct ItemProbe: Sendable {
     rawName: Data,
     policy: NoMaterializationPolicy
   ) -> Capability<ItemStorageEvidence> {
-    _ = policy
+    let livePolicy = policy.revalidateLive()
+    guard livePolicy.status == .known else {
+      return Capability(
+        status: livePolicy.status,
+        detail: livePolicy.detail,
+        errorCode: livePolicy.errorCode
+      )
+    }
     var wire = Data(count: ItemWireV1.size)
     var written = 0
     let result = wire.withUnsafeMutableBytes { output in
