@@ -30,7 +30,11 @@ platform, or minimum-deployment-target mismatch before publication.
 `VERSION`, and `SHA256SUMS` make the exact archive contents auditable. Tar entry
 ownership, modes, ordering, and timestamps plus every gzip header field and the
 compression level are pinned, so the same input bytes and source revision produce
-the same archive bytes. Release packaging deliberately pins both the compile-time
+the same archive bytes. The Swift release build maps its private random work root
+to one logical source path and excludes debug STABS at link time, before the
+linker derives the required Mach-O UUID and ad-hoc signature; random checkout
+paths and object timestamps therefore cannot perturb the published engine.
+Release packaging deliberately pins both the compile-time
 and runtime zlib implementation to `1.2.12`; a toolchain change fails closed until
 that reproducibility input is reviewed and updated. The archive and its checksum
 sidecar are published as one verified output set using private, exclusive

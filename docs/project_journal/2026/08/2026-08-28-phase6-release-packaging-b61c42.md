@@ -54,6 +54,10 @@ superseded_by:
   most one reopen and rehash; final proof binds identity, access policy, size,
   and SHA-256, so benign `touch` churn is accepted while content or policy drift
   is rejected.
+- Swift release compilation maps the private random work root to a fixed logical
+  path and excludes debug STABS before Mach-O UUID and ad-hoc signature
+  generation. The published engine therefore retains the UUID required by dyld
+  without embedding random checkout paths or object timestamps.
 
 ## Next Steps
 
@@ -86,3 +90,15 @@ superseded_by:
   ShellCheck 0.11.0, actionlint 1.7.12, Python bytecode compilation, zlib pin,
   and diff checks pass. The initial `/dev/fd` launch design was rejected by a
   real macOS `EACCES` result and replaced by the verified private snapshot path.
+- Review-follow-up macOS 26.6.1 Apple Silicon release validation (head
+  `2c22169b`): two independent clean release builds produced byte-identical
+  archives with SHA-256
+  `0d09ddf7eb0862d84a174285d63c303d591391e1f186122358084435f95dc384`
+  and byte-identical checksum sidecars. The archive lifecycle passed fresh and
+  idempotent install, real launcher/engine handshake, upgrade, rollback,
+  mixed-major rejection, exact uninstall, ancestor/mount binding regressions,
+  timestamp-only acceptance, and content/access-policy rejection. All three
+  packaged executables are exact arm64 Mach-O platform 1 with minimum macOS
+  14.0. A negative focused probe confirmed that removing `LC_UUID` is rejected
+  by dyld; two independent prefix-mapped link-time-stripped engine builds were
+  byte-identical and remained operational.
