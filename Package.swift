@@ -74,7 +74,7 @@ let package = Package(
     ),
     .executableTarget(
       name: "DiskplanEngine",
-      dependencies: ["DiskplanEngineCore", "DiskplanExecution"],
+      dependencies: ["DiskplanCore", "DiskplanEngineCore", "DiskplanExecution"],
       path: "swift/Sources/DiskplanEngine"
     ),
     .executableTarget(

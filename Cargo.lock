@@ -280,6 +280,7 @@ dependencies = [
  "futures-util",
  "hex",
  "insta",
+ "libc",
  "prost",
  "ratatui",
  "sha2",

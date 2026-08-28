@@ -1,0 +1,11 @@
+{
+  "architecture": "arm64",
+  "bundle_format": 1,
+  "deployment_target_macos": "14.0",
+  "protocol_major": 1,
+  "protocol_minor": 3,
+  "release_gate_macos": "26.0",
+  "required_capabilities": [
+    "framing-v1"
+  ]
+}
