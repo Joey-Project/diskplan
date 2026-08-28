@@ -71,13 +71,17 @@ superseded_by:
   held, bounded `proc_listpgrppids` enumeration distinguishes the held leader from descendants; the
   signal/enumeration syscall itself is serialized with identity-loss and release. Enumeration error,
   churn that fills the capped buffer, and lost identity remain typed unknown rather than absence.
-- The redirected-descendant regression fixture now uses task-scoped private readiness and
-  acknowledgement FIFOs instead of relying on shell scheduling. The descendant redirects all three
-  standard streams before publishing its PID, then blocks until the test validates the leader and
-  descendant PID, PGID, and `proc_bsdinfo` start generation twice. The acknowledgement path repeats
-  the full validation before allowing the leader to exit. Readiness timeout, early descendant exit,
-  malformed records, process-observation failure, identity change, wrong PGID, and FIFO failure stay
-  typed and distinct.
+- The redirected-descendant regression fixture now creates anonymous readiness and acknowledgement
+  pipes before spawn. A package-only spawn action consumes the child-side sources, maps them to fixed
+  child descriptors under `POSIX_SPAWN_CLOEXEC_DEFAULT`, and closes every parent copy on success or
+  failure. The descendant redirects all three standard streams before publishing its PID, then blocks
+  until the parent validates leader and descendant PID, PGID, and `proc_bsdinfo` start generation
+  twice. The acknowledgement path repeats the full validation, then the descendant kills the held
+  shell leader and blocks on a second read from the same pipe until process-group cleanup ends it.
+  The fixture therefore uses neither a trapped signal nor a fixed sleep to establish the descendant
+  lifetime. Readiness timeout, early EOF, malformed records, process-observation failure, identity
+  change, wrong PGID, and pipe I/O failure stay typed and distinct. The acknowledgement write also
+  disables `SIGPIPE`, so an early child close is returned as typed `EPIPE`.
 
 ## Next Steps
 
@@ -165,3 +169,21 @@ superseded_by:
   no P0-P2. The exact real test then passed 10 consecutive sequential iterations, the supervisor and
   readiness focus passed 20 of 20, `DiskplanScanTests` passed 82 of 82, and the serial full Swift gate
   passed 432 of 432.
+- A third public macOS 26 run showed that the named-FIFO fixture still retained a parent `O_RDWR`
+  writer, so child exit could not produce EOF and both positive and early-exit cases could time out
+  under different shell scheduling. The current uncommitted follow-up removes pathname FIFO open
+  ordering entirely. Spawn happens synchronously before the parent reads; only the anonymous ready
+  read end and acknowledgement write end remain in the parent, while exact child ends are consumed by
+  atomic spawn actions. The decoder has deterministic child-first and parent-first event coverage,
+  closing an untransferred child writer produces typed early EOF instead of timeout, and closing the
+  acknowledgement reader produces typed `EPIPE` without terminating the test process. Fresh static
+  review found no P0-P2. The first dynamic run exposed one remaining shell dependency: default
+  `SIGTERM` delivery to a shell blocked in `wait` could be deferred until the supervisor deadline.
+  The final fixture uses immediate leader `SIGKILL` plus a second acknowledgement-pipe read to hold the
+  descendant, without trap, sleep, or timeout semantics. The real positive fixture then passed 20
+  consecutive iterations and the real typed early-exit fixture passed another 20. The focused
+  `RuntimeCollectorsTests` gate passed 39 of 39 and the complete `DiskplanScanTests` target passed 87
+  of 87.
+  A sandboxed full run reached all 437 tests but 47 unrelated fixture-oracle cases uniformly failed
+  their host boot-generation probe with `EPERM`; rerunning the established serial gate with that
+  read-only host probe allowed the suite to pass all 437 tests.

@@ -406,23 +406,46 @@ int dp_list_snapshot_attributes(int fd, uint8_t *buffer, size_t buffer_size) {
     return fs_snapshot_list(fd, &attributes, buffer, buffer_size, 0);
 }
 
-int dp_spawn_process_group(const char *executable,
-                           const uint8_t *arguments,
-                           size_t arguments_size,
-                           size_t argument_count,
-                           const uint8_t *environment,
-                           size_t environment_size,
-                           size_t environment_count,
-                           dp_spawned_process_group_v1 *result) {
+static int dp_spawn_process_group_impl(
+    const char *executable,
+    const uint8_t *arguments,
+    size_t arguments_size,
+    size_t argument_count,
+    const uint8_t *environment,
+    size_t environment_size,
+    size_t environment_count,
+    const dp_spawn_inherited_fd_v1 *inherited_fds,
+    size_t inherited_fd_count,
+    dp_spawned_process_group_v1 *result) {
     if (executable == NULL || executable[0] == '\0' || result == NULL ||
         (arguments_size > 0 && arguments == NULL) ||
         (argument_count == 0 && arguments_size != 0) ||
         (environment_size > 0 && environment == NULL) ||
         (environment_count == 0 && environment_size != 0) ||
+        (inherited_fd_count > 0 && inherited_fds == NULL) ||
+        inherited_fd_count > 16 ||
         argument_count > SIZE_MAX / sizeof(char *) - 2 ||
         environment_count > SIZE_MAX / sizeof(char *) - 1) {
         errno = EINVAL;
         return -1;
+    }
+    for (size_t index = 0; index < inherited_fd_count; index++) {
+        const int source_fd = inherited_fds[index].source_fd;
+        const int child_fd = inherited_fds[index].child_fd;
+        if (source_fd < 3 || child_fd < 3 || source_fd == child_fd ||
+            fcntl(source_fd, F_GETFD) < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        for (size_t compared = 0; compared < inherited_fd_count; compared++) {
+            if (index != compared &&
+                (source_fd == inherited_fds[compared].source_fd ||
+                 child_fd == inherited_fds[compared].child_fd ||
+                 child_fd == inherited_fds[compared].source_fd)) {
+                errno = EINVAL;
+                return -1;
+            }
+        }
     }
 
     char **argv = calloc(argument_count + 2, sizeof(*argv));
@@ -527,6 +550,19 @@ int dp_spawn_process_group(const char *executable,
     if (error == 0) {
         error = posix_spawn_file_actions_addclose(&actions, error_pipe[0]);
     }
+    for (size_t index = 0; error == 0 && index < inherited_fd_count;
+         index++) {
+        error = posix_spawn_file_actions_adddup2(
+            &actions, inherited_fds[index].source_fd,
+            inherited_fds[index].child_fd);
+    }
+    for (size_t index = 0; error == 0 && index < inherited_fd_count;
+         index++) {
+        if (inherited_fds[index].source_fd != inherited_fds[index].child_fd) {
+            error = posix_spawn_file_actions_addclose(
+                &actions, inherited_fds[index].source_fd);
+        }
+    }
     if (error != 0) {
         goto cleanup;
     }
@@ -585,6 +621,37 @@ cleanup:
         return -1;
     }
     return 0;
+}
+
+int dp_spawn_process_group(const char *executable,
+                           const uint8_t *arguments,
+                           size_t arguments_size,
+                           size_t argument_count,
+                           const uint8_t *environment,
+                           size_t environment_size,
+                           size_t environment_count,
+                           dp_spawned_process_group_v1 *result) {
+    return dp_spawn_process_group_impl(
+        executable, arguments, arguments_size, argument_count,
+        environment, environment_size, environment_count,
+        NULL, 0, result);
+}
+
+int dp_spawn_process_group_with_inherited_fds(
+    const char *executable,
+    const uint8_t *arguments,
+    size_t arguments_size,
+    size_t argument_count,
+    const uint8_t *environment,
+    size_t environment_size,
+    size_t environment_count,
+    const dp_spawn_inherited_fd_v1 *inherited_fds,
+    size_t inherited_fd_count,
+    dp_spawned_process_group_v1 *result) {
+    return dp_spawn_process_group_impl(
+        executable, arguments, arguments_size, argument_count,
+        environment, environment_size, environment_count,
+        inherited_fds, inherited_fd_count, result);
 }
 
 uint32_t dp_attr_common_device(void) { return ATTR_CMN_DEVID; }

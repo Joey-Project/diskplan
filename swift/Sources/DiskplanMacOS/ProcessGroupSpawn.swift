@@ -18,6 +18,16 @@ public struct SpawnedPOSIXProcessGroup: Equatable, Sendable {
   }
 }
 
+package struct POSIXSpawnInheritedFileDescriptor: Equatable, Sendable {
+  package let sourceFileDescriptor: Int32
+  package let childFileDescriptor: Int32
+
+  package init(sourceFileDescriptor: Int32, childFileDescriptor: Int32) {
+    self.sourceFileDescriptor = sourceFileDescriptor
+    self.childFileDescriptor = childFileDescriptor
+  }
+}
+
 public struct POSIXProcessGroupSpawner: Sendable {
   public init() {}
 
@@ -28,6 +38,29 @@ public struct POSIXProcessGroupSpawner: Sendable {
     arguments: [String],
     environment: [String: String]
   ) throws -> SpawnedPOSIXProcessGroup {
+    try spawn(
+      executableURL: executableURL,
+      arguments: arguments,
+      environment: environment,
+      consumingInheritedFileDescriptors: []
+    )
+  }
+
+  /// Consumes every source descriptor on success or failure. Child descriptors are created only by
+  /// the atomic spawn file actions and remain closed in the parent.
+  package func spawn(
+    executableURL: URL,
+    arguments: [String],
+    environment: [String: String],
+    consumingInheritedFileDescriptors inheritedDescriptors: [POSIXSpawnInheritedFileDescriptor]
+  ) throws -> SpawnedPOSIXProcessGroup {
+    defer {
+      let uniqueSources = Set(inheritedDescriptors.map(\.sourceFileDescriptor))
+      for sourceFileDescriptor in uniqueSources {
+        Darwin.close(sourceFileDescriptor)
+      }
+    }
+    try Self.validate(inheritedDescriptors: inheritedDescriptors)
     guard executableURL.isFileURL else {
       throw NSError(
         domain: NSPOSIXErrorDomain,
@@ -63,20 +96,30 @@ public struct POSIXProcessGroupSpawner: Sendable {
       environmentBytes.append(0)
     }
 
+    let inherited = inheritedDescriptors.map { descriptor in
+      dp_spawn_inherited_fd_v1(
+        source_fd: descriptor.sourceFileDescriptor,
+        child_fd: descriptor.childFileDescriptor
+      )
+    }
     var result = dp_spawned_process_group_v1()
     let status = executableURL.path.withCString { executable in
       argumentBytes.withUnsafeBytes { bytes in
         environmentBytes.withUnsafeBytes { environmentBytes in
-          dp_spawn_process_group(
-            executable,
-            bytes.bindMemory(to: UInt8.self).baseAddress,
-            bytes.count,
-            arguments.count,
-            environmentBytes.bindMemory(to: UInt8.self).baseAddress,
-            environmentBytes.count,
-            environment.count,
-            &result
-          )
+          inherited.withUnsafeBufferPointer { inherited in
+            dp_spawn_process_group_with_inherited_fds(
+              executable,
+              bytes.bindMemory(to: UInt8.self).baseAddress,
+              bytes.count,
+              arguments.count,
+              environmentBytes.bindMemory(to: UInt8.self).baseAddress,
+              environmentBytes.count,
+              environment.count,
+              inherited.baseAddress,
+              inherited.count,
+              &result
+            )
+          }
         }
       }
     }
@@ -96,5 +139,26 @@ public struct POSIXProcessGroupSpawner: Sendable {
       standardOutputFileDescriptor: result.standard_output_fd,
       standardErrorFileDescriptor: result.standard_error_fd
     )
+  }
+
+  private static func validate(
+    inheritedDescriptors: [POSIXSpawnInheritedFileDescriptor]
+  ) throws {
+    guard inheritedDescriptors.count <= 16 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+    }
+    var sourceDescriptors = Set<Int32>()
+    var childDescriptors = Set<Int32>()
+    for descriptor in inheritedDescriptors {
+      guard descriptor.sourceFileDescriptor >= 3, descriptor.childFileDescriptor >= 3,
+        sourceDescriptors.insert(descriptor.sourceFileDescriptor).inserted,
+        childDescriptors.insert(descriptor.childFileDescriptor).inserted
+      else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+      }
+    }
+    guard sourceDescriptors.isDisjoint(with: childDescriptors) else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+    }
   }
 }

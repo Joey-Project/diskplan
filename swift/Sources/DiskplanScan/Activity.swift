@@ -521,63 +521,103 @@ public struct FoundationProcessSnapshotRunner: ProcessSnapshotRunning {
         cleanup: ProcessSnapshotCleanupReport(residualProcessGroup: false)
       )
     }
-    let cancellation = ProcessSnapshotCancellationRelay()
-    return await withTaskCancellationHandler {
-      await withCheckedContinuation { continuation in
-        do {
-          let process = try spawner.spawn(
-            executableURL: executableURL,
-            arguments: arguments,
-            environment: environment
-          )
-          let state = BoundedProcessGroupSnapshotState(
-            completion: { continuation.resume(returning: $0) },
-            backend: POSIXProcessGroupSnapshotBackend(process: process),
-            executionDeadlineNanoseconds: deadlineNanoseconds,
-            maximumOutputBytes: maximumOutputBytes
-          )
-          state.start()
-          cancellation.install(state)
-        } catch {
-          let result: ProcessSnapshotExecution =
-            Task.isCancelled
-            ? .cancelled(
-              cleanup: ProcessSnapshotCleanupReport(residualProcessGroup: false)
-            )
-            : .launchFailed(ProcessLaunchFailure(error: error, operation: "failed to launch lsof"))
-          continuation.resume(returning: result)
-        }
+    do {
+      let process = try spawner.spawn(
+        executableURL: executableURL,
+        arguments: arguments,
+        environment: environment
+      )
+      let session = Self.startSupervision(
+        process: process,
+        deadlineNanoseconds: deadlineNanoseconds,
+        maximumOutputBytes: maximumOutputBytes
+      )
+      return await withTaskCancellationHandler {
+        await session.value()
+      } onCancel: {
+        session.cancel()
       }
-    } onCancel: {
-      cancellation.cancel()
+    } catch {
+      return Task.isCancelled
+        ? .cancelled(
+          cleanup: ProcessSnapshotCleanupReport(residualProcessGroup: false)
+        )
+        : .launchFailed(ProcessLaunchFailure(error: error, operation: "failed to launch lsof"))
+    }
+  }
+
+  package static func startSupervision(
+    process: SpawnedPOSIXProcessGroup,
+    deadlineNanoseconds: UInt64,
+    maximumOutputBytes: Int
+  ) -> ProcessSnapshotSupervisionSession {
+    precondition(maximumOutputBytes > 0)
+    return ProcessSnapshotSupervisionSession(
+      process: process,
+      deadlineNanoseconds: deadlineNanoseconds,
+      maximumOutputBytes: maximumOutputBytes
+    )
+  }
+}
+
+package final class ProcessSnapshotSupervisionSession: @unchecked Sendable {
+  private let result = ProcessSnapshotExecutionResultBox()
+  private let state: BoundedProcessGroupSnapshotState
+
+  fileprivate init(
+    process: SpawnedPOSIXProcessGroup,
+    deadlineNanoseconds: UInt64,
+    maximumOutputBytes: Int
+  ) {
+    let result = self.result
+    state = BoundedProcessGroupSnapshotState(
+      completion: { result.complete($0) },
+      backend: POSIXProcessGroupSnapshotBackend(process: process),
+      executionDeadlineNanoseconds: deadlineNanoseconds,
+      maximumOutputBytes: maximumOutputBytes
+    )
+    state.start()
+  }
+
+  package func value() async -> ProcessSnapshotExecution {
+    await result.value()
+  }
+
+  package func cancel() {
+    state.requestCancellation()
+  }
+}
+
+private final class ProcessSnapshotExecutionResultBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var result: ProcessSnapshotExecution?
+  private var waiters: [CheckedContinuation<ProcessSnapshotExecution, Never>] = []
+
+  func complete(_ result: ProcessSnapshotExecution) {
+    let waiters = lock.withLock { () -> [CheckedContinuation<ProcessSnapshotExecution, Never>] in
+      precondition(self.result == nil)
+      self.result = result
+      let waiters = self.waiters
+      self.waiters.removeAll(keepingCapacity: false)
+      return waiters
+    }
+    for waiter in waiters { waiter.resume(returning: result) }
+  }
+
+  func value() async -> ProcessSnapshotExecution {
+    await withCheckedContinuation { continuation in
+      let immediate = lock.withLock { () -> ProcessSnapshotExecution? in
+        if let result { return result }
+        waiters.append(continuation)
+        return nil
+      }
+      if let immediate { continuation.resume(returning: immediate) }
     }
   }
 }
 
 protocol ProcessSnapshotCancellationRequesting: AnyObject, Sendable {
   func requestCancellation()
-}
-
-private final class ProcessSnapshotCancellationRelay: @unchecked Sendable {
-  private let lock = NSLock()
-  private weak var target: (any ProcessSnapshotCancellationRequesting)?
-  private var cancellationRequested = false
-
-  func install(_ target: any ProcessSnapshotCancellationRequesting) {
-    let shouldCancel = lock.withLock {
-      self.target = target
-      return cancellationRequested
-    }
-    if shouldCancel { target.requestCancellation() }
-  }
-
-  func cancel() {
-    let installedTarget = lock.withLock {
-      cancellationRequested = true
-      return self.target
-    }
-    installedTarget?.requestCancellation()
-  }
 }
 
 public struct UnavailableProcessActivityCollector: ProcessActivityCollecting {
