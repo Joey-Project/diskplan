@@ -30,6 +30,14 @@ typedef struct __attribute__((packed, aligned(4))) {
 typedef struct __attribute__((packed, aligned(4))) {
     uint32_t length;
     attribute_set_t returned;
+    dev_t device;
+    fsobj_type_t object_type;
+    uint64_t file_id;
+} dp_kernel_fd_identity_buffer;
+
+typedef struct __attribute__((packed, aligned(4))) {
+    uint32_t length;
+    attribute_set_t returned;
     vol_capabilities_attr_t capabilities;
     vol_attributes_attr_t attributes;
 } dp_kernel_volume_buffer;
@@ -219,6 +227,77 @@ int dp_probe_item_at(int parent_fd, const uint8_t *name, size_t name_length,
         return -1;
     }
     return dp_parse_item_buffer(raw, sizeof(raw), wire, wire_capacity, wire_length);
+}
+
+int dp_probe_fd_identity(int fd, dp_fd_identity_v1 *result) {
+    if (fd < 0 || result == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    struct attrlist attributes = {0};
+    attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+    attributes.commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_DEVID |
+                            ATTR_CMN_OBJTYPE | ATTR_CMN_FILEID;
+
+    uint8_t raw[sizeof(dp_kernel_fd_identity_buffer)] = {0};
+    unsigned long options = FSOPT_REPORT_FULLSIZE | FSOPT_PACK_INVAL_ATTRS |
+                            FSOPT_RETURN_REALDEV;
+    if (fgetattrlist(fd, &attributes, raw, sizeof(raw), options) != 0) {
+        return -1;
+    }
+
+    const size_t returned_end = offsetof(dp_kernel_fd_identity_buffer, device);
+    uint32_t raw_length = 0;
+    memcpy(&raw_length, raw, sizeof(raw_length));
+    if (raw_length < returned_end || raw_length > sizeof(raw)) {
+        errno = EPROTO;
+        return -1;
+    }
+    attribute_set_t returned = {0};
+    memcpy(&returned, raw + offsetof(dp_kernel_fd_identity_buffer, returned),
+           sizeof(returned));
+    const uint32_t requested_common =
+        ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_DEVID | ATTR_CMN_OBJTYPE |
+        ATTR_CMN_FILEID;
+    if ((returned.commonattr & ATTR_CMN_RETURNED_ATTRS) == 0 ||
+        (returned.commonattr & ~requested_common) != 0 ||
+        returned.volattr != 0 || returned.dirattr != 0 ||
+        returned.fileattr != 0 || returned.forkattr != 0) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    dev_t device = 0;
+    fsobj_type_t object_type = 0;
+    uint64_t file_id = 0;
+    if (dp_read_claimed_field(raw, raw_length,
+                              offsetof(dp_kernel_fd_identity_buffer, device),
+                              &device, sizeof(device),
+                              (returned.commonattr & ATTR_CMN_DEVID) != 0) != 0 ||
+        dp_read_claimed_field(raw, raw_length,
+                              offsetof(dp_kernel_fd_identity_buffer, object_type),
+                              &object_type, sizeof(object_type),
+                              (returned.commonattr & ATTR_CMN_OBJTYPE) != 0) != 0 ||
+        dp_read_claimed_field(raw, raw_length,
+                              offsetof(dp_kernel_fd_identity_buffer, file_id),
+                              &file_id, sizeof(file_id),
+                              (returned.commonattr & ATTR_CMN_FILEID) != 0) != 0) {
+        return -1;
+    }
+
+    memset(result, 0, sizeof(*result));
+    result->returned_common = returned.commonattr;
+    if ((returned.commonattr & ATTR_CMN_DEVID) != 0) {
+        result->real_device = (int64_t)device;
+    }
+    if ((returned.commonattr & ATTR_CMN_FILEID) != 0) {
+        result->file_id = file_id;
+    }
+    if ((returned.commonattr & ATTR_CMN_OBJTYPE) != 0) {
+        result->object_type = (uint32_t)object_type;
+    }
+    return 0;
 }
 
 int dp_probe_volume_fd(int fd, dp_volume_evidence_v1 *result) {

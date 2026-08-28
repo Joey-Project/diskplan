@@ -344,8 +344,7 @@ func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
       DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(5)) {
         completion(.identifierAbsent)
       }
-    },
-    makeMetadataCoordinator: { ImmediateMetadataCoordinator() }
+    }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
     parentFileDescriptor: fixture.parentFD,
@@ -363,16 +362,11 @@ func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
 }
 
 @Test
-func boundProviderProbeTypesIdentityTimeoutWithoutMetadataStart() throws {
+func boundProviderProbeTypesIdentityTimeoutWithoutMetadataWork() throws {
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }
-  let metadataCreated = LockedFlag()
   let operations = FileProviderProbeOperations(
-    startIdentity: { _, _ in },
-    makeMetadataCoordinator: {
-      metadataCreated.set()
-      return ImmediateMetadataCoordinator()
-    }
+    startIdentity: { _, _ in }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
     parentFileDescriptor: fixture.parentFD,
@@ -381,28 +375,29 @@ func boundProviderProbeTypesIdentityTimeoutWithoutMetadataStart() throws {
     timeout: .milliseconds(2)
   )
   #expect(outcome == .rejected(.timedOut(stage: .identityLookup)))
-  #expect(!metadataCreated.value)
   #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
 }
 
 @Test
-func boundProviderProbeCancelsBlockingMetadataAtSharedDeadline() throws {
+func boundProviderProbeReturnsMetadataUnavailableWithoutInProcessCoordination() throws {
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }
-  let coordinator = BlockingMetadataCoordinator()
   let operations = FileProviderProbeOperations(
-    startIdentity: { _, completion in completion(.identifierAbsent) },
-    makeMetadataCoordinator: { coordinator }
+    startIdentity: { _, completion in completion(.identifierAbsent) }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
     parentFileDescriptor: fixture.parentFD,
     rawName: fixture.rawName,
     policy: try injectedPolicy(),
-    timeout: .milliseconds(10)
+    timeout: .milliseconds(100)
   )
-  #expect(outcome == .rejected(.timedOut(stage: .metadata)))
-  #expect(coordinator.cancelled)
-  #expect(outcome.handling == .reportOnly)
+  guard case .evidence(let evidence) = outcome else {
+    Issue.record("expected provider evidence, got \(outcome)")
+    return
+  }
+  #expect(evidence.promisedMetadata.status == .unavailable)
+  #expect(evidence.promisedMetadata.value == nil)
+  #expect(evidence.promisedMetadata.detail?.contains("disabled") == true)
 }
 
 @Test
@@ -426,12 +421,16 @@ func boundProviderProbeKeepsMissingUnreadableAndFailureDistinct() throws {
     for: Capability<Bool>(status: .failed, detail: "fixture", errorCode: EIO),
     stage: .preflight
   )
+  let unreadableParent = probe.posixRejection(EACCES, stage: .derivedParentPostflight)
   #expect(unreadable == .unreadable(stage: .preflight, errorCode: EACCES))
   #expect(
     failed
       == .failed(stage: .preflight, status: .failed, detail: "fixture", errorCode: EIO)
   )
   #expect(FileProviderProbeOutcome.rejected(unreadable).handling == .reportOnly)
+  #expect(
+    unreadableParent == .unreadable(stage: .derivedParentPostflight, errorCode: EACCES)
+  )
   #expect(
     FileProviderProbeOutcome.rejected(failed).traversal
       == .doNotDescendUnverifiedProviderOwnership
@@ -449,8 +448,7 @@ func boundProviderProbeDetectsReplacementAcrossFoundationOperations() throws {
     startIdentity: { url, completion in
       if rename(replacement.path, url.path) == 0 { renamed.set() }
       completion(.identifierAbsent)
-    },
-    makeMetadataCoordinator: { ImmediateMetadataCoordinator() }
+    }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
     parentFileDescriptor: fixture.parentFD,
@@ -465,6 +463,72 @@ func boundProviderProbeDetectsReplacementAcrossFoundationOperations() throws {
   }
   #expect(stage == .postflight)
   #expect(expected != observed)
+  #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
+func boundProviderProbeDetectsParentReplacementDespiteChildHardlinkIdentity() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let movedParent = fixture.container.appendingPathComponent("moved-parent", isDirectory: true)
+  let replacementParent = fixture.container.appendingPathComponent(
+    "replacement-parent",
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(
+    at: replacementParent,
+    withIntermediateDirectories: false
+  )
+  let replacementItem = replacementParent.appendingPathComponent("item")
+  #expect(link(fixture.root.appendingPathComponent("item").path, replacementItem.path) == 0)
+  let replaced = LockedFlag()
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in
+      if rename(fixture.root.path, movedParent.path) == 0,
+        rename(replacementParent.path, fixture.root.path) == 0
+      {
+        replaced.set()
+      }
+      completion(.identifierAbsent)
+    }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  #expect(replaced.value)
+  guard case .rejected(.parentIdentityMismatch(let stage, let expected, let observed)) = outcome
+  else {
+    Issue.record("expected parent identity mismatch, got \(outcome)")
+    return
+  }
+  #expect(stage == .derivedParentPostflight)
+  #expect(expected != observed)
+  #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
+func boundProviderProbeKeepsRenamedDerivedParentMissingDistinct() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let movedParent = fixture.container.appendingPathComponent("moved-parent", isDirectory: true)
+  let renamed = LockedFlag()
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in
+      if rename(fixture.root.path, movedParent.path) == 0 { renamed.set() }
+      completion(.identifierAbsent)
+    }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  #expect(renamed.value)
+  #expect(outcome == .rejected(.missing(stage: .derivedParentPostflight)))
   #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
 }
 
@@ -509,7 +573,6 @@ func boundProviderProbeUsesStablePostflightBoundaryEvidence() throws {
   let sequence = LockedEvidenceSequence([before, before, after, after])
   let operations = FileProviderProbeOperations(
     startIdentity: { _, completion in completion(.identifierAbsent) },
-    makeMetadataCoordinator: { ImmediateMetadataCoordinator() },
     readItem: { _, _, _ in sequence.next() }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
@@ -533,7 +596,6 @@ func unavailableRealDeviceIdentityFailsClosed() throws {
   let evidence = try providerItemEvidence(isDataless: false, includeDevice: false)
   let operations = FileProviderProbeOperations(
     startIdentity: { _, completion in completion(.identifierAbsent) },
-    makeMetadataCoordinator: { ImmediateMetadataCoordinator() },
     readItem: { _, _, _ in .known(evidence) }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
@@ -680,7 +742,6 @@ private func contentTransitionOutcome(
   let sequence = LockedEvidenceSequence([before, before, after, after])
   let operations = FileProviderProbeOperations(
     startIdentity: { _, completion in completion(.identifierAbsent) },
-    makeMetadataCoordinator: { ImmediateMetadataCoordinator() },
     readItem: { _, _, _ in sequence.next() }
   )
   return FileProviderBoundaryProbe(operations: operations).probe(
@@ -740,43 +801,19 @@ private final class LockedEvidenceSequence: @unchecked Sendable {
   }
 }
 
-private final class ImmediateMetadataCoordinator: FileProviderMetadataCoordinating,
-  @unchecked Sendable
-{
-  func collect(url _: URL) -> Capability<[String: String]> { .known([:]) }
-  func cancel() {}
-}
-
-private final class BlockingMetadataCoordinator: FileProviderMetadataCoordinating,
-  @unchecked Sendable
-{
-  private let lock = NSLock()
-  private let release = DispatchSemaphore(value: 0)
-  private var wasCancelled = false
-
-  var cancelled: Bool { lock.withLock { wasCancelled } }
-
-  func collect(url _: URL) -> Capability<[String: String]> {
-    release.wait()
-    return .known([:])
-  }
-
-  func cancel() {
-    lock.withLock { wasCancelled = true }
-    release.signal()
-  }
-}
-
 private struct BoundProbeFixture {
+  let container: URL
   let root: URL
   let parentFD: Int32
   let rawName = Data("item".utf8)
 
   init(isDirectory: Bool = false) throws {
-    root = FileManager.default.temporaryDirectory.appendingPathComponent(
+    container = FileManager.default.temporaryDirectory.appendingPathComponent(
       UUID().uuidString,
       isDirectory: true
     )
+    root = container.appendingPathComponent("parent", isDirectory: true)
+    try FileManager.default.createDirectory(at: container, withIntermediateDirectories: false)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     let item = root.appendingPathComponent("item", isDirectory: isDirectory)
     if isDirectory {
@@ -790,7 +827,7 @@ private struct BoundProbeFixture {
 
   func close() {
     Darwin.close(parentFD)
-    try? FileManager.default.removeItem(at: root)
+    try? FileManager.default.removeItem(at: container)
   }
 }
 

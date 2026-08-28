@@ -26,6 +26,14 @@ typedef struct {
     char filesystem_type[16];
 } dp_volume_evidence_v1;
 
+typedef struct {
+    uint32_t returned_common;
+    int64_t real_device;
+    uint64_t file_id;
+    uint32_t object_type;
+    uint32_t reserved;
+} dp_fd_identity_v1;
+
 int dp_set_materialization_off(void);
 int dp_get_materialization_policy(void);
 uint64_t dp_item_probe_options(void);
@@ -34,6 +42,7 @@ int dp_parse_item_buffer(const uint8_t *raw, size_t raw_capacity,
                          size_t *wire_length);
 int dp_probe_item_at(int parent_fd, const uint8_t *name, size_t name_length,
                      uint8_t *wire, size_t wire_capacity, size_t *wire_length);
+int dp_probe_fd_identity(int fd, dp_fd_identity_v1 *result);
 int dp_probe_volume_fd(int fd, dp_volume_evidence_v1 *result);
 
 uint32_t dp_attr_common_device(void);

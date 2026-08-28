@@ -1,3 +1,4 @@
+import CDiskplanMacOS
 import Darwin
 @preconcurrency import FileProvider
 @preconcurrency import Foundation
@@ -36,10 +37,13 @@ public struct FileObjectIdentity: Equatable, Sendable {
 }
 
 public enum FileProviderProbeStage: String, Equatable, Sendable {
+  case heldParentPreflight
+  case derivedParentPreflight
   case preflight
   case derivedPathPreflight
   case identityLookup
-  case metadata
+  case heldParentPostflight
+  case derivedParentPostflight
   case postflight
   case derivedPathPostflight
 }
@@ -56,6 +60,11 @@ public enum FileProviderProbeRejection: Error, Equatable, Sendable {
     errorCode: Int32?
   )
   case identityMismatch(
+    stage: FileProviderProbeStage,
+    expected: FileObjectIdentity,
+    observed: FileObjectIdentity
+  )
+  case parentIdentityMismatch(
     stage: FileProviderProbeStage,
     expected: FileObjectIdentity,
     observed: FileObjectIdentity
@@ -107,32 +116,23 @@ enum ProviderIdentityOperationResult: Equatable, Sendable {
   case rejected(status: CapabilityStatus, detail: String?, errorCode: Int32?)
 }
 
-protocol FileProviderMetadataCoordinating: AnyObject, Sendable {
-  func collect(url: URL) -> Capability<[String: String]>
-  func cancel()
-}
-
 struct FileProviderProbeOperations: Sendable {
   typealias IdentityStarter =
     @Sendable (
       URL,
       @escaping @Sendable (ProviderIdentityOperationResult) -> Void
     ) -> Void
-  typealias MetadataFactory = @Sendable () -> any FileProviderMetadataCoordinating
   typealias ItemReader =
     @Sendable (Int32, Data, NoMaterializationPolicy) -> Capability<ItemStorageEvidence>
 
   let startIdentity: IdentityStarter
-  let makeMetadataCoordinator: MetadataFactory
   let readItem: ItemReader
 
   init(
     startIdentity: @escaping IdentityStarter,
-    makeMetadataCoordinator: @escaping MetadataFactory,
     readItem: @escaping ItemReader = FileProviderProbeOperations.productionItemReader
   ) {
     self.startIdentity = startIdentity
-    self.makeMetadataCoordinator = makeMetadataCoordinator
     self.readItem = readItem
   }
 
@@ -191,72 +191,7 @@ struct FileProviderProbeOperations: Sendable {
         }
       }
     },
-    makeMetadataCoordinator: { FoundationMetadataCoordinator() },
     readItem: productionItemReader
-  )
-}
-
-private final class FoundationMetadataCoordinator: FileProviderMetadataCoordinating,
-  @unchecked Sendable
-{
-  private let coordinator = NSFileCoordinator(filePresenter: nil)
-
-  func collect(url: URL) -> Capability<[String: String]> {
-    var coordinationError: NSError?
-    var result: Capability<[String: String]>?
-    coordinator.coordinate(
-      readingItemAt: url,
-      options: .immediatelyAvailableMetadataOnly,
-      error: &coordinationError
-    ) { coordinatedURL in
-      do {
-        let values = try (coordinatedURL as NSURL).promisedItemResourceValues(
-          forKeys: [.isDirectoryKey, .fileSizeKey, .isUbiquitousItemKey]
-        )
-        var metadata: [String: String] = [:]
-        if let value = values[.isDirectoryKey] as? NSNumber {
-          metadata["is_directory"] = value.boolValue.description
-        }
-        if let value = values[.fileSizeKey] as? NSNumber {
-          metadata["file_size"] = value.uint64Value.description
-        }
-        if let value = values[.isUbiquitousItemKey] as? NSNumber {
-          metadata["is_ubiquitous"] = value.boolValue.description
-        }
-        result = .known(metadata)
-      } catch let error as NSError {
-        result = foundationFailure(error, operation: "promised metadata lookup")
-      }
-    }
-    if let result { return result }
-    if let coordinationError {
-      return foundationFailure(coordinationError, operation: "metadata-only coordination")
-    }
-    return Capability(
-      status: .inconsistent,
-      detail: "metadata-only coordinator did not invoke its accessor"
-    )
-  }
-
-  func cancel() { coordinator.cancel() }
-}
-
-private func foundationFailure<Value: Equatable & Sendable>(
-  _ error: NSError,
-  operation: String
-) -> Capability<Value> {
-  let status: CapabilityStatus
-  if error.domain == NSCocoaErrorDomain, error.code == NSFileReadNoPermissionError {
-    status = .permissionDenied
-  } else if error.domain == NSCocoaErrorDomain, error.code == NSFeatureUnsupportedError {
-    status = .unsupported
-  } else {
-    status = .failed
-  }
-  return Capability(
-    status: status,
-    detail: operation,
-    errorCode: Int32(clamping: error.code)
   )
 }
 
@@ -316,6 +251,7 @@ private struct OperationDeadline: Sendable {
 private struct DerivedSlot: Sendable {
   let url: URL
   let parentURL: URL
+  let heldParentIdentity: FileObjectIdentity
 }
 
 private struct ProbedItem: Sendable {
@@ -361,14 +297,13 @@ public struct FileProviderBoundaryProbe: Sendable {
       rawName: rawName,
       expected: before,
       isDirectory: before.evidence.objectType.value == .directory,
-      policy: livePolicy,
-      stage: .derivedPathPreflight
+      policy: livePolicy
     )
     guard case .success(let slot) = derived else {
       return .rejected(derived.failure!)
     }
 
-    let operationResult = runProviderOperations(
+    let operationResult = runIdentityOperation(
       url: slot.url,
       policy: livePolicy,
       deadline: OperationDeadline(timeout: timeout)
@@ -402,10 +337,13 @@ public struct FileProviderBoundaryProbe: Sendable {
 
     let derivedPostflight = validateDerivedSlot(
       slot,
+      heldParentFileDescriptor: parentFileDescriptor,
       rawName: rawName,
       expected: after,
       policy: livePolicy,
-      stage: .derivedPathPostflight
+      heldParentStage: .heldParentPostflight,
+      derivedParentStage: .derivedParentPostflight,
+      itemStage: .derivedPathPostflight
     )
     if case .failure(let failure) = derivedPostflight { return .rejected(failure) }
 
@@ -413,7 +351,7 @@ public struct FileProviderBoundaryProbe: Sendable {
     case .failure(let failure):
       return .rejected(failure)
     case .success(let result):
-      let disposition = identityDisposition(result.identity)
+      let disposition = identityDisposition(result)
       let decision = Self.decideBoundary(
         item: after.evidence,
         identityDisposition: disposition,
@@ -421,12 +359,14 @@ public struct FileProviderBoundaryProbe: Sendable {
       )
       return .evidence(
         FileProviderEvidence(
-          identity: identityCapability(result.identity),
+          identity: identityCapability(result),
           identityDisposition: disposition,
           providerCapabilities: .unavailable(
             "capabilities for an arbitrary File Provider domain are not exposed by public API"
           ),
-          promisedMetadata: result.metadata,
+          promisedMetadata: .unavailable(
+            "in-process metadata coordination is disabled because a timed-out accessor cannot be killed and reaped safely"
+          ),
           traversal: decision.traversal,
           handling: decision.handling,
           hiddenBackingBytes: .unavailable("unavailable via public API"),
@@ -462,14 +402,11 @@ public struct FileProviderBoundaryProbe: Sendable {
     return (.doNotDescendUnverifiedProviderOwnership, .reportOnly)
   }
 
-  private func runProviderOperations(
+  private func runIdentityOperation(
     url: URL,
     policy: NoMaterializationPolicy,
     deadline: OperationDeadline
-  ) -> Result<
-    (identity: ProviderIdentityOperationResult, metadata: Capability<[String: String]>),
-    FileProviderProbeRejection
-  > {
+  ) -> Result<ProviderIdentityOperationResult, FileProviderProbeRejection> {
     let identityPolicy = policy.revalidateLive()
     guard identityPolicy.value != nil else { return .failure(policyRejection(identityPolicy)) }
     let identityBox = DeadlineResultBox<ProviderIdentityOperationResult>()
@@ -477,28 +414,7 @@ public struct FileProviderBoundaryProbe: Sendable {
     guard let identity = identityBox.wait(until: deadline.dispatchTime) else {
       return .failure(.timedOut(stage: .identityLookup))
     }
-
-    let coordinator = operations.makeMetadataCoordinator()
-    let metadataBox = DeadlineResultBox<
-      Result<Capability<[String: String]>, FileProviderProbeRejection>
-    >()
-    DispatchQueue.global(qos: .utility).async {
-      let metadataPolicy = policy.revalidateLive()
-      guard metadataPolicy.value != nil else {
-        metadataBox.complete(.failure(policyRejection(metadataPolicy)))
-        return
-      }
-      metadataBox.complete(.success(coordinator.collect(url: url)))
-    }
-    guard let metadataResult = metadataBox.wait(until: deadline.dispatchTime) else {
-      coordinator.cancel()
-      _ = metadataBox.closeAndTake()
-      return .failure(.timedOut(stage: .metadata))
-    }
-    switch metadataResult {
-    case .failure(let failure): return .failure(failure)
-    case .success(let metadata): return .success((identity, metadata))
-    }
+    return .success(identity)
   }
 
   private func identityCapability(
@@ -588,6 +504,68 @@ public struct FileProviderBoundaryProbe: Sendable {
     )
   }
 
+  private func probeFDIdentity(
+    fileDescriptor: Int32,
+    policy: NoMaterializationPolicy,
+    stage: FileProviderProbeStage
+  ) -> Result<FileObjectIdentity, FileProviderProbeRejection> {
+    let livePolicy = policy.revalidateLive()
+    guard livePolicy.value != nil else { return .failure(policyRejection(livePolicy)) }
+    var raw = dp_fd_identity_v1()
+    guard dp_probe_fd_identity(fileDescriptor, &raw) == 0 else {
+      return .failure(posixRejection(errno, stage: stage))
+    }
+    let common = raw.returned_common
+    guard common & dp_attr_common_device() != 0 else {
+      return .failure(
+        .failed(
+          stage: stage,
+          status: .unavailable,
+          detail: "real parent device identity was not returned",
+          errorCode: nil
+        )
+      )
+    }
+    guard common & dp_attr_common_file_id() != 0 else {
+      return .failure(
+        .failed(
+          stage: stage,
+          status: .unavailable,
+          detail: "parent file ID was not returned",
+          errorCode: nil
+        )
+      )
+    }
+    guard common & dp_attr_common_object_type() != 0 else {
+      return .failure(
+        .failed(
+          stage: stage,
+          status: .unavailable,
+          detail: "parent object type was not returned",
+          errorCode: nil
+        )
+      )
+    }
+    let objectType = FileSystemObjectType(rawKernelValue: raw.object_type)
+    guard objectType == .directory else {
+      return .failure(
+        .failed(
+          stage: stage,
+          status: .inconsistent,
+          detail: "bound parent descriptor does not identify a directory",
+          errorCode: nil
+        )
+      )
+    }
+    return .success(
+      FileObjectIdentity(
+        device: raw.real_device,
+        fileID: raw.file_id,
+        objectType: objectType
+      )
+    )
+  }
+
   func rejection<Value: Equatable & Sendable>(
     for capability: Capability<Value>,
     stage: FileProviderProbeStage
@@ -611,14 +589,21 @@ public struct FileProviderBoundaryProbe: Sendable {
     rawName: Data,
     expected: ProbedItem,
     isDirectory: Bool,
-    policy: NoMaterializationPolicy,
-    stage: FileProviderProbeStage
+    policy: NoMaterializationPolicy
   ) -> Result<DerivedSlot, FileProviderProbeRejection> {
+    let heldParent = probeFDIdentity(
+      fileDescriptor: heldParentFileDescriptor,
+      policy: policy,
+      stage: .heldParentPreflight
+    )
+    guard case .success(let heldParentIdentity) = heldParent else {
+      return .failure(heldParent.failure!)
+    }
     let pathPolicy = policy.revalidateLive()
     guard pathPolicy.value != nil else { return .failure(policyRejection(pathPolicy)) }
     var parentPath = [CChar](repeating: 0, count: Int(MAXPATHLEN))
     guard fcntl(heldParentFileDescriptor, F_GETPATH, &parentPath) == 0 else {
-      return .failure(posixRejection(errno, stage: stage))
+      return .failure(posixRejection(errno, stage: .derivedParentPreflight))
     }
     let parentURL = parentPath.withUnsafeBufferPointer { buffer in
       URL(
@@ -635,47 +620,97 @@ public struct FileProviderBoundaryProbe: Sendable {
     else {
       return .failure(.rawNameUnavailable)
     }
-    let slot = DerivedSlot(url: url, parentURL: parentURL)
+    let slot = DerivedSlot(
+      url: url,
+      parentURL: parentURL,
+      heldParentIdentity: heldParentIdentity
+    )
     return validateDerivedSlot(
       slot,
+      heldParentFileDescriptor: heldParentFileDescriptor,
       rawName: rawName,
       expected: expected,
       policy: policy,
-      stage: stage
+      heldParentStage: .heldParentPreflight,
+      derivedParentStage: .derivedParentPreflight,
+      itemStage: .derivedPathPreflight
     ).map { slot }
   }
 
   private func validateDerivedSlot(
     _ slot: DerivedSlot,
+    heldParentFileDescriptor: Int32,
     rawName: Data,
     expected: ProbedItem,
     policy: NoMaterializationPolicy,
-    stage: FileProviderProbeStage
+    heldParentStage: FileProviderProbeStage,
+    derivedParentStage: FileProviderProbeStage,
+    itemStage: FileProviderProbeStage
   ) -> Result<Void, FileProviderProbeRejection> {
+    let heldParent = probeFDIdentity(
+      fileDescriptor: heldParentFileDescriptor,
+      policy: policy,
+      stage: heldParentStage
+    )
+    guard case .success(let observedHeldParent) = heldParent else {
+      return .failure(heldParent.failure!)
+    }
+    guard observedHeldParent == slot.heldParentIdentity else {
+      return .failure(
+        .parentIdentityMismatch(
+          stage: heldParentStage,
+          expected: slot.heldParentIdentity,
+          observed: observedHeldParent
+        )
+      )
+    }
     let pathPolicy = policy.revalidateLive()
     guard pathPolicy.value != nil else { return .failure(policyRejection(pathPolicy)) }
     let pathFD = slot.parentURL.withUnsafeFileSystemRepresentation { representation -> Int32 in
       guard let representation else { return -1 }
       return open(representation, O_EVTONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
     }
-    guard pathFD >= 0 else { return .failure(posixRejection(errno, stage: stage)) }
+    guard pathFD >= 0 else {
+      return .failure(posixRejection(errno, stage: derivedParentStage))
+    }
     defer { close(pathFD) }
+    let derivedParent = probeFDIdentity(
+      fileDescriptor: pathFD,
+      policy: policy,
+      stage: derivedParentStage
+    )
+    guard case .success(let observedDerivedParent) = derivedParent else {
+      return .failure(derivedParent.failure!)
+    }
+    guard observedDerivedParent == slot.heldParentIdentity else {
+      return .failure(
+        .parentIdentityMismatch(
+          stage: derivedParentStage,
+          expected: slot.heldParentIdentity,
+          observed: observedDerivedParent
+        )
+      )
+    }
     let result = probeItem(
       parentFileDescriptor: pathFD,
       rawName: rawName,
       policy: policy,
-      stage: stage
+      stage: itemStage
     )
     guard case .success(let observed) = result else { return .failure(result.failure!) }
     guard observed.identity == expected.identity else {
       return .failure(
-        .identityMismatch(stage: stage, expected: expected.identity, observed: observed.identity)
+        .identityMismatch(
+          stage: itemStage,
+          expected: expected.identity,
+          observed: observed.identity
+        )
       )
     }
     if let mismatch = contentStateMismatch(
       expected: expected,
       observed: observed,
-      stage: stage
+      stage: itemStage
     ) {
       return .failure(mismatch)
     }
@@ -709,7 +744,7 @@ public struct FileProviderBoundaryProbe: Sendable {
     )
   }
 
-  private func posixRejection(
+  func posixRejection(
     _ code: Int32,
     stage: FileProviderProbeStage
   ) -> FileProviderProbeRejection {
