@@ -196,6 +196,21 @@ superseded_by:
   during a stalled writer, and plan-receipt nonpublication after writer
   failure. The runner completed in 31.496 seconds with a verified quiescent
   process group and an untruncated 17,752-byte log.
+- PR #17's macOS 26 Rust fixture failures exposed two stale test assumptions:
+  protocol minor 1.4 made the old hard-coded `minor=4` acceptance valid, and
+  canonical envelope admission had collapsed raw protobuf syntax failures into
+  semantic provenance errors. Acceptance mutations now derive an exact invalid
+  field from the live client offer and prove the verifier observes that field;
+  transport mutations select a typed post-handshake event by variant, request
+  ID, and frame occurrence. Raw protobuf decode errors retain their transport
+  taxonomy while decodable non-canonical or unknown-field envelopes remain
+  provenance failures. The two affected tests pass 10 sequential iterations
+  each; full `engine_integration` passes 9 local tests with 10 cross-language
+  tests intentionally ignored, and the Rust workspace passes 146 tests with
+  those same 10 ignored. Workspace check, all-target Clippy with warnings
+  denied, formatting, and the 10/10 Swift-Rust cross-language gate pass. Every
+  bounded runner reports a verified quiescent process group without output
+  truncation.
 - Rust 1.95.0 passes `cargo check --locked --workspace`, all-target Clippy with
   warnings denied, and formatting. `cargo test --locked -p diskplan-proto`
   passes four unit tests plus four runtime-golden tests; the golden test covers
