@@ -122,7 +122,7 @@ func forceWarningPrecedesTheMutationAndAuditFailureIsNonfatal() async throws {
     globalFacts: facts,
     evidenceSnapshots: [evidence],
     actions: [action],
-    releaseSets: []
+    releaseGraphBundle: nil
   )
   let overlay = DecisionOverlay.create(
     plan: plan, selectedActionIDs: [action.id], waiverConsents: [], userNotes: [])
@@ -1057,7 +1057,7 @@ private struct MultiActionFixture {
       globalFacts: facts,
       evidenceSnapshots: [firstEvidence, independentEvidence, dependentEvidence],
       actions: [first, independent, dependent],
-      releaseSets: []
+      releaseGraphBundle: nil
     )
     overlay = DecisionOverlay.create(
       plan: plan,

@@ -57,25 +57,70 @@ superseded_by:
   worktree registration/root identity, administrative and common directory identity,
   registration/metadata digests, linked-worktree and sparse-checkout state, nested
   repositories, submodules, trusted-exclusive namespace, and post-quarantine coverage. V1
-  execution requires an ordinary worktree with sparse checkout disabled; linked, sparse,
-  target-mismatched, absent, unknown, unreadable, or failed evidence stays report-only. Dirty
-  work requires a separate explicit discard action prerequisite whose typed clean successor
-  preserves HEAD identity and becomes the remove action's JIT content baseline. Action-aware
-  policy records the prerequisite discharge before action hashing.
+  execution requires an ordinary worktree with sparse checkout disabled and exact equality
+  between administrative and common directory identity; linked, sparse, identity-mismatched,
+  absent, unknown, unreadable, or failed evidence stays report-only. Dirty work requires a
+  separate explicit discard action prerequisite whose typed clean successor preserves HEAD
+  identity and becomes the remove action's JIT content baseline. Action-aware policy records
+  the prerequisite discharge before action hashing.
 - Complete-release actions bind the exact verified release graph, owner topology, actions,
-  candidates, and bytes; plans reject empty, duplicate, or mismatched action bindings. Bound
-  owners are mandatory prerequisites for consent validation. A closed composite execution
-  step retains every owner JIT contract and rewritten prerequisite edges while preventing
-  duplicate individual deletion; credit-only release sets remain independent of aggregates.
+  candidates, and bytes; plans reject empty, duplicate, or mismatched action bindings. Public
+  builders require the aggregate evidence to match an exact owner prerequisite, and reject
+  duplicate prerequisite ActionID or lineage multiplicity. Bound owners are mandatory
+  prerequisites for consent validation. A closed connected-component execution step carries
+  every represented aggregate postcondition/release set plus unique owner and exact Git-discard
+  JIT contracts, rewrites prerequisite edges once, and prevents duplicate individual deletion;
+  credit-only release sets remain independent of aggregates.
 - Raw-path and raw-UTF8 identity are preserved across graph keys, adapter scopes, release
   owners, and hashes. Full-corpus absolute-namespace overlap blocks selected parents even
   when nested candidates are not selected, while unrelated sibling and distinct-root targets
   remain independent.
 - Frozen claim/source payloads and adapter-scope sets are validated and canonicalized before
   hashing. Overlay terminal effects, including Git discard, are checked against the complete
-  frozen corpus and reject unauthorized alias or ancestor effects. Duplicate-survivor consent
-  protects every plan-declared survivor namespace even when the declaring duplicate is not
-  selected.
+  frozen corpus and reject unauthorized alias or ancestor effects. Duplicate groups retain
+  their declaring members, require the chosen survivor to be a member, and protect the full
+  survivor namespace symmetrically against direct, ancestor, descendant, path-alias, and
+  identity-alias mutations even when the declaring duplicate is not selected.
+- Git-scope dominance uses symmetric path/identity overlap for non-Git actions at plan and
+  overlay boundaries, blocking nested children, ancestors, and aliases while allowing disjoint
+  targets. Display tiers are derived from final action-aware policy and force-warning semantics;
+  recomputation rejects forged safe labels for blocked or review-required actions.
+- Full release evaluation now yields one immutable manifest bundle binding every group, the
+  global candidate/action map, graph provenance, and connected-component topology. Plans reject
+  sliced, mixed, duplicated, or missing groups; a group-scoped aggregate keeps the full manifest
+  in its JIT execution contract. Evaluation freezes the exact ActionID for every graph candidate,
+  including private-only candidates outside all release groups, so bundle construction rejects
+  omitted, substituted, or blocked action mappings.
+- Release-component discovery uses deterministic union-find over canonical raw-UTF8 group and
+  candidate identities, so one owner connecting many groups cannot cause repeated queue growth.
+  Immutable-plan construction rejects an aggregate whose owner contraction introduces a
+  leave-and-reenter cycle; overlay validation repeats the proof for all selected components at
+  once, preserving acyclic cross-component prerequisite direction and rejecting a simultaneous
+  two-component quotient cycle even when each component is individually contraction-safe.
+- Complete-release lineage now binds stable semantic topology and stable owner lineages without
+  current graph/evidence/action/epoch data. Reference-time-only advancement preserves lineage,
+  while an owner-topology change invalidates it. Current graph and owner action bindings remain
+  sealed by ActionID, plan, and JIT contracts.
+- Recommendation and display tier are both derived from the final seven source-bound votes.
+  Rebuildable tier requires exclusively static-only rebuild predicates; additional uncertainty
+  remains review-tier, and hard rejects remain blocked. Plan recomputation rejects recommendation
+  transplants.
+- Public authority is closed around that derivation: `PolicyEvaluation` has no public
+  initializer, its source binding is mandatory and privately constructed from verified frozen
+  evidence/global facts, and public callers cannot construct `GateVote`. Arbitrary-vote reducer
+  coverage uses only a debug-only `@testable` helper. Action construction still recomputes the
+  authoritative evaluation and rejects internally forged vote payloads even when they retain a
+  genuine source binding.
+- Public display-metric construction no longer accepts a recommendation tier. It starts blocked,
+  and action construction alone replaces that placeholder with the source-bound authoritative
+  tier; a debug-only helper retains negative forged-tier coverage.
+- Action and execution-step DAG validation use a deterministic minimum heap instead of repeated
+  array-front removal and full ready-set sorting. Overlay validation canonicalizes every
+  error-producing selection, lineage, consent, and waiver traversal, and full topology bindings
+  canonicalize file and owner arrays at the encoder boundary.
+- Storage-graph construction canonicalizes candidate, file-object, and allocation-group inputs
+  by raw UTF-8 ID before any ID-bearing validation, making the first typed invalid diagnostic
+  invariant under input permutation.
 
 ## Task List
 
@@ -100,6 +145,19 @@ superseded_by:
   discharge, composite release steps, terminal namespace exclusivity, and survivor invariants.
 - [x] Bind Git worktree registration and administrative metadata plus linked/sparse typed
   facts, and fail closed outside the exact ordinary, sparse-disabled v1 execution predicate.
+- [x] Close full-range review findings for symmetric Git dominance, ordinary admin/common
+  metadata consistency, and authoritative display tiers.
+- [x] Bind full release-graph manifests, stabilize complete-release lineage across pure
+  reference-time advancement, and derive recommendations authoritatively from final votes.
+- [x] Close public evaluation and display-tier authority surfaces, require verified non-optional
+  source bindings, and retain forged-vote/tier rejection tests without a public bypass.
+- [x] Close follow-up builder authority, prerequisite multiplicity, duplicate-survivor,
+  connected release-component, deterministic diagnostic, topology encoding, and wide-DAG
+  complexity findings.
+- [x] Bound release-component discovery, reject non-convex aggregate contractions before
+  projection, and canonicalize StorageGraph diagnostics before observable validation.
+- [x] Cover the simultaneous multi-component contraction guard through public action, plan,
+  release-bundle, and overlay construction.
 
 ## Handoff
 
@@ -114,8 +172,9 @@ superseded_by:
 - Policy contract: `docs/design/policy-core.md`.
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
-  overlay consent binding; the latest focused run passed all 43 tests.
-- The final full local `swift test --package-path swift` run passed all 71 tests, including
-  all 43 focused policy tests.
+  overlay consent binding, public API construction boundaries, and forged vote/tier rejection;
+  the latest focused run passed all 63 tests.
+- The final full local serial `swift test --no-parallel` run passed all 91 tests, including
+  all 63 focused policy tests; `swift build -c release` also completed successfully.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.

@@ -171,6 +171,16 @@ candidate/path nodes
 - snapshot 是 blocker，不自动成为清理目标。
 - partial clone 只使用 private-size lower bound。
 - apply 前重新验证所有 owner、refcount、link count 和 snapshot blockers。
+- 共享任一 owner 的多个 release set 属于一个 connected execution component；执行计划必须在
+  首次 mutation 前携带并重验该 component 中所有已激活 group 的 topology、aggregate
+  postcondition 和去重 owner contract。同一 owner 只能执行一次，所有 group post-verify
+  成功后才能分别确认实际释放量。
+- release component partition 使用按 raw UTF-8 group/candidate identity 规范化的 union-find；
+  每个 membership 只参与常数次合并，不能用重复 enqueue/sort 的图遍历放大共享 owner fan-out。
+- aggregate folding 只对 contraction-safe action DAG 开放：把 aggregate 与 owner actions 收缩为
+  单步后必须仍然无环。任何 `owner -> external prerequisite chain -> owner` 的 leave/re-enter
+  路径在 immutable-plan 构造时拒绝；overlay 对本次选择的全部 component 同时收缩再做防御性
+  验证，跨 component prerequisite 保持原方向。
 
 ## 9. File Provider Contract
 
@@ -334,9 +344,17 @@ explicit protection/type hint 同样受这个边界约束：protection 可以直
 
 dirty/untracked Git 内容必须使用专门的 `discard-local-work` action，不得伪装成普通删除。
 
+duplicate-survivor fact 的声明者就是该 duplicate group 的成员；唯一 survivor 必须是成员，
+不能由全局存在但未声明该 group 的无关 candidate 冒充。survivor 的受保护属性是整个绑定
+namespace，因此 direct、ancestor、descendant、path alias 或 object-identity alias mutation
+都必须拒绝，而不是只保护 exact path。
+
 ### 13.1 Canonical IDs And Bindings
 
 所有用于执行授权或 cache 命中的 ID/hash 都来自 versioned closed typed binding schema，不能由各模块临时选择字段。权威 schema 与 `.proto` 同仓维护，但摘要输入使用独立的 `canonical-binary-v1` 编码，避免依赖未保证 canonical 的普通 Protobuf serialization：
+
+任何会返回带 candidate/file/group ID 的 StorageGraph validation error，都必须先按 raw UTF-8
+ID 规范化对应 collection，再执行可观察验证；输入数组排列不能改变首个 typed diagnostic。
 
 - record 使用固定 field order；整数为 fixed-width big-endian；bytes/path 使用 length prefix 并保留 filesystem raw name bytes；timestamp 使用 UTC seconds+nanos；禁止 map；具有集合语义的 repeated field 按其 canonical byte key 排序；absent、unknown、unreadable、failed 和 empty 使用不同 typed variants；
 - digest 使用 SHA-256，并以 `diskplan/<binding-kind>/v1\0` 做 domain separation；不同 kind 至少包括 evidence、action-lineage、action、plan、waiver-consent、waiver-credential 和 agent-cache；

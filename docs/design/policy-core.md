@@ -81,6 +81,17 @@ unreadable, or failed hard evidence cannot be papered over by a caller-supplied 
 vote. Explicit protection is a typed hard gate. Unknown recoverability becomes an exact
 waiver predicate rather than ready state.
 
+`PolicyEvaluation` is a read-only public projection, not a public construction surface. Its
+source binding is mandatory, and the binding constructor is private. The package creates it
+only after checking the capture, evidence, global-facts, policy/schema, reference-time,
+matching-root coverage, and classification-resolution bindings against the frozen inputs.
+`GateVote` construction and the evaluation reducer remain package-internal; only a
+debug-only `@testable` helper accepts arbitrary votes for reducer unit tests. Consequently a
+frontend or another package consumer cannot turn caller-selected votes into `safeToClean`,
+`stageable`, or any other policy result. Action construction independently recomputes the
+authoritative evaluation from the same evidence and rejects a source-binding transplant or
+vote mutation before it can enter a plan.
+
 Independent review facts are additive. Recency, task-semantic, duplicate-survivor, normal
 keep, static-rebuild, rebuild-cost, and fully observed local-Git-discard predicates are
 canonicalized and unioned; none replaces another. Each deterministically missing
@@ -112,10 +123,20 @@ A file object appearing in multiple allocation groups blocks every affected grou
 same shared ownership cannot receive credit twice. The complete graph receives a canonical
 digest over candidates, exact identities and provenance, owner paths, hardlink counts,
 allocation groups, clone counts, snapshot observations, and byte observations.
-`PlanReleaseSet.buildAll` is atomic over one complete successful graph evaluation; any global
-or group blocker, unknown total, within-bucket or cross-bucket arithmetic failure rejects the
-aggregate. Selection uses raw-UTF8 `CandidateActionBinding` records rather than a Swift
+`PlanReleaseSet.buildAll` is atomic over one complete successful graph evaluation and returns
+one immutable graph bundle rather than a caller-sliceable release-set list. The bundle manifest
+binds the graph digest and provenance, complete allocation-group ID set and count, global
+candidate-to-ActionID map, and connected-component topology. `ImmutablePlan` recomputes that
+manifest and rejects missing, duplicated, sliced, or mixed groups. Aggregate actions may cover
+one verified group, but their JIT contract carries the full manifest so execution cannot mistake
+an aggregate subset for a complete graph. Any global or group blocker, unknown total,
+within-bucket or cross-bucket arithmetic failure rejects the bundle. Selection uses raw-UTF8
+`CandidateActionBinding` records rather than a Swift
 `String` dictionary, so canonically equivalent but byte-distinct identifiers cannot collapse.
+The graph evaluation itself freezes the complete candidate-to-ActionID map. Bundle construction
+matches every candidate against that exact evaluated action, including private-only candidates
+that own no shared allocation group, so omitted, substituted, or blocked actions cannot enter the
+manifest through a release-owner-only check.
 Each retained
 set carries the full graph digest, exact candidate/action/target/identity/evidence provenance,
 conditional bytes, and file-owner/refcount/snapshot topology expectations needed by Phase 4
@@ -134,11 +155,21 @@ unreadable, and failed content observations cannot form an action. Postcondition
 are a closed enum for ordinary removal, quarantined worktree removal, cleanup scope, artifact
 version, or allocation-group release; no string placeholder claims enforcement. Action
 lineage seals those contracts, the complete protected namespace, adapter contract, and
-prerequisite lineages. Action IDs add the full snapshot and global-facts digests,
-prerequisite action IDs, and seven canonical gate votes. A plan rejects mixed semantic
+prerequisite lineages. Complete-release lineage is narrower by design: it binds stable release
+scope and owner topology plus stable owner lineages, while excluding graph digest, reference
+time, current evidence and owner ActionIDs. Current graph topology, owner ActionIDs, evidence,
+and epoch facts remain in the ActionID, plan, and JIT bindings. Advancing reference time alone
+therefore preserves a consent lineage, while a semantic owner-topology change does not. Action
+IDs add the full snapshot and global-facts digests, prerequisite action IDs, and seven canonical
+gate votes. A plan rejects mixed semantic
 reference times, scan roots outside global coverage, or actions built from different global
 facts, then hashes complete global facts/evidence alongside ActionID-byte order, metrics, and
 release topology.
+
+The public display-metrics input accepts only reclaim, age, rebuild, cleanup, and raw-path
+facts. It starts at the conservative blocked tier; callers cannot submit a safe or review tier.
+Action construction replaces that placeholder with the tier derived from the final
+source-bound evaluation and the closed force-warning contract.
 
 The unified action-prototype builder has no arbitrary argv surface. Generic removal derives
 the exact target kind, prototype path slot, unavoidable path-race residual, trusted namespace,
@@ -149,10 +180,12 @@ administrative-directory and common-directory identities, registration/metadata 
 linked-worktree state, sparse-checkout state, absence of nested repositories and submodules,
 trusted-exclusive namespace, and complete post-quarantine coverage. The v1 executable
 predicate is intentionally closed to an exact registration, an ordinary worktree, and
-disabled sparse checkout. Known linked worktrees, known enabled sparse checkout, and any
-absent, unknown, unreadable, failed, or target-mismatched registration fact remain report-only
-until a specialized adapter proves their additional cleanup and coverage semantics. All such
-typed facts remain in evidence, lineage, action, and plan hashes. Dirty local work is
+disabled sparse checkout; an ordinary registration must also prove that its administrative
+directory identity exactly equals its common-directory identity. Known linked worktrees,
+known enabled sparse checkout, mismatched administrative/common identity, and any absent,
+unknown, unreadable, failed, or target-mismatched registration fact remain report-only until
+a specialized adapter proves their additional cleanup and coverage semantics. All such typed
+facts remain in evidence, lineage, action, and plan hashes. Dirty local work is
 represented by a separate discard-local-changes action and exact waiver. Its typed
 postcondition seals a clean successor HEAD/index/content baseline, preserves HEAD identity,
 and becomes the dependent remove action's JIT baseline. The remove's action-aware evaluation
@@ -200,8 +233,17 @@ replacement. Duplicate-survivor consent requires one plan-consistent survivor an
 direct or ancestor deletion of its namespace. A selected terminal mutation, including a Git
 discard transition, is checked directionally against the complete frozen evidence corpus; it
 cannot mutate an alias or descendant snapshot whose independent seven-gate evidence was not
-authorized. Git-specific evidence dominates non-Git adapters across the whole plan, so a
-second generic snapshot cannot downgrade quarantine or local-work contracts. Display order is
-separate from canonical action order: UI metrics use typed known/unknown lexicographic
-ordering. Plan hashing uses ActionID-byte order; validated execution steps use deterministic
-topological order with ActionID-byte tie breaking.
+authorized. Git-specific evidence uses symmetric absolute-path and identity overlap to
+dominate every non-Git adapter across the whole plan and at overlay validation, including a
+generic child nested below the worktree; a second generic snapshot therefore cannot downgrade
+discard consent or quarantine. Directional mutation checks remain in place for non-Git
+survivor semantics, and disjoint namespaces remain independent. Display order is separate
+from canonical action order: policy core derives the tier from final action-aware
+stageability/recommendation and force-warning semantics, while callers provide only the other
+typed known/unknown metrics. Recommendation is likewise derived from the final seven votes:
+`likelyRebuildable` is available only when every required consent is a static-only rebuild
+predicate, while any additional semantic or recoverability uncertainty remains review-tier and
+any hard reject remains blocked. Recomputed plans reject forged tiers or transplanted
+recommendations. Plan hashing uses
+ActionID-byte order; validated execution steps use deterministic topological order with
+ActionID-byte tie breaking.

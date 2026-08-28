@@ -478,7 +478,6 @@ private struct GitQuarantineFixture: @unchecked Sendable {
       prerequisites: [],
       evaluation: evaluation,
       displayMetrics: ActionDisplayMetrics(
-        tier: .safe,
         immediateReclaimBytes: .known(1),
         inactiveDurationSeconds: .known(1),
         rebuildCost: .known(1),
