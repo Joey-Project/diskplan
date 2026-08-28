@@ -532,7 +532,7 @@ func replacementDomainRemovalGateRetainsDispatchedPredecessorAcrossCrash() throw
 }
 
 @Test
-func preparedRemovalLeafWithActivePredecessorMergesAfterSuccessorGateCrash() throws {
+func preparedRemovalLeafSurvivesTwoSuccessorGateBeforeStateCrashes() throws {
   let fixture = try TemporaryMutationJournal()
   defer { fixture.remove() }
   let ordinary = try fixture.journal(boot: firstBoot)
@@ -556,10 +556,27 @@ func preparedRemovalLeafWithActivePredecessorMergesAfterSuccessorGateCrash() thr
   #expect(recovered.phase == .prepared)
   #expect(recovered.operationID != preparedID)
   #expect(recovered.unresolvedPredecessorOperationIDs == [activeID])
+
+  #expect(
+    throws: ExternalMutationJournalError.operationFailed(
+      "injected-after-dispatch-gate",
+      errno: EIO
+    )
+  ) {
+    try crashing.markDispatched(
+      .domainRemove,
+      operationID: recovered.operationID,
+      nowNanoseconds: 50
+    )
+  }
+  let recoveredAgain = try #require(try ordinary.state(.domainRemove))
+  #expect(recoveredAgain.phase == .dispatched)
+  #expect(recoveredAgain.operationID == recovered.operationID)
+  #expect(recoveredAgain.unresolvedPredecessorOperationIDs == [activeID])
 }
 
 @Test
-func failedRemovalLeafWithActivePredecessorMergesAfterSuccessorGateCrash() throws {
+func failedRemovalLeafSurvivesTwoSuccessorGateBeforeStateCrashes() throws {
   let fixture = try TemporaryMutationJournal()
   defer { fixture.remove() }
   let ordinary = try fixture.journal(boot: firstBoot)
@@ -594,6 +611,23 @@ func failedRemovalLeafWithActivePredecessorMergesAfterSuccessorGateCrash() throw
   #expect(recovered.phase == .prepared)
   #expect(recovered.operationID != failedID)
   #expect(recovered.unresolvedPredecessorOperationIDs == [activeID])
+
+  #expect(
+    throws: ExternalMutationJournalError.operationFailed(
+      "injected-after-dispatch-gate",
+      errno: EIO
+    )
+  ) {
+    try crashing.markDispatched(
+      .extensionRemove,
+      operationID: recovered.operationID,
+      nowNanoseconds: 70
+    )
+  }
+  let recoveredAgain = try #require(try ordinary.state(.extensionRemove))
+  #expect(recoveredAgain.phase == .dispatched)
+  #expect(recoveredAgain.operationID == recovered.operationID)
+  #expect(recoveredAgain.unresolvedPredecessorOperationIDs == [activeID])
 }
 
 @Test

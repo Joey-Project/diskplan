@@ -232,8 +232,7 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
       }
       throw ExternalMutationJournalError.stateMismatch
     }
-    guard predecessorOperationID == other.predecessorOperationID,
-      bootGeneration == other.bootGeneration,
+    guard bootGeneration == other.bootGeneration,
       beganNanoseconds == other.beganNanoseconds
     else { throw ExternalMutationJournalError.stateMismatch }
     let mergedPredecessors = try Self.mergePredecessorCohorts(
@@ -321,9 +320,10 @@ public struct ExternalMutationRecoveryState: Codable, Equatable, Sendable {
       }
     }
     values = inheritedPrefix + values
-    if state.phase == .dispatched || state.phase == .originalSucceeded {
-      values.append(ExternalMutationPredecessorState(state))
-    }
+    // Keep the exact old leaf as a merge tombstone until a later read observes the gate and leaf
+    // durably sharing this successor's operation ID. A second gate-before-leaf crash must still be
+    // able to relate the successor gate to the unchanged old leaf.
+    values.append(ExternalMutationPredecessorState(state))
     guard values.count <= Self.maximumPredecessors,
       Set(values.map(\.operationID)).count == values.count
     else { throw ExternalMutationJournalError.malformedState }

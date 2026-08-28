@@ -139,7 +139,8 @@ superseded_by:
 - [x] Attribute late predecessor callbacks by operation UUID, require post-completion absence for
   every same-boot dispatched removal, and recursively retain legacy predecessor cohorts.
 - [x] Carry prepared/failed removal leaves with active predecessors as merge tombstones until the
-  pre-overwrite leaf durably merges after a successor-gate crash.
+  gate and leaf durably share the successor operation ID, including repeated successor-gate
+  crashes before leaf overwrite.
 - [x] Add manifestless prepare rollback, pre-prepare shell recovery, and durable empty-event creation.
 - [x] Seal exact event bytes and held events/window identities, enforce strict JSONL framing, and bind the oracle to one boot session.
 - [x] Treat ctime/mtime as control-byte revalidation triggers and keep content, identity, and access-policy failures distinct.
@@ -187,7 +188,7 @@ superseded_by:
   recovery before any deletion. Follow-up regressions also cover exact cleanup-staging replacement,
   predecessor-to-successor mutation recovery, durable domain/extension removal predecessor cohorts,
   operation-ID-attributed late predecessor completion, recursive legacy-chain recovery,
-  prepared/failed leaf merge tombstones across successor-gate crashes,
+  prepared/failed leaf merge tombstones across two consecutive successor gate-before-leaf crashes,
   timestamp-only mutation-journal revalidation, true initial/final-window byte drift, final-window
   ACL drift, post-preliminary-lookup identity replacement caught by the final name seal, typed
   final-name missing/unavailable results, bounded unstable-window failure, manifestless prepare
