@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import os
+import select
 import selectors
 import signal
 import subprocess
@@ -16,6 +18,66 @@ from typing import Optional, Sequence
 READ_CHUNK_BYTES = 4096
 TERMINATE_GRACE_SECONDS = 0.05
 REAP_TIMEOUT_SECONDS = 0.5
+GROUP_QUIESCENCE_POLL_SECONDS = 0.01
+
+
+class LeaderExitObserver:
+    """Observe direct-child exit without releasing its PID/PGID identity fence."""
+
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self._process = process
+        self._kqueue: Optional[select.kqueue] = None
+        self._already_exited = False
+        if sys.platform == "darwin":
+            self._kqueue = select.kqueue()
+            event = select.kevent(
+                process.pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                self._kqueue.control([event], 0, 0)
+            except OSError as error:
+                if error.errno != errno.ESRCH:
+                    raise
+                # Popen succeeded and this process has not called a reaping API.
+                self._already_exited = True
+        elif not (
+            hasattr(os, "waitid")
+            and hasattr(os, "P_PID")
+            and hasattr(os, "WEXITED")
+            and hasattr(os, "WNOWAIT")
+            and hasattr(os, "WNOHANG")
+        ):
+            raise RuntimeError("non-reaping child-exit observation is unavailable")
+
+    def wait_until(self, deadline: float) -> bool:
+        if self._already_exited:
+            return True
+        if self._kqueue is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            return bool(self._kqueue.control(None, 1, remaining))
+
+        while True:
+            result = os.waitid(
+                os.P_PID,
+                self._process.pid,
+                os.WEXITED | os.WNOWAIT | os.WNOHANG,
+            )
+            if result is not None:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+
+    def close(self) -> None:
+        if self._kqueue is not None:
+            self._kqueue.close()
+            self._kqueue = None
 
 
 def parse_args(arguments: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -43,28 +105,100 @@ def parse_args(arguments: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parsed
 
 
-def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+def terminate_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    leader_exited: bool = False,
+) -> None:
     """Terminate the owned process group while its leader is still unreaped."""
 
+    term_sent = False
     try:
         os.killpg(process.pid, signal.SIGTERM)
-    except OSError:
-        try:
-            process.terminate()
-        except OSError:
-            pass
-    time.sleep(TERMINATE_GRACE_SECONDS)
+        term_sent = True
+    except (ProcessLookupError, PermissionError):
+        if not leader_exited:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+    if term_sent or not leader_exited:
+        time.sleep(TERMINATE_GRACE_SECONDS)
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except OSError:
-        try:
-            process.kill()
-        except OSError:
-            pass
+    except (ProcessLookupError, PermissionError):
+        if not leader_exited:
+            try:
+                process.kill()
+            except OSError:
+                pass
+    cleanup_deadline = time.monotonic() + REAP_TIMEOUT_SECONDS
+    wait_for_process_group_quiescence(
+        process.pid,
+        cleanup_deadline,
+    )
+    remaining = cleanup_deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("probe process-group cleanup timed out before reap")
     try:
-        process.wait(timeout=REAP_TIMEOUT_SECONDS)
+        process.wait(timeout=remaining)
     except subprocess.TimeoutExpired as error:
         raise RuntimeError("probe process did not terminate after SIGKILL") from error
+
+
+def wait_for_process_group_quiescence(pgid: int, deadline: float) -> None:
+    while process_group_has_live_members(pgid, deadline):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("probe process group did not become quiescent")
+        time.sleep(min(GROUP_QUIESCENCE_POLL_SECONDS, remaining))
+
+
+def process_group_has_live_members(pgid: int, deadline: float) -> bool:
+    if sys.platform == "darwin":
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            # All group members inherit the probe identity. Darwin reports EPERM
+            # for the retained zombie leader once no signalable member remains.
+            return False
+    if sys.platform.startswith("linux"):
+        return linux_process_group_has_live_members(pgid, deadline)
+    raise RuntimeError("process-group quiescence inspection is unavailable")
+
+
+def linux_process_group_has_live_members(pgid: int, deadline: float) -> bool:
+    try:
+        entries = os.scandir("/proc")
+    except OSError as error:
+        raise RuntimeError("cannot inspect Linux process groups") from error
+    with entries:
+        for entry in entries:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("probe process-group inspection timed out")
+            if not entry.name.isdigit() or int(entry.name) == pgid:
+                continue
+            try:
+                with open(f"{entry.path}/stat", "rb") as stat_file:
+                    stat_data = stat_file.read(4097)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise RuntimeError("cannot inspect Linux process-group member") from error
+            if len(stat_data) > 4096:
+                raise RuntimeError("Linux process stat exceeded its byte limit")
+            command_end = stat_data.rfind(b")")
+            fields = stat_data[command_end + 2 :].split() if command_end >= 0 else []
+            if len(fields) < 3:
+                raise RuntimeError("Linux process stat was malformed")
+            try:
+                member_group = int(fields[2])
+            except ValueError as error:
+                raise RuntimeError("Linux process group was malformed") from error
+            if member_group == pgid and fields[0] != b"Z":
+                return True
+    return False
 
 
 def bounded_result(payload: bytes, marker: Optional[bytes], limit: int) -> bytes:
@@ -78,6 +212,8 @@ def bounded_result(payload: bytes, marker: Optional[bytes], limit: int) -> bytes
 
 
 def run_bounded(command: Sequence[str], limit: int, timeout: float) -> bytes:
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise RuntimeError("probe cleanup requires default waitable SIGCHLD semantics")
     try:
         process = subprocess.Popen(
             command,
@@ -93,8 +229,10 @@ def run_bounded(command: Sequence[str], limit: int, timeout: float) -> bytes:
     output = bytearray()
     marker: Optional[bytes] = None
     deadline = time.monotonic() + timeout
+    exit_observer: Optional[LeaderExitObserver] = None
     selector: Optional[selectors.BaseSelector] = None
     try:
+        exit_observer = LeaderExitObserver(process)
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         while True:
@@ -113,11 +251,11 @@ def run_bounded(command: Sequence[str], limit: int, timeout: float) -> bytes:
                 min(READ_CHUNK_BYTES, limit + 1 - len(output)),
             )
             if not chunk:
-                try:
-                    process.wait(timeout=max(0.05, deadline - time.monotonic()))
-                except subprocess.TimeoutExpired:
+                if not exit_observer.wait_until(deadline):
                     marker = b"[probe timed out]"
                     terminate_process_group(process)
+                else:
+                    terminate_process_group(process, leader_exited=True)
                 break
             output.extend(chunk)
             if len(output) > limit:
@@ -130,6 +268,8 @@ def run_bounded(command: Sequence[str], limit: int, timeout: float) -> bytes:
     finally:
         if selector is not None:
             selector.close()
+        if exit_observer is not None:
+            exit_observer.close()
         process.stdout.close()
 
     return bounded_result(bytes(output), marker, limit)

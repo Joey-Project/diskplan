@@ -64,7 +64,9 @@ On failure, CI uploads only a small allowlisted runner/toolchain manifest for
 seven days. Each command probe has a one-second wall-clock deadline and a
 1 KiB output allowance enforced while its merged output is read; excess output
 or a timeout terminates the probe process group before the bounded result is
-appended. The private same-directory temporary manifest has a separately
-enforced 16 KiB total ceiling and is atomically published only after final
-validation. CI does not upload source trees, dependency stores, build products,
-process dumps, or unrestricted logs.
+appended. Normal completion also retains the unreaped leader as a PID/PGID
+identity fence until any same-group background processes are terminated and the
+group is quiescent. The private same-directory temporary manifest has a
+separately enforced 16 KiB total ceiling and is atomically published only after
+final validation. CI does not upload source trees, dependency stores, build
+products, process dumps, or unrestricted logs.

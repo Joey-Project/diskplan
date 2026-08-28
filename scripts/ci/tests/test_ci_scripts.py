@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -85,6 +86,67 @@ class CiScriptTests(unittest.TestCase):
             self.assertLessEqual(output.stat().st_size, 16384)
             self.assertIn(b"[probe timed out]", output.read_bytes())
             self.assertEqual([], list(output.parent.glob(f".{output.name}.tmp.*")))
+
+    def test_normal_probe_quiesces_redirected_background_process(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "background.pid"
+            child_code = (
+                "import os, signal, sys, time; "
+                "from pathlib import Path; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii'); "
+                "time.sleep(60)"
+            )
+            parent_code = (
+                "import subprocess, sys, time; "
+                "from pathlib import Path; "
+                "path = Path(sys.argv[1]); "
+                "subprocess.Popen([sys.executable, '-c', sys.argv[2], str(path)], "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                "deadline = time.monotonic() + 2; "
+                "\nwhile not path.exists():\n"
+                "    assert time.monotonic() < deadline\n"
+                "    time.sleep(0.01)\n"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CI_ROOT / "bounded_probe.py"),
+                    "--max-bytes",
+                    "1024",
+                    "--timeout-seconds",
+                    "3",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    parent_code,
+                    str(pid_path),
+                    child_code,
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+            )
+            background_pid = int(pid_path.read_text(encoding="ascii"))
+            background_gone = False
+            try:
+                self.assertEqual(0, result.returncode, result.stderr.decode())
+                deadline = time.monotonic() + 2
+                while True:
+                    try:
+                        os.kill(background_pid, 0)
+                    except ProcessLookupError:
+                        background_gone = True
+                        break
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+            finally:
+                if not background_gone:
+                    try:
+                        os.kill(background_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def test_valid_diagnostics_publish_private_bounded_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
