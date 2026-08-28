@@ -109,7 +109,9 @@ swift build \
     --disable-automatic-resolution \
     --configuration release \
     --scratch-path "${SWIFT_SCRATCH_PATH}" \
-    -Xlinker -no_uuid \
+    -Xswiftc -file-prefix-map \
+    -Xswiftc "${WORK_ROOT}=/diskplan-release" \
+    -Xlinker -S \
     --product diskplan-engine
 /usr/bin/xcrun clang \
     -arch arm64 \
@@ -133,7 +135,6 @@ SWIFT_BIN_DIR="$(swift build \
     --show-bin-path)"
 readonly SWIFT_BIN_DIR
 readonly ENGINE="${SWIFT_BIN_DIR}/diskplan-engine"
-/usr/bin/strip -S "${ENGINE}"
 
 AFTER_BUILD_SOURCE_STATE="$(source_state)"
 readonly AFTER_BUILD_SOURCE_STATE
