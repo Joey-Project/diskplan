@@ -607,6 +607,14 @@ impl PlanModel {
     }
 
     pub fn toggle_target_expanded(&mut self, key: &TargetRowKey) -> bool {
+        self.set_target_expanded(key, None)
+    }
+
+    pub fn set_target_row_expanded(&mut self, key: &TargetRowKey, expanded: bool) -> bool {
+        self.set_target_expanded(key, Some(expanded))
+    }
+
+    fn set_target_expanded(&mut self, key: &TargetRowKey, expanded: Option<bool>) -> bool {
         if self.target_filter_is_active() {
             return false;
         }
@@ -619,7 +627,7 @@ impl PlanModel {
         let old_index = self
             .target_cursor_index()
             .unwrap_or(self.target_cursor_index_hint);
-        toggle_set(&mut self.expanded_targets, key.clone());
+        set_membership(&mut self.expanded_targets, key.clone(), expanded);
         self.rebuild_target_visible_indices();
         self.reconcile_target_cursor(old_index);
         true
@@ -671,20 +679,30 @@ impl PlanModel {
     }
 
     pub fn toggle_expanded(&mut self, key: &RowKey) -> bool {
+        self.set_expanded(key, None)
+    }
+
+    /// Changes expansion without letting input handling accidentally invert it.
+    pub fn set_row_expanded(&mut self, key: &RowKey, expanded: bool) -> bool {
+        self.set_expanded(key, Some(expanded))
+    }
+
+    fn set_expanded(&mut self, key: &RowKey, expanded: Option<bool>) -> bool {
         let old_index = self.cursor_index().unwrap_or(self.cursor_index_hint);
         let changed = match key {
             RowKey::Disposition(disposition) => {
-                toggle_set(&mut self.expanded_dispositions, *disposition)
+                set_membership(&mut self.expanded_dispositions, *disposition, expanded)
             }
             RowKey::ActionKind {
                 disposition,
                 kind_id,
-            } => toggle_set(
+            } => set_membership(
                 &mut self.expanded_groups,
                 GroupKey {
                     disposition: *disposition,
                     kind_id: kind_id.clone(),
                 },
+                expanded,
             ),
             RowKey::Action(_) => false,
         };
@@ -1120,6 +1138,18 @@ fn toggle_set<T: Eq + std::hash::Hash + Clone>(set: &mut HashSet<T>, value: T) -
         true
     } else {
         set.insert(value)
+    }
+}
+
+fn set_membership<T: Eq + std::hash::Hash + Clone>(
+    set: &mut HashSet<T>,
+    value: T,
+    wanted: Option<bool>,
+) -> bool {
+    match wanted {
+        Some(true) => set.insert(value),
+        Some(false) => set.remove(&value),
+        None => toggle_set(set, value),
     }
 }
 

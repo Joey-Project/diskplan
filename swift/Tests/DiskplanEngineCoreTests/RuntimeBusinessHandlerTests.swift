@@ -112,6 +112,80 @@ import Testing
   try broker.finish()
 }
 
+@Test func responderDoesNotCommitAuthorityWhenWriterFails() throws {
+  let broker = SerialEventBroker { _ in throw RuntimeTransactionWriterError.failed }
+  let authority = RuntimeBusinessAuthorityState()
+  let (first, emission) = try runtimePlanTransactionFixture()
+  #expect(authority.claim(.buildPlan(first))?.code == nil)
+  let responder = RuntimeBusinessResponder(
+    broker: broker,
+    request: .buildPlan(first),
+    runtimeSessionID: Data("runtime-session".utf8),
+    authority: authority
+  )
+
+  #expect(throws: EventBrokerError.self) {
+    try responder.send(emission)
+  }
+  #expect(!authority.hasLivePlanReceiptForTesting())
+  var duplicate = Diskplan_V1_BuildPlanRequest()
+  duplicate.requestID = 2
+  #expect(authority.claim(.buildPlan(duplicate))?.code == .invalidState)
+  #expect(throws: EventBrokerError.self) { try broker.finish() }
+}
+
+@Test func responderDoesNotHoldAuthorityLockAcrossWriter() throws {
+  let writerGate = RuntimeTransactionGate()
+  let writerEntered = RuntimeTransactionFlag()
+  let responseFinished = RuntimeTransactionFlag()
+  let claimResult = RuntimeTransactionClaimResult()
+  let broker = SerialEventBroker { _ in
+    writerEntered.set()
+    writerGate.wait()
+  }
+  let authority = RuntimeBusinessAuthorityState()
+  var first = Diskplan_V1_BuildPlanRequest()
+  first.requestID = 1
+  #expect(authority.claim(.buildPlan(first))?.code == nil)
+  let responder = RuntimeBusinessResponder(
+    broker: broker,
+    request: .buildPlan(first),
+    runtimeSessionID: Data("runtime-session".utf8),
+    authority: authority
+  )
+  Thread {
+    do {
+      try responder.send(try .rejected(code: .invalidState, summary: "terminal"))
+    } catch {
+      Issue.record("runtime response unexpectedly failed: \(error)")
+    }
+    responseFinished.set()
+  }.start()
+  defer { writerGate.open() }
+  #expect(writerEntered.wait(timeout: 1.0))
+
+  var duplicate = Diskplan_V1_BuildPlanRequest()
+  duplicate.requestID = 2
+  let duplicateRequest = duplicate
+  Thread {
+    claimResult.set(authority.claim(.buildPlan(duplicateRequest))?.code)
+  }.start()
+  #expect(claimResult.wait(timeout: 1.0) == .invalidState)
+  #expect(!responseFinished.value())
+
+  writerGate.open()
+  #expect(responseFinished.wait(timeout: 1.0))
+  #expect(authority.claim(.buildPlan(duplicateRequest))?.code == nil)
+  let duplicateResponder = RuntimeBusinessResponder(
+    broker: broker,
+    request: .buildPlan(duplicateRequest),
+    runtimeSessionID: Data("runtime-session".utf8),
+    authority: authority
+  )
+  try duplicateResponder.send(try .rejected(code: .invalidState, summary: "terminal"))
+  try broker.finish()
+}
+
 @Test func runtimeIngressRejectsEnvelopeAndNestedUnknownFields() throws {
   let handler = RecordingRuntimeHandler()
   for transform in [
@@ -607,6 +681,109 @@ private final class ReservedRejectionRuntimeHandler: RuntimeBusinessHandler {
 
 private enum FixtureHandlerError: Error {
   case afterTerminal
+}
+
+private enum RuntimeTransactionWriterError: Error {
+  case failed
+}
+
+private final class RuntimeTransactionGate: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var opened = false
+
+  func wait() {
+    condition.lock()
+    while !opened { condition.wait() }
+    condition.unlock()
+  }
+
+  func open() {
+    condition.lock()
+    opened = true
+    condition.broadcast()
+    condition.unlock()
+  }
+}
+
+private final class RuntimeTransactionFlag: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var isSet = false
+
+  func set() {
+    condition.lock()
+    isSet = true
+    condition.broadcast()
+    condition.unlock()
+  }
+
+  func value() -> Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    return isSet
+  }
+
+  func wait(timeout: TimeInterval) -> Bool {
+    condition.lock()
+    let deadline = Date(timeIntervalSinceNow: timeout)
+    while !isSet && condition.wait(until: deadline) {}
+    let result = isSet
+    condition.unlock()
+    return result
+  }
+}
+
+private final class RuntimeTransactionClaimResult: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var isSet = false
+  private var code: Diskplan_V1_RuntimeRejectCode?
+
+  func set(_ code: Diskplan_V1_RuntimeRejectCode?) {
+    condition.lock()
+    self.code = code
+    isSet = true
+    condition.broadcast()
+    condition.unlock()
+  }
+
+  func wait(timeout: TimeInterval) -> Diskplan_V1_RuntimeRejectCode? {
+    condition.lock()
+    let deadline = Date(timeIntervalSinceNow: timeout)
+    while !isSet && condition.wait(until: deadline) {}
+    let result = code
+    condition.unlock()
+    return result
+  }
+}
+
+private func runtimePlanTransactionFixture() throws -> (
+  Diskplan_V1_BuildPlanRequest, RuntimeBusinessEmission
+) {
+  let scanSessionID = Data("scan-session".utf8)
+  let evidenceSHA256 = Data(repeating: 0x42, count: 32)
+  let checkpointID = Data(evidenceSHA256.map { String(format: "%02x", $0) }.joined().utf8)
+  var request = Diskplan_V1_BuildPlanRequest()
+  request.requestID = 1
+  request.scanSessionID.value = scanSessionID
+  request.scanCheckpointID.value = checkpointID
+  request.scanEvidenceSha256.value = evidenceSHA256
+  let metadata = PlanProjectionWireMetadata(
+    scanSessionID: scanSessionID,
+    scanCheckpointID: checkpointID,
+    scanCheckpointEvidenceSHA256: Data(repeating: 0x43, count: 32),
+    planSHA256: Data(repeating: 0x44, count: 32),
+    evidenceSHA256: evidenceSHA256,
+    cleanupCandidateCount: 0,
+    policyVersion: "fixture-policy-v1",
+    schemaVersion: "fixture-schema-v1"
+  )
+  return (
+    request,
+    try RuntimeBusinessEmission.plan(
+      planBuildID: Data("plan-build".utf8),
+      records: [],
+      metadata: metadata
+    )
+  )
 }
 
 private func runRuntimeExchange(

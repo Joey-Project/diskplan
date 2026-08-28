@@ -118,6 +118,13 @@ superseded_by:
   advancing when output fails. Midstream cancellation remains a typed
   unsupported operation for this first complete-batch execution seam rather
   than advertising cancellation semantics it cannot honor.
+- Runtime emission now uses a two-phase, session-owned authority transaction:
+  prepare creates an unforgeable in-process token under the authority lock,
+  writer I/O and the broker flush run after releasing that lock, and only an
+  exact token/request match can commit the receipt afterward. A failed or
+  partial write aborts the token without publishing a plan or successor
+  receipt, while the active request continues to reject concurrent authority
+  transitions fail closed.
 - Runtime authority admission is single-flight before invoking a handler that
   may retain its responder. A confirmation atomically claims the exact live
   review and force set before mutation code can run; duplicate confirmation or
@@ -183,6 +190,12 @@ superseded_by:
 - Apple Swift 6.3.3 on arm64 macOS 26 builds the serial targeted gates.
   `DiskplanCoreTests` passes 17 tests and `DiskplanEngineCoreTests` passes 31
   receipt, JIT, canonical-ingress, budget, and negative tests.
+- After merging the latest integration work, the bounded EngineCore gate
+  passes 73 tests. Targeted coverage confirms bounded semantic backpressure,
+  exact final-scan writer acknowledgement, nonblocking authority admission
+  during a stalled writer, and plan-receipt nonpublication after writer
+  failure. The runner completed in 31.496 seconds with a verified quiescent
+  process group and an untruncated 17,752-byte log.
 - Rust 1.95.0 passes `cargo check --locked --workspace`, all-target Clippy with
   warnings denied, and formatting. `cargo test --locked -p diskplan-proto`
   passes four unit tests plus four runtime-golden tests; the golden test covers

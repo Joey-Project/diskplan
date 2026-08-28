@@ -276,6 +276,14 @@ private struct PreparedRuntimeEmission {
   let transition: RuntimeAuthorityTransition
 }
 
+private final class RuntimeAuthorityEmissionToken: @unchecked Sendable {}
+
+private struct RuntimeAuthorityEmissionTransaction {
+  let requestID: UInt64
+  let token: RuntimeAuthorityEmissionToken
+  let prepared: PreparedRuntimeEmission
+}
+
 package enum RuntimeExecutionAuthorityValidator {
   package static func validateMembership(
     events: [Diskplan_V1_ExecutionStreamEvent],
@@ -375,6 +383,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private var consumedReviewBindings: Set<Data> = []
   private var executionClaim: RuntimeExecutionClaim?
   private var activeRequestID: UInt64?
+  private var activeEmissionToken: RuntimeAuthorityEmissionToken?
 
   func withLock<T>(_ body: () throws -> T) rethrows -> T {
     lock.lock()
@@ -414,7 +423,71 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     }
   }
 
-  fileprivate func prepare(
+  fileprivate func authorize(
+    _ emission: RuntimeBusinessEmission,
+    for request: RuntimeBusinessRequest
+  ) throws -> RuntimeAuthorityEmissionTransaction {
+    try withLock {
+      try beginEmission(try prepareUnderLock(emission, for: request), request: request)
+    }
+  }
+
+  fileprivate func authorize(
+    _ prepared: PreparedRuntimeEmission,
+    for request: RuntimeBusinessRequest
+  ) throws -> RuntimeAuthorityEmissionTransaction {
+    try withLock { try beginEmission(prepared, request: request) }
+  }
+
+  fileprivate func rejectionTransition(
+    for request: RuntimeBusinessRequest
+  ) -> RuntimeAuthorityTransition {
+    withLock { rejectionTransitionUnderLock(for: request) }
+  }
+
+  fileprivate func commit(_ transaction: RuntimeAuthorityEmissionTransaction) throws {
+    try withLock {
+      guard activeRequestID == transaction.requestID,
+        activeEmissionToken === transaction.token
+      else { throw invalidState("runtime emission transaction is no longer active") }
+      commitUnderLock(transaction.prepared.transition, requestID: transaction.requestID)
+      activeEmissionToken = nil
+    }
+  }
+
+  fileprivate func abort(_ transaction: RuntimeAuthorityEmissionTransaction) {
+    withLock {
+      guard activeRequestID == transaction.requestID,
+        activeEmissionToken === transaction.token
+      else { return }
+      activeEmissionToken = nil
+    }
+  }
+
+  func hasLivePlanReceiptForTesting() -> Bool {
+    withLock { plan != nil }
+  }
+
+  private func beginEmission(
+    _ prepared: PreparedRuntimeEmission,
+    request: RuntimeBusinessRequest
+  ) throws -> RuntimeAuthorityEmissionTransaction {
+    guard activeRequestID == request.requestID else {
+      throw invalidState("runtime request has no active authority claim")
+    }
+    guard activeEmissionToken == nil else {
+      throw invalidState("runtime request already has an active emission transaction")
+    }
+    let token = RuntimeAuthorityEmissionToken()
+    activeEmissionToken = token
+    return RuntimeAuthorityEmissionTransaction(
+      requestID: request.requestID,
+      token: token,
+      prepared: prepared
+    )
+  }
+
+  private func prepareUnderLock(
     _ emission: RuntimeBusinessEmission,
     for request: RuntimeBusinessRequest
   ) throws -> PreparedRuntimeEmission {
@@ -550,7 +623,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       )
 
     case .rejected(_, let summary):
-      let transition = rejectionTransition(for: request)
+      let transition = rejectionTransitionUnderLock(for: request)
       if transition.consumesExecutionClaim {
         var rejected = Diskplan_V1_RuntimeRejected()
         rejected.code = .confirmationMismatch
@@ -567,7 +640,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     }
   }
 
-  fileprivate func commit(_ transition: RuntimeAuthorityTransition, requestID: UInt64) {
+  private func commitUnderLock(_ transition: RuntimeAuthorityTransition, requestID: UInt64) {
     guard activeRequestID == requestID else { return }
     switch transition {
     case .none:
@@ -597,7 +670,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     activeRequestID = nil
   }
 
-  fileprivate func rejectionTransition(
+  private func rejectionTransitionUnderLock(
     for request: RuntimeBusinessRequest
   ) -> RuntimeAuthorityTransition {
     guard case .confirmApply = request,
@@ -884,6 +957,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
 }
 
 public final class RuntimeBusinessResponder: @unchecked Sendable {
+  private let responseLock = NSLock()
   private let broker: SerialEventBroker
   private let requestID: UInt64
   private let runtimeSessionID: Data
@@ -905,39 +979,52 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   }
 
   public func send(_ emission: RuntimeBusinessEmission) throws {
-    try authority.withLock {
-      guard !completed else {
-        throw RuntimeResponderError.alreadyTerminal
-      }
-      let prepared: PreparedRuntimeEmission
-      do {
-        prepared = try authority.prepare(emission, for: request)
-      } catch let error as RuntimeAuthorityError {
-        let transition = authority.rejectionTransition(for: request)
-        prepared = typedRejection(
+    responseLock.lock()
+    defer { responseLock.unlock() }
+    guard !completed else {
+      throw RuntimeResponderError.alreadyTerminal
+    }
+    let transaction: RuntimeAuthorityEmissionTransaction
+    do {
+      transaction = try authority.authorize(emission, for: request)
+    } catch let error as RuntimeAuthorityError {
+      let transition = authority.rejectionTransition(for: request)
+      transaction = try authority.authorize(
+        typedRejection(
           code: transition.consumesExecutionClaim ? .confirmationMismatch : error.code,
           summary: error.summary,
           transition: transition
-        )
-      }
-      try sendPrepared(prepared)
-      authority.commit(prepared.transition, requestID: requestID)
-      completed = true
+        ),
+        for: request
+      )
     }
+    try transmit(transaction)
   }
 
   func rejectHandlerFailure() throws {
-    try authority.withLock {
-      guard !completed else { return }
-      let transition = authority.rejectionTransition(for: request)
-      let prepared = typedRejection(
+    responseLock.lock()
+    defer { responseLock.unlock() }
+    guard !completed else { return }
+    let transition = authority.rejectionTransition(for: request)
+    let transaction = try authority.authorize(
+      typedRejection(
         code: transition.consumesExecutionClaim ? .confirmationMismatch : .internalError,
         summary: "runtime business handler failed",
         transition: transition
-      )
-      try sendPrepared(prepared)
-      authority.commit(prepared.transition, requestID: requestID)
+      ),
+      for: request
+    )
+    try transmit(transaction)
+  }
+
+  private func transmit(_ transaction: RuntimeAuthorityEmissionTransaction) throws {
+    do {
+      try sendPrepared(transaction.prepared)
+      try authority.commit(transaction)
       completed = true
+    } catch {
+      authority.abort(transaction)
+      throw error
     }
   }
 

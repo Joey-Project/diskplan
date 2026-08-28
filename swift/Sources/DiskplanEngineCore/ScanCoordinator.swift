@@ -11,10 +11,26 @@ enum ScanCoordinatorError: Error, Equatable {
 private struct ConfiguredScan: @unchecked Sendable {
   let scanner: DeterministicScanner
   let sink: StreamingNodeSink
+  let authoritySession: RuntimePolicyAuthoritySession?
   let batchSize: Int
 }
 
-private final class StreamingNodeSink: ScanNodeSink, @unchecked Sendable {
+final class AuthorityTeeNodeSink: ScanNodeSink, @unchecked Sendable {
+  private let authority: RuntimePolicyAuthoritySession
+  private let streaming: StreamingNodeSink
+
+  init(authority: RuntimePolicyAuthoritySession, streaming: StreamingNodeSink) {
+    self.authority = authority
+    self.streaming = streaming
+  }
+
+  func receive(_ event: ScanNodeEvent) {
+    authority.receive(event)
+    streaming.receive(event)
+  }
+}
+
+final class StreamingNodeSink: ScanNodeSink, @unchecked Sendable {
   private let lock = NSLock()
   private let broker: SerialEventBroker
   private let scanSessionID: String
@@ -127,18 +143,31 @@ struct BoundedWorkerCommandQueue: Sendable {
 }
 
 final class ScanCoordinator: @unchecked Sendable {
+  typealias AuthoritySessionFactory = @Sendable (ResolvedScanScope) -> RuntimePolicyAuthoritySession
+
   private static let maximumCheckpointRootBindingBytes = 1 * 1_024 * 1_024
   static let commandCapacity = 256
 
   private let condition = NSCondition()
   private let broker: SerialEventBroker
+  private let authoritySessionFactory: AuthoritySessionFactory?
   private var commands = BoundedWorkerCommandQueue(capacity: commandCapacity)
   private var state: Diskplan_V1_ScanState = .idle
   private var workerStarted = false
   private var workerFinished = false
   private var sessionID = ""
+  private var authoritySession: RuntimePolicyAuthoritySession?
 
-  init(broker: SerialEventBroker) { self.broker = broker }
+  init(
+    broker: SerialEventBroker,
+    authoritySessionFactory: AuthoritySessionFactory? = nil,
+    authoritySession: RuntimePolicyAuthoritySession? = nil
+  ) {
+    precondition(authoritySessionFactory == nil || authoritySession == nil)
+    self.broker = broker
+    self.authoritySessionFactory = authoritySessionFactory
+    self.authoritySession = authoritySession
+  }
 
   func start(_ request: Diskplan_V1_StartScanRequest) throws {
     condition.lock()
@@ -160,7 +189,8 @@ final class ScanCoordinator: @unchecked Sendable {
       configured = try Self.buildProductionScan(
         request: request,
         scanSessionID: sessionID,
-        broker: broker
+        broker: broker,
+        authoritySessionFactory: authoritySessionFactory
       )
     } catch ScanCoordinatorError.malformed(let setupCode, let detail) {
       try reject(
@@ -214,6 +244,7 @@ final class ScanCoordinator: @unchecked Sendable {
     workerStarted = true
     state = .running
     self.sessionID = sessionID
+    authoritySession = configured.authoritySession
     condition.unlock()
 
     do {
@@ -309,6 +340,27 @@ final class ScanCoordinator: @unchecked Sendable {
     condition.unlock()
   }
 
+  func makePlanForCurrentSession() throws -> RuntimePolicyAuthorityResult {
+    condition.lock()
+    let authoritySession = self.authoritySession
+    let state = self.state
+    let workerFinished = self.workerFinished
+    condition.unlock()
+    guard let authoritySession,
+      Self.authorityPlanIsReachable(state: state, workerFinished: workerFinished)
+    else {
+      throw RuntimePolicyAuthoritySessionError.scanNotFinalized
+    }
+    return try authoritySession.makePlan()
+  }
+
+  static func authorityPlanIsReachable(
+    state: Diskplan_V1_ScanState,
+    workerFinished: Bool
+  ) -> Bool {
+    workerFinished && (state == .finished || state == .finalizedPartial)
+  }
+
   private func runWorker(
     configured: ConfiguredScan,
     scanSessionID: String
@@ -330,7 +382,13 @@ final class ScanCoordinator: @unchecked Sendable {
       }
       if let command = commands.dequeuePrioritizingStop() {
         condition.unlock()
-        if handle(command, scanner: scanner, scanSessionID: scanSessionID) { return }
+        if handle(
+          command,
+          scanner: scanner,
+          scanSessionID: scanSessionID
+        ) {
+          return
+        }
         continue
       }
       let shouldRun = state == .running
@@ -345,26 +403,18 @@ final class ScanCoordinator: @unchecked Sendable {
       emitProgress(result)
       switch result.state {
       case .complete:
-        guard finishOrFail(result, state: .finished, reason: "scan complete") else {
-          markWorkerFinished(state: .failed)
-          return
-        }
-        rejectQueuedControls(currentState: .finished)
-        markWorkerFinished(state: .finished)
+        publishFinalizedAuthorityResult(
+          result,
+          state: .finished,
+          reason: "scan complete"
+        )
         return
       case .partial:
-        guard
-          finishOrFail(
-            result,
-            state: .finalizedPartial,
-            reason: "scan finalized partial"
-          )
-        else {
-          markWorkerFinished(state: .failed)
-          return
-        }
-        rejectQueuedControls(currentState: .finalizedPartial)
-        markWorkerFinished(state: .finalizedPartial)
+        publishFinalizedAuthorityResult(
+          result,
+          state: .finalizedPartial,
+          reason: "scan finalized partial"
+        )
         return
       case .cancelled:
         guard finishOrFail(result, state: .cancelled, reason: "scan cancelled") else {
@@ -423,9 +473,11 @@ final class ScanCoordinator: @unchecked Sendable {
           )
           try stateChanged(.finalizingPartial, reason: "partial finalization acknowledged")
           let result = scanner.finalizePartial()
-          try finish(result, state: .finalizedPartial, reason: "finalized by user")
-          rejectQueuedControls(currentState: .finalizedPartial)
-          markWorkerFinished(state: .finalizedPartial)
+          publishFinalizedAuthorityResult(
+            result,
+            state: .finalizedPartial,
+            reason: "finalized by user"
+          )
           return true
         case .cancelScan where current == .running || current == .paused:
           setState(.cancelling)
@@ -530,7 +582,7 @@ final class ScanCoordinator: @unchecked Sendable {
     finalized.reason = reason
     finalized.canonicalCheckpointPayload = encoded.checkpointPayload
     finalized.manifest = encoded.manifest
-    try broker.sendSemantic(
+    try broker.sendSemanticAwaitingWrite(
       requestID: 0,
       scanSessionID: sessionID,
       body: .scanFinalized(finalized)
@@ -552,6 +604,32 @@ final class ScanCoordinator: @unchecked Sendable {
       emitFailure(code: code, detail: String(describing: error))
       return false
     }
+  }
+
+  func publishFinalizedAuthorityResult(
+    _ result: ScanResult,
+    state terminalState: Diskplan_V1_ScanState,
+    reason: String
+  ) {
+    precondition(terminalState == .finished || terminalState == .finalizedPartial)
+    do {
+      condition.lock()
+      let authoritySession = self.authoritySession
+      condition.unlock()
+      try authoritySession?.finalize(result)
+    } catch {
+      emitFailure(code: "authority_finalize_failed", detail: String(describing: error))
+      rejectQueuedControls(currentState: .failed)
+      markWorkerFinished(state: .failed)
+      return
+    }
+    guard finishOrFail(result, state: terminalState, reason: reason) else {
+      rejectQueuedControls(currentState: .failed)
+      markWorkerFinished(state: .failed)
+      return
+    }
+    rejectQueuedControls(currentState: terminalState)
+    markWorkerFinished(state: terminalState)
   }
 
   private func emitChunks(_ chunks: [Diskplan_V1_ScanCheckpointChunk]) throws {
@@ -669,7 +747,8 @@ final class ScanCoordinator: @unchecked Sendable {
   private static func buildProductionScan(
     request: Diskplan_V1_StartScanRequest,
     scanSessionID: String,
-    broker: SerialEventBroker
+    broker: SerialEventBroker,
+    authoritySessionFactory: AuthoritySessionFactory?
   ) throws -> ConfiguredScan {
     guard
       let profile = ScanProfile(rawValue: request.profile.isEmpty ? "standard" : request.profile)
@@ -765,13 +844,21 @@ final class ScanCoordinator: @unchecked Sendable {
       scanSessionID: scanSessionID,
       roots: scope.roots
     )
+    let authoritySession = authoritySessionFactory?(scope)
+    let nodeSink: any ScanNodeSink =
+      if let authoritySession {
+        AuthorityTeeNodeSink(authority: authoritySession, streaming: sink)
+      } else {
+        sink
+      }
     return ConfiguredScan(
       scanner: DeterministicScanner(
         filesystem: DarwinScanFilesystem(policy: policy),
         scope: scope,
-        nodeSink: sink
+        nodeSink: nodeSink
       ),
       sink: sink,
+      authoritySession: authoritySession,
       batchSize: batchSize
     )
   }

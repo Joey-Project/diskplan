@@ -1,0 +1,28 @@
+---
+source: rust/crates/diskplan-cli/src/tui/render.rs
+expression: "snapshot(&state, 80, 24)"
+---
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ diskplan Immutable plan  •  Paused                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Plan-first • Summary ────────────────────────────────────────────────────────┐
+│Plan plan-runtime-0001 • 1 staged                                             │
+│Decision Plan/action                   Immediate  Status                      │
+│▾ Ready                                                                       │
+│▾ Generic remove                                                              │
+│>[x]           Remove rebuildable c…     1.0 GiB  staged • path race residual…│
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────
+j/k move  Enter/l expand  h collapse  Space stage  p plan  / filter  ? help
+immutable engine plan ready

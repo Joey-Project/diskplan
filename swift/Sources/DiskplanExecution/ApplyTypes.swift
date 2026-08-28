@@ -349,11 +349,18 @@ public struct AuditWriteFailure: Equatable, Sendable {
   public let eventIndex: Int
   public let code: String
   public let errno: Int32?
+  public let retainedLocator: ArtifactRecoveryLocator?
 
-  public init(eventIndex: Int, code: String, errno: Int32? = nil) {
+  public init(
+    eventIndex: Int,
+    code: String,
+    errno: Int32? = nil,
+    retainedLocator: ArtifactRecoveryLocator? = nil
+  ) {
     self.eventIndex = eventIndex
     self.code = code
     self.errno = errno
+    self.retainedLocator = retainedLocator
   }
 }
 
@@ -394,7 +401,7 @@ public protocol ExecutionEventSink: Sendable {
 }
 
 public protocol ExecutionAuditSink: Sendable {
-  func record(_ event: ExecutionEvent) async throws
+  func record(_ event: ExecutionEvent, epochID: String) async throws
 }
 
 public actor NoOpExecutionEventSink: ExecutionEventSink {
@@ -429,7 +436,10 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
     case .unitFinished(let id, let status):
       return "unit-finished id=\(unitLabel(id)) status=\(status.rawValue)"
     case .auditWriteFailed(let failure):
-      return "audit-write-failed event=\(failure.eventIndex) code=\(failure.code)"
+      let retained =
+        failure.retainedLocator == nil
+        ? "" : " retained-artifact=true revalidate-required=true"
+      return "audit-write-failed event=\(failure.eventIndex) code=\(failure.code)\(retained)"
     case .applyFinished: return "apply-finished"
     }
   }

@@ -631,6 +631,89 @@ func failedRemovalLeafSurvivesTwoSuccessorGateBeforeStateCrashes() throws {
 }
 
 @Test
+func sameOperationMergeRecoversDurablyPrunedTombstoneCohort() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  let activeID = try ordinary.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 10)
+  try ordinary.markDispatched(
+    .extensionRemove,
+    operationID: activeID,
+    nowNanoseconds: 20
+  )
+  let failedID = try ordinary.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 30)
+  try ordinary.markDispatched(
+    .extensionRemove,
+    operationID: failedID,
+    nowNanoseconds: 40
+  )
+  try ordinary.recordOriginalCompletion(
+    .extensionRemove,
+    operationID: failedID,
+    completion: .failed,
+    nowNanoseconds: 50
+  )
+  let successorID = try ordinary.beginRemovalAttempt(.extensionRemove, nowNanoseconds: 60)
+
+  let crashing = try fixture.journal(
+    boot: firstBoot,
+    failureInjection: .afterStateBeforeGate
+  )
+  #expect(
+    throws: ExternalMutationJournalError.operationFailed(
+      "injected-after-completion-state",
+      errno: EIO
+    )
+  ) {
+    try crashing.recordOriginalCompletion(
+      .extensionRemove,
+      operationID: activeID,
+      completion: .succeeded,
+      nowNanoseconds: 70
+    )
+  }
+
+  let gate = try #require(
+    JSONSerialization.jsonObject(with: Data(contentsOf: fixture.gateURL)) as? [String: Any]
+  )
+  let gateMutations = try #require(gate["mutations"] as? [[String: Any]])
+  let gateState = try #require(gateMutations.first?["state"] as? [String: Any])
+  let leafState = try #require(
+    JSONSerialization.jsonObject(with: Data(contentsOf: fixture.stateURL(.extensionRemove)))
+      as? [String: Any]
+  )
+  #expect(UUID(uuidString: try #require(gateState["operationID"] as? String)) == successorID)
+  #expect(UUID(uuidString: try #require(leafState["operationID"] as? String)) == successorID)
+  #expect(
+    UUID(uuidString: try #require(gateState["predecessorOperationID"] as? String)) == failedID
+  )
+  #expect(
+    UUID(uuidString: try #require(leafState["predecessorOperationID"] as? String)) == activeID
+  )
+
+  let recovered = try #require(try ordinary.state(.extensionRemove))
+  #expect(recovered.operationID == successorID)
+  #expect(recovered.phase == .prepared)
+  #expect(recovered.predecessorOperationID == activeID)
+  #expect(recovered.unresolvedPredecessorOperationIDs == [activeID])
+
+  try ordinary.markDispatched(
+    .extensionRemove,
+    operationID: successorID,
+    nowNanoseconds: 80
+  )
+  try ordinary.recordOriginalCompletion(
+    .extensionRemove,
+    operationID: successorID,
+    completion: .succeeded,
+    nowNanoseconds: 90
+  )
+  try ordinary.confirmFinished(.extensionRemove, observed: .absent)
+  try ordinary.requireClear()
+  #expect(try fixture.evidenceNames().isEmpty)
+}
+
+@Test
 func replacementExtensionRemovalGateRetainsSucceededPredecessorAcrossCrash() throws {
   let fixture = try TemporaryMutationJournal()
   defer { fixture.remove() }

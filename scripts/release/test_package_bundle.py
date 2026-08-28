@@ -293,6 +293,42 @@ class BoundedProbeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"")
 
+    def test_failure_retains_only_a_bounded_supervisor_report_summary(self) -> None:
+        report = {
+            "cleanup": {
+                "attempted": True,
+                "term_attempted": True,
+                "term_sent": False,
+                "kill_attempted": True,
+                "kill_sent": False,
+                "quiescent": True,
+            },
+            "command_output": "must-not-leak",
+            "elapsed_millis": 3,
+            "error_type": "ProcessLookupError",
+            "exit_code": 70,
+            "leader_exit_code": 0,
+            "output_bytes": 27,
+            "process_group_verified": False,
+            "result": "supervisor_failed",
+            "termination_signal": None,
+        }
+        completed = SimpleNamespace(
+            stdout=json.dumps(report).encode("ascii"),
+            stderr=b"",
+            returncode=70,
+        )
+        with mock.patch.object(packager.subprocess, "run", return_value=completed):
+            with self.assertRaises(ValueError) as raised:
+                packager.run_staged(self.staged, ["/usr/bin/true"], "identity probe")
+
+        message = str(raised.exception)
+        self.assertIn('"error_type":"ProcessLookupError"', message)
+        self.assertIn('"result":"supervisor_failed"', message)
+        self.assertIn('"supervisor_returncode":70', message)
+        self.assertNotIn("command_output", message)
+        self.assertNotIn("must-not-leak", message)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2161,8 +2161,15 @@ impl EngineSession {
             }
             Ok(Some(_)) => {}
             Ok(None) => *clean_eof = true,
-            Err(error) if tail_error.is_none() => *tail_error = Some(ClientError::Frame(error)),
-            Err(_) => {}
+            Err(error) => {
+                // The decoder exits after reporting any framing error. Treat that
+                // report as the terminal stdout state so the following channel
+                // disconnect cannot mask the protocol violation.
+                *clean_eof = true;
+                if tail_error.is_none() {
+                    *tail_error = Some(ClientError::Frame(error));
+                }
+            }
         }
     }
 
@@ -2435,6 +2442,28 @@ mod event_sequence_tests {
             process_group_id: 0,
             reaper,
         }
+    }
+
+    #[test]
+    fn shutdown_frame_error_is_terminal_and_precedes_decoder_disconnect() {
+        let mut session = session_with_events([]);
+        let mut clean_eof = false;
+        let mut tail_error = None;
+
+        session.accept_shutdown_frame(
+            Err(FrameError::Oversized {
+                length: diskplan_core::framing::MAX_FRAME_LENGTH + 1,
+                maximum: diskplan_core::framing::MAX_FRAME_LENGTH,
+            }),
+            &mut clean_eof,
+            &mut tail_error,
+        );
+
+        assert!(clean_eof);
+        assert!(matches!(
+            tail_error,
+            Some(ClientError::Frame(FrameError::Oversized { .. }))
+        ));
     }
 
     fn accepted_start(sequence: u64) -> EngineEvent {
