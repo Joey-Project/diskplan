@@ -171,6 +171,10 @@ candidate/path nodes
 - snapshot 是 blocker，不自动成为清理目标。
 - partial clone 只使用 private-size lower bound。
 - apply 前重新验证所有 owner、refcount、link count 和 snapshot blockers。
+- 共享任一 owner 的多个 release set 属于一个 connected execution component；执行计划必须在
+  首次 mutation 前携带并重验该 component 中所有已激活 group 的 topology、aggregate
+  postcondition 和去重 owner contract。同一 owner 只能执行一次，所有 group post-verify
+  成功后才能分别确认实际释放量。
 
 ## 9. File Provider Contract
 
@@ -333,6 +337,11 @@ explicit protection/type hint 同样受这个边界约束：protection 可以直
 - Normal keep policy.
 
 dirty/untracked Git 内容必须使用专门的 `discard-local-work` action，不得伪装成普通删除。
+
+duplicate-survivor fact 的声明者就是该 duplicate group 的成员；唯一 survivor 必须是成员，
+不能由全局存在但未声明该 group 的无关 candidate 冒充。survivor 的受保护属性是整个绑定
+namespace，因此 direct、ancestor、descendant、path alias 或 object-identity alias mutation
+都必须拒绝，而不是只保护 exact path。
 
 ### 13.1 Canonical IDs And Bindings
 

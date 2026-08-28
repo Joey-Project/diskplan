@@ -64,24 +64,27 @@ superseded_by:
   identity and becomes the remove action's JIT content baseline. Action-aware policy records
   the prerequisite discharge before action hashing.
 - Complete-release actions bind the exact verified release graph, owner topology, actions,
-  candidates, and bytes; plans reject empty, duplicate, or mismatched action bindings. Bound
-  owners are mandatory prerequisites for consent validation. A closed composite execution
-  step retains every owner JIT contract and rewritten prerequisite edges while preventing
-  duplicate individual deletion; credit-only release sets remain independent of aggregates.
+  candidates, and bytes; plans reject empty, duplicate, or mismatched action bindings. Public
+  builders require the aggregate evidence to match an exact owner prerequisite, and reject
+  duplicate prerequisite ActionID or lineage multiplicity. Bound owners are mandatory
+  prerequisites for consent validation. A closed connected-component execution step carries
+  every represented aggregate postcondition/release set plus unique owner and exact Git-discard
+  JIT contracts, rewrites prerequisite edges once, and prevents duplicate individual deletion;
+  credit-only release sets remain independent of aggregates.
 - Raw-path and raw-UTF8 identity are preserved across graph keys, adapter scopes, release
   owners, and hashes. Full-corpus absolute-namespace overlap blocks selected parents even
   when nested candidates are not selected, while unrelated sibling and distinct-root targets
   remain independent.
 - Frozen claim/source payloads and adapter-scope sets are validated and canonicalized before
   hashing. Overlay terminal effects, including Git discard, are checked against the complete
-  frozen corpus and reject unauthorized alias or ancestor effects. Duplicate-survivor consent
-  protects every plan-declared survivor namespace even when the declaring duplicate is not
-  selected.
+  frozen corpus and reject unauthorized alias or ancestor effects. Duplicate groups retain
+  their declaring members, require the chosen survivor to be a member, and protect the full
+  survivor namespace symmetrically against direct, ancestor, descendant, path-alias, and
+  identity-alias mutations even when the declaring duplicate is not selected.
 - Git-scope dominance uses symmetric path/identity overlap for non-Git actions at plan and
-  overlay boundaries, blocking nested children, ancestors, and aliases while preserving
-  directional non-Git survivor checks and allowing disjoint targets. Display tiers are derived
-  from final action-aware policy and force-warning semantics; recomputation rejects forged
-  safe labels for blocked or review-required actions.
+  overlay boundaries, blocking nested children, ancestors, and aliases while allowing disjoint
+  targets. Display tiers are derived from final action-aware policy and force-warning semantics;
+  recomputation rejects forged safe labels for blocked or review-required actions.
 - Full release evaluation now yields one immutable manifest bundle binding every group, the
   global candidate/action map, graph provenance, and connected-component topology. Plans reject
   sliced, mixed, duplicated, or missing groups; a group-scoped aggregate keeps the full manifest
@@ -105,6 +108,10 @@ superseded_by:
 - Public display-metric construction no longer accepts a recommendation tier. It starts blocked,
   and action construction alone replaces that placeholder with the source-bound authoritative
   tier; a debug-only helper retains negative forged-tier coverage.
+- Action and execution-step DAG validation use a deterministic minimum heap instead of repeated
+  array-front removal and full ready-set sorting. Overlay validation canonicalizes every
+  error-producing selection, lineage, consent, and waiver traversal, and full topology bindings
+  canonicalize file and owner arrays at the encoder boundary.
 
 ## Task List
 
@@ -135,6 +142,9 @@ superseded_by:
   reference-time advancement, and derive recommendations authoritatively from final votes.
 - [x] Close public evaluation and display-tier authority surfaces, require verified non-optional
   source bindings, and retain forged-vote/tier rejection tests without a public bypass.
+- [x] Close follow-up builder authority, prerequisite multiplicity, duplicate-survivor,
+  connected release-component, deterministic diagnostic, topology encoding, and wide-DAG
+  complexity findings.
 
 ## Handoff
 
@@ -150,8 +160,8 @@ superseded_by:
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
   overlay consent binding, public API construction boundaries, and forged vote/tier rejection;
-  the latest focused run passed all 52 tests.
-- The final full local `swift test --package-path swift` run passed all 80 tests, including
-  all 52 focused policy tests.
+  the latest focused run passed all 58 tests.
+- The final full local serial `swift test --no-parallel` run passed all 86 tests, including
+  all 58 focused policy tests; `swift build -c release` also completed successfully.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.
