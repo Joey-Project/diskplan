@@ -566,6 +566,8 @@ Rust launcher 只从自己的 versioned directory 定位 engine。升级通过�
 
 - Identity/activity/provider/dependency revalidation.
 - Adapter dry-run and generic command preview.
+- The authoritative implementation contract is documented in
+  [`revalidation-and-dry-run.md`](revalidation-and-dry-run.md).
 - Best-effort result stream and no-persistence mode.
 
 ### Phase 5: Apply

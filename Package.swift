@@ -9,6 +9,7 @@ let package = Package(
     .library(name: "DiskplanCore", targets: ["DiskplanCore"]),
     .library(name: "DiskplanMacOS", targets: ["DiskplanMacOS"]),
     .library(name: "DiskplanPolicy", targets: ["DiskplanPolicy"]),
+    .library(name: "DiskplanExecution", targets: ["DiskplanExecution"]),
     .executable(name: "diskplan-engine", targets: ["DiskplanEngine"]),
     .executable(name: "diskplan-macos-probe", targets: ["DiskplanMacOSProbe"]),
   ],
@@ -46,6 +47,11 @@ let package = Package(
       name: "DiskplanPolicy",
       path: "swift/Sources/DiskplanPolicy"
     ),
+    .target(
+      name: "DiskplanExecution",
+      dependencies: ["DiskplanPolicy"],
+      path: "swift/Sources/DiskplanExecution"
+    ),
     .executableTarget(
       name: "DiskplanEngine",
       dependencies: ["DiskplanCore", "DiskplanProto"],
@@ -75,6 +81,11 @@ let package = Package(
       name: "DiskplanPolicyTests",
       dependencies: ["DiskplanPolicy"],
       path: "swift/Tests/DiskplanPolicyTests"
+    ),
+    .testTarget(
+      name: "DiskplanExecutionTests",
+      dependencies: ["DiskplanExecution", "DiskplanPolicy"],
+      path: "swift/Tests/DiskplanExecutionTests"
     ),
   ]
 )

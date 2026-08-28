@@ -797,6 +797,18 @@ public struct RequiredAccessPolicyBaseline: Equatable, Sendable {
   public let aclDigest: PolicyDigest
   public let providerState: ProviderState
   public let mountIdentityBytes: Data
+
+  public init(
+    accessPolicyBytes: Data,
+    aclDigest: PolicyDigest,
+    providerState: ProviderState,
+    mountIdentityBytes: Data
+  ) {
+    self.accessPolicyBytes = accessPolicyBytes
+    self.aclDigest = aclDigest
+    self.providerState = providerState
+    self.mountIdentityBytes = mountIdentityBytes
+  }
 }
 
 public struct AccessPolicyProtectionContract: Equatable, Sendable {
