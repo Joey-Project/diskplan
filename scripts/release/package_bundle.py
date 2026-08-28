@@ -387,6 +387,50 @@ def require_pinned_zlib() -> None:
         )
 
 
+def bounded_probe_failure_summary(report: Any, supervisor_returncode: int) -> str:
+    """Render fixed report fields without retaining command output."""
+
+    summary: dict[str, Any] = {"supervisor_returncode": supervisor_returncode}
+    if type(report) is not dict:
+        summary["report_type"] = type(report).__name__
+        return json.dumps(summary, sort_keys=True, separators=(",", ":"))
+
+    for key in ("exit_code", "leader_exit_code", "elapsed_millis", "output_bytes"):
+        value = report.get(key)
+        if value is None and key == "leader_exit_code":
+            summary[key] = None
+        elif type(value) is int:
+            summary[key] = value
+
+    for key in ("process_group_verified",):
+        value = report.get(key)
+        if type(value) is bool:
+            summary[key] = value
+
+    for key in ("result", "error_type", "termination_signal"):
+        value = report.get(key)
+        if type(value) is str and re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", value):
+            summary[key] = value
+
+    cleanup = report.get("cleanup")
+    if type(cleanup) is dict:
+        safe_cleanup = {
+            key: cleanup[key]
+            for key in (
+                "attempted",
+                "term_attempted",
+                "term_sent",
+                "kill_attempted",
+                "kill_sent",
+                "quiescent",
+            )
+            if type(cleanup.get(key)) is bool
+        }
+        if safe_cleanup:
+            summary["cleanup"] = safe_cleanup
+    return json.dumps(summary, sort_keys=True, separators=(",", ":"))
+
+
 def run_staged(file: StagedFile, command: list[str], label: str) -> ProbeResult:
     file.assert_staged_stable()
     supervisor = Path(__file__).resolve().with_name("run_bounded.py")
@@ -429,7 +473,11 @@ def run_staged(file: StagedFile, command: list[str], label: str) -> ProbeResult:
             or report["cleanup"].get("quiescent") is not True
             or completed.returncode != 0
         ):
-            raise ValueError(f"{label} failed its bounded process-group probe")
+            summary = bounded_probe_failure_summary(report, completed.returncode)
+            raise ValueError(
+                f"{label} failed its bounded process-group probe; "
+                f"supervisor report {summary}"
+            )
         probe_output = read_regular_file(output, MAX_IDENTITY_BYTES)
         file.assert_staged_stable()
         return ProbeResult(stdout=probe_output, returncode=completed.returncode)
