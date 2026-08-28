@@ -571,7 +571,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       contract.verifiedEvidence.trustedExclusiveNamespace == .known(true),
       contract.verifiedEvidence.noFollowTraversalComplete == .known(true),
       contract.verifiedEvidence.postQuarantineCoverage == .known(.complete),
-      contract.verifiedEvidence.linkage == .known(.ordinary),
+      Self.hasExecutableLinkedRegistration(contract.verifiedEvidence),
       contract.verifiedEvidence.sparseCheckout == .known(.disabled),
       contract.verifiedEvidence.nestedRepositories == .known(.none),
       contract.verifiedEvidence.submodules == .known(.none),
@@ -596,7 +596,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       contract.verifiedEvidence.trustedExclusiveNamespace == .known(true),
       contract.verifiedEvidence.noFollowTraversalComplete == .known(true),
       contract.verifiedEvidence.postQuarantineCoverage == .known(.complete),
-      contract.verifiedEvidence.linkage == .known(.ordinary),
+      Self.hasExecutableLinkedRegistration(contract.verifiedEvidence),
       contract.verifiedEvidence.sparseCheckout == .known(.disabled),
       contract.verifiedEvidence.nestedRepositories == .known(.none),
       contract.verifiedEvidence.submodules == .known(.none),
@@ -606,6 +606,15 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       digest == contract.changeSetDigest,
       contract.verifiedEvidence.postDiscardSuccessor == .known(contract.successorBaseline)
     else { throw failure("invalid-git-worktree-discard-contract") }
+  }
+
+  static func hasExecutableLinkedRegistration(_ evidence: GitWorktreeEvidence) -> Bool {
+    guard case .known(let registration) = evidence.registration,
+      case .known(.linked(let registrationID)) = evidence.linkage
+    else { return false }
+    return registrationID == registration.registrationID
+      && registration.administrativeDirectoryIdentity
+        != registration.commonDirectoryIdentity
   }
 
   private func openSourceBinding(_ target: BoundMutationTarget) throws -> DescriptorBinding {

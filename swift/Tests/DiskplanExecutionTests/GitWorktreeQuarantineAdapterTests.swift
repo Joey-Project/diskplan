@@ -301,6 +301,43 @@ func gitDiscardUsesOnlyTypedGitCommandsAndVerifiesSuccessorCoverage() async thro
   #expect(slotExists(fixture.worktree))
 }
 
+@Test
+func gitExecutionGuardRequiresExactLinkedRegistrationAndDistinctObjects() throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let registration = fixture.registration
+  let exact = gitRegistrationGuardEvidence(
+    registration: registration,
+    linkage: .known(.linked(registrationID: registration.registrationID))
+  )
+  #expect(GitWorktreeQuarantineAdapter.hasExecutableLinkedRegistration(exact))
+
+  let mismatchedID = gitRegistrationGuardEvidence(
+    registration: registration,
+    linkage: .known(.linked(registrationID: gitDigest(76)))
+  )
+  #expect(!GitWorktreeQuarantineAdapter.hasExecutableLinkedRegistration(mismatchedID))
+
+  let ordinary = gitRegistrationGuardEvidence(
+    registration: registration,
+    linkage: .known(.ordinary)
+  )
+  #expect(!GitWorktreeQuarantineAdapter.hasExecutableLinkedRegistration(ordinary))
+
+  let sameIdentity = try GitWorktreeRegistrationEvidence(
+    registeredWorktreeIdentity: registration.registeredWorktreeIdentity,
+    administrativeDirectoryIdentity: registration.administrativeDirectoryIdentity,
+    commonDirectoryIdentity: registration.administrativeDirectoryIdentity,
+    registrationID: registration.registrationID,
+    metadataDigest: registration.metadataDigest
+  )
+  let aliased = gitRegistrationGuardEvidence(
+    registration: sameIdentity,
+    linkage: .known(.linked(registrationID: sameIdentity.registrationID))
+  )
+  #expect(!GitWorktreeQuarantineAdapter.hasExecutableLinkedRegistration(aliased))
+}
+
 private struct GitQuarantineFixture: @unchecked Sendable {
   let container: URL
   let root: URL
@@ -390,7 +427,7 @@ private struct GitQuarantineFixture: @unchecked Sendable {
       indexDigest: .known(gitDigest(71)),
       localChanges: .known(localChanges),
       registration: .known(registration),
-      linkage: .known(.ordinary),
+      linkage: .known(.linked(registrationID: registration.registrationID)),
       sparseCheckout: .known(.disabled),
       nestedRepositories: .known(.none),
       submodules: .known(.none),
@@ -507,6 +544,26 @@ private struct GitQuarantineFixture: @unchecked Sendable {
 
 private enum GitFixtureError: Error {
   case invalidContract
+}
+
+private func gitRegistrationGuardEvidence(
+  registration: GitWorktreeRegistrationEvidence,
+  linkage: Observation<GitWorktreeLinkageState>
+) -> GitWorktreeEvidence {
+  GitWorktreeEvidence(
+    noFollowTraversalComplete: .absent,
+    headIdentity: .absent,
+    indexDigest: .absent,
+    localChanges: .absent,
+    registration: .known(registration),
+    linkage: linkage,
+    sparseCheckout: .absent,
+    nestedRepositories: .absent,
+    submodules: .absent,
+    trustedExclusiveNamespace: .absent,
+    postQuarantineCoverage: .absent,
+    postDiscardSuccessor: .absent
+  )
 }
 
 private final class LockedGitTestClock: @unchecked Sendable {

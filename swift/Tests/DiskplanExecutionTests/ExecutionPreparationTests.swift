@@ -1398,7 +1398,7 @@ func gitEvidence(
     indexDigest: indexDigest,
     localChanges: .known(.clean),
     registration: .known(registration),
-    linkage: .known(.ordinary),
+    linkage: .known(.linked(registrationID: registration.registrationID)),
     sparseCheckout: .known(.disabled),
     nestedRepositories: .known(.none),
     submodules: .known(.none),

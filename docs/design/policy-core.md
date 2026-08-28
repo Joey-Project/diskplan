@@ -179,13 +179,15 @@ HEAD identity, index digest, local-change digest, exact registered worktree/root
 administrative-directory and common-directory identities, registration/metadata digests,
 linked-worktree state, sparse-checkout state, absence of nested repositories and submodules,
 trusted-exclusive namespace, and complete post-quarantine coverage. The v1 executable
-predicate is intentionally closed to an exact registration, an ordinary worktree, and
-disabled sparse checkout; an ordinary registration must also prove that its administrative
-directory identity exactly equals its common-directory identity. Known linked worktrees,
-known enabled sparse checkout, mismatched administrative/common identity, and any absent,
-unknown, unreadable, failed, or target-mismatched registration fact remain report-only until
-a specialized adapter proves their additional cleanup and coverage semantics. All such typed
-facts remain in evidence, lineage, action, and plan hashes. Dirty local work is
+predicate is intentionally closed to an exact linked-worktree registration and disabled sparse
+checkout. The linkage registration ID must exactly equal the registration evidence ID, while
+the administrative-directory and common-directory identities must be distinct. Both exact
+identities, the registration and metadata digests, and the raw registration binding remain in
+evidence, lineage, action, and plan hashes. The execution adapter separately proves the `.git`
+gitdir-file target and its descriptor-relative administrative-to-common directory relationship.
+Ordinary worktrees, enabled sparse checkout, a linkage-ID mismatch, equal administrative/common
+identity, and any absent, unknown, unreadable, failed, or target-mismatched registration fact
+remain report-only. Dirty local work is
 represented by a separate discard-local-changes action and exact waiver. Its typed
 postcondition seals a clean successor HEAD/index/content baseline, preserves HEAD identity,
 and becomes the dependent remove action's JIT baseline. The remove's action-aware evaluation
