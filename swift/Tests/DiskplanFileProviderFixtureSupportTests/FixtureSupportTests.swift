@@ -386,6 +386,126 @@ func cleanupCrashBeforeFinalRemovalRetainsExternalRecoveryEvidence() throws {
 }
 
 @Test
+func cleanupCrashAfterDurableFinalRemovalRetainsExternalRecoveryEvidence() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  #expect(throws: Error.self) {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: manifestURL,
+      expectedRunDirectory: fixture.runDirectory,
+      injectFinalDirectoryRemovalFailure: false,
+      injectCrashAfterFinalDirectoryRemoval: true
+    )
+  }
+  let recoveryURL = SecureFixtureStorage.cleanupRecoveryManifestURL(
+    for: fixture.runDirectory
+  )
+  let stagingURL = SecureFixtureStorage.cleanupStagingDirectoryURL(
+    for: fixture.runDirectory
+  )
+  #expect(!FileManager.default.fileExists(atPath: fixture.runDirectory.path))
+  #expect(!FileManager.default.fileExists(atPath: stagingURL.path))
+  #expect(FileManager.default.fileExists(atPath: recoveryURL.path))
+  #expect(
+    try SecureFixtureStorage.readCleanupRecoveryManifest(
+      at: recoveryURL,
+      expectedRunDirectory: fixture.runDirectory
+    ).runID == fixture.runID
+  )
+}
+
+@Test
+func recoveryCleanupRemovesOnlyExactStagingAndSiblingManifest() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  #expect(throws: Error.self) {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: manifestURL,
+      expectedRunDirectory: fixture.runDirectory,
+      injectFinalDirectoryRemovalFailure: false,
+      injectCrashBeforeFinalDirectoryRemoval: true
+    )
+  }
+  let recoveryURL = SecureFixtureStorage.cleanupRecoveryManifestURL(
+    for: fixture.runDirectory
+  )
+  let stagingURL = SecureFixtureStorage.cleanupStagingDirectoryURL(
+    for: fixture.runDirectory
+  )
+  try SecureFixtureStorage.recoverCleanup(
+    recoveryManifestURL: recoveryURL,
+    expectedRunDirectory: fixture.runDirectory
+  )
+  #expect(!FileManager.default.fileExists(atPath: stagingURL.path))
+  #expect(!FileManager.default.fileExists(atPath: recoveryURL.path))
+}
+
+@Test
+func recoveryCleanupAfterDurableRmdirRemovesSiblingManifest() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  #expect(throws: Error.self) {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: manifestURL,
+      expectedRunDirectory: fixture.runDirectory,
+      injectFinalDirectoryRemovalFailure: false,
+      injectCrashAfterFinalDirectoryRemoval: true
+    )
+  }
+  let recoveryURL = SecureFixtureStorage.cleanupRecoveryManifestURL(
+    for: fixture.runDirectory
+  )
+  try SecureFixtureStorage.recoverCleanup(
+    recoveryManifestURL: recoveryURL,
+    expectedRunDirectory: fixture.runDirectory
+  )
+  #expect(!FileManager.default.fileExists(atPath: recoveryURL.path))
+}
+
+@Test
+func recoveryCleanupFailsClosedWhenCanonicalRunStillExists() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  let recoveryURL = SecureFixtureStorage.cleanupRecoveryManifestURL(
+    for: fixture.runDirectory
+  )
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  try fixture.writePrivate(fixture.manifestData, to: recoveryURL)
+  #expect(throws: FixtureCleanupError.retained(recoveryURL.path)) {
+    try SecureFixtureStorage.recoverCleanup(
+      recoveryManifestURL: recoveryURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+  }
+  #expect(FileManager.default.fileExists(atPath: manifestURL.path))
+  #expect(FileManager.default.fileExists(atPath: recoveryURL.path))
+}
+
+@Test
+func recoveryCleanupRejectsAnyNonExactSiblingManifestPath() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let wrongURL = fixture.runDirectory.deletingLastPathComponent().appendingPathComponent(
+    ".manifest-recovery-other.json"
+  )
+  try fixture.writePrivate(fixture.manifestData, to: wrongURL)
+  #expect(throws: FixtureCleanupError.unsafeTarget) {
+    try SecureFixtureStorage.recoverCleanup(
+      recoveryManifestURL: wrongURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+  }
+  #expect(FileManager.default.fileExists(atPath: wrongURL.path))
+}
+
+@Test
 func oracleCloseRequiresTwoSecondsAfterALateCallback() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
@@ -782,20 +902,21 @@ func eventLockContentionUsesTheSameAbsoluteDeadlineAndPoisons() throws {
 }
 
 @Test
-func callbackGateDeterministicallyRejectsLateAndNeverCallbacks() {
-  let lateCallback = OneShotCallbackGate()
-  #expect(lateCallback.claimCompletion(from: .callback))
-  #expect(!lateCallback.claimCompletion(from: .deadline))
+func callbackGateAtomicallyChecksItsOwnedDeadline() {
+  let future = ContinuousClock.now + .seconds(10)
+  let lateCallback = OneShotCallbackGate(deadline: future)
+  #expect(lateCallback.claimCallback() == .callback)
+  #expect(!lateCallback.claimDeadline())
   #expect(lateCallback.completionSource == .callback)
 
-  let neverCallback = OneShotCallbackGate()
-  #expect(neverCallback.claimCompletion(from: .deadline))
-  #expect(!neverCallback.claimCompletion(from: .callback))
+  let neverCallback = OneShotCallbackGate(deadline: future)
+  #expect(neverCallback.claimDeadline())
+  #expect(neverCallback.claimCallback() == nil)
   #expect(neverCallback.completionSource == .deadline)
 
-  let delayedTimeoutTask = OneShotCallbackGate()
-  #expect(delayedTimeoutTask.claimCallback(isBeforeDeadline: false) == .deadline)
-  #expect(!delayedTimeoutTask.claimCompletion(from: .deadline))
+  let delayedTimeoutTask = OneShotCallbackGate(deadline: ContinuousClock.now - .seconds(1))
+  #expect(delayedTimeoutTask.claimCallback() == .deadline)
+  #expect(!delayedTimeoutTask.claimDeadline())
   #expect(delayedTimeoutTask.completionSource == .deadline)
 }
 

@@ -31,7 +31,9 @@ instances instead of masquerading as callback-zero.
 Teardown persistently seals the recorder before domain removal, and append never recreates a
 missing run directory. File Provider callbacks and `pluginkit` mutation/query steps have bounded
 monotonic deadlines and discard late completions. A callback checks the absolute deadline before
-claiming completion, so a delayed timeout task cannot admit a late reply. The bounded local,
+claiming completion under the one-shot gate lock, so a stale comparison or delayed timeout task
+cannot admit a late reply. The callback-only `materializedItemsDidChange` API always completes
+even if its oracle append fails; persistent poison evidence still rejects acceptance. The bounded local,
 recorder, and JSONL locks plus state/append/poison stages use one 30-second entry deadline.
 Exact-bundle registry records require
 strict UTF-8, a recognized header, and one absolute path; malformed text that mentions the exact
@@ -50,4 +52,7 @@ directory on a different device, and unregister cleanup proceeds only after the 
 longer references the exact embedded extension path. A validated recovery copy prevents
 manifest restoration failures from being silently discarded. A durable deterministic sibling
 manifest remains outside the staging tree until final `rmdir` succeeds, so a crash during
-recursive deletion does not consume the only recovery evidence.
+recursive deletion does not consume the only recovery evidence. The held parent directory is
+`fsync`ed after that `rmdir` and before the sibling manifest is unlinked. The production recovery
+command accepts that exact sibling manifest, validates its UUID and App Group binding, and safely
+finishes only the deterministic `.cleanup-<uuid>` staging path.

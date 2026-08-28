@@ -135,22 +135,30 @@ public enum CallbackCompletionSource: Equatable, Sendable {
 
 public final class OneShotCallbackGate: @unchecked Sendable {
   private let lock = NSLock()
+  private let clock = ContinuousClock()
+  private let deadline: ContinuousClock.Instant
   private var source: CallbackCompletionSource?
 
-  public init() {}
+  public init(deadline: ContinuousClock.Instant) {
+    self.deadline = deadline
+  }
 
   @discardableResult
-  public func claimCompletion(from candidate: CallbackCompletionSource) -> Bool {
+  public func claimDeadline() -> Bool {
     lock.lock()
     defer { lock.unlock() }
     guard source == nil else { return false }
-    source = candidate
+    source = .deadline
     return true
   }
 
-  public func claimCallback(isBeforeDeadline: Bool) -> CallbackCompletionSource? {
-    let candidate: CallbackCompletionSource = isBeforeDeadline ? .callback : .deadline
-    return claimCompletion(from: candidate) ? candidate : nil
+  public func claimCallback() -> CallbackCompletionSource? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard source == nil else { return nil }
+    let candidate: CallbackCompletionSource = clock.now < deadline ? .callback : .deadline
+    source = candidate
+    return candidate
   }
 
   public var completionSource: CallbackCompletionSource? {

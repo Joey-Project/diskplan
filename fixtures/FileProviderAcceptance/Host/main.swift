@@ -28,19 +28,19 @@ enum FixtureHost {
       let runID = try options.requiredUUID("run-id")
       try prepare(runID: runID, appPath: appPath, extensionPath: extensionPath)
     case "setup":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
-      try await setup(manifest: manifest)
+      let loaded = try loadManifest(try options.requiredURL("manifest"))
+      try await setup(manifest: loaded.manifest)
     case "probe":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
-      try probe(manifest: manifest, policy: policy)
+      let loaded = try loadManifest(try options.requiredURL("manifest"))
+      try probe(manifest: loaded.manifest, policy: policy)
     case "oracle-begin":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
+      let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
       try OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath)).writeWindow(
         OracleWindow(beginNanoseconds: monotonicNow())
       )
       printJSON(["status": "oracle-open", "run_id": manifest.runID.uuidString.lowercased()])
     case "oracle-end":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
+      let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
       let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
       let quietMilliseconds = try options.optionalInt("quiet-ms", default: 2_000)
       let timeoutMilliseconds = try options.optionalInt("timeout-ms", default: 30_000)
@@ -56,27 +56,39 @@ enum FixtureHost {
         "quiet_ms": String(quiescence.quietMilliseconds),
       ])
     case "oracle-health":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
+      let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
       try await assertOracleHealth(manifest: manifest)
     case "assert":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
+      let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
       try assertAcceptance(manifest: manifest)
     case "status":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
-      try await status(manifest: manifest)
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      try await status(manifest: loaded.manifest)
     case "teardown":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
-      try await teardown(manifest: manifest)
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      try await teardown(loaded: loaded)
     case "cleanup":
       let manifestURL = try options.requiredURL("manifest")
-      let manifest = try loadManifest(manifestURL)
-      try cleanup(manifest: manifest, manifestURL: manifestURL)
+      let loaded = try loadManifest(manifestURL, allowCleanupRecovery: true)
+      try cleanup(loaded: loaded, manifestURL: manifestURL)
     case "extension-path":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
-      print(manifest.extensionPath)
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      print(loaded.manifest.extensionPath)
     case "app-path":
-      let manifest = try loadManifest(try options.requiredURL("manifest"))
-      print(manifest.appPath)
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      print(loaded.manifest.appPath)
     case "manifest-path":
       let runID = try options.requiredUUID("run-id")
       let log = try OracleLog.appGroup(runID: runID)
@@ -227,15 +239,20 @@ enum FixtureHost {
     printJSON(["status": present ? "present" : "absent", "domain": manifest.domainIdentifier])
   }
 
-  private static func teardown(manifest: FixtureManifest) async throws {
+  private static func teardown(loaded: LoadedFixtureManifest) async throws {
     let deadline = ContinuousClock.now + .seconds(20)
-    try OracleLog(
-      runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath)
-    ).sealRecorder()
+    let manifest = loaded.manifest
     let matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
       $0 == manifest.domainIdentifier
     }
     guard matches.count <= 1 else { throw HostError.duplicateExactDomain }
+    switch loaded.location {
+    case .canonical(let runDirectory):
+      try OracleLog(runDirectory: runDirectory).sealRecorder()
+    case .cleanupRecovery(let stagingDirectory):
+      guard matches.first != nil else { break }
+      try OracleLog(runDirectory: stagingDirectory).sealRecorder()
+    }
     if matches.first != nil {
       let domain = NSFileProviderDomain(
         identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
@@ -285,14 +302,23 @@ enum FixtureHost {
     throw HostError.oracleHealthTimedOut
   }
 
-  private static func cleanup(manifest: FixtureManifest, manifestURL: URL) throws {
+  private static func cleanup(loaded: LoadedFixtureManifest, manifestURL: URL) throws {
+    let manifest = loaded.manifest
     let expectedLog = try OracleLog.appGroup(runID: manifest.runID)
     let expectedTaskRoot = expectedLog.runDirectory.standardizedFileURL
     try manifest.validate(expectedTaskRoot: expectedTaskRoot)
-    try SecureFixtureStorage.cleanupRun(
-      manifestURL: manifestURL,
-      expectedRunDirectory: expectedTaskRoot
-    )
+    switch loaded.location {
+    case .canonical:
+      try SecureFixtureStorage.cleanupRun(
+        manifestURL: manifestURL,
+        expectedRunDirectory: expectedTaskRoot
+      )
+    case .cleanupRecovery:
+      try SecureFixtureStorage.recoverCleanup(
+        recoveryManifestURL: manifestURL,
+        expectedRunDirectory: expectedTaskRoot
+      )
+    }
     printJSON(["status": "cleaned", "run_id": manifest.runID.uuidString.lowercased()])
   }
 
@@ -304,15 +330,51 @@ enum FixtureHost {
     }
   }
 
-  private static func loadManifest(_ url: URL) throws -> FixtureManifest {
-    let runDirectory = url.deletingLastPathComponent()
-    guard let runID = UUID(uuidString: runDirectory.lastPathComponent) else {
+  private static func loadManifest(
+    _ url: URL,
+    allowCleanupRecovery: Bool = false
+  ) throws -> LoadedFixtureManifest {
+    let parent = url.deletingLastPathComponent()
+    let name = url.lastPathComponent
+    let runID: UUID
+    let isRecovery: Bool
+    if name == "manifest.json", let parsed = UUID(uuidString: parent.lastPathComponent) {
+      runID = parsed
+      isRecovery = false
+    } else if allowCleanupRecovery,
+      name.hasPrefix(".manifest-recovery-"), name.hasSuffix(".json")
+    {
+      let start = name.index(name.startIndex, offsetBy: ".manifest-recovery-".count)
+      let end = name.index(name.endIndex, offsetBy: -".json".count)
+      guard let parsed = UUID(uuidString: String(name[start..<end])) else {
+        throw FixtureControlReadError.mismatch(.manifest, .semantic)
+      }
+      runID = parsed
+      isRecovery = true
+    } else {
       throw FixtureControlReadError.mismatch(.manifest, .semantic)
     }
     let expectedTaskRoot = try OracleLog.appGroup(runID: runID).runDirectory
-    return try SecureFixtureStorage.readManifest(
-      at: url,
-      expectedRunDirectory: expectedTaskRoot
+    if isRecovery {
+      let manifest = try SecureFixtureStorage.readCleanupRecoveryManifest(
+        at: url,
+        expectedRunDirectory: expectedTaskRoot
+      )
+      return LoadedFixtureManifest(
+        manifest: manifest,
+        location: .cleanupRecovery(
+          stagingDirectory: SecureFixtureStorage.cleanupStagingDirectoryURL(
+            for: expectedTaskRoot
+          )
+        )
+      )
+    }
+    return LoadedFixtureManifest(
+      manifest: try SecureFixtureStorage.readManifest(
+        at: url,
+        expectedRunDirectory: expectedTaskRoot
+      ),
+      location: .canonical(runDirectory: expectedTaskRoot)
     )
   }
 
@@ -376,6 +438,16 @@ private enum HostError: Error {
   case forbiddenCallbacks([String])
   case duplicateExactDomain
   case domainRemovalTimedOut
+}
+
+private struct LoadedFixtureManifest {
+  let manifest: FixtureManifest
+  let location: FixtureManifestLocation
+}
+
+private enum FixtureManifestLocation {
+  case canonical(runDirectory: URL)
+  case cleanupRecovery(stagingDirectory: URL)
 }
 
 private func addDomain(
@@ -462,20 +534,16 @@ private func boundedCallback<Value: Sendable>(
   deadline: ContinuousClock.Instant,
   start: (@escaping @Sendable (Result<Value, Error>) -> Void) -> Void
 ) async throws -> Value {
-  let gate = OneShotCallbackGate()
+  let gate = OneShotCallbackGate(deadline: deadline)
   return try await withCheckedThrowingContinuation { continuation in
     Task {
       try? await ContinuousClock().sleep(until: deadline)
-      if gate.claimCompletion(from: .deadline) {
+      if gate.claimDeadline() {
         continuation.resume(throwing: HostError.callbackTimedOut)
       }
     }
     start { result in
-      guard
-        let source = gate.claimCallback(
-          isBeforeDeadline: ContinuousClock.now < deadline
-        )
-      else { return }
+      guard let source = gate.claimCallback() else { return }
       switch source {
       case .callback: continuation.resume(with: result)
       case .deadline: continuation.resume(throwing: HostError.callbackTimedOut)

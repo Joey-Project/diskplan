@@ -77,7 +77,8 @@ public enum SecureFixtureStorage {
       manifestURL: manifestURL,
       expectedRunDirectory: expectedRunDirectory,
       injectFinalDirectoryRemovalFailure: false,
-      injectCrashBeforeFinalDirectoryRemoval: false
+      injectCrashBeforeFinalDirectoryRemoval: false,
+      injectCrashAfterFinalDirectoryRemoval: false
     )
   }
 
@@ -85,7 +86,8 @@ public enum SecureFixtureStorage {
     manifestURL: URL,
     expectedRunDirectory: URL,
     injectFinalDirectoryRemovalFailure: Bool,
-    injectCrashBeforeFinalDirectoryRemoval: Bool = false
+    injectCrashBeforeFinalDirectoryRemoval: Bool = false,
+    injectCrashAfterFinalDirectoryRemoval: Bool = false
   ) throws {
     let expectedManifest = expectedRunDirectory.appendingPathComponent("manifest.json")
     guard manifestURL.standardizedFileURL == expectedManifest.standardizedFileURL else {
@@ -166,6 +168,12 @@ public enum SecureFixtureStorage {
         throw FixtureCleanupError.operationFailed("injected-final-directory-removal", errno: EBUSY)
       }
       try unlink(parent: parent, name: stagingName, flags: AT_REMOVEDIR)
+      guard fsync(parent.rawValue) == 0 else {
+        throw FixtureCleanupError.operationFailed("sync-staging-removal-parent", errno: errno)
+      }
+      if injectCrashAfterFinalDirectoryRemoval {
+        throw FixtureCleanupInjectedCrash.afterFinalDirectoryRemovalParentSync
+      }
     } catch {
       if error is FixtureCleanupInjectedCrash { throw error }
       let operationError = error
@@ -199,13 +207,20 @@ public enum SecureFixtureStorage {
     }
   }
 
-  static func cleanupRecoveryManifestURL(for expectedRunDirectory: URL) -> URL {
+  public static func cleanupRecoveryManifestURL(for expectedRunDirectory: URL) -> URL {
     expectedRunDirectory.deletingLastPathComponent().appendingPathComponent(
       ".manifest-recovery-\(expectedRunDirectory.lastPathComponent).json"
     )
   }
 
-  static func readCleanupRecoveryManifest(
+  public static func cleanupStagingDirectoryURL(for expectedRunDirectory: URL) -> URL {
+    expectedRunDirectory.deletingLastPathComponent().appendingPathComponent(
+      ".cleanup-\(expectedRunDirectory.lastPathComponent)",
+      isDirectory: true
+    )
+  }
+
+  public static func readCleanupRecoveryManifest(
     at recoveryURL: URL,
     expectedRunDirectory: URL
   ) throws -> FixtureManifest {
@@ -226,6 +241,75 @@ public enum SecureFixtureStorage {
       throw FixtureControlReadError.mismatch(.manifest, .semantic)
     }
     return manifest
+  }
+
+  public static func recoverCleanup(
+    recoveryManifestURL: URL,
+    expectedRunDirectory: URL
+  ) throws {
+    let recoveryURL = cleanupRecoveryManifestURL(for: expectedRunDirectory)
+    guard recoveryManifestURL.standardizedFileURL == recoveryURL.standardizedFileURL else {
+      throw FixtureCleanupError.unsafeTarget
+    }
+    let parentURL = expectedRunDirectory.deletingLastPathComponent()
+    let runName = expectedRunDirectory.lastPathComponent
+    let stagingName = cleanupStagingDirectoryURL(for: expectedRunDirectory).lastPathComponent
+    let recoveryName = recoveryURL.lastPathComponent
+    let parent = try openDirectory(at: parentURL, cleanupPath: parentURL.path)
+    try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
+
+    let manifestData = try readBoundControlFile(
+      directory: parent,
+      name: recoveryName,
+      record: .manifest
+    )
+    let manifest: FixtureManifest
+    do {
+      manifest = try JSONDecoder().decode(FixtureManifest.self, from: manifestData)
+      try manifest.validate(expectedTaskRoot: expectedRunDirectory)
+      guard
+        URL(fileURLWithPath: manifest.appGroupRunPath).standardizedFileURL
+          == expectedRunDirectory.standardizedFileURL
+      else { throw FixtureContractError.unsafePath }
+    } catch {
+      throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
+    }
+
+    do {
+      try requireMissingPath(parent: parent, name: runName, operation: "canonical-run-directory")
+      let staging = try openOptionalChildDirectory(
+        parent: parent,
+        name: stagingName,
+        expectedDevice: parent.metadata.device
+      )
+      if let staging {
+        var remainingEntries = maximumCleanupEntries
+        let tree = try inventory(
+          directory: staging,
+          rootDevice: staging.metadata.device,
+          depth: 0,
+          isRoot: false,
+          remainingEntries: &remainingEntries
+        )
+        try delete(entries: tree, from: staging)
+        try requireStableObject(parent: parent, name: stagingName, descriptor: staging)
+        try unlink(parent: parent, name: stagingName, flags: AT_REMOVEDIR)
+      }
+      guard fsync(parent.rawValue) == 0 else {
+        throw FixtureCleanupError.retained(recoveryURL.path)
+      }
+      try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
+      try removeExternalManifestRecovery(
+        manifestData,
+        parent: parent,
+        name: recoveryName
+      )
+    } catch let error as FixtureCleanupError {
+      if case .retained = error { throw error }
+      throw FixtureCleanupError.retained(recoveryURL.path)
+    } catch {
+      throw FixtureCleanupError.retained(recoveryURL.path)
+    }
   }
 
   public static func readControlFile(
@@ -373,6 +457,38 @@ private func openChildDirectory(
   } catch {
     close(descriptor)
     throw error
+  }
+}
+
+private func openOptionalChildDirectory(
+  parent: BoundDescriptor,
+  name: String,
+  expectedDevice: dev_t
+) throws -> BoundDescriptor? {
+  var entry = stat()
+  guard fstatat(parent.rawValue, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 else {
+    if errno == ENOENT { return nil }
+    throw FixtureCleanupError.operationFailed(name, errno: errno)
+  }
+  return try openChildDirectory(
+    parent: parent,
+    name: name,
+    depth: 0,
+    expectedDevice: expectedDevice
+  )
+}
+
+private func requireMissingPath(
+  parent: BoundDescriptor,
+  name: String,
+  operation: String
+) throws {
+  var entry = stat()
+  guard fstatat(parent.rawValue, name, &entry, AT_SYMLINK_NOFOLLOW) != 0 else {
+    throw FixtureCleanupError.treeMismatch(operation)
+  }
+  guard errno == ENOENT else {
+    throw FixtureCleanupError.operationFailed(operation, errno: errno)
   }
 }
 
@@ -738,6 +854,7 @@ private func recreateManifest(_ data: Data, in directory: BoundDescriptor) throw
 
 private enum FixtureCleanupInjectedCrash: Error {
   case beforeFinalDirectoryRemoval
+  case afterFinalDirectoryRemovalParentSync
 }
 
 private func createExternalManifestRecovery(

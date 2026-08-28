@@ -87,6 +87,31 @@ def main() -> int:
         "cleanup must retain deterministic recovery evidence outside staging",
     )
     require(
+        "try unlink(parent: parent, name: stagingName, flags: AT_REMOVEDIR)\n"
+        "      guard fsync(parent.rawValue) == 0" in swift,
+        "final staging removal must be durable before recovery evidence is deleted",
+    )
+    require(
+        "SecureFixtureStorage.recoverCleanup(" in swift,
+        "the production host must support exact sibling-manifest recovery cleanup",
+    )
+    require(
+        'sibling_manifest=$(dirname "$run_directory")/.manifest-recovery-"$run_name".json'
+        in lifecycle,
+        "acceptance failure must report the deterministic sibling recovery manifest",
+    )
+    require(
+        "let gate = OneShotCallbackGate(deadline: deadline)" in swift
+        and "let source = gate.claimCallback()" in swift
+        and "claimCallback(isBeforeDeadline:" not in swift,
+        "the callback gate must own and atomically evaluate its deadline",
+    )
+    require(
+        "func materializedItemsDidChange(completionHandler:" in swift
+        and "defer { completionHandler() }" in swift,
+        "materialized-items callbacks must complete even when oracle recording fails",
+    )
+    require(
         '"$host" oracle-end --manifest "$manifest" --quiet-ms 2000 --timeout-ms 30000' in lifecycle,
         "acceptance must require a two-second quiet window within a 30-second bound",
     )

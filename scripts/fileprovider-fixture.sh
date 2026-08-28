@@ -159,8 +159,15 @@ accept() {
   complete=0
   report_recovery() {
     if ((complete == 0)); then
-      echo "fixture did not complete; retained manifest: $manifest" >&2
-      echo "recover with: scripts/fileprovider-fixture.sh recover '$manifest'" >&2
+      retained_manifest=$manifest
+      run_directory=$(dirname "$manifest")
+      run_name=$(basename "$run_directory")
+      sibling_manifest=$(dirname "$run_directory")/.manifest-recovery-"$run_name".json
+      if [[ ! -f $retained_manifest && -f $sibling_manifest && ! -L $sibling_manifest ]]; then
+        retained_manifest=$sibling_manifest
+      fi
+      echo "fixture did not complete; retained manifest: $retained_manifest" >&2
+      echo "recover with: scripts/fileprovider-fixture.sh recover '$retained_manifest'" >&2
     fi
   }
   trap report_recovery EXIT

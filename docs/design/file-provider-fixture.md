@@ -71,8 +71,9 @@ appends and `fsync`s the JSONL event, and clears the marker only after the event
 append failure or a failure while initially persisting poison leaves evidence checked by existing
 and recreated instances and by host health, closure, and assertion. The in-window oracle-health
 barrier therefore cannot succeed after a hidden recording failure. Callback APIs with an error
-result return the recording error; enumeration fails its observer, and callbacks without an
-error channel do not report completion.
+result return the recording error, and enumeration fails its observer. The
+`materializedItemsDidChange` callback has no error channel, so it always invokes its completion
+handler even if recording fails; durable poison evidence still makes the oracle fail closed.
 
 The recorder lock and the nested JSONL lock both use nonblocking `flock` acquisition and share
 the same absolute 30-second monotonic deadline for an append. Lock contention cannot turn a
@@ -129,9 +130,10 @@ malformed records or text that mentions the exact bundle fail closed instead of 
 as successful removal.
 
 All File Provider add, list, remove, signal, and user-visible-URL callbacks share one monotonic
-20-second deadline per lifecycle phase. The callback thread checks the absolute deadline before
-claiming the one-shot gate. Therefore a late callback cannot win merely because the timeout task
-was delayed; a daemon that never replies or replies late cannot hang the host or resume a
+20-second deadline per lifecycle phase. The one-shot gate owns that deadline and compares its
+clock while holding the same lock that claims callback completion. Therefore a stale
+precomputed comparison cannot let a late callback win merely because the timeout task was
+delayed; a daemon that never replies or replies late cannot hang the host or resume a
 continuation twice.
 
 It never performs bulk domain removal and never deletes paths under the user-visible File
@@ -142,12 +144,25 @@ prints an exact recovery command:
 scripts/fileprovider-fixture.sh recover '/absolute/app-group/runs/<uuid>/manifest.json'
 ```
 
+If a process crash occurs after cleanup has renamed the UUID directory, the same production
+entrypoint also accepts only the exact sibling manifest and maps it to the deterministic staging
+directory:
+
+```bash
+scripts/fileprovider-fixture.sh recover \
+  '/absolute/app-group/runs/.manifest-recovery-<uuid>.json'
+```
+
 Recovery never executes `appPath` from an untrusted manifest. It first verifies the known
 DerivedData host and embedded extension as physical nonsymlink artifacts, validates both code
 signatures, both exact bundle IDs, and team `XCTTZ89923`, and only then asks that known host to
 securely load the manifest. The manifest build paths must equal those already trusted artifacts.
 Recovery removes only the exact domain, unregisters only that exact embedded extension, and
-then removes only the App Group UUID run directory.
+then removes only the App Group UUID run directory. A sibling recovery manifest is accepted only
+when its exact lowercased UUID path, embedded manifest identity, expected App Group run path, and
+deterministic `.cleanup-<uuid>` staging path all agree. If the exact domain still exists, the
+host must seal the recorder in that staging directory before removal; missing or mismatched
+staging state fails closed.
 
 Cleanup protects object identity and owner/group/mode access policy for every held descriptor.
 Regular files additionally protect content stability. Directories deliberately do not compare
@@ -159,10 +174,12 @@ The exact UUID directory is atomically renamed with exclusive semantics inside t
 owner-private `runs` directory before recursive deletion; symlinks and special objects fail
 closed. Before that rename, cleanup durably creates and validates the sibling recovery record
 `.manifest-recovery-<uuid>.json` outside the staging directory. It remains present while the
-staging tree, its manifest, and the staging directory itself are removed. Only after final
-`rmdir` succeeds does bounded cleanup validate and unlink the sibling evidence. A crash at any
-earlier point therefore leaves a deterministic owner-private manifest path outside the partially
-deleted tree. On an ordinary failure, cleanup recreates and directly validates `manifest.json`,
+staging tree, its manifest, and the staging directory itself are removed. After final `rmdir`,
+cleanup `fsync`s the held parent directory before it validates and unlinks the sibling evidence.
+A crash before that ordering completes therefore leaves a deterministic owner-private manifest
+path outside the partially deleted tree; production recovery can safely finish either a partial
+staging tree or the already-removed staging state. On an ordinary failure, cleanup recreates and
+directly validates `manifest.json`,
 restores the original UUID directory name, and then removes the sibling record. Any recovery or
 evidence-cleanup failure is an explicit retained-state error, never discarded with `try?`.
 These are point-in-time replacement checks and do not claim

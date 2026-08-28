@@ -157,10 +157,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
   }
 
   func materializedItemsDidChange(completionHandler: @escaping () -> Void) {
-    guard (try? record(.materializedItemsDidChange, item: .rootContainer)) != nil else {
-      return
-    }
-    completionHandler()
+    defer { completionHandler() }
+    try? record(.materializedItemsDidChange, item: .rootContainer)
   }
 
   private func record(
