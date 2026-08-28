@@ -28,6 +28,9 @@ Every append first durably writes run-scoped poison evidence while holding the r
 then durably appends its JSONL event, and clears the poison marker only after that success. An
 append or poison-storage error therefore remains fail-closed across recreated extension
 instances instead of masquerading as callback-zero.
+Every other non-sealed recorder failure, including local-lock timeout and state-read failure,
+durably creates a separate immutable `recorder-failed` marker before callback completion.
+Successful append never clears this marker, and every host acceptance read treats it as poison.
 Teardown persistently seals the recorder before domain removal, and append never recreates a
 missing run directory. File Provider callbacks and `pluginkit` mutation/query steps have bounded
 monotonic deadlines and discard late completions. A callback checks the absolute deadline before
@@ -55,4 +58,7 @@ manifest remains outside the staging tree until final `rmdir` succeeds, so a cra
 recursive deletion does not consume the only recovery evidence. The held parent directory is
 `fsync`ed after that `rmdir` and before the sibling manifest is unlinked. The production recovery
 command accepts that exact sibling manifest, validates its UUID and App Group binding, and safely
-finishes only the deterministic `.cleanup-<uuid>` staging path.
+finishes only the deterministic `.cleanup-<uuid>` staging path. The Host rejects noncanonical
+manifest arguments, and the support layer opens the exact sibling basename only from the trusted
+expected `runs` parent descriptor, so symlink and `..` aliases cannot be consumed by status,
+trusted build-path reads, teardown, or cleanup.

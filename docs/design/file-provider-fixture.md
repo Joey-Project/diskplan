@@ -73,7 +73,11 @@ and recreated instances and by host health, closure, and assertion. The in-windo
 barrier therefore cannot succeed after a hidden recording failure. Callback APIs with an error
 result return the recording error, and enumeration fails its observer. The
 `materializedItemsDidChange` callback has no error channel, so it always invokes its completion
-handler even if recording fails; durable poison evidence still makes the oracle fail closed.
+handler even if recording fails. Before that completion, every non-sealed `record` failure also
+durably creates an immutable `recorder-failed` marker outside the recorder lock. This covers
+local-lock timeout, deadline expiry, state-read failure, and append/poison failure; successful
+append cannot clear that marker. Host health, closure, and sealed-snapshot assertion all interpret
+it as poisoned, so the callback-only API cannot turn a recording failure into callback-zero.
 
 The recorder lock and the nested JSONL lock both use nonblocking `flock` acquisition and share
 the same absolute 30-second monotonic deadline for an append. Lock contention cannot turn a
@@ -162,7 +166,11 @@ then removes only the App Group UUID run directory. A sibling recovery manifest 
 when its exact lowercased UUID path, embedded manifest identity, expected App Group run path, and
 deterministic `.cleanup-<uuid>` staging path all agree. If the exact domain still exists, the
 host must seal the recorder in that staging directory before removal; missing or mismatched
-staging state fails closed.
+staging state fails closed. The Host rejects noncanonical manifest strings before constructing
+the lifecycle request. The support layer then opens the recovery file by its exact basename from
+a descriptor for the trusted expected App Group `runs` parent; it never opens a caller-supplied
+parent path. Symlink plus `..` aliases therefore fail before status, build-path reads, teardown,
+or cleanup can consume manifest bytes.
 
 Cleanup protects object identity and owner/group/mode access policy for every held descriptor.
 Regular files additionally protect content stability. Directories deliberately do not compare

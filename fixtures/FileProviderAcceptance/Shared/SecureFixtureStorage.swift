@@ -224,11 +224,19 @@ public enum SecureFixtureStorage {
     at recoveryURL: URL,
     expectedRunDirectory: URL
   ) throws -> FixtureManifest {
-    guard
-      recoveryURL.standardizedFileURL
-        == cleanupRecoveryManifestURL(for: expectedRunDirectory).standardizedFileURL
-    else { throw FixtureControlReadError.mismatch(.manifest, .semantic) }
-    let data = try readControlFile(at: recoveryURL, record: .manifest)
+    let expectedURL = cleanupRecoveryManifestURL(for: expectedRunDirectory)
+    guard recoveryURL.isFileURL, recoveryURL.path == expectedURL.path else {
+      throw FixtureControlReadError.mismatch(.manifest, .semantic)
+    }
+    let parentURL = expectedRunDirectory.deletingLastPathComponent()
+    let parent = try openControlDirectory(at: parentURL, record: .manifest)
+    try requireControlDirectoryPathIdentity(parentURL, descriptor: parent, record: .manifest)
+    let data = try readBoundControlFile(
+      directory: parent,
+      name: expectedURL.lastPathComponent,
+      record: .manifest
+    )
+    try requireControlDirectoryPathIdentity(parentURL, descriptor: parent, record: .manifest)
     let manifest: FixtureManifest
     do {
       manifest = try JSONDecoder().decode(FixtureManifest.self, from: data)
@@ -248,7 +256,7 @@ public enum SecureFixtureStorage {
     expectedRunDirectory: URL
   ) throws {
     let recoveryURL = cleanupRecoveryManifestURL(for: expectedRunDirectory)
-    guard recoveryManifestURL.standardizedFileURL == recoveryURL.standardizedFileURL else {
+    guard recoveryManifestURL.isFileURL, recoveryManifestURL.path == recoveryURL.path else {
       throw FixtureCleanupError.unsafeTarget
     }
     let parentURL = expectedRunDirectory.deletingLastPathComponent()

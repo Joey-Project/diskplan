@@ -61,6 +61,12 @@ superseded_by:
 - Final staging removal is parent-directory durable before sibling recovery evidence is deleted.
   The production recovery entry validates the exact sibling manifest and finishes only the
   deterministic UUID staging path, including the already-removed post-crash state.
+- Every non-sealed recorder failure persists an immutable failure marker before callback
+  completion, including local-lock timeout and state-read failure. The marker is independent of
+  successful append cleanup and remains fail-closed across extension instances.
+- Sibling recovery is opened descriptor-relative from the trusted App Group `runs` parent using
+  only the exact expected basename; Host argument parsing rejects noncanonical and symlink plus
+  dot-dot aliases before status, path reads, teardown, or cleanup.
 - Cleanup rejects mount/device-boundary traversal before inventory. The current gate is
   explicitly probe-level; full scanner acceptance remains a later engine integration.
 - Local unsigned compile and support tests are available without provisioning.
@@ -84,6 +90,8 @@ superseded_by:
   frozen rereview.
 - [x] Close parent-sync ordering, gate-owned atomic deadline comparison, production sibling
   recovery, and callback-only completion gaps from the fourth frozen rereview.
+- [x] Close durable poison for all non-sealed recorder failures and descriptor-bound rejection of
+  aliased sibling recovery manifests from the fifth frozen rereview.
 - [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
 - [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
 - [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
@@ -101,7 +109,7 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 37 targeted support tests pass
+- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 39 targeted support tests pass
   and cover
   concurrent JSONL writers, manifest/ready validation, typed secure-read failures,
   symlink-retaining cleanup, recursive cleanup, device-boundary rejection, append-failure
@@ -109,13 +117,15 @@ superseded_by:
   contention, one-entry deadline propagation, atomic final-snapshot sealing against a racing
   callback, gate-owned delayed-timeout callback arbitration, crash-surviving sibling manifest
   evidence before and after parent-durable final removal, production recovery of partial and
-  already-removed staging state, deterministic final-rmdir recovery, semantic window validation,
-  and deterministic two-second quiet-window reset after a one-second-late callback.
+  already-removed staging state, exact rejection of symlink-plus-dot-dot recovery aliases,
+  durable poison after local-lock and state-read failure, deterministic final-rmdir recovery,
+  semantic window validation, and deterministic two-second quiet-window reset after a
+  one-second-late callback.
 - `python3 scripts/test-fileprovider-fixture-registration.py`: 12 parser/physical-path election,
   strict-UTF-8, malformed exact-bundle text, and exact-path removal tests pass.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
   compiled successfully with signing disabled.
-- The resolved-only complete Swift gate passed 77 tests on the integrated tree. Canonical binary
+- The resolved-only complete Swift gate passed 79 tests on the integrated tree. Canonical binary
   generation and the Swift/Rust cross-language process tests also passed.
 - `scripts/test-macos-capabilities.sh`: 29 `DiskplanMacOS` tests and the live self-test passed;
   the signed fixture and real-host APFS fixture remained explicitly unavailable without their

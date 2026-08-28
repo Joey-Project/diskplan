@@ -506,6 +506,41 @@ func recoveryCleanupRejectsAnyNonExactSiblingManifestPath() throws {
 }
 
 @Test
+func recoveryManifestRejectsSymlinkDotDotAliasBeforeOpening() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let runs = fixture.runDirectory.deletingLastPathComponent()
+  let recoveryURL = SecureFixtureStorage.cleanupRecoveryManifestURL(
+    for: fixture.runDirectory
+  )
+  try fixture.writePrivate(fixture.manifestData, to: recoveryURL)
+  let child = runs.appendingPathComponent("alias-target", isDirectory: true)
+  try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+  guard chmod(child.path, 0o700) == 0 else { throw POSIXError(.EIO) }
+  let alias = runs.appendingPathComponent("alias", isDirectory: true)
+  guard symlink(child.path, alias.path) == 0 else {
+    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+  }
+  let aliasedURL = URL(
+    fileURLWithPath: "\(alias.path)/../\(recoveryURL.lastPathComponent)"
+  )
+  #expect(aliasedURL.path != recoveryURL.path)
+  #expect(aliasedURL.standardizedFileURL == recoveryURL.standardizedFileURL)
+  #expect(throws: FixtureControlReadError.mismatch(.manifest, .semantic)) {
+    try SecureFixtureStorage.readCleanupRecoveryManifest(
+      at: aliasedURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+  }
+  #expect(throws: FixtureCleanupError.unsafeTarget) {
+    try SecureFixtureStorage.recoverCleanup(
+      recoveryManifestURL: aliasedURL,
+      expectedRunDirectory: fixture.runDirectory
+    )
+  }
+}
+
+@Test
 func oracleCloseRequiresTwoSecondsAfterALateCallback() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
@@ -818,9 +853,11 @@ func oracleRecorderPassesTheSameDeadlineToStateAppendAndPoison() throws {
 }
 
 @Test
-func oracleRecorderLocalLockContentionIsDeadlineBounded() throws {
+func oracleRecorderLocalLockContentionIsDeadlineBoundedAndDurablyPoisons() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
   let clock = DeterministicOracleClock()
   let entered = DispatchSemaphore(value: 0)
   let release = DispatchSemaphore(value: 0)
@@ -831,6 +868,7 @@ func oracleRecorderLocalLockContentionIsDeadlineBounded() throws {
       entered.signal()
       release.wait()
     },
+    failure: { try log.failRecorder() },
     clock: clock,
     timeoutNanoseconds: 100_000_000
   )
@@ -850,6 +888,30 @@ func oracleRecorderLocalLockContentionIsDeadlineBounded() throws {
   #expect(finished.wait(timeout: .now() + 2) == .success)
   #expect(firstResult.recorderError == .lockTimedOut)
   #expect(clock.nanoseconds == 100_000_000)
+  #expect(try log.recorderState() == .poisoned)
+  #expect(
+    try SecureFixtureStorage.readControlFile(
+      at: fixture.runDirectory.appendingPathComponent("recorder-failed"),
+      record: .events
+    ) == Data("diskplan-recorder-state-v1\n".utf8)
+  )
+}
+
+@Test
+func oracleRecorderStateReadFailureDurablyPoisonsBeforeReturning() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  let recorder = OracleRecorder(
+    append: { _, _ in Issue.record("append unexpectedly ran after state-read failure") },
+    state: { _ in throw POSIXError(.EIO) },
+    failure: { try log.failRecorder() }
+  )
+  #expect(throws: POSIXError.self) {
+    try recorder.record(fixture.oracleEvent(kind: .materializedItemsDidChange))
+  }
+  #expect(try log.recorderState() == .poisoned)
 }
 
 @Test

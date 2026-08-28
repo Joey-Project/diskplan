@@ -112,6 +112,24 @@ def main() -> int:
         "materialized-items callbacks must complete even when oracle recording fails",
     )
     require(
+        'try createRecorderMarker("recorder-failed", directory: directory)' in swift
+        and 'recorderMarkerExists("recorder-failed"' in swift
+        and "failure: { try log.failRecorder() }" in swift,
+        "every production non-sealed recorder failure must leave immutable poison evidence",
+    )
+    require(
+        "recoveryURL.isFileURL, recoveryURL.path == expectedURL.path" in swift
+        and "let parent = try openControlDirectory(at: parentURL, record: .manifest)" in swift
+        and "name: expectedURL.lastPathComponent" in swift,
+        "sibling recovery must bind an exact basename under the trusted expected parent",
+    )
+    require(
+        '!components.contains(".")' in swift
+        and '!components.contains("..")' in swift
+        and "guard url.path == value" in swift,
+        "host manifest arguments must reject noncanonical path components before loading",
+    )
+    require(
         '"$host" oracle-end --manifest "$manifest" --quiet-ms 2000 --timeout-ms 30000' in lifecycle,
         "acceptance must require a two-second quiet window within a 30-second bound",
     )

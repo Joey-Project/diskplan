@@ -406,8 +406,13 @@ private struct Options {
 
   func requiredURL(_ key: String) throws -> URL {
     let value = try required(key)
-    guard value.hasPrefix("/") else { throw FixtureContractError.unsafePath }
-    return URL(fileURLWithPath: value)
+    let components = value.split(separator: "/", omittingEmptySubsequences: false)
+    guard value.hasPrefix("/"), !components.contains("."), !components.contains("..") else {
+      throw FixtureContractError.unsafePath
+    }
+    let url = URL(fileURLWithPath: value)
+    guard url.path == value else { throw FixtureContractError.unsafePath }
+    return url
   }
 
   func requiredUUID(_ key: String) throws -> UUID {

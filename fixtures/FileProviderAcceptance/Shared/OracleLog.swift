@@ -131,6 +131,12 @@ public struct OracleLog: Sendable {
     try withRecorderLock { try createRecorderMarker("recorder-poisoned", directory: $0) }
   }
 
+  public func failRecorder() throws {
+    let directory = try openExistingRunDirectory(runDirectory)
+    defer { close(directory) }
+    try createRecorderMarker("recorder-failed", directory: directory)
+  }
+
   func poisonRecorder(
     deadlineNanoseconds: UInt64,
     clock: any OracleQuiescenceClock
@@ -520,6 +526,7 @@ private func requireLockDeadline(
 }
 
 private func lockedRecorderState(directory: Int32) throws -> OracleRecorderState {
+  if try recorderMarkerExists("recorder-failed", directory: directory) { return .poisoned }
   if try recorderMarkerExists("recorder-poisoned", directory: directory) { return .poisoned }
   if try recorderMarkerExists("recorder-sealed", directory: directory) { return .sealed }
   return .healthy
