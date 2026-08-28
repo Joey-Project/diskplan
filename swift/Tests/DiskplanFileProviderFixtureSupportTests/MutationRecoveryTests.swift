@@ -278,6 +278,150 @@ func pendingGateByteChangeAfterInitialReadIsContentMutation() throws {
 }
 
 @Test
+func pendingGateByteChangeInFinalLookupWindowIsContentMutation() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.begin(.domainAdd, nowNanoseconds: 10)
+  try ordinary.markDispatched(.domainAdd, nowNanoseconds: 20)
+
+  let mutating = try fixture.journal(
+    boot: firstBoot,
+    beforeFinalRecordLookup: { directory, name, _ in
+      guard name == ".fileprovider-pending-run.json" else { return }
+      let descriptor = openat(
+        directory,
+        name,
+        O_WRONLY | O_CLOEXEC | O_NOFOLLOW
+      )
+      guard descriptor >= 0 else { throw POSIXError(.EIO) }
+      defer { close(descriptor) }
+      var replacement: UInt8 = 0x5b
+      guard pwrite(descriptor, &replacement, 1, 0) == 1 else {
+        throw POSIXError(.EIO)
+      }
+    }
+  )
+
+  #expect(throws: ExternalMutationJournalError.contentChanged) {
+    _ = try mutating.pendingKinds()
+  }
+}
+
+@Test
+func pendingGateACLDriftInFinalLookupWindowIsAccessPolicyMutation() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.begin(.domainAdd, nowNanoseconds: 10)
+  try ordinary.markDispatched(.domainAdd, nowNanoseconds: 20)
+
+  let mutating = try fixture.journal(
+    boot: firstBoot,
+    beforeFinalRecordLookup: { _, name, descriptor in
+      guard name == ".fileprovider-pending-run.json" else { return }
+      guard fchmod(descriptor, 0o640) == 0 else { throw POSIXError(.EIO) }
+    }
+  )
+
+  #expect(throws: ExternalMutationJournalError.accessPolicyChanged) {
+    _ = try mutating.pendingKinds()
+  }
+}
+
+@Test
+func pendingGateRepeatedFinalMetadataDriftIsRevalidationUnstable() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.begin(.domainAdd, nowNanoseconds: 10)
+  try ordinary.markDispatched(.domainAdd, nowNanoseconds: 20)
+
+  let touching = try fixture.journal(
+    boot: firstBoot,
+    beforeFinalRecordLookup: { _, name, descriptor in
+      guard name == ".fileprovider-pending-run.json" else { return }
+      var metadata = stat()
+      guard fstat(descriptor, &metadata) == 0 else { throw POSIXError(.EIO) }
+      var times = [metadata.st_atimespec, metadata.st_mtimespec]
+      times[1].tv_sec = metadata.st_mtimespec.tv_sec == 1 ? 2 : 1
+      times[1].tv_nsec = 0
+      let result = times.withUnsafeBufferPointer { buffer in
+        futimens(descriptor, buffer.baseAddress)
+      }
+      guard result == 0 else { throw POSIXError(.EIO) }
+    }
+  )
+
+  #expect(throws: ExternalMutationJournalError.revalidationUnstable) {
+    _ = try touching.pendingKinds()
+  }
+}
+
+@Test
+func pendingGateFinalLookupSeparatesMissingFromUnavailable() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.begin(.domainAdd, nowNanoseconds: 10)
+  try ordinary.markDispatched(.domainAdd, nowNanoseconds: 20)
+
+  let missing = try fixture.journal(
+    boot: firstBoot,
+    injectedFinalLookupErrno: { _, name in
+      name == ".fileprovider-pending-run.json" ? ENOENT : nil
+    }
+  )
+  #expect(throws: ExternalMutationJournalError.recordMissing) {
+    _ = try missing.pendingKinds()
+  }
+
+  let unavailable = try fixture.journal(
+    boot: firstBoot,
+    injectedFinalLookupErrno: { _, name in
+      name == ".fileprovider-pending-run.json" ? EACCES : nil
+    }
+  )
+  #expect(
+    throws: ExternalMutationJournalError.revalidationUnavailable(
+      "lookup-state",
+      errno: EACCES
+    )
+  ) {
+    _ = try unavailable.pendingKinds()
+  }
+}
+
+@Test
+func pendingGateReplacementInFinalLookupWindowIsIdentityMutation() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  try ordinary.begin(.domainAdd, nowNanoseconds: 10)
+  try ordinary.markDispatched(.domainAdd, nowNanoseconds: 20)
+
+  let replacing = try fixture.journal(
+    boot: firstBoot,
+    beforeFinalRecordLookup: { directory, name, _ in
+      guard name == ".fileprovider-pending-run.json" else { return }
+      guard unlinkat(directory, name, 0) == 0 else { throw POSIXError(.EIO) }
+      let replacement = openat(
+        directory,
+        name,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+        0o600
+      )
+      guard replacement >= 0 else { throw POSIXError(.EIO) }
+      close(replacement)
+    }
+  )
+
+  #expect(throws: ExternalMutationJournalError.identityChanged) {
+    _ = try replacing.pendingKinds()
+  }
+}
+
+@Test
 func crashAfterDispatchedGateCannotRegressToPrepared() throws {
   let fixture = try TemporaryMutationJournal()
   defer { fixture.remove() }
@@ -356,12 +500,31 @@ func replacementDomainRemovalGateRetainsDispatchedPredecessorAcrossCrash() throw
   }
   #expect(!(try fixture.evidenceNames().isEmpty))
 
-  try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 40)
-  try ordinary.markDispatched(.domainRemove, nowNanoseconds: 50)
+  let successorID = try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 40)
+  try ordinary.markDispatched(
+    .domainRemove,
+    operationID: successorID,
+    nowNanoseconds: 50
+  )
   try ordinary.recordOriginalCompletion(
     .domainRemove,
+    operationID: successorID,
     completion: .succeeded,
     nowNanoseconds: 60
+  )
+  #expect(
+    throws: ExternalMutationJournalError.unresolvedExternalMutation(
+      .domainRemove,
+      bootGeneration: firstBoot
+    )
+  ) {
+    try ordinary.confirmFinished(.domainRemove, observed: .absent)
+  }
+  try ordinary.recordOriginalCompletion(
+    .domainRemove,
+    operationID: predecessorID,
+    completion: .succeeded,
+    nowNanoseconds: 70
   )
   try ordinary.confirmFinished(.domainRemove, observed: .absent)
   try ordinary.requireClear()
@@ -422,6 +585,94 @@ func replacementExtensionRemovalGateRetainsSucceededPredecessorAcrossCrash() thr
   try ordinary.confirmFinished(.extensionRemove, observed: .absent)
   try ordinary.requireClear()
   #expect(try fixture.evidenceNames().isEmpty)
+}
+
+@Test
+func extensionRemovalWaitsForLateDispatchedPredecessorCompletionAndNewAbsence() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  let predecessorID = try ordinary.beginRemovalAttempt(
+    .extensionRemove,
+    nowNanoseconds: 10
+  )
+  try ordinary.markDispatched(
+    .extensionRemove,
+    operationID: predecessorID,
+    nowNanoseconds: 20
+  )
+  let successorID = try ordinary.beginRemovalAttempt(
+    .extensionRemove,
+    nowNanoseconds: 30
+  )
+  try ordinary.markDispatched(
+    .extensionRemove,
+    operationID: successorID,
+    nowNanoseconds: 40
+  )
+  try ordinary.recordOriginalCompletion(
+    .extensionRemove,
+    operationID: successorID,
+    completion: .succeeded,
+    nowNanoseconds: 50
+  )
+
+  #expect(
+    throws: ExternalMutationJournalError.unresolvedExternalMutation(
+      .extensionRemove,
+      bootGeneration: firstBoot
+    )
+  ) {
+    try ordinary.confirmFinished(.extensionRemove, observed: .absent)
+  }
+  try ordinary.recordOriginalCompletion(
+    .extensionRemove,
+    operationID: predecessorID,
+    completion: .succeeded,
+    nowNanoseconds: 60
+  )
+  try ordinary.confirmFinished(.extensionRemove, observed: .absent)
+  try ordinary.requireClear()
+}
+
+@Test
+func legacyTwoLevelRemovalChainRecoversEveryActivePredecessor() throws {
+  let fixture = try TemporaryMutationJournal()
+  defer { fixture.remove() }
+  let ordinary = try fixture.journal(boot: firstBoot)
+  let oldestID = try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 10)
+  try ordinary.markDispatched(
+    .domainRemove,
+    operationID: oldestID,
+    nowNanoseconds: 20
+  )
+  let middleID = try ordinary.beginRemovalAttempt(.domainRemove, nowNanoseconds: 30)
+  try ordinary.markDispatched(
+    .domainRemove,
+    operationID: middleID,
+    nowNanoseconds: 40
+  )
+
+  let crashing = try fixture.journal(
+    boot: firstBoot,
+    failureInjection: .afterGateBeforeState
+  )
+  #expect(throws: ExternalMutationJournalError.operationFailed("injected-after-gate", errno: EIO)) {
+    try crashing.beginRemovalAttempt(.domainRemove, nowNanoseconds: 50)
+  }
+  try fixture.rewriteGateAndStateAsLegacy(kind: .domainRemove)
+
+  let recovered = try #require(try ordinary.state(.domainRemove))
+  #expect(recovered.phase == .prepared)
+  #expect(recovered.unresolvedPredecessorOperationIDs == [oldestID, middleID])
+  #expect(
+    throws: ExternalMutationJournalError.unresolvedExternalMutation(
+      .domainRemove,
+      bootGeneration: firstBoot
+    )
+  ) {
+    try ordinary.requireClear()
+  }
 }
 
 @Test
@@ -520,6 +771,12 @@ private struct TemporaryMutationJournal {
 
   var gateURL: URL { runs.appendingPathComponent(".fileprovider-pending-run.json") }
 
+  func stateURL(_ kind: ExternalMutationKind) -> URL {
+    runs.appendingPathComponent(
+      ".external-mutation-\(runID.uuidString.lowercased())-\(kind.rawValue).json"
+    )
+  }
+
   init() throws {
     root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     runs = root.appendingPathComponent("runs")
@@ -548,14 +805,24 @@ private struct TemporaryMutationJournal {
         _ directory: Int32,
         _ name: String,
         _ descriptor: Int32
-      ) throws -> Void = { _, _, _ in }
+      ) throws -> Void = { _, _, _ in },
+    beforeFinalRecordLookup:
+      @escaping @Sendable (
+        _ directory: Int32,
+        _ name: String,
+        _ descriptor: Int32
+      ) throws -> Void = { _, _, _ in },
+    injectedFinalLookupErrno:
+      @escaping @Sendable (_ directory: Int32, _ name: String) -> Int32? = { _, _ in nil }
   ) throws -> ExternalMutationJournal {
     try ExternalMutationJournal(
       runDirectory: runDirectory,
       binding: binding,
       currentBootGeneration: boot,
       failureInjection: failureInjection,
-      afterInitialRecordRead: afterInitialRecordRead
+      afterInitialRecordRead: afterInitialRecordRead,
+      beforeFinalRecordLookup: beforeFinalRecordLookup,
+      injectedFinalLookupErrno: injectedFinalLookupErrno
     )
   }
 
@@ -579,6 +846,38 @@ private struct TemporaryMutationJournal {
     try FileManager.default.contentsOfDirectory(atPath: runs.path).filter {
       $0.hasPrefix(".external-mutation-") || $0.hasPrefix(".fileprovider-pending-run")
     }.sorted()
+  }
+
+  func rewriteGateAndStateAsLegacy(kind: ExternalMutationKind) throws {
+    var gate = try #require(
+      JSONSerialization.jsonObject(with: Data(contentsOf: gateURL)) as? [String: Any]
+    )
+    var mutations = try #require(gate["mutations"] as? [[String: Any]])
+    for index in mutations.indices {
+      var mutation = mutations[index]
+      var state = try #require(mutation["state"] as? [String: Any])
+      state.removeValue(forKey: "predecessorStates")
+      mutation["state"] = state
+      mutations[index] = mutation
+    }
+    gate["mutations"] = mutations
+    try overwriteLegacyJSON(gate, at: gateURL)
+
+    let stateURL = stateURL(kind)
+    var state = try #require(
+      JSONSerialization.jsonObject(with: Data(contentsOf: stateURL)) as? [String: Any]
+    )
+    state.removeValue(forKey: "predecessorStates")
+    try overwriteLegacyJSON(state, at: stateURL)
+  }
+
+  private func overwriteLegacyJSON(_ object: [String: Any], at url: URL) throws {
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    try handle.truncate(atOffset: 0)
+    try handle.write(contentsOf: data)
+    try handle.synchronize()
   }
 
   func remove() { try? FileManager.default.removeItem(at: root) }

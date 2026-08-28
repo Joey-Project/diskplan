@@ -212,16 +212,20 @@ authoritatively succeeded without a final exact-absence observation. If a crash 
 successor state B is durable in the gate but before its per-kind leaf replaces predecessor A,
 recovery recognizes only the exact persisted A-to-B relation. A prepared or failed B cannot make A
 inactive: the host-global gate and per-run evidence remain until a successor is durably dispatched,
-authoritatively completes, and exact absence is observed, or a later boot-session ordering barrier
-permits the same exact-state reconciliation. This also keeps a timed-out PlugInKit removal from an
-older run from later unregistering the shared extension path after a newer run starts. Unrelated
-operation UUIDs remain a typed mismatch.
+authoritatively completes, every same-boot dispatched predecessor has an operation-ID-attributed
+completion, and exact absence is observed after those completions. A reboot is the only ordering
+barrier for a predecessor whose authoritative completion remains unknown. Legacy immediate-
+predecessor records are recursively flattened, terminal failures are pruned only after their durable
+completion is merged, duplicates must agree, and the complete cohort is capped at 64 operations.
+This also keeps a timed-out PlugInKit removal from an older run from later unregistering the shared
+extension path after a newer run starts. Unrelated operation UUIDs remain a typed mismatch.
 
-Mutation-journal reads protect object identity (`st_dev` and `st_ino`), owner/group/mode/ACL access
-policy, and exact JSON bytes as separate properties. Size, mtime, or ctime drift triggers one bounded
-reread and restat; equal bytes on the same object with the same access policy are accepted, while
-byte drift, identity replacement, policy drift, and failed revalidation retain distinct typed
-results.
+Mutation-journal reads protect object identity (`st_dev`, `st_ino`, and `st_gen`),
+owner/group/mode/ACL access policy, and exact JSON bytes as separate properties. Size, mtime, or
+ctime drift triggers bounded reread/restat plus canonical-name revalidation after the last descriptor
+read; equal bytes on the same object with the same access policy are accepted. Byte drift, identity
+replacement, policy drift, missing canonical entry, unavailable lookup, and an unstable final
+revalidation window retain distinct typed results.
 
 Same-boot absence polling is never terminal evidence for an unresolved add. Even an
 authoritatively completed compensating removal cannot clear an earlier add whose original

@@ -222,9 +222,14 @@ enum FixtureHost {
     domain.isHidden = true
     domain.testingModes = []
     let journal = try mutationJournal(manifest)
-    try journal.begin(.domainAdd)
-    try journal.markDispatched(.domainAdd)
-    try await addDomain(domain, deadline: deadline, journal: journal)
+    let operationID = try journal.begin(.domainAdd)
+    try journal.markDispatched(.domainAdd, operationID: operationID)
+    try await addDomain(
+      domain,
+      deadline: deadline,
+      journal: journal,
+      operationID: operationID
+    )
     let identifiers = try await registeredDomainIdentifiers(deadline: deadline)
     guard identifiers.filter({ $0 == domainIdentifier }).count == 1 else {
       throw HostError.domainAdditionNotConfirmed
@@ -428,9 +433,14 @@ enum FixtureHost {
     case .cleanupRecovery(let stagingDirectory):
       try OracleLog(runDirectory: stagingDirectory).sealRecorder()
     }
-    try journal.beginRemovalAttempt(.domainRemove)
-    try journal.markDispatched(.domainRemove)
-    try await removeExactDomain(domain, deadline: deadline, journal: journal)
+    let operationID = try journal.beginRemovalAttempt(.domainRemove)
+    try journal.markDispatched(.domainRemove, operationID: operationID)
+    try await removeExactDomain(
+      domain,
+      deadline: deadline,
+      journal: journal,
+      operationID: operationID
+    )
 
     while ContinuousClock.now < deadline {
       matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
@@ -613,7 +623,8 @@ private enum FixtureManifestLocation {
 private func addDomain(
   _ domain: NSFileProviderDomain,
   deadline: ContinuousClock.Instant,
-  journal: ExternalMutationJournal
+  journal: ExternalMutationJournal,
+  operationID: UUID
 ) async throws {
   try await boundedCallback(deadline: deadline) { completion in
     NSFileProviderManager.add(domain) { error in
@@ -621,6 +632,7 @@ private func addDomain(
       do {
         try journal.recordOriginalCompletion(
           .domainAdd,
+          operationID: operationID,
           completion: error == nil ? .succeeded : .failed
         )
         completion(result)
@@ -648,7 +660,8 @@ private func registeredDomainIdentifiers(
 private func removeExactDomain(
   _ domain: NSFileProviderDomain,
   deadline: ContinuousClock.Instant,
-  journal: ExternalMutationJournal
+  journal: ExternalMutationJournal,
+  operationID: UUID
 ) async throws {
   try await boundedCallback(deadline: deadline) { completion in
     NSFileProviderManager.remove(domain, mode: .removeAll) { _, error in
@@ -656,6 +669,7 @@ private func removeExactDomain(
       do {
         try journal.recordOriginalCompletion(
           .domainRemove,
+          operationID: operationID,
           completion: error == nil ? .succeeded : .failed
         )
         completion(result)
