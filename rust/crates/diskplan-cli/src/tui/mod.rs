@@ -2,6 +2,7 @@ mod app;
 mod driver;
 mod event;
 mod model;
+pub mod plan;
 mod reducer;
 mod render;
 
