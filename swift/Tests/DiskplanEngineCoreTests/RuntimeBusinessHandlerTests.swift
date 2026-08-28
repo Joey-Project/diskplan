@@ -1,0 +1,749 @@
+import DiskplanCore
+import DiskplanProto
+import Foundation
+import Testing
+
+@testable import DiskplanEngineCore
+
+@Test func scanOnlyEngineDoesNotAdvertiseRuntimeAndRejectsRequestTyped() throws {
+  let envelopes = try runRuntimeExchange(handler: nil)
+  #expect(envelopes.count == 2)
+  guard case .helloAccepted(let accepted) = envelopes[0].body else {
+    Issue.record("expected accepted handshake")
+    return
+  }
+  #expect(Set(accepted.negotiatedCapabilities).isDisjoint(with: protocol14RuntimeCapabilities))
+  guard case .runtimeEvent(let event) = envelopes[1].body,
+    case .runtimeRejected(let rejected) = event.body
+  else {
+    Issue.record("expected typed runtime rejection")
+    return
+  }
+  #expect(envelopes[1].sequence == event.eventSequence)
+  #expect(event.requestID == 2)
+  #expect(!event.runtimeSessionID.value.isEmpty)
+  #expect(rejected.code == .businessUnsupported)
+}
+
+@Test func installedRuntimeHandlerAdvertisesAndReceivesNegotiatedRequest() throws {
+  let handler = RecordingRuntimeHandler()
+  let envelopes = try runRuntimeExchange(handler: handler)
+  #expect(envelopes.count == 2)
+  guard case .helloAccepted(let accepted) = envelopes[0].body else {
+    Issue.record("expected accepted handshake")
+    return
+  }
+  #expect(accepted.negotiatedCapabilities.contains("plan-projection-v1"))
+  #expect(!accepted.negotiatedCapabilities.contains("decision-overlay-v1"))
+  #expect(handler.requestIDs == [2])
+  guard case .runtimeEvent(let event) = envelopes[1].body,
+    case .runtimeRejected(let rejected) = event.body
+  else {
+    Issue.record("expected fake handler response")
+    return
+  }
+  #expect(rejected.code == .invalidState)
+}
+
+@Test func externalHandlerCannotSelfReportPlanOrForceAuthority() throws {
+  let envelopes = try runRuntimeExchange(handler: MaliciousAuthorityHandler())
+  guard case .runtimeEvent(let event) = envelopes.last?.body,
+    case .runtimeRejected(let rejected) = event.body
+  else {
+    Issue.record("expected typed authority rejection")
+    return
+  }
+  #expect(rejected.code == .invalidState)
+}
+
+@Test func handlerThrowAfterTerminalDoesNotEmitASecondResponse() throws {
+  let envelopes = try runRuntimeExchange(handler: SendThenThrowHandler())
+  #expect(envelopes.count == 2)
+  guard case .runtimeEvent(let event) = envelopes.last?.body,
+    case .runtimeRejected(let rejected) = event.body
+  else {
+    Issue.record("expected the first terminal rejection")
+    return
+  }
+  #expect(rejected.code == .invalidState)
+}
+
+@Test func nonconfirmHandlerCannotEmitReservedConsumedReviewCode() throws {
+  let envelopes = try runRuntimeExchange(handler: ReservedRejectionRuntimeHandler())
+  guard case .runtimeEvent(let event) = envelopes.last?.body,
+    case .runtimeRejected(let rejected) = event.body
+  else {
+    Issue.record("expected typed handler failure")
+    return
+  }
+  #expect(rejected.code == .internalError)
+  #expect(rejected.code != .confirmationMismatch)
+}
+
+@Test func retainedResponderClaimBlocksConcurrentRuntimeTransitions() throws {
+  let broker = SerialEventBroker { _ in }
+  let authority = RuntimeBusinessAuthorityState()
+  var first = Diskplan_V1_BuildPlanRequest()
+  first.requestID = 1
+  #expect(authority.claim(.buildPlan(first))?.code == nil)
+  let responder = RuntimeBusinessResponder(
+    broker: broker,
+    request: .buildPlan(first),
+    runtimeSessionID: Data("runtime-session".utf8),
+    authority: authority
+  )
+
+  var duplicate = Diskplan_V1_BuildPlanRequest()
+  duplicate.requestID = 2
+  #expect(authority.claim(.buildPlan(duplicate))?.code == .invalidState)
+  var overlay = Diskplan_V1_DecisionOverlayEditRequest()
+  overlay.requestID = 3
+  #expect(authority.claim(.editDecisionOverlay(overlay))?.code == .invalidState)
+
+  try responder.send(try .rejected(code: .invalidState, summary: "terminal"))
+  #expect(authority.claim(.buildPlan(duplicate))?.code == nil)
+  let duplicateResponder = RuntimeBusinessResponder(
+    broker: broker,
+    request: .buildPlan(duplicate),
+    runtimeSessionID: Data("runtime-session".utf8),
+    authority: authority
+  )
+  try duplicateResponder.send(try .rejected(code: .invalidState, summary: "terminal"))
+  try broker.finish()
+}
+
+@Test func runtimeIngressRejectsEnvelopeAndNestedUnknownFields() throws {
+  let handler = RecordingRuntimeHandler()
+  for transform in [
+    { (canonical: Data) -> Data in canonical + Data([0x98, 0x06, 0x01]) },
+    { (_: Data) -> Data in nestedUnknownBuildPlanEnvelope() },
+  ] {
+    let envelopes = try runRuntimeExchange(handler: handler, requestPayloadTransform: transform)
+    guard envelopes.count == 2,
+      case .helloRejected(let rejected) = envelopes[1].body
+    else {
+      Issue.record("expected malformed-envelope rejection")
+      continue
+    }
+    #expect(rejected.code == .malformedEnvelope)
+  }
+}
+
+@Test func overlaySelectionUsesExactAuthoritativeStageabilityAndWaiverSet() throws {
+  let actionID = Data(repeating: 0x31, count: 32)
+  var notStageable = Diskplan_V1_PlanActionProjection()
+  notStageable.actionID.value = actionID
+  notStageable.stageability = .notStageable
+  var record = Diskplan_V1_PlanProjectionRecord()
+  record.body = .action(notStageable)
+  let base = overlayFixture(selectedActionID: actionID)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealDecisionOverlayAcknowledged(
+      base,
+      authoritativePlanRecords: [record]
+    )
+  }
+
+  let waiverID = Data("required-waiver".utf8)
+  var requiresWaiver = notStageable
+  requiresWaiver.stageability = .requiresWaivers
+  var required = Diskplan_V1_PlanWaiverProjection()
+  required.waiverID.value = waiverID
+  requiresWaiver.requiredWaivers = [required]
+  record.body = .action(requiresWaiver)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealDecisionOverlayAcknowledged(
+      base,
+      authoritativePlanRecords: [record]
+    )
+  }
+
+  var exact = base
+  var consent = Diskplan_V1_AcknowledgedWaiver()
+  consent.actionID.value = actionID
+  consent.waiverID.value = waiverID
+  consent.consentSha256.value = Data(repeating: 0x91, count: 32)
+  exact.acknowledgedWaivers = [consent]
+  _ = try SealedRuntimeWire.sealDecisionOverlayAcknowledged(
+    exact,
+    authoritativePlanRecords: [record]
+  )
+
+  var extra = consent
+  extra.waiverID.value = Data("extra-waiver".utf8)
+  exact.acknowledgedWaivers.append(extra)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealDecisionOverlayAcknowledged(
+      exact,
+      authoritativePlanRecords: [record]
+    )
+  }
+
+  exact.acknowledgedWaivers = [consent]
+  exact.acknowledgedWaivers.append(consent)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealDecisionOverlayAcknowledged(
+      exact,
+      authoritativePlanRecords: [record]
+    )
+  }
+
+  var requiresForce = notStageable
+  requiresForce.stageability = .stageable
+  requiresForce.requiresForce = true
+  requiresForce.requiredWaivers = []
+  record.body = .action(requiresForce)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealDecisionOverlayAcknowledged(
+      base,
+      authoritativePlanRecords: [record]
+    )
+  }
+  var exactForce = base
+  exactForce.forceWarningActionIds = exactForce.selectedActionIds
+  _ = try SealedRuntimeWire.sealDecisionOverlayAcknowledged(
+    exactForce,
+    authoritativePlanRecords: [record]
+  )
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealDecisionOverlayAcknowledged(
+      exactForce,
+      authoritativePlanRecords: [record, record]
+    )
+  }
+}
+
+@Test func planPrerequisiteProjectionRejectsCycles() throws {
+  let a = Data(repeating: 0x01, count: 32)
+  let b = Data(repeating: 0x02, count: 32)
+  #expect(throws: RuntimeProjectionWireError.self) {
+    try PlanProjectionWireEncoder.validatePrerequisiteDAG([a: [b], b: [a]])
+  }
+  try PlanProjectionWireEncoder.validatePrerequisiteDAG([a: [], b: [a]])
+}
+
+@Test func safetyEvidenceRejectsUnknownClosedStateAndOversizedRawSelector() throws {
+  var evidence = Diskplan_V1_PlanSafetyEvidenceProjection()
+  evidence.policyEvidenceSha256.value = Data(repeating: 0x71, count: 32)
+  evidence.namespaceAccess.targetAccessPolicy.status = .UNRECOGNIZED(999)
+  evidence.namespaceAccess.targetAccessPolicy.code = "unknown-enum"
+  evidence.namespaceAccess.targetAccessPolicy.summary = "Unknown enum fixture."
+  evidence.contentBaseline.observation.status = .unknown
+  evidence.contentBaseline.observation.code = "unknown"
+  evidence.contentBaseline.observation.summary = "Unknown baseline fixture."
+  #expect(throws: RuntimeProjectionWireError.self) {
+    try PlanProjectionWireEncoder.validateSafetyEvidenceForTesting(
+      evidence,
+      actionKind: .genericRemove
+    )
+  }
+  #expect(throws: RuntimeProjectionWireError.self) {
+    try PlanProjectionWireEncoder.validateRawSelectorTargetForTesting(
+      Data(repeating: 0x61, count: PlanProjectionWireEncoder.maximumRawSelectorTargetBytes + 1)
+    )
+  }
+}
+
+@Test func executionForceWarningsAreAnExactSet() throws {
+  let fixture = try forceExecutionFixture()
+  _ = try SealedRuntimeWire.sealExecutionStream(
+    fixture.events,
+    requiredForceWarningActionIDs: fixture.required
+  )
+  var omitted = fixture.events
+  omitted.removeAll { event in
+    if case .forceRequiredWarning? = event.body { return true }
+    return false
+  }
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      omitted,
+      requiredForceWarningActionIDs: fixture.required
+    )
+  }
+  var duplicated = fixture.events
+  guard
+    let warning = duplicated.first(where: {
+      if case .forceRequiredWarning? = $0.body { return true }
+      return false
+    })
+  else {
+    Issue.record("force fixture omitted warning")
+    return
+  }
+  duplicated.insert(warning, at: duplicated.index(before: duplicated.endIndex))
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      duplicated,
+      requiredForceWarningActionIDs: fixture.required
+    )
+  }
+}
+
+@Test func responderRejectsAnOversizedRuntimeEnvelopeBeforeEnqueue() throws {
+  let broker = SerialEventBroker { _ in }
+  let authority = RuntimeBusinessAuthorityState()
+  var request = Diskplan_V1_BuildPlanRequest()
+  request.requestID = 1
+  #expect(authority.claim(.buildPlan(request))?.code == nil)
+  let responder = RuntimeBusinessResponder(
+    broker: broker,
+    request: .buildPlan(request),
+    runtimeSessionID: Data("runtime-session".utf8),
+    authority: authority
+  )
+  let emission = try RuntimeBusinessEmission.rejected(
+    code: .invalidState,
+    summary: String(repeating: "x", count: maximumFrameLength)
+  )
+  #expect(throws: FrameError.self) { try responder.send(emission) }
+  try broker.finish()
+}
+
+@Test func runtimeOuterBudgetAcceptsExactBoundaryAndRejectsOneByteOver() throws {
+  try RuntimeEmissionBudget.validateEncodedEnvelopeLengths(
+    envelopeLengths(totalFramedBytes: SealedRuntimeWire.maximumRuntimeFramedEmissionBytes)
+  )
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeEmissionBudget.validateEncodedEnvelopeLengths(
+      envelopeLengths(
+        totalFramedBytes: SealedRuntimeWire.maximumRuntimeFramedEmissionBytes + 1
+      )
+    )
+  }
+}
+
+@Test func cancellationRequestRemainsInExecutionCapabilityDomain() {
+  var cancellation = Diskplan_V1_CancelExecutionRequest()
+  cancellation.requestID = 2
+  #expect(
+    RuntimeBusinessRequest.cancelExecution(cancellation).requiredCapability
+      == "execution-stream-v1"
+  )
+}
+
+@Test func batchRuntimeRejectsMidstreamCancellationTyped() throws {
+  var cancellation = Diskplan_V1_CancelExecutionRequest()
+  cancellation.requestID = 2
+  cancellation.executionID.value = Data("execution".utf8)
+  let envelopes = try runRuntimeExchange(
+    handler: RecordingRuntimeHandler(),
+    requestBody: .cancelExecutionRequest(cancellation)
+  )
+  guard case .runtimeEvent(let event) = envelopes.last?.body,
+    case .runtimeRejected(let rejected) = event.body
+  else {
+    Issue.record("expected typed cancellation rejection")
+    return
+  }
+  #expect(rejected.code == .businessUnsupported)
+}
+
+@Test func preclaimConfirmRejectionsNeverUseConsumedReviewCode() throws {
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = 2
+  confirmation.applyReviewID.value = Data("review".utf8)
+  confirmation.reviewBindingSha256.value = Data(repeating: 0x51, count: 32)
+  for (handler, expected) in [
+    (nil as (any RuntimeBusinessHandler)?, Diskplan_V1_RuntimeRejectCode.businessUnsupported),
+    (RecordingRuntimeHandler(), .capabilityNotNegotiated),
+    (ExecutionRecordingRuntimeHandler(), .staleBinding),
+  ] {
+    let envelopes = try runRuntimeExchange(
+      handler: handler,
+      requestBody: .confirmApplyRequest(confirmation)
+    )
+    guard case .runtimeEvent(let event) = envelopes.last?.body,
+      case .runtimeRejected(let rejected) = event.body
+    else {
+      Issue.record("expected typed pre-claim rejection")
+      continue
+    }
+    #expect(rejected.code == expected)
+    #expect(rejected.code != .confirmationMismatch)
+  }
+}
+
+@Test func executionMembershipRejectsForeignActionsAndReleaseSets() throws {
+  let selectedID = Data(repeating: 0x11, count: 32)
+  let foreignID = Data(repeating: 0x22, count: 32)
+  var selected = Diskplan_V1_OpaqueIdentifier()
+  selected.value = selectedID
+
+  var foreignUnit = Diskplan_V1_ExecutionUnitProjection()
+  foreignUnit.actionID.value = foreignID
+  var started = Diskplan_V1_UnitStartedProjection()
+  started.unit = foreignUnit
+  var event = Diskplan_V1_ExecutionStreamEvent()
+  event.body = .unitStarted(started)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionAuthorityValidator.validateMembership(
+      events: [event],
+      planRecords: [],
+      selectedActionIDs: [selected]
+    )
+  }
+
+  var selectedUnit = Diskplan_V1_ExecutionUnitProjection()
+  selectedUnit.actionID.value = selectedID
+  var finished = Diskplan_V1_UnitFinishedProjection()
+  finished.unit = foreignUnit
+  event.body = .unitFinished(finished)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionAuthorityValidator.validateMembership(
+      events: [event], planRecords: [], selectedActionIDs: [selected]
+    )
+  }
+
+  var rejected = Diskplan_V1_UnitJITRejectedProjection()
+  rejected.unit = selectedUnit
+  var foreignOutcome = Diskplan_V1_ActionRevalidationProjection()
+  foreignOutcome.actionID.value = foreignID
+  rejected.revalidation.actionOutcomes = [foreignOutcome]
+  event.body = .unitJitRejected(rejected)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionAuthorityValidator.validateMembership(
+      events: [event], planRecords: [], selectedActionIDs: [selected]
+    )
+  }
+
+  var skipped = Diskplan_V1_UnitSkippedPrerequisiteProjection()
+  skipped.unit = selectedUnit
+  skipped.blockingPrerequisites = [foreignUnit]
+  event.body = .unitSkippedPrerequisite(skipped)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionAuthorityValidator.validateMembership(
+      events: [event], planRecords: [], selectedActionIDs: [selected]
+    )
+  }
+
+  var step = Diskplan_V1_ExecutionStepFinishedProjection()
+  step.actionID.value = foreignID
+  event.body = .stepFinished(step)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionAuthorityValidator.validateMembership(
+      events: [event], planRecords: [], selectedActionIDs: [selected]
+    )
+  }
+
+  var compound = Diskplan_V1_ExecutionUnitProjection()
+  var release = Diskplan_V1_CompoundReleaseUnitProjection()
+  release.releaseSetIds = [
+    {
+      var value = Diskplan_V1_OpaqueIdentifier()
+      value.value = Data("foreign-release".utf8)
+      return value
+    }()
+  ]
+  compound.unit = .compoundRelease(release)
+  started.unit = compound
+  event.body = .unitStarted(started)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionAuthorityValidator.validateMembership(
+      events: [event],
+      planRecords: [],
+      selectedActionIDs: [selected]
+    )
+  }
+
+  var releasePost = Diskplan_V1_ReleasePostVerificationProjection()
+  releasePost.releaseSetID.value = Data("foreign-release".utf8)
+  event.body = .releasePostVerificationFinished(releasePost)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionAuthorityValidator.validateMembership(
+      events: [event], planRecords: [], selectedActionIDs: [selected]
+    )
+  }
+}
+
+@Test func overlayRejectionBindsLiveRevisionAndEditedIdentifiers() throws {
+  let actionID = Data(repeating: 0x11, count: 32)
+  var projectionID = Diskplan_V1_OpaqueIdentifier()
+  projectionID.value = Data(repeating: 0x10, count: 32)
+  var request = Diskplan_V1_DecisionOverlayEditRequest()
+  request.projectionID = projectionID
+  var stage = Diskplan_V1_StageActionEdit()
+  stage.actionID.value = actionID
+  var edit = Diskplan_V1_DecisionOverlayEdit()
+  edit.edit = .stageAction(stage)
+  request.edits = [edit]
+
+  var stale = Diskplan_V1_DecisionOverlayRejected()
+  stale.code = .staleRevision
+  stale.summary = "stale"
+  stale.currentRevision = 0
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeBusinessAuthorityState.validateOverlayRejectionBinding(
+      stale,
+      request: request,
+      liveRevision: 7,
+      liveProjectionID: projectionID,
+      planRecords: []
+    )
+  }
+
+  var foreign = Diskplan_V1_DecisionOverlayRejected()
+  foreign.code = .actionNotStageable
+  foreign.summary = "foreign"
+  foreign.currentRevision = 7
+  foreign.actionID.value = actionID
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeBusinessAuthorityState.validateOverlayRejectionBinding(
+      foreign,
+      request: request,
+      liveRevision: 7,
+      liveProjectionID: projectionID,
+      planRecords: []
+    )
+  }
+
+  let waiverID = Data("known-waiver".utf8)
+  var action = Diskplan_V1_PlanActionProjection()
+  action.actionID.value = actionID
+  action.stageability = .requiresWaivers
+  var waiver = Diskplan_V1_PlanWaiverProjection()
+  waiver.waiverID.value = waiverID
+  action.requiredWaivers = [waiver]
+  var record = Diskplan_V1_PlanProjectionRecord()
+  record.body = .action(action)
+  var allow = Diskplan_V1_AllowWaiverEdit()
+  allow.actionID.value = actionID
+  allow.waiverID.value = waiverID
+  edit.edit = .allowWaiver(allow)
+  request.edits = [edit]
+  request.baseRevision = 7
+  var falselyUnknown = Diskplan_V1_DecisionOverlayRejected()
+  falselyUnknown.code = .unknownWaiver
+  falselyUnknown.summary = "unknown"
+  falselyUnknown.currentRevision = 7
+  falselyUnknown.actionID.value = actionID
+  falselyUnknown.waiverID.value = waiverID
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeBusinessAuthorityState.validateOverlayRejectionBinding(
+      falselyUnknown,
+      request: request,
+      liveRevision: 7,
+      liveProjectionID: projectionID,
+      planRecords: [record]
+    )
+  }
+
+  var wrongProjection = falselyUnknown
+  wrongProjection.code = .invalidReason
+  request.projectionID.value = Data(repeating: 0x20, count: 32)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeBusinessAuthorityState.validateOverlayRejectionBinding(
+      wrongProjection,
+      request: request,
+      liveRevision: 7,
+      liveProjectionID: projectionID,
+      planRecords: [record]
+    )
+  }
+}
+
+private final class RecordingRuntimeHandler: RuntimeBusinessHandler {
+  let supportedCapabilities: Set<String> = ["plan-projection-v1"]
+  private(set) var requestIDs: [UInt64] = []
+
+  func handle(
+    _ request: RuntimeBusinessRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    requestIDs.append(request.requestID)
+    try responder.send(
+      try .rejected(code: .invalidState, summary: "fixture response")
+    )
+  }
+}
+
+private final class ExecutionRecordingRuntimeHandler: RuntimeBusinessHandler {
+  let supportedCapabilities: Set<String> = ["execution-stream-v1"]
+
+  func handle(
+    _ request: RuntimeBusinessRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    Issue.record("pre-claim rejection must not dispatch to the handler")
+  }
+}
+
+private final class MaliciousAuthorityHandler: RuntimeBusinessHandler {
+  let supportedCapabilities: Set<String> = ["plan-projection-v1"]
+
+  func handle(
+    _ request: RuntimeBusinessRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    let overlay = overlayFixture(selectedActionID: Data(repeating: 0x31, count: 32))
+    try responder.send(try .decisionOverlay(overlay))
+  }
+}
+
+private final class SendThenThrowHandler: RuntimeBusinessHandler {
+  let supportedCapabilities: Set<String> = ["plan-projection-v1"]
+
+  func handle(
+    _ request: RuntimeBusinessRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    try responder.send(try .rejected(code: .invalidState, summary: "first terminal"))
+    throw FixtureHandlerError.afterTerminal
+  }
+}
+
+private final class ReservedRejectionRuntimeHandler: RuntimeBusinessHandler {
+  let supportedCapabilities: Set<String> = ["plan-projection-v1"]
+
+  func handle(
+    _ request: RuntimeBusinessRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    try responder.send(
+      try .rejected(code: .confirmationMismatch, summary: "forged consumed review")
+    )
+  }
+}
+
+private enum FixtureHandlerError: Error {
+  case afterTerminal
+}
+
+private func runRuntimeExchange(
+  handler: (any RuntimeBusinessHandler)?,
+  requestBody: Diskplan_V1_Envelope.OneOf_Body? = nil,
+  requestPayloadTransform: ((Data) -> Data)? = nil
+) throws -> [Diskplan_V1_Envelope] {
+  let input = Pipe()
+  let output = Pipe()
+
+  var peer = Handshake.swiftEngineHello(runtimeCapabilities: protocol14RuntimeCapabilities)
+  peer.implementation = "diskplan-runtime-handler-test"
+  var hello = Diskplan_V1_Envelope()
+  hello.sequence = 1
+  hello.body = .hello(peer)
+  try FrameCodec.write(try hello.serializedData(), to: input.fileHandleForWriting)
+
+  var build = Diskplan_V1_BuildPlanRequest()
+  build.requestID = 2
+  var request = Diskplan_V1_Envelope()
+  request.sequence = 2
+  request.body = requestBody ?? .buildPlanRequest(build)
+  let canonicalRequest = try request.serializedData()
+  try FrameCodec.write(
+    requestPayloadTransform?(canonicalRequest) ?? canonicalRequest,
+    to: input.fileHandleForWriting
+  )
+  try input.fileHandleForWriting.close()
+
+  try EngineServer.run(
+    input: input.fileHandleForReading,
+    output: output.fileHandleForWriting,
+    runtimeHandler: handler
+  )
+  try output.fileHandleForWriting.close()
+
+  var envelopes: [Diskplan_V1_Envelope] = []
+  while let payload = try FrameCodec.read(from: output.fileHandleForReading) {
+    envelopes.append(try Diskplan_V1_Envelope(serializedBytes: payload))
+  }
+  return envelopes
+}
+
+private func overlayFixture(selectedActionID: Data) -> Diskplan_V1_DecisionOverlayAcknowledged {
+  let plan = Data(repeating: 0x41, count: 32)
+  let evidence = Data(repeating: 0x42, count: 32)
+  var overlay = Diskplan_V1_DecisionOverlayAcknowledged()
+  overlay.projectionID.value = Data("projection".utf8)
+  overlay.overlayID.value = Data("overlay".utf8)
+  overlay.overlaySha256.value = Data(repeating: 0x43, count: 32)
+  overlay.planID.value = plan
+  overlay.planSha256.value = plan
+  overlay.evidenceID.value = evidence
+  overlay.evidenceSha256.value = evidence
+  overlay.scanSessionID.value = Data("scan-session".utf8)
+  overlay.scanCheckpointID.value = Data(evidence.map { String(format: "%02x", $0) }.joined().utf8)
+  overlay.scanCheckpointEvidenceSha256.value = Data(repeating: 0x44, count: 32)
+  overlay.selectedActionIds = [
+    {
+      var value = Diskplan_V1_OpaqueIdentifier()
+      value.value = selectedActionID
+      return value
+    }()
+  ]
+  overlay.selectedActionCount = 1
+  overlay.maximumSelectedActions = SealedRuntimeWire.maximumActionCount
+  overlay.maximumWaiverConsents = SealedRuntimeWire.maximumOverlayWaiverCount
+  overlay.maximumUserNotes = SealedRuntimeWire.maximumOverlayNoteCount
+  overlay.maximumNoteBytes = SealedRuntimeWire.maximumOverlayNoteBytes
+  overlay.maximumEncodedBytes = SealedRuntimeWire.maximumProjectionBytes
+  return overlay
+}
+
+private func nestedUnknownBuildPlanEnvelope() -> Data {
+  var nested = Data([0x08, 0x02])
+  nested.append(contentsOf: [0x98, 0x06, 0x01])
+  var envelope = Data([0x08, 0x02, 0xC2, 0x01])
+  appendVarint(UInt64(nested.count), to: &envelope)
+  envelope.append(nested)
+  return envelope
+}
+
+private func appendVarint(_ value: UInt64, to data: inout Data) {
+  var remaining = value
+  while remaining >= 0x80 {
+    data.append(UInt8(remaining & 0x7f) | 0x80)
+    remaining >>= 7
+  }
+  data.append(UInt8(remaining))
+}
+
+private func envelopeLengths(totalFramedBytes: UInt64) -> [Int] {
+  let maximumFramed = UInt64(maximumFrameLength + 4)
+  let count = Int((totalFramedBytes + maximumFramed - 1) / maximumFramed)
+  var remaining = totalFramedBytes
+  var output: [Int] = []
+  output.reserveCapacity(count)
+  for index in 0..<count {
+    let remainingSlots = UInt64(count - index - 1)
+    let framed = min(maximumFramed, remaining - remainingSlots * 4)
+    output.append(Int(framed - 4))
+    remaining -= framed
+  }
+  return output
+}
+
+private func forceExecutionFixture() throws -> (
+  events: [Diskplan_V1_ExecutionStreamEvent],
+  required: [Diskplan_V1_OpaqueIdentifier]
+) {
+  let root = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+  let text = try String(
+    contentsOf: root.appendingPathComponent(
+      "proto/fixtures/runtime-v1.4/force-action-execution.frames.hex"
+    ),
+    encoding: .utf8
+  )
+  var events: [Diskplan_V1_ExecutionStreamEvent] = []
+  var required: [Diskplan_V1_OpaqueIdentifier] = []
+  for line in text.split(whereSeparator: \.isNewline) {
+    let bytes = stride(from: 0, to: line.count, by: 2).compactMap { offset -> UInt8? in
+      let start = line.index(line.startIndex, offsetBy: offset)
+      let end = line.index(start, offsetBy: 2)
+      return UInt8(line[start..<end], radix: 16)
+    }
+    let frame = Data(bytes)
+    let envelope = try Diskplan_V1_Envelope(serializedBytes: frame.dropFirst(4))
+    guard case .runtimeEvent(let runtime)? = envelope.body else { continue }
+    switch runtime.body {
+    case .applyReviewProjection(let review): required = review.forceWarningActionIds
+    case .executionStreamEvent(let event): events.append(event)
+    default: break
+    }
+  }
+  return (events, required)
+}

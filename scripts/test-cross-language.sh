@@ -38,3 +38,4 @@ DISKPLAN_ENGINE_BIN="${ENGINE_BIN}" cargo test --locked -p diskplan --test engin
     swift_engine_malformed_embedding_consumes_request_id -- --ignored --exact
 scripts/canonical-fixture.sh check
 scripts/protocol13-fixtures.sh check
+scripts/protocol14-fixtures.sh check

@@ -16,6 +16,11 @@ private enum PendingOutput: @unchecked Sendable {
     body: Diskplan_V1_EngineEvent.OneOf_Body,
     telemetry: Bool
   )
+  case runtimeEvent(
+    requestID: UInt64,
+    runtimeSessionID: Data,
+    body: Diskplan_V1_RuntimeEvent.OneOf_Body
+  )
 
   var isTelemetry: Bool {
     if case .event(_, _, _, let telemetry) = self { return telemetry }
@@ -33,6 +38,7 @@ final class SerialEventBroker: @unchecked Sendable {
   private let writer: Writer
   private var pending: [PendingOutput] = []
   private var semanticCount = 0
+  private var inFlightCount = 0
   private var closing = false
   private var finished = false
   private var failure: EventBrokerError?
@@ -80,6 +86,21 @@ final class SerialEventBroker: @unchecked Sendable {
     )
   }
 
+  func sendRuntime(
+    requestID: UInt64,
+    runtimeSessionID: Data,
+    body: Diskplan_V1_RuntimeEvent.OneOf_Body
+  ) throws {
+    try enqueue(
+      .runtimeEvent(
+        requestID: requestID,
+        runtimeSessionID: runtimeSessionID,
+        body: body
+      ),
+      semantic: true
+    )
+  }
+
   func sendProgress(
     scanSessionID: String,
     progress: Diskplan_V1_ScanProgress
@@ -118,6 +139,19 @@ final class SerialEventBroker: @unchecked Sendable {
     if let failure { throw failure }
   }
 
+  /// Waits until every output accepted before this call has completed its
+  /// actual writer invocation. Runtime authority receipts commit only after
+  /// this barrier succeeds.
+  func flush() throws {
+    condition.lock()
+    while (!pending.isEmpty || inFlightCount != 0) && failure == nil && !finished {
+      condition.wait()
+    }
+    let failure = failure
+    condition.unlock()
+    if let failure { throw failure }
+  }
+
   private func enqueue(_ output: PendingOutput, semantic: Bool) throws {
     condition.lock()
     defer { condition.unlock() }
@@ -146,14 +180,20 @@ final class SerialEventBroker: @unchecked Sendable {
         return
       }
       let output = pending.removeFirst()
+      inFlightCount += 1
       if !output.isTelemetry { semanticCount -= 1 }
       condition.broadcast()
       condition.unlock()
 
       do {
         try writer(serialized(output))
+        condition.lock()
+        inFlightCount -= 1
+        condition.broadcast()
+        condition.unlock()
       } catch {
         condition.lock()
+        inFlightCount -= 1
         failure = .outputFailed(String(describing: error))
         pending.removeAll()
         semanticCount = 0
@@ -173,11 +213,7 @@ final class SerialEventBroker: @unchecked Sendable {
       envelope.sequence = sequence
       envelope.body = body
     case .event(let requestID, let scanSessionID, let body, _):
-      let sequence = nextEventSequence
-      guard sequence != 0 else {
-        throw EventBrokerError.outputFailed("event sequence space exhausted")
-      }
-      nextEventSequence = sequence == UInt64.max ? 0 : sequence + 1
+      let sequence = try consumeEventSequence()
       var event = Diskplan_V1_EngineEvent()
       event.eventSequence = sequence
       event.requestID = requestID
@@ -185,7 +221,27 @@ final class SerialEventBroker: @unchecked Sendable {
       event.body = body
       envelope.sequence = sequence
       envelope.body = .engineEvent(event)
+    case .runtimeEvent(let requestID, let runtimeSessionID, let body):
+      let sequence = try consumeEventSequence()
+      var sessionID = Diskplan_V1_OpaqueIdentifier()
+      sessionID.value = runtimeSessionID
+      var event = Diskplan_V1_RuntimeEvent()
+      event.eventSequence = sequence
+      event.requestID = requestID
+      event.runtimeSessionID = sessionID
+      event.body = body
+      envelope.sequence = sequence
+      envelope.body = .runtimeEvent(event)
     }
     return try envelope.serializedData()
+  }
+
+  private func consumeEventSequence() throws -> UInt64 {
+    let sequence = nextEventSequence
+    guard sequence != 0 else {
+      throw EventBrokerError.outputFailed("event sequence space exhausted")
+    }
+    nextEventSequence = sequence == UInt64.max ? 0 : sequence + 1
+    return sequence
   }
 }
