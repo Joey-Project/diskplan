@@ -45,6 +45,456 @@ message BusinessEnvelope {
   bytes payload = 2;
 }
 
+enum ScanControlKind {
+  SCAN_CONTROL_KIND_UNSPECIFIED = 0;
+  SCAN_CONTROL_KIND_START_SCAN = 1;
+  SCAN_CONTROL_KIND_PAUSE_SCAN = 2;
+  SCAN_CONTROL_KIND_RESUME_SCAN = 3;
+  // Retained for protocol-minor compatibility with the Phase 0 shell. The
+  // Phase 1 evidence producer rejects this control and never emits plan data.
+  SCAN_CONTROL_KIND_PAUSE_AND_BUILD_PROVISIONAL_PLAN = 4;
+  SCAN_CONTROL_KIND_CANCEL_SCAN = 5;
+  SCAN_CONTROL_KIND_CHECKPOINT_SCAN = 6;
+  SCAN_CONTROL_KIND_FINALIZE_PARTIAL_SCAN = 7;
+  SCAN_CONTROL_KIND_CHECKPOINT_PROVISIONAL_EVIDENCE = 8;
+}
+
+enum ScanState {
+  SCAN_STATE_UNSPECIFIED = 0;
+  SCAN_STATE_IDLE = 1;
+  SCAN_STATE_RUNNING = 2;
+  SCAN_STATE_PAUSED = 3;
+  SCAN_STATE_BUILDING_PROVISIONAL_PLAN = 4;
+  SCAN_STATE_PROVISIONAL_PLAN_READY = 5;
+  SCAN_STATE_CANCELLING = 6;
+  SCAN_STATE_CANCELLED = 7;
+  SCAN_STATE_FINISHED = 8;
+  SCAN_STATE_FAILED = 9;
+  SCAN_STATE_FINALIZING_PARTIAL = 10;
+  SCAN_STATE_FINALIZED_PARTIAL = 11;
+}
+
+enum ScanMachineState {
+  SCAN_MACHINE_STATE_UNSPECIFIED = 0;
+  SCAN_MACHINE_STATE_READY = 1;
+  SCAN_MACHINE_STATE_SCANNING = 2;
+  SCAN_MACHINE_STATE_COMPLETE = 3;
+  SCAN_MACHINE_STATE_PARTIAL = 4;
+  SCAN_MACHINE_STATE_CANCELLED = 5;
+}
+
+enum ControlRejectCode {
+  CONTROL_REJECT_CODE_UNSPECIFIED = 0;
+  CONTROL_REJECT_CODE_INVALID_STATE = 1;
+  CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID = 2;
+  CONTROL_REJECT_CODE_MALFORMED_REQUEST = 3;
+  CONTROL_REJECT_CODE_UNAVAILABLE = 4;
+  // The finite producer command queue was full at the admission boundary.
+  CONTROL_REJECT_CODE_CAPACITY_EXCEEDED = 5;
+}
+
+// A stable machine-readable reason for a rejected StartScanRequest. This is
+// deliberately separate from ControlRejectCode: the latter describes the
+// control-plane class, while this enum identifies the setup boundary that
+// could not be established. Non-start controls leave this unspecified.
+enum ScanSetupRejectCode {
+  SCAN_SETUP_REJECT_CODE_UNSPECIFIED = 0;
+  SCAN_SETUP_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED = 1;
+  SCAN_SETUP_REJECT_CODE_INVALID_PROFILE = 2;
+  SCAN_SETUP_REJECT_CODE_INVALID_ROOT = 3;
+  SCAN_SETUP_REJECT_CODE_INVALID_BUDGET = 4;
+  SCAN_SETUP_REJECT_CODE_DUPLICATE_ROOT_ID = 5;
+  SCAN_SETUP_REJECT_CODE_MATERIALIZATION_POLICY_UNAVAILABLE = 6;
+  SCAN_SETUP_REJECT_CODE_ROOT_DISCOVERY_UNAVAILABLE = 7;
+  SCAN_SETUP_REJECT_CODE_SCANNER_INITIALIZATION_FAILED = 8;
+}
+
+message StartScanRequest {
+  uint64 request_id = 1;
+  string profile = 2;
+  repeated ScanRootRequest roots = 3;
+  uint64 maximum_duration_millis = 4;
+  uint32 batch_size = 5;
+}
+
+message ScanRootRequest {
+  string root_id = 1;
+  bytes raw_absolute_path = 2;
+  string display_path = 3;
+}
+
+message ScanControlRequest {
+  uint64 request_id = 1;
+  ScanControlKind control = 2;
+}
+
+message ControlAccepted {
+  ScanControlKind control = 1;
+  ScanState resulting_state = 2;
+}
+
+message ControlRejected {
+  ScanControlKind control = 1;
+  ControlRejectCode code = 2;
+  string detail = 3;
+  ScanState current_state = 4;
+  ScanSetupRejectCode setup_code = 5;
+}
+
+message ScanStateChanged {
+  ScanState state = 1;
+  string reason = 2;
+}
+
+message ScanProgress {
+  string profile = 1;
+  uint64 elapsed_millis = 2;
+  uint64 entries = 3;
+  uint64 directories = 4;
+  uint64 candidates = 5;
+  uint64 allocated_bytes_observed = 6;
+  uint64 reclaim_estimate_bytes = 7;
+  uint64 complete_roots = 8;
+  uint64 partial_roots = 9;
+  uint64 entries_per_second = 10;
+  string current_root = 11;
+  uint64 structural_budget = 12;
+  uint64 retained_nodes = 13;
+}
+
+enum EvidenceStatus {
+  EVIDENCE_STATUS_UNSPECIFIED = 0;
+  EVIDENCE_STATUS_KNOWN = 1;
+  EVIDENCE_STATUS_ABSENT = 2;
+  EVIDENCE_STATUS_UNKNOWN = 3;
+  EVIDENCE_STATUS_UNREADABLE = 4;
+  EVIDENCE_STATUS_FAILED = 5;
+}
+
+enum ByteMeasureKind {
+  BYTE_MEASURE_KIND_UNSPECIFIED = 0;
+  BYTE_MEASURE_KIND_EXACT = 1;
+  BYTE_MEASURE_KIND_LOWER_BOUND = 2;
+  BYTE_MEASURE_KIND_UNKNOWN = 3;
+}
+
+message EvidenceFailure {
+  EvidenceStatus status = 1;
+  string reason = 2;
+  int32 error_code = 3;
+  bool has_error_code = 4;
+}
+
+message RawPath {
+  string root_id = 1;
+  repeated bytes components = 2;
+  string display_path = 3;
+}
+
+message CoverageEvidence {
+  bool complete = 1;
+  repeated string reasons = 2;
+}
+
+message ByteMeasureEvidence {
+  ByteMeasureKind kind = 1;
+  uint64 bytes = 2;
+  string reason = 3;
+}
+
+message ObjectIdentityEvidence {
+  EvidenceFailure observation = 1;
+  int64 device = 2;
+  uint64 file_id = 3;
+  string object_type = 4;
+}
+
+message TimeValue {
+  int64 seconds_since_epoch = 1;
+  int32 nanoseconds = 2;
+}
+
+message TimeEvidence {
+  EvidenceFailure observation = 1;
+  TimeValue value = 2;
+}
+
+message FilesystemTimeEvidence {
+  TimeEvidence access_time = 1;
+  TimeEvidence modification_time = 2;
+  TimeEvidence status_change_time = 3;
+  TimeEvidence birth_time = 4;
+  string trust = 5;
+}
+
+message AccessPolicyEvidence {
+  EvidenceFailure observation = 1;
+  uint32 owner_user_id = 2;
+  uint32 owner_group_id = 3;
+  uint32 mode = 4;
+  uint32 flags = 5;
+}
+
+message BoolEvidence {
+  EvidenceFailure observation = 1;
+  bool value = 2;
+}
+
+message UInt64Evidence {
+  EvidenceFailure observation = 1;
+  uint64 value = 2;
+}
+
+message UInt32Evidence {
+  EvidenceFailure observation = 1;
+  uint32 value = 2;
+}
+
+message ItemByteEvidence {
+  ByteMeasureEvidence logical = 1;
+  ByteMeasureEvidence nominal_allocated = 2;
+  ByteMeasureEvidence immediate_private_reclaim = 3;
+}
+
+message StorageTopologyEvidence {
+  UInt32Evidence link_count = 1;
+  BoolEvidence may_share_blocks = 2;
+  BoolEvidence shares_all_blocks = 3;
+  UInt64Evidence clone_id = 4;
+  UInt32Evidence clone_refcount = 5;
+  ByteMeasureEvidence conditional_group_reclaim = 6;
+}
+
+message ProviderObjectIdentityEvidence {
+  string item_identifier = 1;
+  string domain_identifier = 2;
+}
+
+message StringPair {
+  string key = 1;
+  string value = 2;
+}
+
+message ProviderScanEvidence {
+  EvidenceFailure observation = 1;
+  EvidenceFailure identity_observation = 2;
+  ProviderObjectIdentityEvidence identity = 3;
+  EvidenceFailure promised_metadata_observation = 4;
+  repeated StringPair promised_metadata = 5;
+  ByteMeasureEvidence hidden_backing_bytes = 6;
+  BoolEvidence controlled_non_materialization_acceptance = 7;
+}
+
+message ScannedNodeEvidence {
+  RawPath path = 1;
+  ObjectIdentityEvidence identity = 2;
+  ItemByteEvidence bytes = 3;
+  StorageTopologyEvidence storage_topology = 4;
+  FilesystemTimeEvidence filesystem_times = 5;
+  AccessPolicyEvidence access_policy = 6;
+  CoverageEvidence coverage = 7;
+  string provider_boundary = 8;
+  string provider_boundary_reason = 9;
+  ProviderScanEvidence provider_evidence = 10;
+}
+
+message ScanNodeObserved {
+  ScannedNodeEvidence node = 1;
+  bool directory_closed = 2;
+}
+
+message RootScanEvidence {
+  ScanRootRequest root = 1;
+  ObjectIdentityEvidence identity = 2;
+  string provider_boundary = 3;
+  string provider_boundary_reason = 4;
+  ItemByteEvidence aggregate_bytes = 5;
+  CoverageEvidence coverage = 6;
+  uint64 entries_observed = 7;
+  uint64 directories_closed = 8;
+}
+
+message RootFailureEvidence {
+  string root_id = 1;
+  EvidenceFailure observation = 2;
+}
+
+message ProcessActivityEvidence {
+  int32 process_id = 1;
+  string command = 2;
+  string file_descriptor = 3;
+  bytes raw_path = 4;
+  string display_path = 5;
+}
+
+message StringUInt64Pair {
+  string key = 1;
+  uint64 value = 2;
+}
+
+message GlobalFactEvidence {
+  bool known = 1;
+  string unavailable_reason = 2;
+  repeated StringUInt64Pair uint64_values = 3;
+  repeated string string_values = 4;
+}
+
+message ScanCollectorConfigurationEvidence {
+  string process_activity_collector_id = 1;
+  uint64 process_activity_deadline_nanoseconds = 2;
+  bool has_process_activity_deadline = 3;
+  repeated string global_fact_collector_ids = 4;
+}
+
+message ScanCheckpointEvidence {
+  string profile = 1;
+  uint32 resolver_version = 2;
+  uint64 wall_clock_unix_millis = 3;
+  uint64 monotonic_nanoseconds = 4;
+  uint64 maximum_entries_per_root = 5;
+  uint32 maximum_depth = 6;
+  uint64 maximum_entries_per_directory = 7;
+  uint64 maximum_pending_name_bytes = 8;
+  uint32 retained_node_count = 9;
+  uint64 maximum_duration_millis = 10;
+  repeated ScanRootRequest resolved_roots = 11;
+  ScanProgress progress = 12;
+  CoverageEvidence coverage = 13;
+  repeated ScannedNodeEvidence retained_nodes = 14;
+  repeated RootScanEvidence completed_roots = 15;
+  repeated RootFailureEvidence root_failures = 16;
+  EvidenceFailure process_activity_observation = 17;
+  repeated ProcessActivityEvidence process_activity = 18;
+  ScanMachineState machine_state = 19;
+  bool resumable_in_process = 20;
+  bool provisional = 21;
+  ScanCollectorConfigurationEvidence collector_configuration = 22;
+  GlobalFactEvidence vm = 23;
+  GlobalFactEvidence swap = 24;
+  GlobalFactEvidence apfs_snapshots = 25;
+}
+
+// A chunk payload is a concatenation of records. Each record is a four-byte
+// big-endian length followed by the canonical protobuf encoding of one
+// ScannedNodeEvidence. The digest covers canonical_node_payload exactly.
+message ScanCheckpointChunk {
+  string checkpoint_id = 1;
+  uint32 chunk_index = 2;
+  string chunk_id = 3;
+  uint32 node_count = 4;
+  bytes canonical_node_payload = 5;
+  bytes payload_sha256 = 6;
+}
+
+message ScanCheckpointChunkDescriptor {
+  uint32 chunk_index = 1;
+  string chunk_id = 2;
+  uint32 node_count = 3;
+  uint64 payload_bytes = 4;
+  bytes payload_sha256 = 5;
+}
+
+// This manifest binds the checkpoint's coverage/frontier metadata and every
+// retained-node chunk. checkpoint_evidence_sha256 covers the exact
+// canonical_checkpoint_payload bytes carried by ScanCheckpointReady or
+// ScanFinalized. final_evidence_sha256 is the protocol-defined canonical hash
+// over that evidence digest, all budgets, and the ordered descriptors. The
+// coverage/frontier mirrors must exactly match the digested checkpoint.
+message ScanCheckpointManifest {
+  uint32 manifest_version = 1;
+  string checkpoint_id = 2;
+  uint32 chunk_count = 3;
+  uint64 retained_node_count = 4;
+  uint32 retained_node_entry_budget = 5;
+  uint64 retained_node_payload_bytes = 6;
+  uint32 maximum_checkpoint_payload_bytes = 7;
+  uint32 maximum_chunk_payload_bytes = 8;
+  uint32 maximum_manifest_encoded_bytes = 9;
+  repeated ScanCheckpointChunkDescriptor chunks = 10;
+  bytes checkpoint_evidence_sha256 = 11;
+  bytes final_evidence_sha256 = 12;
+  ScanProgress frontier = 13;
+  CoverageEvidence coverage = 14;
+  repeated string completed_root_ids = 15;
+  repeated string failed_root_ids = 16;
+  ScanMachineState machine_state = 17;
+  bool resumable_in_process = 18;
+  bool provisional = 19;
+  uint64 maximum_retained_node_payload_bytes = 20;
+}
+
+message ScanCheckpointReady {
+  // Deprecated Phase 0 field. Protocol 1.3 producers leave this unset and use
+  // canonical_checkpoint_payload plus manifest so receivers can verify the
+  // exact bytes before exposing checkpoint evidence.
+  ScanCheckpointEvidence checkpoint = 1;
+  bytes canonical_checkpoint_payload = 2;
+  ScanCheckpointManifest manifest = 3;
+}
+
+message ScanFinalized {
+  // Deprecated Phase 0 field; see ScanCheckpointReady.checkpoint.
+  ScanCheckpointEvidence checkpoint = 1;
+  string reason = 2;
+  bytes canonical_checkpoint_payload = 3;
+  ScanCheckpointManifest manifest = 4;
+}
+
+message ProvisionalPlanGroupSummary {
+  string group_id = 1;
+  string title = 2;
+  uint64 action_count = 3;
+  uint64 immediate_reclaim_bytes = 4;
+  uint64 conditional_reclaim_bytes = 5;
+  string status = 6;
+}
+
+message ProvisionalPlanReady {
+  string plan_id = 1;
+  uint64 action_count = 2;
+  uint64 immediate_reclaim_bytes = 3;
+  uint64 conditional_reclaim_bytes = 4;
+  repeated ProvisionalPlanGroupSummary groups = 5;
+}
+
+message ProvisionalPlanInvalidated {
+  string previous_plan_id = 1;
+}
+
+message ScanCancelled {
+  string reason = 1;
+}
+
+message ScanFinished {
+  string summary = 1;
+}
+
+message EngineFailed {
+  string code = 1;
+  string detail = 2;
+}
+
+message EngineEvent {
+  uint64 event_sequence = 1;
+  uint64 request_id = 2;
+  string scan_session_id = 3;
+  oneof body {
+    ControlAccepted control_accepted = 10;
+    ControlRejected control_rejected = 11;
+    ScanStateChanged scan_state_changed = 12;
+    ScanProgress scan_progress = 13;
+    ProvisionalPlanReady provisional_plan_ready = 14;
+    ProvisionalPlanInvalidated provisional_plan_invalidated = 15;
+    ScanCancelled scan_cancelled = 16;
+    ScanFinished scan_finished = 17;
+    EngineFailed engine_failed = 18;
+    ScanNodeObserved scan_node_observed = 19;
+    ScanCheckpointReady scan_checkpoint_ready = 20;
+    ScanFinalized scan_finalized = 21;
+    ScanCheckpointChunk scan_checkpoint_chunk = 22;
+  }
+}
+
 message Envelope {
   uint64 sequence = 1;
   oneof body {
@@ -52,5 +502,8 @@ message Envelope {
     HelloAccepted hello_accepted = 11;
     HelloRejected hello_rejected = 12;
     BusinessEnvelope business = 20;
+    StartScanRequest start_scan_request = 21;
+    ScanControlRequest scan_control_request = 22;
+    EngineEvent engine_event = 23;
   }
 }

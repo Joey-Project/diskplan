@@ -88,6 +88,405 @@ public nonisolated enum Diskplan_V1_RejectCode: SwiftProtobuf.Enum, Swift.CaseIt
 
 }
 
+public nonisolated enum Diskplan_V1_ScanControlKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case startScan // = 1
+  case pauseScan // = 2
+  case resumeScan // = 3
+
+  /// Retained for protocol-minor compatibility with the Phase 0 shell. The
+  /// Phase 1 evidence producer rejects this control and never emits plan data.
+  case pauseAndBuildProvisionalPlan // = 4
+  case cancelScan // = 5
+  case checkpointScan // = 6
+  case finalizePartialScan // = 7
+  case checkpointProvisionalEvidence // = 8
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .startScan
+    case 2: self = .pauseScan
+    case 3: self = .resumeScan
+    case 4: self = .pauseAndBuildProvisionalPlan
+    case 5: self = .cancelScan
+    case 6: self = .checkpointScan
+    case 7: self = .finalizePartialScan
+    case 8: self = .checkpointProvisionalEvidence
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .startScan: return 1
+    case .pauseScan: return 2
+    case .resumeScan: return 3
+    case .pauseAndBuildProvisionalPlan: return 4
+    case .cancelScan: return 5
+    case .checkpointScan: return 6
+    case .finalizePartialScan: return 7
+    case .checkpointProvisionalEvidence: return 8
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ScanControlKind] = [
+    .unspecified,
+    .startScan,
+    .pauseScan,
+    .resumeScan,
+    .pauseAndBuildProvisionalPlan,
+    .cancelScan,
+    .checkpointScan,
+    .finalizePartialScan,
+    .checkpointProvisionalEvidence,
+  ]
+
+}
+
+public nonisolated enum Diskplan_V1_ScanState: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case idle // = 1
+  case running // = 2
+  case paused // = 3
+  case buildingProvisionalPlan // = 4
+  case provisionalPlanReady // = 5
+  case cancelling // = 6
+  case cancelled // = 7
+  case finished // = 8
+  case failed // = 9
+  case finalizingPartial // = 10
+  case finalizedPartial // = 11
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .idle
+    case 2: self = .running
+    case 3: self = .paused
+    case 4: self = .buildingProvisionalPlan
+    case 5: self = .provisionalPlanReady
+    case 6: self = .cancelling
+    case 7: self = .cancelled
+    case 8: self = .finished
+    case 9: self = .failed
+    case 10: self = .finalizingPartial
+    case 11: self = .finalizedPartial
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .idle: return 1
+    case .running: return 2
+    case .paused: return 3
+    case .buildingProvisionalPlan: return 4
+    case .provisionalPlanReady: return 5
+    case .cancelling: return 6
+    case .cancelled: return 7
+    case .finished: return 8
+    case .failed: return 9
+    case .finalizingPartial: return 10
+    case .finalizedPartial: return 11
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ScanState] = [
+    .unspecified,
+    .idle,
+    .running,
+    .paused,
+    .buildingProvisionalPlan,
+    .provisionalPlanReady,
+    .cancelling,
+    .cancelled,
+    .finished,
+    .failed,
+    .finalizingPartial,
+    .finalizedPartial,
+  ]
+
+}
+
+public nonisolated enum Diskplan_V1_ScanMachineState: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case ready // = 1
+  case scanning // = 2
+  case complete // = 3
+  case partial // = 4
+  case cancelled // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .ready
+    case 2: self = .scanning
+    case 3: self = .complete
+    case 4: self = .partial
+    case 5: self = .cancelled
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .ready: return 1
+    case .scanning: return 2
+    case .complete: return 3
+    case .partial: return 4
+    case .cancelled: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ScanMachineState] = [
+    .unspecified,
+    .ready,
+    .scanning,
+    .complete,
+    .partial,
+    .cancelled,
+  ]
+
+}
+
+public nonisolated enum Diskplan_V1_ControlRejectCode: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case invalidState // = 1
+  case duplicateRequestID // = 2
+  case malformedRequest // = 3
+  case unavailable // = 4
+
+  /// The finite producer command queue was full at the admission boundary.
+  case capacityExceeded // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .invalidState
+    case 2: self = .duplicateRequestID
+    case 3: self = .malformedRequest
+    case 4: self = .unavailable
+    case 5: self = .capacityExceeded
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .invalidState: return 1
+    case .duplicateRequestID: return 2
+    case .malformedRequest: return 3
+    case .unavailable: return 4
+    case .capacityExceeded: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ControlRejectCode] = [
+    .unspecified,
+    .invalidState,
+    .duplicateRequestID,
+    .malformedRequest,
+    .unavailable,
+    .capacityExceeded,
+  ]
+
+}
+
+/// A stable machine-readable reason for a rejected StartScanRequest. This is
+/// deliberately separate from ControlRejectCode: the latter describes the
+/// control-plane class, while this enum identifies the setup boundary that
+/// could not be established. Non-start controls leave this unspecified.
+public nonisolated enum Diskplan_V1_ScanSetupRejectCode: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case capabilityNotNegotiated // = 1
+  case invalidProfile // = 2
+  case invalidRoot // = 3
+  case invalidBudget // = 4
+  case duplicateRootID // = 5
+  case materializationPolicyUnavailable // = 6
+  case rootDiscoveryUnavailable // = 7
+  case scannerInitializationFailed // = 8
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .capabilityNotNegotiated
+    case 2: self = .invalidProfile
+    case 3: self = .invalidRoot
+    case 4: self = .invalidBudget
+    case 5: self = .duplicateRootID
+    case 6: self = .materializationPolicyUnavailable
+    case 7: self = .rootDiscoveryUnavailable
+    case 8: self = .scannerInitializationFailed
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .capabilityNotNegotiated: return 1
+    case .invalidProfile: return 2
+    case .invalidRoot: return 3
+    case .invalidBudget: return 4
+    case .duplicateRootID: return 5
+    case .materializationPolicyUnavailable: return 6
+    case .rootDiscoveryUnavailable: return 7
+    case .scannerInitializationFailed: return 8
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ScanSetupRejectCode] = [
+    .unspecified,
+    .capabilityNotNegotiated,
+    .invalidProfile,
+    .invalidRoot,
+    .invalidBudget,
+    .duplicateRootID,
+    .materializationPolicyUnavailable,
+    .rootDiscoveryUnavailable,
+    .scannerInitializationFailed,
+  ]
+
+}
+
+public nonisolated enum Diskplan_V1_EvidenceStatus: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case known // = 1
+  case absent // = 2
+  case unknown // = 3
+  case unreadable // = 4
+  case failed // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .known
+    case 2: self = .absent
+    case 3: self = .unknown
+    case 4: self = .unreadable
+    case 5: self = .failed
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .known: return 1
+    case .absent: return 2
+    case .unknown: return 3
+    case .unreadable: return 4
+    case .failed: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_EvidenceStatus] = [
+    .unspecified,
+    .known,
+    .absent,
+    .unknown,
+    .unreadable,
+    .failed,
+  ]
+
+}
+
+public nonisolated enum Diskplan_V1_ByteMeasureKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case exact // = 1
+  case lowerBound // = 2
+  case unknown // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .exact
+    case 2: self = .lowerBound
+    case 3: self = .unknown
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .exact: return 1
+    case .lowerBound: return 2
+    case .unknown: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ByteMeasureKind] = [
+    .unspecified,
+    .exact,
+    .lowerBound,
+    .unknown,
+  ]
+
+}
+
 public nonisolated struct Diskplan_V1_ProtocolVersion: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -191,45 +590,1619 @@ public nonisolated struct Diskplan_V1_BusinessEnvelope: Sendable {
   public init() {}
 }
 
-public nonisolated struct Diskplan_V1_Envelope: Sendable {
+public nonisolated struct Diskplan_V1_StartScanRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  public var sequence: UInt64 = 0
+  public var requestID: UInt64 = 0
 
-  public var body: Diskplan_V1_Envelope.OneOf_Body? = nil
+  public var profile: String = String()
+
+  public var roots: [Diskplan_V1_ScanRootRequest] = []
+
+  public var maximumDurationMillis: UInt64 = 0
+
+  public var batchSize: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanRootRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var rootID: String = String()
+
+  public var rawAbsolutePath: Data = Data()
+
+  public var displayPath: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanControlRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: UInt64 = 0
+
+  public var control: Diskplan_V1_ScanControlKind = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ControlAccepted: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var control: Diskplan_V1_ScanControlKind = .unspecified
+
+  public var resultingState: Diskplan_V1_ScanState = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ControlRejected: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var control: Diskplan_V1_ScanControlKind = .unspecified
+
+  public var code: Diskplan_V1_ControlRejectCode = .unspecified
+
+  public var detail: String = String()
+
+  public var currentState: Diskplan_V1_ScanState = .unspecified
+
+  public var setupCode: Diskplan_V1_ScanSetupRejectCode = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanStateChanged: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var state: Diskplan_V1_ScanState = .unspecified
+
+  public var reason: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanProgress: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var profile: String = String()
+
+  public var elapsedMillis: UInt64 = 0
+
+  public var entries: UInt64 = 0
+
+  public var directories: UInt64 = 0
+
+  public var candidates: UInt64 = 0
+
+  public var allocatedBytesObserved: UInt64 = 0
+
+  public var reclaimEstimateBytes: UInt64 = 0
+
+  public var completeRoots: UInt64 = 0
+
+  public var partialRoots: UInt64 = 0
+
+  public var entriesPerSecond: UInt64 = 0
+
+  public var currentRoot: String = String()
+
+  public var structuralBudget: UInt64 = 0
+
+  public var retainedNodes: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_EvidenceFailure: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var status: Diskplan_V1_EvidenceStatus = .unspecified
+
+  public var reason: String = String()
+
+  public var errorCode: Int32 = 0
+
+  public var hasErrorCode_p: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_RawPath: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var rootID: String = String()
+
+  public var components: [Data] = []
+
+  public var displayPath: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_CoverageEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var complete: Bool = false
+
+  public var reasons: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ByteMeasureEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var kind: Diskplan_V1_ByteMeasureKind = .unspecified
+
+  public var bytes: UInt64 = 0
+
+  public var reason: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ObjectIdentityEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var observation: Diskplan_V1_EvidenceFailure {
+    get {_observation ?? Diskplan_V1_EvidenceFailure()}
+    set {_observation = newValue}
+  }
+  /// Returns true if `observation` has been explicitly set.
+  public var hasObservation: Bool {self._observation != nil}
+  /// Clears the value of `observation`. Subsequent reads from it will return its default value.
+  public mutating func clearObservation() {self._observation = nil}
+
+  public var device: Int64 = 0
+
+  public var fileID: UInt64 = 0
+
+  public var objectType: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _observation: Diskplan_V1_EvidenceFailure? = nil
+}
+
+public nonisolated struct Diskplan_V1_TimeValue: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var secondsSinceEpoch: Int64 = 0
+
+  public var nanoseconds: Int32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_TimeEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var observation: Diskplan_V1_EvidenceFailure {
+    get {_observation ?? Diskplan_V1_EvidenceFailure()}
+    set {_observation = newValue}
+  }
+  /// Returns true if `observation` has been explicitly set.
+  public var hasObservation: Bool {self._observation != nil}
+  /// Clears the value of `observation`. Subsequent reads from it will return its default value.
+  public mutating func clearObservation() {self._observation = nil}
+
+  public var value: Diskplan_V1_TimeValue {
+    get {_value ?? Diskplan_V1_TimeValue()}
+    set {_value = newValue}
+  }
+  /// Returns true if `value` has been explicitly set.
+  public var hasValue: Bool {self._value != nil}
+  /// Clears the value of `value`. Subsequent reads from it will return its default value.
+  public mutating func clearValue() {self._value = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _observation: Diskplan_V1_EvidenceFailure? = nil
+  fileprivate var _value: Diskplan_V1_TimeValue? = nil
+}
+
+public nonisolated struct Diskplan_V1_FilesystemTimeEvidence: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var accessTime: Diskplan_V1_TimeEvidence {
+    get {_storage._accessTime ?? Diskplan_V1_TimeEvidence()}
+    set {_uniqueStorage()._accessTime = newValue}
+  }
+  /// Returns true if `accessTime` has been explicitly set.
+  public var hasAccessTime: Bool {_storage._accessTime != nil}
+  /// Clears the value of `accessTime`. Subsequent reads from it will return its default value.
+  public mutating func clearAccessTime() {_uniqueStorage()._accessTime = nil}
+
+  public var modificationTime: Diskplan_V1_TimeEvidence {
+    get {_storage._modificationTime ?? Diskplan_V1_TimeEvidence()}
+    set {_uniqueStorage()._modificationTime = newValue}
+  }
+  /// Returns true if `modificationTime` has been explicitly set.
+  public var hasModificationTime: Bool {_storage._modificationTime != nil}
+  /// Clears the value of `modificationTime`. Subsequent reads from it will return its default value.
+  public mutating func clearModificationTime() {_uniqueStorage()._modificationTime = nil}
+
+  public var statusChangeTime: Diskplan_V1_TimeEvidence {
+    get {_storage._statusChangeTime ?? Diskplan_V1_TimeEvidence()}
+    set {_uniqueStorage()._statusChangeTime = newValue}
+  }
+  /// Returns true if `statusChangeTime` has been explicitly set.
+  public var hasStatusChangeTime: Bool {_storage._statusChangeTime != nil}
+  /// Clears the value of `statusChangeTime`. Subsequent reads from it will return its default value.
+  public mutating func clearStatusChangeTime() {_uniqueStorage()._statusChangeTime = nil}
+
+  public var birthTime: Diskplan_V1_TimeEvidence {
+    get {_storage._birthTime ?? Diskplan_V1_TimeEvidence()}
+    set {_uniqueStorage()._birthTime = newValue}
+  }
+  /// Returns true if `birthTime` has been explicitly set.
+  public var hasBirthTime: Bool {_storage._birthTime != nil}
+  /// Clears the value of `birthTime`. Subsequent reads from it will return its default value.
+  public mutating func clearBirthTime() {_uniqueStorage()._birthTime = nil}
+
+  public var trust: String {
+    get {_storage._trust}
+    set {_uniqueStorage()._trust = newValue}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public nonisolated struct Diskplan_V1_AccessPolicyEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var observation: Diskplan_V1_EvidenceFailure {
+    get {_observation ?? Diskplan_V1_EvidenceFailure()}
+    set {_observation = newValue}
+  }
+  /// Returns true if `observation` has been explicitly set.
+  public var hasObservation: Bool {self._observation != nil}
+  /// Clears the value of `observation`. Subsequent reads from it will return its default value.
+  public mutating func clearObservation() {self._observation = nil}
+
+  public var ownerUserID: UInt32 = 0
+
+  public var ownerGroupID: UInt32 = 0
+
+  public var mode: UInt32 = 0
+
+  public var flags: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _observation: Diskplan_V1_EvidenceFailure? = nil
+}
+
+public nonisolated struct Diskplan_V1_BoolEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var observation: Diskplan_V1_EvidenceFailure {
+    get {_observation ?? Diskplan_V1_EvidenceFailure()}
+    set {_observation = newValue}
+  }
+  /// Returns true if `observation` has been explicitly set.
+  public var hasObservation: Bool {self._observation != nil}
+  /// Clears the value of `observation`. Subsequent reads from it will return its default value.
+  public mutating func clearObservation() {self._observation = nil}
+
+  public var value: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _observation: Diskplan_V1_EvidenceFailure? = nil
+}
+
+public nonisolated struct Diskplan_V1_UInt64Evidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var observation: Diskplan_V1_EvidenceFailure {
+    get {_observation ?? Diskplan_V1_EvidenceFailure()}
+    set {_observation = newValue}
+  }
+  /// Returns true if `observation` has been explicitly set.
+  public var hasObservation: Bool {self._observation != nil}
+  /// Clears the value of `observation`. Subsequent reads from it will return its default value.
+  public mutating func clearObservation() {self._observation = nil}
+
+  public var value: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _observation: Diskplan_V1_EvidenceFailure? = nil
+}
+
+public nonisolated struct Diskplan_V1_UInt32Evidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var observation: Diskplan_V1_EvidenceFailure {
+    get {_observation ?? Diskplan_V1_EvidenceFailure()}
+    set {_observation = newValue}
+  }
+  /// Returns true if `observation` has been explicitly set.
+  public var hasObservation: Bool {self._observation != nil}
+  /// Clears the value of `observation`. Subsequent reads from it will return its default value.
+  public mutating func clearObservation() {self._observation = nil}
+
+  public var value: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _observation: Diskplan_V1_EvidenceFailure? = nil
+}
+
+public nonisolated struct Diskplan_V1_ItemByteEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var logical: Diskplan_V1_ByteMeasureEvidence {
+    get {_logical ?? Diskplan_V1_ByteMeasureEvidence()}
+    set {_logical = newValue}
+  }
+  /// Returns true if `logical` has been explicitly set.
+  public var hasLogical: Bool {self._logical != nil}
+  /// Clears the value of `logical`. Subsequent reads from it will return its default value.
+  public mutating func clearLogical() {self._logical = nil}
+
+  public var nominalAllocated: Diskplan_V1_ByteMeasureEvidence {
+    get {_nominalAllocated ?? Diskplan_V1_ByteMeasureEvidence()}
+    set {_nominalAllocated = newValue}
+  }
+  /// Returns true if `nominalAllocated` has been explicitly set.
+  public var hasNominalAllocated: Bool {self._nominalAllocated != nil}
+  /// Clears the value of `nominalAllocated`. Subsequent reads from it will return its default value.
+  public mutating func clearNominalAllocated() {self._nominalAllocated = nil}
+
+  public var immediatePrivateReclaim: Diskplan_V1_ByteMeasureEvidence {
+    get {_immediatePrivateReclaim ?? Diskplan_V1_ByteMeasureEvidence()}
+    set {_immediatePrivateReclaim = newValue}
+  }
+  /// Returns true if `immediatePrivateReclaim` has been explicitly set.
+  public var hasImmediatePrivateReclaim: Bool {self._immediatePrivateReclaim != nil}
+  /// Clears the value of `immediatePrivateReclaim`. Subsequent reads from it will return its default value.
+  public mutating func clearImmediatePrivateReclaim() {self._immediatePrivateReclaim = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _logical: Diskplan_V1_ByteMeasureEvidence? = nil
+  fileprivate var _nominalAllocated: Diskplan_V1_ByteMeasureEvidence? = nil
+  fileprivate var _immediatePrivateReclaim: Diskplan_V1_ByteMeasureEvidence? = nil
+}
+
+public nonisolated struct Diskplan_V1_StorageTopologyEvidence: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var linkCount: Diskplan_V1_UInt32Evidence {
+    get {_storage._linkCount ?? Diskplan_V1_UInt32Evidence()}
+    set {_uniqueStorage()._linkCount = newValue}
+  }
+  /// Returns true if `linkCount` has been explicitly set.
+  public var hasLinkCount: Bool {_storage._linkCount != nil}
+  /// Clears the value of `linkCount`. Subsequent reads from it will return its default value.
+  public mutating func clearLinkCount() {_uniqueStorage()._linkCount = nil}
+
+  public var mayShareBlocks: Diskplan_V1_BoolEvidence {
+    get {_storage._mayShareBlocks ?? Diskplan_V1_BoolEvidence()}
+    set {_uniqueStorage()._mayShareBlocks = newValue}
+  }
+  /// Returns true if `mayShareBlocks` has been explicitly set.
+  public var hasMayShareBlocks: Bool {_storage._mayShareBlocks != nil}
+  /// Clears the value of `mayShareBlocks`. Subsequent reads from it will return its default value.
+  public mutating func clearMayShareBlocks() {_uniqueStorage()._mayShareBlocks = nil}
+
+  public var sharesAllBlocks: Diskplan_V1_BoolEvidence {
+    get {_storage._sharesAllBlocks ?? Diskplan_V1_BoolEvidence()}
+    set {_uniqueStorage()._sharesAllBlocks = newValue}
+  }
+  /// Returns true if `sharesAllBlocks` has been explicitly set.
+  public var hasSharesAllBlocks: Bool {_storage._sharesAllBlocks != nil}
+  /// Clears the value of `sharesAllBlocks`. Subsequent reads from it will return its default value.
+  public mutating func clearSharesAllBlocks() {_uniqueStorage()._sharesAllBlocks = nil}
+
+  public var cloneID: Diskplan_V1_UInt64Evidence {
+    get {_storage._cloneID ?? Diskplan_V1_UInt64Evidence()}
+    set {_uniqueStorage()._cloneID = newValue}
+  }
+  /// Returns true if `cloneID` has been explicitly set.
+  public var hasCloneID: Bool {_storage._cloneID != nil}
+  /// Clears the value of `cloneID`. Subsequent reads from it will return its default value.
+  public mutating func clearCloneID() {_uniqueStorage()._cloneID = nil}
+
+  public var cloneRefcount: Diskplan_V1_UInt32Evidence {
+    get {_storage._cloneRefcount ?? Diskplan_V1_UInt32Evidence()}
+    set {_uniqueStorage()._cloneRefcount = newValue}
+  }
+  /// Returns true if `cloneRefcount` has been explicitly set.
+  public var hasCloneRefcount: Bool {_storage._cloneRefcount != nil}
+  /// Clears the value of `cloneRefcount`. Subsequent reads from it will return its default value.
+  public mutating func clearCloneRefcount() {_uniqueStorage()._cloneRefcount = nil}
+
+  public var conditionalGroupReclaim: Diskplan_V1_ByteMeasureEvidence {
+    get {_storage._conditionalGroupReclaim ?? Diskplan_V1_ByteMeasureEvidence()}
+    set {_uniqueStorage()._conditionalGroupReclaim = newValue}
+  }
+  /// Returns true if `conditionalGroupReclaim` has been explicitly set.
+  public var hasConditionalGroupReclaim: Bool {_storage._conditionalGroupReclaim != nil}
+  /// Clears the value of `conditionalGroupReclaim`. Subsequent reads from it will return its default value.
+  public mutating func clearConditionalGroupReclaim() {_uniqueStorage()._conditionalGroupReclaim = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public nonisolated struct Diskplan_V1_ProviderObjectIdentityEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var itemIdentifier: String = String()
+
+  public var domainIdentifier: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_StringPair: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var key: String = String()
+
+  public var value: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ProviderScanEvidence: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var observation: Diskplan_V1_EvidenceFailure {
+    get {_storage._observation ?? Diskplan_V1_EvidenceFailure()}
+    set {_uniqueStorage()._observation = newValue}
+  }
+  /// Returns true if `observation` has been explicitly set.
+  public var hasObservation: Bool {_storage._observation != nil}
+  /// Clears the value of `observation`. Subsequent reads from it will return its default value.
+  public mutating func clearObservation() {_uniqueStorage()._observation = nil}
+
+  public var identityObservation: Diskplan_V1_EvidenceFailure {
+    get {_storage._identityObservation ?? Diskplan_V1_EvidenceFailure()}
+    set {_uniqueStorage()._identityObservation = newValue}
+  }
+  /// Returns true if `identityObservation` has been explicitly set.
+  public var hasIdentityObservation: Bool {_storage._identityObservation != nil}
+  /// Clears the value of `identityObservation`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentityObservation() {_uniqueStorage()._identityObservation = nil}
+
+  public var identity: Diskplan_V1_ProviderObjectIdentityEvidence {
+    get {_storage._identity ?? Diskplan_V1_ProviderObjectIdentityEvidence()}
+    set {_uniqueStorage()._identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {_storage._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {_uniqueStorage()._identity = nil}
+
+  public var promisedMetadataObservation: Diskplan_V1_EvidenceFailure {
+    get {_storage._promisedMetadataObservation ?? Diskplan_V1_EvidenceFailure()}
+    set {_uniqueStorage()._promisedMetadataObservation = newValue}
+  }
+  /// Returns true if `promisedMetadataObservation` has been explicitly set.
+  public var hasPromisedMetadataObservation: Bool {_storage._promisedMetadataObservation != nil}
+  /// Clears the value of `promisedMetadataObservation`. Subsequent reads from it will return its default value.
+  public mutating func clearPromisedMetadataObservation() {_uniqueStorage()._promisedMetadataObservation = nil}
+
+  public var promisedMetadata: [Diskplan_V1_StringPair] {
+    get {_storage._promisedMetadata}
+    set {_uniqueStorage()._promisedMetadata = newValue}
+  }
+
+  public var hiddenBackingBytes: Diskplan_V1_ByteMeasureEvidence {
+    get {_storage._hiddenBackingBytes ?? Diskplan_V1_ByteMeasureEvidence()}
+    set {_uniqueStorage()._hiddenBackingBytes = newValue}
+  }
+  /// Returns true if `hiddenBackingBytes` has been explicitly set.
+  public var hasHiddenBackingBytes: Bool {_storage._hiddenBackingBytes != nil}
+  /// Clears the value of `hiddenBackingBytes`. Subsequent reads from it will return its default value.
+  public mutating func clearHiddenBackingBytes() {_uniqueStorage()._hiddenBackingBytes = nil}
+
+  public var controlledNonMaterializationAcceptance: Diskplan_V1_BoolEvidence {
+    get {_storage._controlledNonMaterializationAcceptance ?? Diskplan_V1_BoolEvidence()}
+    set {_uniqueStorage()._controlledNonMaterializationAcceptance = newValue}
+  }
+  /// Returns true if `controlledNonMaterializationAcceptance` has been explicitly set.
+  public var hasControlledNonMaterializationAcceptance: Bool {_storage._controlledNonMaterializationAcceptance != nil}
+  /// Clears the value of `controlledNonMaterializationAcceptance`. Subsequent reads from it will return its default value.
+  public mutating func clearControlledNonMaterializationAcceptance() {_uniqueStorage()._controlledNonMaterializationAcceptance = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public nonisolated struct Diskplan_V1_ScannedNodeEvidence: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var path: Diskplan_V1_RawPath {
+    get {_storage._path ?? Diskplan_V1_RawPath()}
+    set {_uniqueStorage()._path = newValue}
+  }
+  /// Returns true if `path` has been explicitly set.
+  public var hasPath: Bool {_storage._path != nil}
+  /// Clears the value of `path`. Subsequent reads from it will return its default value.
+  public mutating func clearPath() {_uniqueStorage()._path = nil}
+
+  public var identity: Diskplan_V1_ObjectIdentityEvidence {
+    get {_storage._identity ?? Diskplan_V1_ObjectIdentityEvidence()}
+    set {_uniqueStorage()._identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {_storage._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {_uniqueStorage()._identity = nil}
+
+  public var bytes: Diskplan_V1_ItemByteEvidence {
+    get {_storage._bytes ?? Diskplan_V1_ItemByteEvidence()}
+    set {_uniqueStorage()._bytes = newValue}
+  }
+  /// Returns true if `bytes` has been explicitly set.
+  public var hasBytes: Bool {_storage._bytes != nil}
+  /// Clears the value of `bytes`. Subsequent reads from it will return its default value.
+  public mutating func clearBytes() {_uniqueStorage()._bytes = nil}
+
+  public var storageTopology: Diskplan_V1_StorageTopologyEvidence {
+    get {_storage._storageTopology ?? Diskplan_V1_StorageTopologyEvidence()}
+    set {_uniqueStorage()._storageTopology = newValue}
+  }
+  /// Returns true if `storageTopology` has been explicitly set.
+  public var hasStorageTopology: Bool {_storage._storageTopology != nil}
+  /// Clears the value of `storageTopology`. Subsequent reads from it will return its default value.
+  public mutating func clearStorageTopology() {_uniqueStorage()._storageTopology = nil}
+
+  public var filesystemTimes: Diskplan_V1_FilesystemTimeEvidence {
+    get {_storage._filesystemTimes ?? Diskplan_V1_FilesystemTimeEvidence()}
+    set {_uniqueStorage()._filesystemTimes = newValue}
+  }
+  /// Returns true if `filesystemTimes` has been explicitly set.
+  public var hasFilesystemTimes: Bool {_storage._filesystemTimes != nil}
+  /// Clears the value of `filesystemTimes`. Subsequent reads from it will return its default value.
+  public mutating func clearFilesystemTimes() {_uniqueStorage()._filesystemTimes = nil}
+
+  public var accessPolicy: Diskplan_V1_AccessPolicyEvidence {
+    get {_storage._accessPolicy ?? Diskplan_V1_AccessPolicyEvidence()}
+    set {_uniqueStorage()._accessPolicy = newValue}
+  }
+  /// Returns true if `accessPolicy` has been explicitly set.
+  public var hasAccessPolicy: Bool {_storage._accessPolicy != nil}
+  /// Clears the value of `accessPolicy`. Subsequent reads from it will return its default value.
+  public mutating func clearAccessPolicy() {_uniqueStorage()._accessPolicy = nil}
+
+  public var coverage: Diskplan_V1_CoverageEvidence {
+    get {_storage._coverage ?? Diskplan_V1_CoverageEvidence()}
+    set {_uniqueStorage()._coverage = newValue}
+  }
+  /// Returns true if `coverage` has been explicitly set.
+  public var hasCoverage: Bool {_storage._coverage != nil}
+  /// Clears the value of `coverage`. Subsequent reads from it will return its default value.
+  public mutating func clearCoverage() {_uniqueStorage()._coverage = nil}
+
+  public var providerBoundary: String {
+    get {_storage._providerBoundary}
+    set {_uniqueStorage()._providerBoundary = newValue}
+  }
+
+  public var providerBoundaryReason: String {
+    get {_storage._providerBoundaryReason}
+    set {_uniqueStorage()._providerBoundaryReason = newValue}
+  }
+
+  public var providerEvidence: Diskplan_V1_ProviderScanEvidence {
+    get {_storage._providerEvidence ?? Diskplan_V1_ProviderScanEvidence()}
+    set {_uniqueStorage()._providerEvidence = newValue}
+  }
+  /// Returns true if `providerEvidence` has been explicitly set.
+  public var hasProviderEvidence: Bool {_storage._providerEvidence != nil}
+  /// Clears the value of `providerEvidence`. Subsequent reads from it will return its default value.
+  public mutating func clearProviderEvidence() {_uniqueStorage()._providerEvidence = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public nonisolated struct Diskplan_V1_ScanNodeObserved: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var node: Diskplan_V1_ScannedNodeEvidence {
+    get {_node ?? Diskplan_V1_ScannedNodeEvidence()}
+    set {_node = newValue}
+  }
+  /// Returns true if `node` has been explicitly set.
+  public var hasNode: Bool {self._node != nil}
+  /// Clears the value of `node`. Subsequent reads from it will return its default value.
+  public mutating func clearNode() {self._node = nil}
+
+  public var directoryClosed: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _node: Diskplan_V1_ScannedNodeEvidence? = nil
+}
+
+public nonisolated struct Diskplan_V1_RootScanEvidence: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var root: Diskplan_V1_ScanRootRequest {
+    get {_storage._root ?? Diskplan_V1_ScanRootRequest()}
+    set {_uniqueStorage()._root = newValue}
+  }
+  /// Returns true if `root` has been explicitly set.
+  public var hasRoot: Bool {_storage._root != nil}
+  /// Clears the value of `root`. Subsequent reads from it will return its default value.
+  public mutating func clearRoot() {_uniqueStorage()._root = nil}
+
+  public var identity: Diskplan_V1_ObjectIdentityEvidence {
+    get {_storage._identity ?? Diskplan_V1_ObjectIdentityEvidence()}
+    set {_uniqueStorage()._identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {_storage._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {_uniqueStorage()._identity = nil}
+
+  public var providerBoundary: String {
+    get {_storage._providerBoundary}
+    set {_uniqueStorage()._providerBoundary = newValue}
+  }
+
+  public var providerBoundaryReason: String {
+    get {_storage._providerBoundaryReason}
+    set {_uniqueStorage()._providerBoundaryReason = newValue}
+  }
+
+  public var aggregateBytes: Diskplan_V1_ItemByteEvidence {
+    get {_storage._aggregateBytes ?? Diskplan_V1_ItemByteEvidence()}
+    set {_uniqueStorage()._aggregateBytes = newValue}
+  }
+  /// Returns true if `aggregateBytes` has been explicitly set.
+  public var hasAggregateBytes: Bool {_storage._aggregateBytes != nil}
+  /// Clears the value of `aggregateBytes`. Subsequent reads from it will return its default value.
+  public mutating func clearAggregateBytes() {_uniqueStorage()._aggregateBytes = nil}
+
+  public var coverage: Diskplan_V1_CoverageEvidence {
+    get {_storage._coverage ?? Diskplan_V1_CoverageEvidence()}
+    set {_uniqueStorage()._coverage = newValue}
+  }
+  /// Returns true if `coverage` has been explicitly set.
+  public var hasCoverage: Bool {_storage._coverage != nil}
+  /// Clears the value of `coverage`. Subsequent reads from it will return its default value.
+  public mutating func clearCoverage() {_uniqueStorage()._coverage = nil}
+
+  public var entriesObserved: UInt64 {
+    get {_storage._entriesObserved}
+    set {_uniqueStorage()._entriesObserved = newValue}
+  }
+
+  public var directoriesClosed: UInt64 {
+    get {_storage._directoriesClosed}
+    set {_uniqueStorage()._directoriesClosed = newValue}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public nonisolated struct Diskplan_V1_RootFailureEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var rootID: String = String()
+
+  public var observation: Diskplan_V1_EvidenceFailure {
+    get {_observation ?? Diskplan_V1_EvidenceFailure()}
+    set {_observation = newValue}
+  }
+  /// Returns true if `observation` has been explicitly set.
+  public var hasObservation: Bool {self._observation != nil}
+  /// Clears the value of `observation`. Subsequent reads from it will return its default value.
+  public mutating func clearObservation() {self._observation = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _observation: Diskplan_V1_EvidenceFailure? = nil
+}
+
+public nonisolated struct Diskplan_V1_ProcessActivityEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var processID: Int32 = 0
+
+  public var command: String = String()
+
+  public var fileDescriptor: String = String()
+
+  public var rawPath: Data = Data()
+
+  public var displayPath: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_StringUInt64Pair: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var key: String = String()
+
+  public var value: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_GlobalFactEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var known: Bool = false
+
+  public var unavailableReason: String = String()
+
+  public var uint64Values: [Diskplan_V1_StringUInt64Pair] = []
+
+  public var stringValues: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanCollectorConfigurationEvidence: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var processActivityCollectorID: String = String()
+
+  public var processActivityDeadlineNanoseconds: UInt64 = 0
+
+  public var hasProcessActivityDeadline_p: Bool = false
+
+  public var globalFactCollectorIds: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanCheckpointEvidence: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var profile: String {
+    get {_storage._profile}
+    set {_uniqueStorage()._profile = newValue}
+  }
+
+  public var resolverVersion: UInt32 {
+    get {_storage._resolverVersion}
+    set {_uniqueStorage()._resolverVersion = newValue}
+  }
+
+  public var wallClockUnixMillis: UInt64 {
+    get {_storage._wallClockUnixMillis}
+    set {_uniqueStorage()._wallClockUnixMillis = newValue}
+  }
+
+  public var monotonicNanoseconds: UInt64 {
+    get {_storage._monotonicNanoseconds}
+    set {_uniqueStorage()._monotonicNanoseconds = newValue}
+  }
+
+  public var maximumEntriesPerRoot: UInt64 {
+    get {_storage._maximumEntriesPerRoot}
+    set {_uniqueStorage()._maximumEntriesPerRoot = newValue}
+  }
+
+  public var maximumDepth: UInt32 {
+    get {_storage._maximumDepth}
+    set {_uniqueStorage()._maximumDepth = newValue}
+  }
+
+  public var maximumEntriesPerDirectory: UInt64 {
+    get {_storage._maximumEntriesPerDirectory}
+    set {_uniqueStorage()._maximumEntriesPerDirectory = newValue}
+  }
+
+  public var maximumPendingNameBytes: UInt64 {
+    get {_storage._maximumPendingNameBytes}
+    set {_uniqueStorage()._maximumPendingNameBytes = newValue}
+  }
+
+  public var retainedNodeCount: UInt32 {
+    get {_storage._retainedNodeCount}
+    set {_uniqueStorage()._retainedNodeCount = newValue}
+  }
+
+  public var maximumDurationMillis: UInt64 {
+    get {_storage._maximumDurationMillis}
+    set {_uniqueStorage()._maximumDurationMillis = newValue}
+  }
+
+  public var resolvedRoots: [Diskplan_V1_ScanRootRequest] {
+    get {_storage._resolvedRoots}
+    set {_uniqueStorage()._resolvedRoots = newValue}
+  }
+
+  public var progress: Diskplan_V1_ScanProgress {
+    get {_storage._progress ?? Diskplan_V1_ScanProgress()}
+    set {_uniqueStorage()._progress = newValue}
+  }
+  /// Returns true if `progress` has been explicitly set.
+  public var hasProgress: Bool {_storage._progress != nil}
+  /// Clears the value of `progress`. Subsequent reads from it will return its default value.
+  public mutating func clearProgress() {_uniqueStorage()._progress = nil}
+
+  public var coverage: Diskplan_V1_CoverageEvidence {
+    get {_storage._coverage ?? Diskplan_V1_CoverageEvidence()}
+    set {_uniqueStorage()._coverage = newValue}
+  }
+  /// Returns true if `coverage` has been explicitly set.
+  public var hasCoverage: Bool {_storage._coverage != nil}
+  /// Clears the value of `coverage`. Subsequent reads from it will return its default value.
+  public mutating func clearCoverage() {_uniqueStorage()._coverage = nil}
+
+  public var retainedNodes: [Diskplan_V1_ScannedNodeEvidence] {
+    get {_storage._retainedNodes}
+    set {_uniqueStorage()._retainedNodes = newValue}
+  }
+
+  public var completedRoots: [Diskplan_V1_RootScanEvidence] {
+    get {_storage._completedRoots}
+    set {_uniqueStorage()._completedRoots = newValue}
+  }
+
+  public var rootFailures: [Diskplan_V1_RootFailureEvidence] {
+    get {_storage._rootFailures}
+    set {_uniqueStorage()._rootFailures = newValue}
+  }
+
+  public var processActivityObservation: Diskplan_V1_EvidenceFailure {
+    get {_storage._processActivityObservation ?? Diskplan_V1_EvidenceFailure()}
+    set {_uniqueStorage()._processActivityObservation = newValue}
+  }
+  /// Returns true if `processActivityObservation` has been explicitly set.
+  public var hasProcessActivityObservation: Bool {_storage._processActivityObservation != nil}
+  /// Clears the value of `processActivityObservation`. Subsequent reads from it will return its default value.
+  public mutating func clearProcessActivityObservation() {_uniqueStorage()._processActivityObservation = nil}
+
+  public var processActivity: [Diskplan_V1_ProcessActivityEvidence] {
+    get {_storage._processActivity}
+    set {_uniqueStorage()._processActivity = newValue}
+  }
+
+  public var machineState: Diskplan_V1_ScanMachineState {
+    get {_storage._machineState}
+    set {_uniqueStorage()._machineState = newValue}
+  }
+
+  public var resumableInProcess: Bool {
+    get {_storage._resumableInProcess}
+    set {_uniqueStorage()._resumableInProcess = newValue}
+  }
+
+  public var provisional: Bool {
+    get {_storage._provisional}
+    set {_uniqueStorage()._provisional = newValue}
+  }
+
+  public var collectorConfiguration: Diskplan_V1_ScanCollectorConfigurationEvidence {
+    get {_storage._collectorConfiguration ?? Diskplan_V1_ScanCollectorConfigurationEvidence()}
+    set {_uniqueStorage()._collectorConfiguration = newValue}
+  }
+  /// Returns true if `collectorConfiguration` has been explicitly set.
+  public var hasCollectorConfiguration: Bool {_storage._collectorConfiguration != nil}
+  /// Clears the value of `collectorConfiguration`. Subsequent reads from it will return its default value.
+  public mutating func clearCollectorConfiguration() {_uniqueStorage()._collectorConfiguration = nil}
+
+  public var vm: Diskplan_V1_GlobalFactEvidence {
+    get {_storage._vm ?? Diskplan_V1_GlobalFactEvidence()}
+    set {_uniqueStorage()._vm = newValue}
+  }
+  /// Returns true if `vm` has been explicitly set.
+  public var hasVm: Bool {_storage._vm != nil}
+  /// Clears the value of `vm`. Subsequent reads from it will return its default value.
+  public mutating func clearVm() {_uniqueStorage()._vm = nil}
+
+  public var swap: Diskplan_V1_GlobalFactEvidence {
+    get {_storage._swap ?? Diskplan_V1_GlobalFactEvidence()}
+    set {_uniqueStorage()._swap = newValue}
+  }
+  /// Returns true if `swap` has been explicitly set.
+  public var hasSwap: Bool {_storage._swap != nil}
+  /// Clears the value of `swap`. Subsequent reads from it will return its default value.
+  public mutating func clearSwap() {_uniqueStorage()._swap = nil}
+
+  public var apfsSnapshots: Diskplan_V1_GlobalFactEvidence {
+    get {_storage._apfsSnapshots ?? Diskplan_V1_GlobalFactEvidence()}
+    set {_uniqueStorage()._apfsSnapshots = newValue}
+  }
+  /// Returns true if `apfsSnapshots` has been explicitly set.
+  public var hasApfsSnapshots: Bool {_storage._apfsSnapshots != nil}
+  /// Clears the value of `apfsSnapshots`. Subsequent reads from it will return its default value.
+  public mutating func clearApfsSnapshots() {_uniqueStorage()._apfsSnapshots = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// A chunk payload is a concatenation of records. Each record is a four-byte
+/// big-endian length followed by the canonical protobuf encoding of one
+/// ScannedNodeEvidence. The digest covers canonical_node_payload exactly.
+public nonisolated struct Diskplan_V1_ScanCheckpointChunk: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var checkpointID: String = String()
+
+  public var chunkIndex: UInt32 = 0
+
+  public var chunkID: String = String()
+
+  public var nodeCount: UInt32 = 0
+
+  public var canonicalNodePayload: Data = Data()
+
+  public var payloadSha256: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanCheckpointChunkDescriptor: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var chunkIndex: UInt32 = 0
+
+  public var chunkID: String = String()
+
+  public var nodeCount: UInt32 = 0
+
+  public var payloadBytes: UInt64 = 0
+
+  public var payloadSha256: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// This manifest binds the checkpoint's coverage/frontier metadata and every
+/// retained-node chunk. checkpoint_evidence_sha256 covers the exact
+/// canonical_checkpoint_payload bytes carried by ScanCheckpointReady or
+/// ScanFinalized. final_evidence_sha256 is the protocol-defined canonical hash
+/// over that evidence digest, all budgets, and the ordered descriptors. The
+/// coverage/frontier mirrors must exactly match the digested checkpoint.
+public nonisolated struct Diskplan_V1_ScanCheckpointManifest: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var manifestVersion: UInt32 {
+    get {_storage._manifestVersion}
+    set {_uniqueStorage()._manifestVersion = newValue}
+  }
+
+  public var checkpointID: String {
+    get {_storage._checkpointID}
+    set {_uniqueStorage()._checkpointID = newValue}
+  }
+
+  public var chunkCount: UInt32 {
+    get {_storage._chunkCount}
+    set {_uniqueStorage()._chunkCount = newValue}
+  }
+
+  public var retainedNodeCount: UInt64 {
+    get {_storage._retainedNodeCount}
+    set {_uniqueStorage()._retainedNodeCount = newValue}
+  }
+
+  public var retainedNodeEntryBudget: UInt32 {
+    get {_storage._retainedNodeEntryBudget}
+    set {_uniqueStorage()._retainedNodeEntryBudget = newValue}
+  }
+
+  public var retainedNodePayloadBytes: UInt64 {
+    get {_storage._retainedNodePayloadBytes}
+    set {_uniqueStorage()._retainedNodePayloadBytes = newValue}
+  }
+
+  public var maximumCheckpointPayloadBytes: UInt32 {
+    get {_storage._maximumCheckpointPayloadBytes}
+    set {_uniqueStorage()._maximumCheckpointPayloadBytes = newValue}
+  }
+
+  public var maximumChunkPayloadBytes: UInt32 {
+    get {_storage._maximumChunkPayloadBytes}
+    set {_uniqueStorage()._maximumChunkPayloadBytes = newValue}
+  }
+
+  public var maximumManifestEncodedBytes: UInt32 {
+    get {_storage._maximumManifestEncodedBytes}
+    set {_uniqueStorage()._maximumManifestEncodedBytes = newValue}
+  }
+
+  public var chunks: [Diskplan_V1_ScanCheckpointChunkDescriptor] {
+    get {_storage._chunks}
+    set {_uniqueStorage()._chunks = newValue}
+  }
+
+  public var checkpointEvidenceSha256: Data {
+    get {_storage._checkpointEvidenceSha256}
+    set {_uniqueStorage()._checkpointEvidenceSha256 = newValue}
+  }
+
+  public var finalEvidenceSha256: Data {
+    get {_storage._finalEvidenceSha256}
+    set {_uniqueStorage()._finalEvidenceSha256 = newValue}
+  }
+
+  public var frontier: Diskplan_V1_ScanProgress {
+    get {_storage._frontier ?? Diskplan_V1_ScanProgress()}
+    set {_uniqueStorage()._frontier = newValue}
+  }
+  /// Returns true if `frontier` has been explicitly set.
+  public var hasFrontier: Bool {_storage._frontier != nil}
+  /// Clears the value of `frontier`. Subsequent reads from it will return its default value.
+  public mutating func clearFrontier() {_uniqueStorage()._frontier = nil}
+
+  public var coverage: Diskplan_V1_CoverageEvidence {
+    get {_storage._coverage ?? Diskplan_V1_CoverageEvidence()}
+    set {_uniqueStorage()._coverage = newValue}
+  }
+  /// Returns true if `coverage` has been explicitly set.
+  public var hasCoverage: Bool {_storage._coverage != nil}
+  /// Clears the value of `coverage`. Subsequent reads from it will return its default value.
+  public mutating func clearCoverage() {_uniqueStorage()._coverage = nil}
+
+  public var completedRootIds: [String] {
+    get {_storage._completedRootIds}
+    set {_uniqueStorage()._completedRootIds = newValue}
+  }
+
+  public var failedRootIds: [String] {
+    get {_storage._failedRootIds}
+    set {_uniqueStorage()._failedRootIds = newValue}
+  }
+
+  public var machineState: Diskplan_V1_ScanMachineState {
+    get {_storage._machineState}
+    set {_uniqueStorage()._machineState = newValue}
+  }
+
+  public var resumableInProcess: Bool {
+    get {_storage._resumableInProcess}
+    set {_uniqueStorage()._resumableInProcess = newValue}
+  }
+
+  public var provisional: Bool {
+    get {_storage._provisional}
+    set {_uniqueStorage()._provisional = newValue}
+  }
+
+  public var maximumRetainedNodePayloadBytes: UInt64 {
+    get {_storage._maximumRetainedNodePayloadBytes}
+    set {_uniqueStorage()._maximumRetainedNodePayloadBytes = newValue}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public nonisolated struct Diskplan_V1_ScanCheckpointReady: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Deprecated Phase 0 field. Protocol 1.3 producers leave this unset and use
+  /// canonical_checkpoint_payload plus manifest so receivers can verify the
+  /// exact bytes before exposing checkpoint evidence.
+  public var checkpoint: Diskplan_V1_ScanCheckpointEvidence {
+    get {_checkpoint ?? Diskplan_V1_ScanCheckpointEvidence()}
+    set {_checkpoint = newValue}
+  }
+  /// Returns true if `checkpoint` has been explicitly set.
+  public var hasCheckpoint: Bool {self._checkpoint != nil}
+  /// Clears the value of `checkpoint`. Subsequent reads from it will return its default value.
+  public mutating func clearCheckpoint() {self._checkpoint = nil}
+
+  public var canonicalCheckpointPayload: Data = Data()
+
+  public var manifest: Diskplan_V1_ScanCheckpointManifest {
+    get {_manifest ?? Diskplan_V1_ScanCheckpointManifest()}
+    set {_manifest = newValue}
+  }
+  /// Returns true if `manifest` has been explicitly set.
+  public var hasManifest: Bool {self._manifest != nil}
+  /// Clears the value of `manifest`. Subsequent reads from it will return its default value.
+  public mutating func clearManifest() {self._manifest = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _checkpoint: Diskplan_V1_ScanCheckpointEvidence? = nil
+  fileprivate var _manifest: Diskplan_V1_ScanCheckpointManifest? = nil
+}
+
+public nonisolated struct Diskplan_V1_ScanFinalized: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Deprecated Phase 0 field; see ScanCheckpointReady.checkpoint.
+  public var checkpoint: Diskplan_V1_ScanCheckpointEvidence {
+    get {_checkpoint ?? Diskplan_V1_ScanCheckpointEvidence()}
+    set {_checkpoint = newValue}
+  }
+  /// Returns true if `checkpoint` has been explicitly set.
+  public var hasCheckpoint: Bool {self._checkpoint != nil}
+  /// Clears the value of `checkpoint`. Subsequent reads from it will return its default value.
+  public mutating func clearCheckpoint() {self._checkpoint = nil}
+
+  public var reason: String = String()
+
+  public var canonicalCheckpointPayload: Data = Data()
+
+  public var manifest: Diskplan_V1_ScanCheckpointManifest {
+    get {_manifest ?? Diskplan_V1_ScanCheckpointManifest()}
+    set {_manifest = newValue}
+  }
+  /// Returns true if `manifest` has been explicitly set.
+  public var hasManifest: Bool {self._manifest != nil}
+  /// Clears the value of `manifest`. Subsequent reads from it will return its default value.
+  public mutating func clearManifest() {self._manifest = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _checkpoint: Diskplan_V1_ScanCheckpointEvidence? = nil
+  fileprivate var _manifest: Diskplan_V1_ScanCheckpointManifest? = nil
+}
+
+public nonisolated struct Diskplan_V1_ProvisionalPlanGroupSummary: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var groupID: String = String()
+
+  public var title: String = String()
+
+  public var actionCount: UInt64 = 0
+
+  public var immediateReclaimBytes: UInt64 = 0
+
+  public var conditionalReclaimBytes: UInt64 = 0
+
+  public var status: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ProvisionalPlanReady: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var planID: String = String()
+
+  public var actionCount: UInt64 = 0
+
+  public var immediateReclaimBytes: UInt64 = 0
+
+  public var conditionalReclaimBytes: UInt64 = 0
+
+  public var groups: [Diskplan_V1_ProvisionalPlanGroupSummary] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ProvisionalPlanInvalidated: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var previousPlanID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanCancelled: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var reason: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_ScanFinished: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var summary: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_EngineFailed: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var code: String = String()
+
+  public var detail: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_EngineEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var eventSequence: UInt64 = 0
+
+  public var requestID: UInt64 = 0
+
+  public var scanSessionID: String = String()
+
+  public var body: Diskplan_V1_EngineEvent.OneOf_Body? = nil
+
+  public var controlAccepted: Diskplan_V1_ControlAccepted {
+    get {
+      if case .controlAccepted(let v)? = body {return v}
+      return Diskplan_V1_ControlAccepted()
+    }
+    set {body = .controlAccepted(newValue)}
+  }
+
+  public var controlRejected: Diskplan_V1_ControlRejected {
+    get {
+      if case .controlRejected(let v)? = body {return v}
+      return Diskplan_V1_ControlRejected()
+    }
+    set {body = .controlRejected(newValue)}
+  }
+
+  public var scanStateChanged: Diskplan_V1_ScanStateChanged {
+    get {
+      if case .scanStateChanged(let v)? = body {return v}
+      return Diskplan_V1_ScanStateChanged()
+    }
+    set {body = .scanStateChanged(newValue)}
+  }
+
+  public var scanProgress: Diskplan_V1_ScanProgress {
+    get {
+      if case .scanProgress(let v)? = body {return v}
+      return Diskplan_V1_ScanProgress()
+    }
+    set {body = .scanProgress(newValue)}
+  }
+
+  public var provisionalPlanReady: Diskplan_V1_ProvisionalPlanReady {
+    get {
+      if case .provisionalPlanReady(let v)? = body {return v}
+      return Diskplan_V1_ProvisionalPlanReady()
+    }
+    set {body = .provisionalPlanReady(newValue)}
+  }
+
+  public var provisionalPlanInvalidated: Diskplan_V1_ProvisionalPlanInvalidated {
+    get {
+      if case .provisionalPlanInvalidated(let v)? = body {return v}
+      return Diskplan_V1_ProvisionalPlanInvalidated()
+    }
+    set {body = .provisionalPlanInvalidated(newValue)}
+  }
+
+  public var scanCancelled: Diskplan_V1_ScanCancelled {
+    get {
+      if case .scanCancelled(let v)? = body {return v}
+      return Diskplan_V1_ScanCancelled()
+    }
+    set {body = .scanCancelled(newValue)}
+  }
+
+  public var scanFinished: Diskplan_V1_ScanFinished {
+    get {
+      if case .scanFinished(let v)? = body {return v}
+      return Diskplan_V1_ScanFinished()
+    }
+    set {body = .scanFinished(newValue)}
+  }
+
+  public var engineFailed: Diskplan_V1_EngineFailed {
+    get {
+      if case .engineFailed(let v)? = body {return v}
+      return Diskplan_V1_EngineFailed()
+    }
+    set {body = .engineFailed(newValue)}
+  }
+
+  public var scanNodeObserved: Diskplan_V1_ScanNodeObserved {
+    get {
+      if case .scanNodeObserved(let v)? = body {return v}
+      return Diskplan_V1_ScanNodeObserved()
+    }
+    set {body = .scanNodeObserved(newValue)}
+  }
+
+  public var scanCheckpointReady: Diskplan_V1_ScanCheckpointReady {
+    get {
+      if case .scanCheckpointReady(let v)? = body {return v}
+      return Diskplan_V1_ScanCheckpointReady()
+    }
+    set {body = .scanCheckpointReady(newValue)}
+  }
+
+  public var scanFinalized: Diskplan_V1_ScanFinalized {
+    get {
+      if case .scanFinalized(let v)? = body {return v}
+      return Diskplan_V1_ScanFinalized()
+    }
+    set {body = .scanFinalized(newValue)}
+  }
+
+  public var scanCheckpointChunk: Diskplan_V1_ScanCheckpointChunk {
+    get {
+      if case .scanCheckpointChunk(let v)? = body {return v}
+      return Diskplan_V1_ScanCheckpointChunk()
+    }
+    set {body = .scanCheckpointChunk(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum OneOf_Body: Equatable, Sendable {
+    case controlAccepted(Diskplan_V1_ControlAccepted)
+    case controlRejected(Diskplan_V1_ControlRejected)
+    case scanStateChanged(Diskplan_V1_ScanStateChanged)
+    case scanProgress(Diskplan_V1_ScanProgress)
+    case provisionalPlanReady(Diskplan_V1_ProvisionalPlanReady)
+    case provisionalPlanInvalidated(Diskplan_V1_ProvisionalPlanInvalidated)
+    case scanCancelled(Diskplan_V1_ScanCancelled)
+    case scanFinished(Diskplan_V1_ScanFinished)
+    case engineFailed(Diskplan_V1_EngineFailed)
+    case scanNodeObserved(Diskplan_V1_ScanNodeObserved)
+    case scanCheckpointReady(Diskplan_V1_ScanCheckpointReady)
+    case scanFinalized(Diskplan_V1_ScanFinalized)
+    case scanCheckpointChunk(Diskplan_V1_ScanCheckpointChunk)
+
+  }
+
+  public init() {}
+}
+
+public nonisolated struct Diskplan_V1_Envelope: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sequence: UInt64 {
+    get {_storage._sequence}
+    set {_uniqueStorage()._sequence = newValue}
+  }
+
+  public var body: OneOf_Body? {
+    get {return _storage._body}
+    set {_uniqueStorage()._body = newValue}
+  }
 
   public var hello: Diskplan_V1_Hello {
     get {
-      if case .hello(let v)? = body {return v}
+      if case .hello(let v)? = _storage._body {return v}
       return Diskplan_V1_Hello()
     }
-    set {body = .hello(newValue)}
+    set {_uniqueStorage()._body = .hello(newValue)}
   }
 
   public var helloAccepted: Diskplan_V1_HelloAccepted {
     get {
-      if case .helloAccepted(let v)? = body {return v}
+      if case .helloAccepted(let v)? = _storage._body {return v}
       return Diskplan_V1_HelloAccepted()
     }
-    set {body = .helloAccepted(newValue)}
+    set {_uniqueStorage()._body = .helloAccepted(newValue)}
   }
 
   public var helloRejected: Diskplan_V1_HelloRejected {
     get {
-      if case .helloRejected(let v)? = body {return v}
+      if case .helloRejected(let v)? = _storage._body {return v}
       return Diskplan_V1_HelloRejected()
     }
-    set {body = .helloRejected(newValue)}
+    set {_uniqueStorage()._body = .helloRejected(newValue)}
   }
 
   public var business: Diskplan_V1_BusinessEnvelope {
     get {
-      if case .business(let v)? = body {return v}
+      if case .business(let v)? = _storage._body {return v}
       return Diskplan_V1_BusinessEnvelope()
     }
-    set {body = .business(newValue)}
+    set {_uniqueStorage()._body = .business(newValue)}
+  }
+
+  public var startScanRequest: Diskplan_V1_StartScanRequest {
+    get {
+      if case .startScanRequest(let v)? = _storage._body {return v}
+      return Diskplan_V1_StartScanRequest()
+    }
+    set {_uniqueStorage()._body = .startScanRequest(newValue)}
+  }
+
+  public var scanControlRequest: Diskplan_V1_ScanControlRequest {
+    get {
+      if case .scanControlRequest(let v)? = _storage._body {return v}
+      return Diskplan_V1_ScanControlRequest()
+    }
+    set {_uniqueStorage()._body = .scanControlRequest(newValue)}
+  }
+
+  public var engineEvent: Diskplan_V1_EngineEvent {
+    get {
+      if case .engineEvent(let v)? = _storage._body {return v}
+      return Diskplan_V1_EngineEvent()
+    }
+    set {_uniqueStorage()._body = .engineEvent(newValue)}
   }
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -239,10 +2212,15 @@ public nonisolated struct Diskplan_V1_Envelope: Sendable {
     case helloAccepted(Diskplan_V1_HelloAccepted)
     case helloRejected(Diskplan_V1_HelloRejected)
     case business(Diskplan_V1_BusinessEnvelope)
+    case startScanRequest(Diskplan_V1_StartScanRequest)
+    case scanControlRequest(Diskplan_V1_ScanControlRequest)
+    case engineEvent(Diskplan_V1_EngineEvent)
 
   }
 
   public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
 }
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
@@ -251,6 +2229,34 @@ fileprivate nonisolated let _protobuf_package = "diskplan.v1"
 
 nonisolated extension Diskplan_V1_RejectCode: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0REJECT_CODE_UNSPECIFIED\0\u{1}REJECT_CODE_PROTOCOL_MAJOR_MISMATCH\0\u{1}REJECT_CODE_MISSING_REQUIRED_CAPABILITY\0\u{1}REJECT_CODE_BUSINESS_BEFORE_HANDSHAKE\0\u{1}REJECT_CODE_MALFORMED_ENVELOPE\0\u{1}REJECT_CODE_FRAME_TOO_LARGE\0\u{1}REJECT_CODE_INTERNAL_ERROR\0\u{1}REJECT_CODE_BUSINESS_UNSUPPORTED\0")
+}
+
+nonisolated extension Diskplan_V1_ScanControlKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SCAN_CONTROL_KIND_UNSPECIFIED\0\u{1}SCAN_CONTROL_KIND_START_SCAN\0\u{1}SCAN_CONTROL_KIND_PAUSE_SCAN\0\u{1}SCAN_CONTROL_KIND_RESUME_SCAN\0\u{1}SCAN_CONTROL_KIND_PAUSE_AND_BUILD_PROVISIONAL_PLAN\0\u{1}SCAN_CONTROL_KIND_CANCEL_SCAN\0\u{1}SCAN_CONTROL_KIND_CHECKPOINT_SCAN\0\u{1}SCAN_CONTROL_KIND_FINALIZE_PARTIAL_SCAN\0\u{1}SCAN_CONTROL_KIND_CHECKPOINT_PROVISIONAL_EVIDENCE\0")
+}
+
+nonisolated extension Diskplan_V1_ScanState: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SCAN_STATE_UNSPECIFIED\0\u{1}SCAN_STATE_IDLE\0\u{1}SCAN_STATE_RUNNING\0\u{1}SCAN_STATE_PAUSED\0\u{1}SCAN_STATE_BUILDING_PROVISIONAL_PLAN\0\u{1}SCAN_STATE_PROVISIONAL_PLAN_READY\0\u{1}SCAN_STATE_CANCELLING\0\u{1}SCAN_STATE_CANCELLED\0\u{1}SCAN_STATE_FINISHED\0\u{1}SCAN_STATE_FAILED\0\u{1}SCAN_STATE_FINALIZING_PARTIAL\0\u{1}SCAN_STATE_FINALIZED_PARTIAL\0")
+}
+
+nonisolated extension Diskplan_V1_ScanMachineState: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SCAN_MACHINE_STATE_UNSPECIFIED\0\u{1}SCAN_MACHINE_STATE_READY\0\u{1}SCAN_MACHINE_STATE_SCANNING\0\u{1}SCAN_MACHINE_STATE_COMPLETE\0\u{1}SCAN_MACHINE_STATE_PARTIAL\0\u{1}SCAN_MACHINE_STATE_CANCELLED\0")
+}
+
+nonisolated extension Diskplan_V1_ControlRejectCode: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CONTROL_REJECT_CODE_UNSPECIFIED\0\u{1}CONTROL_REJECT_CODE_INVALID_STATE\0\u{1}CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID\0\u{1}CONTROL_REJECT_CODE_MALFORMED_REQUEST\0\u{1}CONTROL_REJECT_CODE_UNAVAILABLE\0\u{1}CONTROL_REJECT_CODE_CAPACITY_EXCEEDED\0")
+}
+
+nonisolated extension Diskplan_V1_ScanSetupRejectCode: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SCAN_SETUP_REJECT_CODE_UNSPECIFIED\0\u{1}SCAN_SETUP_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED\0\u{1}SCAN_SETUP_REJECT_CODE_INVALID_PROFILE\0\u{1}SCAN_SETUP_REJECT_CODE_INVALID_ROOT\0\u{1}SCAN_SETUP_REJECT_CODE_INVALID_BUDGET\0\u{1}SCAN_SETUP_REJECT_CODE_DUPLICATE_ROOT_ID\0\u{1}SCAN_SETUP_REJECT_CODE_MATERIALIZATION_POLICY_UNAVAILABLE\0\u{1}SCAN_SETUP_REJECT_CODE_ROOT_DISCOVERY_UNAVAILABLE\0\u{1}SCAN_SETUP_REJECT_CODE_SCANNER_INITIALIZATION_FAILED\0")
+}
+
+nonisolated extension Diskplan_V1_EvidenceStatus: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0EVIDENCE_STATUS_UNSPECIFIED\0\u{1}EVIDENCE_STATUS_KNOWN\0\u{1}EVIDENCE_STATUS_ABSENT\0\u{1}EVIDENCE_STATUS_UNKNOWN\0\u{1}EVIDENCE_STATUS_UNREADABLE\0\u{1}EVIDENCE_STATUS_FAILED\0")
+}
+
+nonisolated extension Diskplan_V1_ByteMeasureKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0BYTE_MEASURE_KIND_UNSPECIFIED\0\u{1}BYTE_MEASURE_KIND_EXACT\0\u{1}BYTE_MEASURE_KIND_LOWER_BOUND\0\u{1}BYTE_MEASURE_KIND_UNKNOWN\0")
 }
 
 nonisolated extension Diskplan_V1_ProtocolVersion: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -455,9 +2461,9 @@ nonisolated extension Diskplan_V1_BusinessEnvelope: SwiftProtobuf.Message, Swift
   }
 }
 
-nonisolated extension Diskplan_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".Envelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}sequence\0\u{2}\u{9}hello\0\u{3}hello_accepted\0\u{3}hello_rejected\0\u{2}\u{8}business\0")
+nonisolated extension Diskplan_V1_StartScanRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".StartScanRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}profile\0\u{1}roots\0\u{3}maximum_duration_millis\0\u{3}batch_size\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -465,57 +2471,2768 @@ nonisolated extension Diskplan_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.sequence) }()
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.profile) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.roots) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.maximumDurationMillis) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.batchSize) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.requestID != 0 {
+      try visitor.visitSingularUInt64Field(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.profile.isEmpty {
+      try visitor.visitSingularStringField(value: self.profile, fieldNumber: 2)
+    }
+    if !self.roots.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.roots, fieldNumber: 3)
+    }
+    if self.maximumDurationMillis != 0 {
+      try visitor.visitSingularUInt64Field(value: self.maximumDurationMillis, fieldNumber: 4)
+    }
+    if self.batchSize != 0 {
+      try visitor.visitSingularUInt32Field(value: self.batchSize, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_StartScanRequest, rhs: Diskplan_V1_StartScanRequest) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.profile != rhs.profile {return false}
+    if lhs.roots != rhs.roots {return false}
+    if lhs.maximumDurationMillis != rhs.maximumDurationMillis {return false}
+    if lhs.batchSize != rhs.batchSize {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanRootRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanRootRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}root_id\0\u{3}raw_absolute_path\0\u{3}display_path\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.rootID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.rawAbsolutePath) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.displayPath) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.rootID.isEmpty {
+      try visitor.visitSingularStringField(value: self.rootID, fieldNumber: 1)
+    }
+    if !self.rawAbsolutePath.isEmpty {
+      try visitor.visitSingularBytesField(value: self.rawAbsolutePath, fieldNumber: 2)
+    }
+    if !self.displayPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.displayPath, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanRootRequest, rhs: Diskplan_V1_ScanRootRequest) -> Bool {
+    if lhs.rootID != rhs.rootID {return false}
+    if lhs.rawAbsolutePath != rhs.rawAbsolutePath {return false}
+    if lhs.displayPath != rhs.displayPath {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanControlRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanControlRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}control\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.control) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.requestID != 0 {
+      try visitor.visitSingularUInt64Field(value: self.requestID, fieldNumber: 1)
+    }
+    if self.control != .unspecified {
+      try visitor.visitSingularEnumField(value: self.control, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanControlRequest, rhs: Diskplan_V1_ScanControlRequest) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.control != rhs.control {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ControlAccepted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ControlAccepted"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}control\0\u{3}resulting_state\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.control) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.resultingState) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.control != .unspecified {
+      try visitor.visitSingularEnumField(value: self.control, fieldNumber: 1)
+    }
+    if self.resultingState != .unspecified {
+      try visitor.visitSingularEnumField(value: self.resultingState, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ControlAccepted, rhs: Diskplan_V1_ControlAccepted) -> Bool {
+    if lhs.control != rhs.control {return false}
+    if lhs.resultingState != rhs.resultingState {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ControlRejected: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ControlRejected"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}control\0\u{1}code\0\u{1}detail\0\u{3}current_state\0\u{3}setup_code\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.control) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.code) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.detail) }()
+      case 4: try { try decoder.decodeSingularEnumField(value: &self.currentState) }()
+      case 5: try { try decoder.decodeSingularEnumField(value: &self.setupCode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.control != .unspecified {
+      try visitor.visitSingularEnumField(value: self.control, fieldNumber: 1)
+    }
+    if self.code != .unspecified {
+      try visitor.visitSingularEnumField(value: self.code, fieldNumber: 2)
+    }
+    if !self.detail.isEmpty {
+      try visitor.visitSingularStringField(value: self.detail, fieldNumber: 3)
+    }
+    if self.currentState != .unspecified {
+      try visitor.visitSingularEnumField(value: self.currentState, fieldNumber: 4)
+    }
+    if self.setupCode != .unspecified {
+      try visitor.visitSingularEnumField(value: self.setupCode, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ControlRejected, rhs: Diskplan_V1_ControlRejected) -> Bool {
+    if lhs.control != rhs.control {return false}
+    if lhs.code != rhs.code {return false}
+    if lhs.detail != rhs.detail {return false}
+    if lhs.currentState != rhs.currentState {return false}
+    if lhs.setupCode != rhs.setupCode {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanStateChanged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanStateChanged"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0\u{1}reason\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.state) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.state != .unspecified {
+      try visitor.visitSingularEnumField(value: self.state, fieldNumber: 1)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanStateChanged, rhs: Diskplan_V1_ScanStateChanged) -> Bool {
+    if lhs.state != rhs.state {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanProgress: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanProgress"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}profile\0\u{3}elapsed_millis\0\u{1}entries\0\u{1}directories\0\u{1}candidates\0\u{3}allocated_bytes_observed\0\u{3}reclaim_estimate_bytes\0\u{3}complete_roots\0\u{3}partial_roots\0\u{3}entries_per_second\0\u{3}current_root\0\u{3}structural_budget\0\u{3}retained_nodes\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.profile) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.elapsedMillis) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.entries) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.directories) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.candidates) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.allocatedBytesObserved) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.reclaimEstimateBytes) }()
+      case 8: try { try decoder.decodeSingularUInt64Field(value: &self.completeRoots) }()
+      case 9: try { try decoder.decodeSingularUInt64Field(value: &self.partialRoots) }()
+      case 10: try { try decoder.decodeSingularUInt64Field(value: &self.entriesPerSecond) }()
+      case 11: try { try decoder.decodeSingularStringField(value: &self.currentRoot) }()
+      case 12: try { try decoder.decodeSingularUInt64Field(value: &self.structuralBudget) }()
+      case 13: try { try decoder.decodeSingularUInt64Field(value: &self.retainedNodes) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.profile.isEmpty {
+      try visitor.visitSingularStringField(value: self.profile, fieldNumber: 1)
+    }
+    if self.elapsedMillis != 0 {
+      try visitor.visitSingularUInt64Field(value: self.elapsedMillis, fieldNumber: 2)
+    }
+    if self.entries != 0 {
+      try visitor.visitSingularUInt64Field(value: self.entries, fieldNumber: 3)
+    }
+    if self.directories != 0 {
+      try visitor.visitSingularUInt64Field(value: self.directories, fieldNumber: 4)
+    }
+    if self.candidates != 0 {
+      try visitor.visitSingularUInt64Field(value: self.candidates, fieldNumber: 5)
+    }
+    if self.allocatedBytesObserved != 0 {
+      try visitor.visitSingularUInt64Field(value: self.allocatedBytesObserved, fieldNumber: 6)
+    }
+    if self.reclaimEstimateBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.reclaimEstimateBytes, fieldNumber: 7)
+    }
+    if self.completeRoots != 0 {
+      try visitor.visitSingularUInt64Field(value: self.completeRoots, fieldNumber: 8)
+    }
+    if self.partialRoots != 0 {
+      try visitor.visitSingularUInt64Field(value: self.partialRoots, fieldNumber: 9)
+    }
+    if self.entriesPerSecond != 0 {
+      try visitor.visitSingularUInt64Field(value: self.entriesPerSecond, fieldNumber: 10)
+    }
+    if !self.currentRoot.isEmpty {
+      try visitor.visitSingularStringField(value: self.currentRoot, fieldNumber: 11)
+    }
+    if self.structuralBudget != 0 {
+      try visitor.visitSingularUInt64Field(value: self.structuralBudget, fieldNumber: 12)
+    }
+    if self.retainedNodes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.retainedNodes, fieldNumber: 13)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanProgress, rhs: Diskplan_V1_ScanProgress) -> Bool {
+    if lhs.profile != rhs.profile {return false}
+    if lhs.elapsedMillis != rhs.elapsedMillis {return false}
+    if lhs.entries != rhs.entries {return false}
+    if lhs.directories != rhs.directories {return false}
+    if lhs.candidates != rhs.candidates {return false}
+    if lhs.allocatedBytesObserved != rhs.allocatedBytesObserved {return false}
+    if lhs.reclaimEstimateBytes != rhs.reclaimEstimateBytes {return false}
+    if lhs.completeRoots != rhs.completeRoots {return false}
+    if lhs.partialRoots != rhs.partialRoots {return false}
+    if lhs.entriesPerSecond != rhs.entriesPerSecond {return false}
+    if lhs.currentRoot != rhs.currentRoot {return false}
+    if lhs.structuralBudget != rhs.structuralBudget {return false}
+    if lhs.retainedNodes != rhs.retainedNodes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_EvidenceFailure: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".EvidenceFailure"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}status\0\u{1}reason\0\u{3}error_code\0\u{3}has_error_code\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.status) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      case 3: try { try decoder.decodeSingularInt32Field(value: &self.errorCode) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.hasErrorCode_p) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.status != .unspecified {
+      try visitor.visitSingularEnumField(value: self.status, fieldNumber: 1)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 2)
+    }
+    if self.errorCode != 0 {
+      try visitor.visitSingularInt32Field(value: self.errorCode, fieldNumber: 3)
+    }
+    if self.hasErrorCode_p != false {
+      try visitor.visitSingularBoolField(value: self.hasErrorCode_p, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_EvidenceFailure, rhs: Diskplan_V1_EvidenceFailure) -> Bool {
+    if lhs.status != rhs.status {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.errorCode != rhs.errorCode {return false}
+    if lhs.hasErrorCode_p != rhs.hasErrorCode_p {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_RawPath: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".RawPath"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}root_id\0\u{1}components\0\u{3}display_path\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.rootID) }()
+      case 2: try { try decoder.decodeRepeatedBytesField(value: &self.components) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.displayPath) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.rootID.isEmpty {
+      try visitor.visitSingularStringField(value: self.rootID, fieldNumber: 1)
+    }
+    if !self.components.isEmpty {
+      try visitor.visitRepeatedBytesField(value: self.components, fieldNumber: 2)
+    }
+    if !self.displayPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.displayPath, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_RawPath, rhs: Diskplan_V1_RawPath) -> Bool {
+    if lhs.rootID != rhs.rootID {return false}
+    if lhs.components != rhs.components {return false}
+    if lhs.displayPath != rhs.displayPath {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_CoverageEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".CoverageEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}complete\0\u{1}reasons\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.complete) }()
+      case 2: try { try decoder.decodeRepeatedStringField(value: &self.reasons) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.complete != false {
+      try visitor.visitSingularBoolField(value: self.complete, fieldNumber: 1)
+    }
+    if !self.reasons.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.reasons, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_CoverageEvidence, rhs: Diskplan_V1_CoverageEvidence) -> Bool {
+    if lhs.complete != rhs.complete {return false}
+    if lhs.reasons != rhs.reasons {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ByteMeasureEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ByteMeasureEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}bytes\0\u{1}reason\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.bytes) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 1)
+    }
+    if self.bytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.bytes, fieldNumber: 2)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ByteMeasureEvidence, rhs: Diskplan_V1_ByteMeasureEvidence) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.bytes != rhs.bytes {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ObjectIdentityEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ObjectIdentityEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}observation\0\u{1}device\0\u{3}file_id\0\u{3}object_type\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._observation) }()
+      case 2: try { try decoder.decodeSingularInt64Field(value: &self.device) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.fileID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.objectType) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._observation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.device != 0 {
+      try visitor.visitSingularInt64Field(value: self.device, fieldNumber: 2)
+    }
+    if self.fileID != 0 {
+      try visitor.visitSingularUInt64Field(value: self.fileID, fieldNumber: 3)
+    }
+    if !self.objectType.isEmpty {
+      try visitor.visitSingularStringField(value: self.objectType, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ObjectIdentityEvidence, rhs: Diskplan_V1_ObjectIdentityEvidence) -> Bool {
+    if lhs._observation != rhs._observation {return false}
+    if lhs.device != rhs.device {return false}
+    if lhs.fileID != rhs.fileID {return false}
+    if lhs.objectType != rhs.objectType {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_TimeValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".TimeValue"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}seconds_since_epoch\0\u{1}nanoseconds\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularInt64Field(value: &self.secondsSinceEpoch) }()
+      case 2: try { try decoder.decodeSingularInt32Field(value: &self.nanoseconds) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.secondsSinceEpoch != 0 {
+      try visitor.visitSingularInt64Field(value: self.secondsSinceEpoch, fieldNumber: 1)
+    }
+    if self.nanoseconds != 0 {
+      try visitor.visitSingularInt32Field(value: self.nanoseconds, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_TimeValue, rhs: Diskplan_V1_TimeValue) -> Bool {
+    if lhs.secondsSinceEpoch != rhs.secondsSinceEpoch {return false}
+    if lhs.nanoseconds != rhs.nanoseconds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_TimeEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".TimeEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}observation\0\u{1}value\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._observation) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._value) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._observation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._value {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_TimeEvidence, rhs: Diskplan_V1_TimeEvidence) -> Bool {
+    if lhs._observation != rhs._observation {return false}
+    if lhs._value != rhs._value {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_FilesystemTimeEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FilesystemTimeEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}access_time\0\u{3}modification_time\0\u{3}status_change_time\0\u{3}birth_time\0\u{1}trust\0")
+
+  fileprivate class _StorageClass {
+    var _accessTime: Diskplan_V1_TimeEvidence? = nil
+    var _modificationTime: Diskplan_V1_TimeEvidence? = nil
+    var _statusChangeTime: Diskplan_V1_TimeEvidence? = nil
+    var _birthTime: Diskplan_V1_TimeEvidence? = nil
+    var _trust: String = String()
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _accessTime = source._accessTime
+      _modificationTime = source._modificationTime
+      _statusChangeTime = source._statusChangeTime
+      _birthTime = source._birthTime
+      _trust = source._trust
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._accessTime) }()
+        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._modificationTime) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._statusChangeTime) }()
+        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._birthTime) }()
+        case 5: try { try decoder.decodeSingularStringField(value: &_storage._trust) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._accessTime {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      try { if let v = _storage._modificationTime {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+      } }()
+      try { if let v = _storage._statusChangeTime {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
+      try { if let v = _storage._birthTime {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      } }()
+      if !_storage._trust.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._trust, fieldNumber: 5)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_FilesystemTimeEvidence, rhs: Diskplan_V1_FilesystemTimeEvidence) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._accessTime != rhs_storage._accessTime {return false}
+        if _storage._modificationTime != rhs_storage._modificationTime {return false}
+        if _storage._statusChangeTime != rhs_storage._statusChangeTime {return false}
+        if _storage._birthTime != rhs_storage._birthTime {return false}
+        if _storage._trust != rhs_storage._trust {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_AccessPolicyEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AccessPolicyEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}observation\0\u{3}owner_user_id\0\u{3}owner_group_id\0\u{1}mode\0\u{1}flags\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._observation) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.ownerUserID) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.ownerGroupID) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.mode) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.flags) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._observation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.ownerUserID != 0 {
+      try visitor.visitSingularUInt32Field(value: self.ownerUserID, fieldNumber: 2)
+    }
+    if self.ownerGroupID != 0 {
+      try visitor.visitSingularUInt32Field(value: self.ownerGroupID, fieldNumber: 3)
+    }
+    if self.mode != 0 {
+      try visitor.visitSingularUInt32Field(value: self.mode, fieldNumber: 4)
+    }
+    if self.flags != 0 {
+      try visitor.visitSingularUInt32Field(value: self.flags, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_AccessPolicyEvidence, rhs: Diskplan_V1_AccessPolicyEvidence) -> Bool {
+    if lhs._observation != rhs._observation {return false}
+    if lhs.ownerUserID != rhs.ownerUserID {return false}
+    if lhs.ownerGroupID != rhs.ownerGroupID {return false}
+    if lhs.mode != rhs.mode {return false}
+    if lhs.flags != rhs.flags {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_BoolEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".BoolEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}observation\0\u{1}value\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._observation) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.value) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._observation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.value != false {
+      try visitor.visitSingularBoolField(value: self.value, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_BoolEvidence, rhs: Diskplan_V1_BoolEvidence) -> Bool {
+    if lhs._observation != rhs._observation {return false}
+    if lhs.value != rhs.value {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_UInt64Evidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".UInt64Evidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}observation\0\u{1}value\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._observation) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.value) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._observation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.value != 0 {
+      try visitor.visitSingularUInt64Field(value: self.value, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_UInt64Evidence, rhs: Diskplan_V1_UInt64Evidence) -> Bool {
+    if lhs._observation != rhs._observation {return false}
+    if lhs.value != rhs.value {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_UInt32Evidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".UInt32Evidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}observation\0\u{1}value\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._observation) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.value) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._observation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.value != 0 {
+      try visitor.visitSingularUInt32Field(value: self.value, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_UInt32Evidence, rhs: Diskplan_V1_UInt32Evidence) -> Bool {
+    if lhs._observation != rhs._observation {return false}
+    if lhs.value != rhs.value {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ItemByteEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ItemByteEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}logical\0\u{3}nominal_allocated\0\u{3}immediate_private_reclaim\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._logical) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._nominalAllocated) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._immediatePrivateReclaim) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._logical {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._nominalAllocated {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try { if let v = self._immediatePrivateReclaim {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ItemByteEvidence, rhs: Diskplan_V1_ItemByteEvidence) -> Bool {
+    if lhs._logical != rhs._logical {return false}
+    if lhs._nominalAllocated != rhs._nominalAllocated {return false}
+    if lhs._immediatePrivateReclaim != rhs._immediatePrivateReclaim {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_StorageTopologyEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".StorageTopologyEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}link_count\0\u{3}may_share_blocks\0\u{3}shares_all_blocks\0\u{3}clone_id\0\u{3}clone_refcount\0\u{3}conditional_group_reclaim\0")
+
+  fileprivate class _StorageClass {
+    var _linkCount: Diskplan_V1_UInt32Evidence? = nil
+    var _mayShareBlocks: Diskplan_V1_BoolEvidence? = nil
+    var _sharesAllBlocks: Diskplan_V1_BoolEvidence? = nil
+    var _cloneID: Diskplan_V1_UInt64Evidence? = nil
+    var _cloneRefcount: Diskplan_V1_UInt32Evidence? = nil
+    var _conditionalGroupReclaim: Diskplan_V1_ByteMeasureEvidence? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _linkCount = source._linkCount
+      _mayShareBlocks = source._mayShareBlocks
+      _sharesAllBlocks = source._sharesAllBlocks
+      _cloneID = source._cloneID
+      _cloneRefcount = source._cloneRefcount
+      _conditionalGroupReclaim = source._conditionalGroupReclaim
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._linkCount) }()
+        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._mayShareBlocks) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._sharesAllBlocks) }()
+        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._cloneID) }()
+        case 5: try { try decoder.decodeSingularMessageField(value: &_storage._cloneRefcount) }()
+        case 6: try { try decoder.decodeSingularMessageField(value: &_storage._conditionalGroupReclaim) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._linkCount {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      try { if let v = _storage._mayShareBlocks {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+      } }()
+      try { if let v = _storage._sharesAllBlocks {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
+      try { if let v = _storage._cloneID {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      } }()
+      try { if let v = _storage._cloneRefcount {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      } }()
+      try { if let v = _storage._conditionalGroupReclaim {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_StorageTopologyEvidence, rhs: Diskplan_V1_StorageTopologyEvidence) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._linkCount != rhs_storage._linkCount {return false}
+        if _storage._mayShareBlocks != rhs_storage._mayShareBlocks {return false}
+        if _storage._sharesAllBlocks != rhs_storage._sharesAllBlocks {return false}
+        if _storage._cloneID != rhs_storage._cloneID {return false}
+        if _storage._cloneRefcount != rhs_storage._cloneRefcount {return false}
+        if _storage._conditionalGroupReclaim != rhs_storage._conditionalGroupReclaim {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ProviderObjectIdentityEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProviderObjectIdentityEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}item_identifier\0\u{3}domain_identifier\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.itemIdentifier) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.domainIdentifier) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.itemIdentifier.isEmpty {
+      try visitor.visitSingularStringField(value: self.itemIdentifier, fieldNumber: 1)
+    }
+    if !self.domainIdentifier.isEmpty {
+      try visitor.visitSingularStringField(value: self.domainIdentifier, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ProviderObjectIdentityEvidence, rhs: Diskplan_V1_ProviderObjectIdentityEvidence) -> Bool {
+    if lhs.itemIdentifier != rhs.itemIdentifier {return false}
+    if lhs.domainIdentifier != rhs.domainIdentifier {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_StringPair: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".StringPair"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}key\0\u{1}value\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.key) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.value) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.key.isEmpty {
+      try visitor.visitSingularStringField(value: self.key, fieldNumber: 1)
+    }
+    if !self.value.isEmpty {
+      try visitor.visitSingularStringField(value: self.value, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_StringPair, rhs: Diskplan_V1_StringPair) -> Bool {
+    if lhs.key != rhs.key {return false}
+    if lhs.value != rhs.value {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ProviderScanEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProviderScanEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}observation\0\u{3}identity_observation\0\u{1}identity\0\u{3}promised_metadata_observation\0\u{3}promised_metadata\0\u{3}hidden_backing_bytes\0\u{3}controlled_non_materialization_acceptance\0")
+
+  fileprivate class _StorageClass {
+    var _observation: Diskplan_V1_EvidenceFailure? = nil
+    var _identityObservation: Diskplan_V1_EvidenceFailure? = nil
+    var _identity: Diskplan_V1_ProviderObjectIdentityEvidence? = nil
+    var _promisedMetadataObservation: Diskplan_V1_EvidenceFailure? = nil
+    var _promisedMetadata: [Diskplan_V1_StringPair] = []
+    var _hiddenBackingBytes: Diskplan_V1_ByteMeasureEvidence? = nil
+    var _controlledNonMaterializationAcceptance: Diskplan_V1_BoolEvidence? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _observation = source._observation
+      _identityObservation = source._identityObservation
+      _identity = source._identity
+      _promisedMetadataObservation = source._promisedMetadataObservation
+      _promisedMetadata = source._promisedMetadata
+      _hiddenBackingBytes = source._hiddenBackingBytes
+      _controlledNonMaterializationAcceptance = source._controlledNonMaterializationAcceptance
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._observation) }()
+        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._identityObservation) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._identity) }()
+        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._promisedMetadataObservation) }()
+        case 5: try { try decoder.decodeRepeatedMessageField(value: &_storage._promisedMetadata) }()
+        case 6: try { try decoder.decodeSingularMessageField(value: &_storage._hiddenBackingBytes) }()
+        case 7: try { try decoder.decodeSingularMessageField(value: &_storage._controlledNonMaterializationAcceptance) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._observation {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      try { if let v = _storage._identityObservation {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+      } }()
+      try { if let v = _storage._identity {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
+      try { if let v = _storage._promisedMetadataObservation {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      } }()
+      if !_storage._promisedMetadata.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._promisedMetadata, fieldNumber: 5)
+      }
+      try { if let v = _storage._hiddenBackingBytes {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+      } }()
+      try { if let v = _storage._controlledNonMaterializationAcceptance {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ProviderScanEvidence, rhs: Diskplan_V1_ProviderScanEvidence) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._observation != rhs_storage._observation {return false}
+        if _storage._identityObservation != rhs_storage._identityObservation {return false}
+        if _storage._identity != rhs_storage._identity {return false}
+        if _storage._promisedMetadataObservation != rhs_storage._promisedMetadataObservation {return false}
+        if _storage._promisedMetadata != rhs_storage._promisedMetadata {return false}
+        if _storage._hiddenBackingBytes != rhs_storage._hiddenBackingBytes {return false}
+        if _storage._controlledNonMaterializationAcceptance != rhs_storage._controlledNonMaterializationAcceptance {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScannedNodeEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScannedNodeEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{1}identity\0\u{1}bytes\0\u{3}storage_topology\0\u{3}filesystem_times\0\u{3}access_policy\0\u{1}coverage\0\u{3}provider_boundary\0\u{3}provider_boundary_reason\0\u{3}provider_evidence\0")
+
+  fileprivate class _StorageClass {
+    var _path: Diskplan_V1_RawPath? = nil
+    var _identity: Diskplan_V1_ObjectIdentityEvidence? = nil
+    var _bytes: Diskplan_V1_ItemByteEvidence? = nil
+    var _storageTopology: Diskplan_V1_StorageTopologyEvidence? = nil
+    var _filesystemTimes: Diskplan_V1_FilesystemTimeEvidence? = nil
+    var _accessPolicy: Diskplan_V1_AccessPolicyEvidence? = nil
+    var _coverage: Diskplan_V1_CoverageEvidence? = nil
+    var _providerBoundary: String = String()
+    var _providerBoundaryReason: String = String()
+    var _providerEvidence: Diskplan_V1_ProviderScanEvidence? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _path = source._path
+      _identity = source._identity
+      _bytes = source._bytes
+      _storageTopology = source._storageTopology
+      _filesystemTimes = source._filesystemTimes
+      _accessPolicy = source._accessPolicy
+      _coverage = source._coverage
+      _providerBoundary = source._providerBoundary
+      _providerBoundaryReason = source._providerBoundaryReason
+      _providerEvidence = source._providerEvidence
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._path) }()
+        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._identity) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._bytes) }()
+        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._storageTopology) }()
+        case 5: try { try decoder.decodeSingularMessageField(value: &_storage._filesystemTimes) }()
+        case 6: try { try decoder.decodeSingularMessageField(value: &_storage._accessPolicy) }()
+        case 7: try { try decoder.decodeSingularMessageField(value: &_storage._coverage) }()
+        case 8: try { try decoder.decodeSingularStringField(value: &_storage._providerBoundary) }()
+        case 9: try { try decoder.decodeSingularStringField(value: &_storage._providerBoundaryReason) }()
+        case 10: try { try decoder.decodeSingularMessageField(value: &_storage._providerEvidence) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._path {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      try { if let v = _storage._identity {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+      } }()
+      try { if let v = _storage._bytes {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
+      try { if let v = _storage._storageTopology {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      } }()
+      try { if let v = _storage._filesystemTimes {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      } }()
+      try { if let v = _storage._accessPolicy {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+      } }()
+      try { if let v = _storage._coverage {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+      } }()
+      if !_storage._providerBoundary.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._providerBoundary, fieldNumber: 8)
+      }
+      if !_storage._providerBoundaryReason.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._providerBoundaryReason, fieldNumber: 9)
+      }
+      try { if let v = _storage._providerEvidence {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScannedNodeEvidence, rhs: Diskplan_V1_ScannedNodeEvidence) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._path != rhs_storage._path {return false}
+        if _storage._identity != rhs_storage._identity {return false}
+        if _storage._bytes != rhs_storage._bytes {return false}
+        if _storage._storageTopology != rhs_storage._storageTopology {return false}
+        if _storage._filesystemTimes != rhs_storage._filesystemTimes {return false}
+        if _storage._accessPolicy != rhs_storage._accessPolicy {return false}
+        if _storage._coverage != rhs_storage._coverage {return false}
+        if _storage._providerBoundary != rhs_storage._providerBoundary {return false}
+        if _storage._providerBoundaryReason != rhs_storage._providerBoundaryReason {return false}
+        if _storage._providerEvidence != rhs_storage._providerEvidence {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanNodeObserved: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanNodeObserved"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}node\0\u{3}directory_closed\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._node) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.directoryClosed) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._node {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.directoryClosed != false {
+      try visitor.visitSingularBoolField(value: self.directoryClosed, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanNodeObserved, rhs: Diskplan_V1_ScanNodeObserved) -> Bool {
+    if lhs._node != rhs._node {return false}
+    if lhs.directoryClosed != rhs.directoryClosed {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_RootScanEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".RootScanEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}root\0\u{1}identity\0\u{3}provider_boundary\0\u{3}provider_boundary_reason\0\u{3}aggregate_bytes\0\u{1}coverage\0\u{3}entries_observed\0\u{3}directories_closed\0")
+
+  fileprivate class _StorageClass {
+    var _root: Diskplan_V1_ScanRootRequest? = nil
+    var _identity: Diskplan_V1_ObjectIdentityEvidence? = nil
+    var _providerBoundary: String = String()
+    var _providerBoundaryReason: String = String()
+    var _aggregateBytes: Diskplan_V1_ItemByteEvidence? = nil
+    var _coverage: Diskplan_V1_CoverageEvidence? = nil
+    var _entriesObserved: UInt64 = 0
+    var _directoriesClosed: UInt64 = 0
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _root = source._root
+      _identity = source._identity
+      _providerBoundary = source._providerBoundary
+      _providerBoundaryReason = source._providerBoundaryReason
+      _aggregateBytes = source._aggregateBytes
+      _coverage = source._coverage
+      _entriesObserved = source._entriesObserved
+      _directoriesClosed = source._directoriesClosed
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._root) }()
+        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._identity) }()
+        case 3: try { try decoder.decodeSingularStringField(value: &_storage._providerBoundary) }()
+        case 4: try { try decoder.decodeSingularStringField(value: &_storage._providerBoundaryReason) }()
+        case 5: try { try decoder.decodeSingularMessageField(value: &_storage._aggregateBytes) }()
+        case 6: try { try decoder.decodeSingularMessageField(value: &_storage._coverage) }()
+        case 7: try { try decoder.decodeSingularUInt64Field(value: &_storage._entriesObserved) }()
+        case 8: try { try decoder.decodeSingularUInt64Field(value: &_storage._directoriesClosed) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._root {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      try { if let v = _storage._identity {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+      } }()
+      if !_storage._providerBoundary.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._providerBoundary, fieldNumber: 3)
+      }
+      if !_storage._providerBoundaryReason.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._providerBoundaryReason, fieldNumber: 4)
+      }
+      try { if let v = _storage._aggregateBytes {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      } }()
+      try { if let v = _storage._coverage {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+      } }()
+      if _storage._entriesObserved != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._entriesObserved, fieldNumber: 7)
+      }
+      if _storage._directoriesClosed != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._directoriesClosed, fieldNumber: 8)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_RootScanEvidence, rhs: Diskplan_V1_RootScanEvidence) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._root != rhs_storage._root {return false}
+        if _storage._identity != rhs_storage._identity {return false}
+        if _storage._providerBoundary != rhs_storage._providerBoundary {return false}
+        if _storage._providerBoundaryReason != rhs_storage._providerBoundaryReason {return false}
+        if _storage._aggregateBytes != rhs_storage._aggregateBytes {return false}
+        if _storage._coverage != rhs_storage._coverage {return false}
+        if _storage._entriesObserved != rhs_storage._entriesObserved {return false}
+        if _storage._directoriesClosed != rhs_storage._directoriesClosed {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_RootFailureEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".RootFailureEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}root_id\0\u{1}observation\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.rootID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._observation) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.rootID.isEmpty {
+      try visitor.visitSingularStringField(value: self.rootID, fieldNumber: 1)
+    }
+    try { if let v = self._observation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_RootFailureEvidence, rhs: Diskplan_V1_RootFailureEvidence) -> Bool {
+    if lhs.rootID != rhs.rootID {return false}
+    if lhs._observation != rhs._observation {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ProcessActivityEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProcessActivityEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}process_id\0\u{1}command\0\u{3}file_descriptor\0\u{3}raw_path\0\u{3}display_path\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularInt32Field(value: &self.processID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.command) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.fileDescriptor) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.rawPath) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.displayPath) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.processID != 0 {
+      try visitor.visitSingularInt32Field(value: self.processID, fieldNumber: 1)
+    }
+    if !self.command.isEmpty {
+      try visitor.visitSingularStringField(value: self.command, fieldNumber: 2)
+    }
+    if !self.fileDescriptor.isEmpty {
+      try visitor.visitSingularStringField(value: self.fileDescriptor, fieldNumber: 3)
+    }
+    if !self.rawPath.isEmpty {
+      try visitor.visitSingularBytesField(value: self.rawPath, fieldNumber: 4)
+    }
+    if !self.displayPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.displayPath, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ProcessActivityEvidence, rhs: Diskplan_V1_ProcessActivityEvidence) -> Bool {
+    if lhs.processID != rhs.processID {return false}
+    if lhs.command != rhs.command {return false}
+    if lhs.fileDescriptor != rhs.fileDescriptor {return false}
+    if lhs.rawPath != rhs.rawPath {return false}
+    if lhs.displayPath != rhs.displayPath {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_StringUInt64Pair: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".StringUInt64Pair"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}key\0\u{1}value\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.key) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.value) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.key.isEmpty {
+      try visitor.visitSingularStringField(value: self.key, fieldNumber: 1)
+    }
+    if self.value != 0 {
+      try visitor.visitSingularUInt64Field(value: self.value, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_StringUInt64Pair, rhs: Diskplan_V1_StringUInt64Pair) -> Bool {
+    if lhs.key != rhs.key {return false}
+    if lhs.value != rhs.value {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_GlobalFactEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".GlobalFactEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}known\0\u{3}unavailable_reason\0\u{3}uint64_values\0\u{3}string_values\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.known) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.unavailableReason) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.uint64Values) }()
+      case 4: try { try decoder.decodeRepeatedStringField(value: &self.stringValues) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.known != false {
+      try visitor.visitSingularBoolField(value: self.known, fieldNumber: 1)
+    }
+    if !self.unavailableReason.isEmpty {
+      try visitor.visitSingularStringField(value: self.unavailableReason, fieldNumber: 2)
+    }
+    if !self.uint64Values.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.uint64Values, fieldNumber: 3)
+    }
+    if !self.stringValues.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.stringValues, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_GlobalFactEvidence, rhs: Diskplan_V1_GlobalFactEvidence) -> Bool {
+    if lhs.known != rhs.known {return false}
+    if lhs.unavailableReason != rhs.unavailableReason {return false}
+    if lhs.uint64Values != rhs.uint64Values {return false}
+    if lhs.stringValues != rhs.stringValues {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanCollectorConfigurationEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanCollectorConfigurationEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}process_activity_collector_id\0\u{3}process_activity_deadline_nanoseconds\0\u{3}has_process_activity_deadline\0\u{3}global_fact_collector_ids\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.processActivityCollectorID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.processActivityDeadlineNanoseconds) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.hasProcessActivityDeadline_p) }()
+      case 4: try { try decoder.decodeRepeatedStringField(value: &self.globalFactCollectorIds) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.processActivityCollectorID.isEmpty {
+      try visitor.visitSingularStringField(value: self.processActivityCollectorID, fieldNumber: 1)
+    }
+    if self.processActivityDeadlineNanoseconds != 0 {
+      try visitor.visitSingularUInt64Field(value: self.processActivityDeadlineNanoseconds, fieldNumber: 2)
+    }
+    if self.hasProcessActivityDeadline_p != false {
+      try visitor.visitSingularBoolField(value: self.hasProcessActivityDeadline_p, fieldNumber: 3)
+    }
+    if !self.globalFactCollectorIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.globalFactCollectorIds, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanCollectorConfigurationEvidence, rhs: Diskplan_V1_ScanCollectorConfigurationEvidence) -> Bool {
+    if lhs.processActivityCollectorID != rhs.processActivityCollectorID {return false}
+    if lhs.processActivityDeadlineNanoseconds != rhs.processActivityDeadlineNanoseconds {return false}
+    if lhs.hasProcessActivityDeadline_p != rhs.hasProcessActivityDeadline_p {return false}
+    if lhs.globalFactCollectorIds != rhs.globalFactCollectorIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanCheckpointEvidence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanCheckpointEvidence"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}profile\0\u{3}resolver_version\0\u{3}wall_clock_unix_millis\0\u{3}monotonic_nanoseconds\0\u{3}maximum_entries_per_root\0\u{3}maximum_depth\0\u{3}maximum_entries_per_directory\0\u{3}maximum_pending_name_bytes\0\u{3}retained_node_count\0\u{3}maximum_duration_millis\0\u{3}resolved_roots\0\u{1}progress\0\u{1}coverage\0\u{3}retained_nodes\0\u{3}completed_roots\0\u{3}root_failures\0\u{3}process_activity_observation\0\u{3}process_activity\0\u{3}machine_state\0\u{3}resumable_in_process\0\u{1}provisional\0\u{3}collector_configuration\0\u{1}vm\0\u{1}swap\0\u{3}apfs_snapshots\0")
+
+  fileprivate class _StorageClass {
+    var _profile: String = String()
+    var _resolverVersion: UInt32 = 0
+    var _wallClockUnixMillis: UInt64 = 0
+    var _monotonicNanoseconds: UInt64 = 0
+    var _maximumEntriesPerRoot: UInt64 = 0
+    var _maximumDepth: UInt32 = 0
+    var _maximumEntriesPerDirectory: UInt64 = 0
+    var _maximumPendingNameBytes: UInt64 = 0
+    var _retainedNodeCount: UInt32 = 0
+    var _maximumDurationMillis: UInt64 = 0
+    var _resolvedRoots: [Diskplan_V1_ScanRootRequest] = []
+    var _progress: Diskplan_V1_ScanProgress? = nil
+    var _coverage: Diskplan_V1_CoverageEvidence? = nil
+    var _retainedNodes: [Diskplan_V1_ScannedNodeEvidence] = []
+    var _completedRoots: [Diskplan_V1_RootScanEvidence] = []
+    var _rootFailures: [Diskplan_V1_RootFailureEvidence] = []
+    var _processActivityObservation: Diskplan_V1_EvidenceFailure? = nil
+    var _processActivity: [Diskplan_V1_ProcessActivityEvidence] = []
+    var _machineState: Diskplan_V1_ScanMachineState = .unspecified
+    var _resumableInProcess: Bool = false
+    var _provisional: Bool = false
+    var _collectorConfiguration: Diskplan_V1_ScanCollectorConfigurationEvidence? = nil
+    var _vm: Diskplan_V1_GlobalFactEvidence? = nil
+    var _swap: Diskplan_V1_GlobalFactEvidence? = nil
+    var _apfsSnapshots: Diskplan_V1_GlobalFactEvidence? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _profile = source._profile
+      _resolverVersion = source._resolverVersion
+      _wallClockUnixMillis = source._wallClockUnixMillis
+      _monotonicNanoseconds = source._monotonicNanoseconds
+      _maximumEntriesPerRoot = source._maximumEntriesPerRoot
+      _maximumDepth = source._maximumDepth
+      _maximumEntriesPerDirectory = source._maximumEntriesPerDirectory
+      _maximumPendingNameBytes = source._maximumPendingNameBytes
+      _retainedNodeCount = source._retainedNodeCount
+      _maximumDurationMillis = source._maximumDurationMillis
+      _resolvedRoots = source._resolvedRoots
+      _progress = source._progress
+      _coverage = source._coverage
+      _retainedNodes = source._retainedNodes
+      _completedRoots = source._completedRoots
+      _rootFailures = source._rootFailures
+      _processActivityObservation = source._processActivityObservation
+      _processActivity = source._processActivity
+      _machineState = source._machineState
+      _resumableInProcess = source._resumableInProcess
+      _provisional = source._provisional
+      _collectorConfiguration = source._collectorConfiguration
+      _vm = source._vm
+      _swap = source._swap
+      _apfsSnapshots = source._apfsSnapshots
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._profile) }()
+        case 2: try { try decoder.decodeSingularUInt32Field(value: &_storage._resolverVersion) }()
+        case 3: try { try decoder.decodeSingularUInt64Field(value: &_storage._wallClockUnixMillis) }()
+        case 4: try { try decoder.decodeSingularUInt64Field(value: &_storage._monotonicNanoseconds) }()
+        case 5: try { try decoder.decodeSingularUInt64Field(value: &_storage._maximumEntriesPerRoot) }()
+        case 6: try { try decoder.decodeSingularUInt32Field(value: &_storage._maximumDepth) }()
+        case 7: try { try decoder.decodeSingularUInt64Field(value: &_storage._maximumEntriesPerDirectory) }()
+        case 8: try { try decoder.decodeSingularUInt64Field(value: &_storage._maximumPendingNameBytes) }()
+        case 9: try { try decoder.decodeSingularUInt32Field(value: &_storage._retainedNodeCount) }()
+        case 10: try { try decoder.decodeSingularUInt64Field(value: &_storage._maximumDurationMillis) }()
+        case 11: try { try decoder.decodeRepeatedMessageField(value: &_storage._resolvedRoots) }()
+        case 12: try { try decoder.decodeSingularMessageField(value: &_storage._progress) }()
+        case 13: try { try decoder.decodeSingularMessageField(value: &_storage._coverage) }()
+        case 14: try { try decoder.decodeRepeatedMessageField(value: &_storage._retainedNodes) }()
+        case 15: try { try decoder.decodeRepeatedMessageField(value: &_storage._completedRoots) }()
+        case 16: try { try decoder.decodeRepeatedMessageField(value: &_storage._rootFailures) }()
+        case 17: try { try decoder.decodeSingularMessageField(value: &_storage._processActivityObservation) }()
+        case 18: try { try decoder.decodeRepeatedMessageField(value: &_storage._processActivity) }()
+        case 19: try { try decoder.decodeSingularEnumField(value: &_storage._machineState) }()
+        case 20: try { try decoder.decodeSingularBoolField(value: &_storage._resumableInProcess) }()
+        case 21: try { try decoder.decodeSingularBoolField(value: &_storage._provisional) }()
+        case 22: try { try decoder.decodeSingularMessageField(value: &_storage._collectorConfiguration) }()
+        case 23: try { try decoder.decodeSingularMessageField(value: &_storage._vm) }()
+        case 24: try { try decoder.decodeSingularMessageField(value: &_storage._swap) }()
+        case 25: try { try decoder.decodeSingularMessageField(value: &_storage._apfsSnapshots) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._profile.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._profile, fieldNumber: 1)
+      }
+      if _storage._resolverVersion != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._resolverVersion, fieldNumber: 2)
+      }
+      if _storage._wallClockUnixMillis != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._wallClockUnixMillis, fieldNumber: 3)
+      }
+      if _storage._monotonicNanoseconds != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._monotonicNanoseconds, fieldNumber: 4)
+      }
+      if _storage._maximumEntriesPerRoot != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._maximumEntriesPerRoot, fieldNumber: 5)
+      }
+      if _storage._maximumDepth != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._maximumDepth, fieldNumber: 6)
+      }
+      if _storage._maximumEntriesPerDirectory != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._maximumEntriesPerDirectory, fieldNumber: 7)
+      }
+      if _storage._maximumPendingNameBytes != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._maximumPendingNameBytes, fieldNumber: 8)
+      }
+      if _storage._retainedNodeCount != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._retainedNodeCount, fieldNumber: 9)
+      }
+      if _storage._maximumDurationMillis != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._maximumDurationMillis, fieldNumber: 10)
+      }
+      if !_storage._resolvedRoots.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._resolvedRoots, fieldNumber: 11)
+      }
+      try { if let v = _storage._progress {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+      } }()
+      try { if let v = _storage._coverage {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+      } }()
+      if !_storage._retainedNodes.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._retainedNodes, fieldNumber: 14)
+      }
+      if !_storage._completedRoots.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._completedRoots, fieldNumber: 15)
+      }
+      if !_storage._rootFailures.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._rootFailures, fieldNumber: 16)
+      }
+      try { if let v = _storage._processActivityObservation {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
+      } }()
+      if !_storage._processActivity.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._processActivity, fieldNumber: 18)
+      }
+      if _storage._machineState != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._machineState, fieldNumber: 19)
+      }
+      if _storage._resumableInProcess != false {
+        try visitor.visitSingularBoolField(value: _storage._resumableInProcess, fieldNumber: 20)
+      }
+      if _storage._provisional != false {
+        try visitor.visitSingularBoolField(value: _storage._provisional, fieldNumber: 21)
+      }
+      try { if let v = _storage._collectorConfiguration {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
+      } }()
+      try { if let v = _storage._vm {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
+      } }()
+      try { if let v = _storage._swap {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 24)
+      } }()
+      try { if let v = _storage._apfsSnapshots {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 25)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanCheckpointEvidence, rhs: Diskplan_V1_ScanCheckpointEvidence) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._profile != rhs_storage._profile {return false}
+        if _storage._resolverVersion != rhs_storage._resolverVersion {return false}
+        if _storage._wallClockUnixMillis != rhs_storage._wallClockUnixMillis {return false}
+        if _storage._monotonicNanoseconds != rhs_storage._monotonicNanoseconds {return false}
+        if _storage._maximumEntriesPerRoot != rhs_storage._maximumEntriesPerRoot {return false}
+        if _storage._maximumDepth != rhs_storage._maximumDepth {return false}
+        if _storage._maximumEntriesPerDirectory != rhs_storage._maximumEntriesPerDirectory {return false}
+        if _storage._maximumPendingNameBytes != rhs_storage._maximumPendingNameBytes {return false}
+        if _storage._retainedNodeCount != rhs_storage._retainedNodeCount {return false}
+        if _storage._maximumDurationMillis != rhs_storage._maximumDurationMillis {return false}
+        if _storage._resolvedRoots != rhs_storage._resolvedRoots {return false}
+        if _storage._progress != rhs_storage._progress {return false}
+        if _storage._coverage != rhs_storage._coverage {return false}
+        if _storage._retainedNodes != rhs_storage._retainedNodes {return false}
+        if _storage._completedRoots != rhs_storage._completedRoots {return false}
+        if _storage._rootFailures != rhs_storage._rootFailures {return false}
+        if _storage._processActivityObservation != rhs_storage._processActivityObservation {return false}
+        if _storage._processActivity != rhs_storage._processActivity {return false}
+        if _storage._machineState != rhs_storage._machineState {return false}
+        if _storage._resumableInProcess != rhs_storage._resumableInProcess {return false}
+        if _storage._provisional != rhs_storage._provisional {return false}
+        if _storage._collectorConfiguration != rhs_storage._collectorConfiguration {return false}
+        if _storage._vm != rhs_storage._vm {return false}
+        if _storage._swap != rhs_storage._swap {return false}
+        if _storage._apfsSnapshots != rhs_storage._apfsSnapshots {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanCheckpointChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanCheckpointChunk"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}checkpoint_id\0\u{3}chunk_index\0\u{3}chunk_id\0\u{3}node_count\0\u{3}canonical_node_payload\0\u{3}payload_sha256\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.checkpointID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.chunkIndex) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.chunkID) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.nodeCount) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.canonicalNodePayload) }()
+      case 6: try { try decoder.decodeSingularBytesField(value: &self.payloadSha256) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.checkpointID.isEmpty {
+      try visitor.visitSingularStringField(value: self.checkpointID, fieldNumber: 1)
+    }
+    if self.chunkIndex != 0 {
+      try visitor.visitSingularUInt32Field(value: self.chunkIndex, fieldNumber: 2)
+    }
+    if !self.chunkID.isEmpty {
+      try visitor.visitSingularStringField(value: self.chunkID, fieldNumber: 3)
+    }
+    if self.nodeCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.nodeCount, fieldNumber: 4)
+    }
+    if !self.canonicalNodePayload.isEmpty {
+      try visitor.visitSingularBytesField(value: self.canonicalNodePayload, fieldNumber: 5)
+    }
+    if !self.payloadSha256.isEmpty {
+      try visitor.visitSingularBytesField(value: self.payloadSha256, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanCheckpointChunk, rhs: Diskplan_V1_ScanCheckpointChunk) -> Bool {
+    if lhs.checkpointID != rhs.checkpointID {return false}
+    if lhs.chunkIndex != rhs.chunkIndex {return false}
+    if lhs.chunkID != rhs.chunkID {return false}
+    if lhs.nodeCount != rhs.nodeCount {return false}
+    if lhs.canonicalNodePayload != rhs.canonicalNodePayload {return false}
+    if lhs.payloadSha256 != rhs.payloadSha256 {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanCheckpointChunkDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanCheckpointChunkDescriptor"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}chunk_index\0\u{3}chunk_id\0\u{3}node_count\0\u{3}payload_bytes\0\u{3}payload_sha256\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.chunkIndex) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.chunkID) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.nodeCount) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.payloadBytes) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.payloadSha256) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.chunkIndex != 0 {
+      try visitor.visitSingularUInt32Field(value: self.chunkIndex, fieldNumber: 1)
+    }
+    if !self.chunkID.isEmpty {
+      try visitor.visitSingularStringField(value: self.chunkID, fieldNumber: 2)
+    }
+    if self.nodeCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.nodeCount, fieldNumber: 3)
+    }
+    if self.payloadBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.payloadBytes, fieldNumber: 4)
+    }
+    if !self.payloadSha256.isEmpty {
+      try visitor.visitSingularBytesField(value: self.payloadSha256, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanCheckpointChunkDescriptor, rhs: Diskplan_V1_ScanCheckpointChunkDescriptor) -> Bool {
+    if lhs.chunkIndex != rhs.chunkIndex {return false}
+    if lhs.chunkID != rhs.chunkID {return false}
+    if lhs.nodeCount != rhs.nodeCount {return false}
+    if lhs.payloadBytes != rhs.payloadBytes {return false}
+    if lhs.payloadSha256 != rhs.payloadSha256 {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanCheckpointManifest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanCheckpointManifest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}manifest_version\0\u{3}checkpoint_id\0\u{3}chunk_count\0\u{3}retained_node_count\0\u{3}retained_node_entry_budget\0\u{3}retained_node_payload_bytes\0\u{3}maximum_checkpoint_payload_bytes\0\u{3}maximum_chunk_payload_bytes\0\u{3}maximum_manifest_encoded_bytes\0\u{1}chunks\0\u{3}checkpoint_evidence_sha256\0\u{3}final_evidence_sha256\0\u{1}frontier\0\u{1}coverage\0\u{3}completed_root_ids\0\u{3}failed_root_ids\0\u{3}machine_state\0\u{3}resumable_in_process\0\u{1}provisional\0\u{3}maximum_retained_node_payload_bytes\0")
+
+  fileprivate class _StorageClass {
+    var _manifestVersion: UInt32 = 0
+    var _checkpointID: String = String()
+    var _chunkCount: UInt32 = 0
+    var _retainedNodeCount: UInt64 = 0
+    var _retainedNodeEntryBudget: UInt32 = 0
+    var _retainedNodePayloadBytes: UInt64 = 0
+    var _maximumCheckpointPayloadBytes: UInt32 = 0
+    var _maximumChunkPayloadBytes: UInt32 = 0
+    var _maximumManifestEncodedBytes: UInt32 = 0
+    var _chunks: [Diskplan_V1_ScanCheckpointChunkDescriptor] = []
+    var _checkpointEvidenceSha256: Data = Data()
+    var _finalEvidenceSha256: Data = Data()
+    var _frontier: Diskplan_V1_ScanProgress? = nil
+    var _coverage: Diskplan_V1_CoverageEvidence? = nil
+    var _completedRootIds: [String] = []
+    var _failedRootIds: [String] = []
+    var _machineState: Diskplan_V1_ScanMachineState = .unspecified
+    var _resumableInProcess: Bool = false
+    var _provisional: Bool = false
+    var _maximumRetainedNodePayloadBytes: UInt64 = 0
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _manifestVersion = source._manifestVersion
+      _checkpointID = source._checkpointID
+      _chunkCount = source._chunkCount
+      _retainedNodeCount = source._retainedNodeCount
+      _retainedNodeEntryBudget = source._retainedNodeEntryBudget
+      _retainedNodePayloadBytes = source._retainedNodePayloadBytes
+      _maximumCheckpointPayloadBytes = source._maximumCheckpointPayloadBytes
+      _maximumChunkPayloadBytes = source._maximumChunkPayloadBytes
+      _maximumManifestEncodedBytes = source._maximumManifestEncodedBytes
+      _chunks = source._chunks
+      _checkpointEvidenceSha256 = source._checkpointEvidenceSha256
+      _finalEvidenceSha256 = source._finalEvidenceSha256
+      _frontier = source._frontier
+      _coverage = source._coverage
+      _completedRootIds = source._completedRootIds
+      _failedRootIds = source._failedRootIds
+      _machineState = source._machineState
+      _resumableInProcess = source._resumableInProcess
+      _provisional = source._provisional
+      _maximumRetainedNodePayloadBytes = source._maximumRetainedNodePayloadBytes
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularUInt32Field(value: &_storage._manifestVersion) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._checkpointID) }()
+        case 3: try { try decoder.decodeSingularUInt32Field(value: &_storage._chunkCount) }()
+        case 4: try { try decoder.decodeSingularUInt64Field(value: &_storage._retainedNodeCount) }()
+        case 5: try { try decoder.decodeSingularUInt32Field(value: &_storage._retainedNodeEntryBudget) }()
+        case 6: try { try decoder.decodeSingularUInt64Field(value: &_storage._retainedNodePayloadBytes) }()
+        case 7: try { try decoder.decodeSingularUInt32Field(value: &_storage._maximumCheckpointPayloadBytes) }()
+        case 8: try { try decoder.decodeSingularUInt32Field(value: &_storage._maximumChunkPayloadBytes) }()
+        case 9: try { try decoder.decodeSingularUInt32Field(value: &_storage._maximumManifestEncodedBytes) }()
+        case 10: try { try decoder.decodeRepeatedMessageField(value: &_storage._chunks) }()
+        case 11: try { try decoder.decodeSingularBytesField(value: &_storage._checkpointEvidenceSha256) }()
+        case 12: try { try decoder.decodeSingularBytesField(value: &_storage._finalEvidenceSha256) }()
+        case 13: try { try decoder.decodeSingularMessageField(value: &_storage._frontier) }()
+        case 14: try { try decoder.decodeSingularMessageField(value: &_storage._coverage) }()
+        case 15: try { try decoder.decodeRepeatedStringField(value: &_storage._completedRootIds) }()
+        case 16: try { try decoder.decodeRepeatedStringField(value: &_storage._failedRootIds) }()
+        case 17: try { try decoder.decodeSingularEnumField(value: &_storage._machineState) }()
+        case 18: try { try decoder.decodeSingularBoolField(value: &_storage._resumableInProcess) }()
+        case 19: try { try decoder.decodeSingularBoolField(value: &_storage._provisional) }()
+        case 20: try { try decoder.decodeSingularUInt64Field(value: &_storage._maximumRetainedNodePayloadBytes) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if _storage._manifestVersion != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._manifestVersion, fieldNumber: 1)
+      }
+      if !_storage._checkpointID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._checkpointID, fieldNumber: 2)
+      }
+      if _storage._chunkCount != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._chunkCount, fieldNumber: 3)
+      }
+      if _storage._retainedNodeCount != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._retainedNodeCount, fieldNumber: 4)
+      }
+      if _storage._retainedNodeEntryBudget != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._retainedNodeEntryBudget, fieldNumber: 5)
+      }
+      if _storage._retainedNodePayloadBytes != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._retainedNodePayloadBytes, fieldNumber: 6)
+      }
+      if _storage._maximumCheckpointPayloadBytes != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._maximumCheckpointPayloadBytes, fieldNumber: 7)
+      }
+      if _storage._maximumChunkPayloadBytes != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._maximumChunkPayloadBytes, fieldNumber: 8)
+      }
+      if _storage._maximumManifestEncodedBytes != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._maximumManifestEncodedBytes, fieldNumber: 9)
+      }
+      if !_storage._chunks.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._chunks, fieldNumber: 10)
+      }
+      if !_storage._checkpointEvidenceSha256.isEmpty {
+        try visitor.visitSingularBytesField(value: _storage._checkpointEvidenceSha256, fieldNumber: 11)
+      }
+      if !_storage._finalEvidenceSha256.isEmpty {
+        try visitor.visitSingularBytesField(value: _storage._finalEvidenceSha256, fieldNumber: 12)
+      }
+      try { if let v = _storage._frontier {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+      } }()
+      try { if let v = _storage._coverage {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
+      } }()
+      if !_storage._completedRootIds.isEmpty {
+        try visitor.visitRepeatedStringField(value: _storage._completedRootIds, fieldNumber: 15)
+      }
+      if !_storage._failedRootIds.isEmpty {
+        try visitor.visitRepeatedStringField(value: _storage._failedRootIds, fieldNumber: 16)
+      }
+      if _storage._machineState != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._machineState, fieldNumber: 17)
+      }
+      if _storage._resumableInProcess != false {
+        try visitor.visitSingularBoolField(value: _storage._resumableInProcess, fieldNumber: 18)
+      }
+      if _storage._provisional != false {
+        try visitor.visitSingularBoolField(value: _storage._provisional, fieldNumber: 19)
+      }
+      if _storage._maximumRetainedNodePayloadBytes != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._maximumRetainedNodePayloadBytes, fieldNumber: 20)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanCheckpointManifest, rhs: Diskplan_V1_ScanCheckpointManifest) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._manifestVersion != rhs_storage._manifestVersion {return false}
+        if _storage._checkpointID != rhs_storage._checkpointID {return false}
+        if _storage._chunkCount != rhs_storage._chunkCount {return false}
+        if _storage._retainedNodeCount != rhs_storage._retainedNodeCount {return false}
+        if _storage._retainedNodeEntryBudget != rhs_storage._retainedNodeEntryBudget {return false}
+        if _storage._retainedNodePayloadBytes != rhs_storage._retainedNodePayloadBytes {return false}
+        if _storage._maximumCheckpointPayloadBytes != rhs_storage._maximumCheckpointPayloadBytes {return false}
+        if _storage._maximumChunkPayloadBytes != rhs_storage._maximumChunkPayloadBytes {return false}
+        if _storage._maximumManifestEncodedBytes != rhs_storage._maximumManifestEncodedBytes {return false}
+        if _storage._chunks != rhs_storage._chunks {return false}
+        if _storage._checkpointEvidenceSha256 != rhs_storage._checkpointEvidenceSha256 {return false}
+        if _storage._finalEvidenceSha256 != rhs_storage._finalEvidenceSha256 {return false}
+        if _storage._frontier != rhs_storage._frontier {return false}
+        if _storage._coverage != rhs_storage._coverage {return false}
+        if _storage._completedRootIds != rhs_storage._completedRootIds {return false}
+        if _storage._failedRootIds != rhs_storage._failedRootIds {return false}
+        if _storage._machineState != rhs_storage._machineState {return false}
+        if _storage._resumableInProcess != rhs_storage._resumableInProcess {return false}
+        if _storage._provisional != rhs_storage._provisional {return false}
+        if _storage._maximumRetainedNodePayloadBytes != rhs_storage._maximumRetainedNodePayloadBytes {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanCheckpointReady: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanCheckpointReady"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}checkpoint\0\u{3}canonical_checkpoint_payload\0\u{1}manifest\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._checkpoint) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.canonicalCheckpointPayload) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._manifest) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._checkpoint {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.canonicalCheckpointPayload.isEmpty {
+      try visitor.visitSingularBytesField(value: self.canonicalCheckpointPayload, fieldNumber: 2)
+    }
+    try { if let v = self._manifest {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanCheckpointReady, rhs: Diskplan_V1_ScanCheckpointReady) -> Bool {
+    if lhs._checkpoint != rhs._checkpoint {return false}
+    if lhs.canonicalCheckpointPayload != rhs.canonicalCheckpointPayload {return false}
+    if lhs._manifest != rhs._manifest {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanFinalized: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanFinalized"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}checkpoint\0\u{1}reason\0\u{3}canonical_checkpoint_payload\0\u{1}manifest\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._checkpoint) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.canonicalCheckpointPayload) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._manifest) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._checkpoint {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 2)
+    }
+    if !self.canonicalCheckpointPayload.isEmpty {
+      try visitor.visitSingularBytesField(value: self.canonicalCheckpointPayload, fieldNumber: 3)
+    }
+    try { if let v = self._manifest {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanFinalized, rhs: Diskplan_V1_ScanFinalized) -> Bool {
+    if lhs._checkpoint != rhs._checkpoint {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.canonicalCheckpointPayload != rhs.canonicalCheckpointPayload {return false}
+    if lhs._manifest != rhs._manifest {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ProvisionalPlanGroupSummary: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProvisionalPlanGroupSummary"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}title\0\u{3}action_count\0\u{3}immediate_reclaim_bytes\0\u{3}conditional_reclaim_bytes\0\u{1}status\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.actionCount) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.immediateReclaimBytes) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.conditionalReclaimBytes) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.status) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularStringField(value: self.groupID, fieldNumber: 1)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
+    }
+    if self.actionCount != 0 {
+      try visitor.visitSingularUInt64Field(value: self.actionCount, fieldNumber: 3)
+    }
+    if self.immediateReclaimBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.immediateReclaimBytes, fieldNumber: 4)
+    }
+    if self.conditionalReclaimBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.conditionalReclaimBytes, fieldNumber: 5)
+    }
+    if !self.status.isEmpty {
+      try visitor.visitSingularStringField(value: self.status, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ProvisionalPlanGroupSummary, rhs: Diskplan_V1_ProvisionalPlanGroupSummary) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.actionCount != rhs.actionCount {return false}
+    if lhs.immediateReclaimBytes != rhs.immediateReclaimBytes {return false}
+    if lhs.conditionalReclaimBytes != rhs.conditionalReclaimBytes {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ProvisionalPlanReady: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProvisionalPlanReady"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}plan_id\0\u{3}action_count\0\u{3}immediate_reclaim_bytes\0\u{3}conditional_reclaim_bytes\0\u{1}groups\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.planID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.actionCount) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.immediateReclaimBytes) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.conditionalReclaimBytes) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.groups) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.planID.isEmpty {
+      try visitor.visitSingularStringField(value: self.planID, fieldNumber: 1)
+    }
+    if self.actionCount != 0 {
+      try visitor.visitSingularUInt64Field(value: self.actionCount, fieldNumber: 2)
+    }
+    if self.immediateReclaimBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.immediateReclaimBytes, fieldNumber: 3)
+    }
+    if self.conditionalReclaimBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.conditionalReclaimBytes, fieldNumber: 4)
+    }
+    if !self.groups.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.groups, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ProvisionalPlanReady, rhs: Diskplan_V1_ProvisionalPlanReady) -> Bool {
+    if lhs.planID != rhs.planID {return false}
+    if lhs.actionCount != rhs.actionCount {return false}
+    if lhs.immediateReclaimBytes != rhs.immediateReclaimBytes {return false}
+    if lhs.conditionalReclaimBytes != rhs.conditionalReclaimBytes {return false}
+    if lhs.groups != rhs.groups {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ProvisionalPlanInvalidated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProvisionalPlanInvalidated"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}previous_plan_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.previousPlanID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.previousPlanID.isEmpty {
+      try visitor.visitSingularStringField(value: self.previousPlanID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ProvisionalPlanInvalidated, rhs: Diskplan_V1_ProvisionalPlanInvalidated) -> Bool {
+    if lhs.previousPlanID != rhs.previousPlanID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanCancelled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanCancelled"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reason\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanCancelled, rhs: Diskplan_V1_ScanCancelled) -> Bool {
+    if lhs.reason != rhs.reason {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_ScanFinished: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanFinished"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}summary\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.summary) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.summary.isEmpty {
+      try visitor.visitSingularStringField(value: self.summary, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ScanFinished, rhs: Diskplan_V1_ScanFinished) -> Bool {
+    if lhs.summary != rhs.summary {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_EngineFailed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".EngineFailed"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{1}detail\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.code) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.detail) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.code.isEmpty {
+      try visitor.visitSingularStringField(value: self.code, fieldNumber: 1)
+    }
+    if !self.detail.isEmpty {
+      try visitor.visitSingularStringField(value: self.detail, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_EngineFailed, rhs: Diskplan_V1_EngineFailed) -> Bool {
+    if lhs.code != rhs.code {return false}
+    if lhs.detail != rhs.detail {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_EngineEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".EngineEvent"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_sequence\0\u{3}request_id\0\u{3}scan_session_id\0\u{4}\u{7}control_accepted\0\u{3}control_rejected\0\u{3}scan_state_changed\0\u{3}scan_progress\0\u{3}provisional_plan_ready\0\u{3}provisional_plan_invalidated\0\u{3}scan_cancelled\0\u{3}scan_finished\0\u{3}engine_failed\0\u{3}scan_node_observed\0\u{3}scan_checkpoint_ready\0\u{3}scan_finalized\0\u{3}scan_checkpoint_chunk\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.eventSequence) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.requestID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.scanSessionID) }()
       case 10: try {
-        var v: Diskplan_V1_Hello?
+        var v: Diskplan_V1_ControlAccepted?
         var hadOneofValue = false
         if let current = self.body {
           hadOneofValue = true
-          if case .hello(let m) = current {v = m}
+          if case .controlAccepted(let m) = current {v = m}
         }
         try decoder.decodeSingularMessageField(value: &v)
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .hello(v)
+          self.body = .controlAccepted(v)
         }
       }()
       case 11: try {
-        var v: Diskplan_V1_HelloAccepted?
+        var v: Diskplan_V1_ControlRejected?
         var hadOneofValue = false
         if let current = self.body {
           hadOneofValue = true
-          if case .helloAccepted(let m) = current {v = m}
+          if case .controlRejected(let m) = current {v = m}
         }
         try decoder.decodeSingularMessageField(value: &v)
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .helloAccepted(v)
+          self.body = .controlRejected(v)
         }
       }()
       case 12: try {
-        var v: Diskplan_V1_HelloRejected?
+        var v: Diskplan_V1_ScanStateChanged?
         var hadOneofValue = false
         if let current = self.body {
           hadOneofValue = true
-          if case .helloRejected(let m) = current {v = m}
+          if case .scanStateChanged(let m) = current {v = m}
         }
         try decoder.decodeSingularMessageField(value: &v)
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .helloRejected(v)
+          self.body = .scanStateChanged(v)
+        }
+      }()
+      case 13: try {
+        var v: Diskplan_V1_ScanProgress?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .scanProgress(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .scanProgress(v)
+        }
+      }()
+      case 14: try {
+        var v: Diskplan_V1_ProvisionalPlanReady?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .provisionalPlanReady(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .provisionalPlanReady(v)
+        }
+      }()
+      case 15: try {
+        var v: Diskplan_V1_ProvisionalPlanInvalidated?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .provisionalPlanInvalidated(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .provisionalPlanInvalidated(v)
+        }
+      }()
+      case 16: try {
+        var v: Diskplan_V1_ScanCancelled?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .scanCancelled(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .scanCancelled(v)
+        }
+      }()
+      case 17: try {
+        var v: Diskplan_V1_ScanFinished?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .scanFinished(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .scanFinished(v)
+        }
+      }()
+      case 18: try {
+        var v: Diskplan_V1_EngineFailed?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .engineFailed(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .engineFailed(v)
+        }
+      }()
+      case 19: try {
+        var v: Diskplan_V1_ScanNodeObserved?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .scanNodeObserved(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .scanNodeObserved(v)
         }
       }()
       case 20: try {
-        var v: Diskplan_V1_BusinessEnvelope?
+        var v: Diskplan_V1_ScanCheckpointReady?
         var hadOneofValue = false
         if let current = self.body {
           hadOneofValue = true
-          if case .business(let m) = current {v = m}
+          if case .scanCheckpointReady(let m) = current {v = m}
         }
         try decoder.decodeSingularMessageField(value: &v)
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .business(v)
+          self.body = .scanCheckpointReady(v)
+        }
+      }()
+      case 21: try {
+        var v: Diskplan_V1_ScanFinalized?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .scanFinalized(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .scanFinalized(v)
+        }
+      }()
+      case 22: try {
+        var v: Diskplan_V1_ScanCheckpointChunk?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .scanCheckpointChunk(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .scanCheckpointChunk(v)
         }
       }()
       default: break
@@ -528,34 +5245,273 @@ nonisolated extension Diskplan_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf
     // allocates stack space for every if/case branch local when no optimizations
     // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
     // https://github.com/apple/swift-protobuf/issues/1182
-    if self.sequence != 0 {
-      try visitor.visitSingularUInt64Field(value: self.sequence, fieldNumber: 1)
+    if self.eventSequence != 0 {
+      try visitor.visitSingularUInt64Field(value: self.eventSequence, fieldNumber: 1)
+    }
+    if self.requestID != 0 {
+      try visitor.visitSingularUInt64Field(value: self.requestID, fieldNumber: 2)
+    }
+    if !self.scanSessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.scanSessionID, fieldNumber: 3)
     }
     switch self.body {
-    case .hello?: try {
-      guard case .hello(let v)? = self.body else { preconditionFailure() }
+    case .controlAccepted?: try {
+      guard case .controlAccepted(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
     }()
-    case .helloAccepted?: try {
-      guard case .helloAccepted(let v)? = self.body else { preconditionFailure() }
+    case .controlRejected?: try {
+      guard case .controlRejected(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
     }()
-    case .helloRejected?: try {
-      guard case .helloRejected(let v)? = self.body else { preconditionFailure() }
+    case .scanStateChanged?: try {
+      guard case .scanStateChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
     }()
-    case .business?: try {
-      guard case .business(let v)? = self.body else { preconditionFailure() }
+    case .scanProgress?: try {
+      guard case .scanProgress(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+    }()
+    case .provisionalPlanReady?: try {
+      guard case .provisionalPlanReady(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
+    }()
+    case .provisionalPlanInvalidated?: try {
+      guard case .provisionalPlanInvalidated(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
+    }()
+    case .scanCancelled?: try {
+      guard case .scanCancelled(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
+    }()
+    case .scanFinished?: try {
+      guard case .scanFinished(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
+    }()
+    case .engineFailed?: try {
+      guard case .engineFailed(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
+    }()
+    case .scanNodeObserved?: try {
+      guard case .scanNodeObserved(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
+    }()
+    case .scanCheckpointReady?: try {
+      guard case .scanCheckpointReady(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
+    }()
+    case .scanFinalized?: try {
+      guard case .scanFinalized(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
+    }()
+    case .scanCheckpointChunk?: try {
+      guard case .scanCheckpointChunk(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
     }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: Diskplan_V1_Envelope, rhs: Diskplan_V1_Envelope) -> Bool {
-    if lhs.sequence != rhs.sequence {return false}
+  public static func ==(lhs: Diskplan_V1_EngineEvent, rhs: Diskplan_V1_EngineEvent) -> Bool {
+    if lhs.eventSequence != rhs.eventSequence {return false}
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.scanSessionID != rhs.scanSessionID {return false}
     if lhs.body != rhs.body {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Envelope"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}sequence\0\u{2}\u{9}hello\0\u{3}hello_accepted\0\u{3}hello_rejected\0\u{2}\u{8}business\0\u{3}start_scan_request\0\u{3}scan_control_request\0\u{3}engine_event\0")
+
+  fileprivate class _StorageClass {
+    var _sequence: UInt64 = 0
+    var _body: Diskplan_V1_Envelope.OneOf_Body?
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _sequence = source._sequence
+      _body = source._body
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularUInt64Field(value: &_storage._sequence) }()
+        case 10: try {
+          var v: Diskplan_V1_Hello?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .hello(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .hello(v)
+          }
+        }()
+        case 11: try {
+          var v: Diskplan_V1_HelloAccepted?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .helloAccepted(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .helloAccepted(v)
+          }
+        }()
+        case 12: try {
+          var v: Diskplan_V1_HelloRejected?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .helloRejected(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .helloRejected(v)
+          }
+        }()
+        case 20: try {
+          var v: Diskplan_V1_BusinessEnvelope?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .business(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .business(v)
+          }
+        }()
+        case 21: try {
+          var v: Diskplan_V1_StartScanRequest?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .startScanRequest(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .startScanRequest(v)
+          }
+        }()
+        case 22: try {
+          var v: Diskplan_V1_ScanControlRequest?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .scanControlRequest(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .scanControlRequest(v)
+          }
+        }()
+        case 23: try {
+          var v: Diskplan_V1_EngineEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .engineEvent(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .engineEvent(v)
+          }
+        }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if _storage._sequence != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._sequence, fieldNumber: 1)
+      }
+      switch _storage._body {
+      case .hello?: try {
+        guard case .hello(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
+      }()
+      case .helloAccepted?: try {
+        guard case .helloAccepted(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+      }()
+      case .helloRejected?: try {
+        guard case .helloRejected(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+      }()
+      case .business?: try {
+        guard case .business(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
+      }()
+      case .startScanRequest?: try {
+        guard case .startScanRequest(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
+      }()
+      case .scanControlRequest?: try {
+        guard case .scanControlRequest(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
+      }()
+      case .engineEvent?: try {
+        guard case .engineEvent(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
+      }()
+      case nil: break
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_Envelope, rhs: Diskplan_V1_Envelope) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._sequence != rhs_storage._sequence {return false}
+        if _storage._body != rhs_storage._body {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -111,6 +111,97 @@ func returnedMasksDegradeUnavailableAttributesWithoutCredit() throws {
 }
 
 @Test
+func itemShimRequestsRealDeviceForObjectIdentity() {
+  let options = dp_item_probe_options()
+  #expect(options & UInt64(FSOPT_RETURN_REALDEV) != 0)
+  #expect(options & UInt64(FSOPT_NOFOLLOW) != 0)
+  #expect(options & UInt64(FSOPT_RESOLVE_BENEATH) != 0)
+}
+
+@Test
+func packedDirectoryKernelItemBufferOmitsFileGroupWithoutShiftingExtendedFields() throws {
+  let parsed = parseKernelItemBuffer(packedKernelItemBuffer(objectType: 2, directoryLayout: true))
+  #expect(parsed.result == 0)
+  #expect(parsed.written == ItemWireV1.size)
+  let evidence = try ItemWireV1.parse(parsed.wire)
+  #expect(evidence.objectType.value == .directory)
+  #expect(evidence.logicalBytes.status == .unavailable)
+  #expect(evidence.nominalAllocatedBytes.status == .unavailable)
+  #expect(evidence.immediatePrivateReclaimBytes.value == 20)
+  #expect(evidence.sharing.cloneID.value == 3)
+  #expect(evidence.sharing.cloneRefcount.value == 2)
+}
+
+@Test
+func packedInvalidAttributesRemainUnavailableWithoutShiftingLaterValues() throws {
+  let common =
+    UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_device()
+    | dp_attr_common_object_type() | dp_attr_common_file_id()
+  let parsed = parseKernelItemBuffer(
+    packedKernelItemBuffer(
+      objectType: 1,
+      returnedCommon: common,
+      returnedFile: dp_attr_file_total_size(),
+      returnedExtended: dp_attr_extended_clone_id()
+    )
+  )
+  #expect(parsed.result == 0)
+  let evidence = try ItemWireV1.parse(parsed.wire)
+  #expect(evidence.objectType.value == .regular)
+  #expect(evidence.isDataless.status == .unavailable)
+  #expect(evidence.linkCount.status == .unavailable)
+  #expect(evidence.logicalBytes.value == 100)
+  #expect(evidence.nominalAllocatedBytes.status == .unavailable)
+  #expect(evidence.immediatePrivateReclaimBytes.status == .unavailable)
+  #expect(evidence.sharing.cloneID.value == 3)
+  #expect(evidence.isSyncRoot.status == .unavailable)
+  #expect(evidence.sharing.cloneRefcount.status == .unavailable)
+}
+
+@Test
+func missingObjectTypeRemainsUnavailableWhilePackedShapeStaysParseable() throws {
+  let common =
+    UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_device()
+    | dp_attr_common_flags() | dp_attr_common_file_id()
+  let parsed = parseKernelItemBuffer(
+    packedKernelItemBuffer(objectType: 1, returnedCommon: common, returnedFile: 0)
+  )
+  #expect(parsed.result == 0)
+  let evidence = try ItemWireV1.parse(parsed.wire)
+  #expect(evidence.device.status == .known)
+  #expect(evidence.objectType.status == .unavailable)
+  #expect(evidence.fileID.status == .known)
+  #expect(evidence.logicalBytes.status == .unavailable)
+}
+
+@Test
+func shortPackedKernelItemBufferFailsClosedEvenWhenTrailingAttributeIsInvalid() {
+  var raw = packedKernelItemBuffer(
+    objectType: 1,
+    returnedExtended: dp_attr_extended_clone_id()
+  )
+  raw.removeLast()
+  raw.store(UInt32(raw.count), at: 0)
+  let parsed = parseKernelItemBuffer(raw)
+  #expect(parsed.result == -1)
+  #expect(parsed.error == EPROTO)
+  #expect(parsed.written == 0)
+}
+
+@Test
+func packedDirectoryRejectsImpossibleReturnedFileAttributes() {
+  let raw = packedKernelItemBuffer(
+    objectType: 2,
+    returnedFile: dp_attr_file_total_size(),
+    directoryLayout: true
+  )
+  let parsed = parseKernelItemBuffer(raw)
+  #expect(parsed.result == -1)
+  #expect(parsed.error == EPROTO)
+  #expect(parsed.written == 0)
+}
+
+@Test
 func volumeCapabilitiesRespectValidityMasks() {
   let returned = ReturnedAttributeMasks(
     common: 0,
@@ -241,6 +332,40 @@ func absentIdentifierNeverAuthorizesLocalTraversal() throws {
 }
 
 @Test
+func providerBoundRegularFilesNeverReceiveDescentDecisions() throws {
+  let regular = try providerItemEvidence(
+    isDataless: false,
+    isSyncRoot: true,
+    objectType: 1
+  )
+  for inherited in [false, true] {
+    let decision = FileProviderBoundaryProbe.decideBoundary(
+      item: regular,
+      identityDisposition: .confirmedProvider,
+      inheritedProviderBoundary: inherited
+    )
+    #expect(decision.traversal == .doNotDescendNonDirectory)
+    #expect(decision.handling == .reportOnly)
+  }
+}
+
+@Test
+func unavailableObjectTypeNeverReceivesDescentDecision() throws {
+  let item = try providerItemEvidence(
+    isDataless: false,
+    isSyncRoot: true,
+    includeObjectType: false
+  )
+  let decision = FileProviderBoundaryProbe.decideBoundary(
+    item: item,
+    identityDisposition: .confirmedProvider,
+    inheritedProviderBoundary: true
+  )
+  #expect(decision.traversal == .doNotDescendUnverifiedItemType)
+  #expect(decision.handling == .reportOnly)
+}
+
+@Test
 func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }
@@ -251,8 +376,7 @@ func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
       DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(5)) {
         completion(.identifierAbsent)
       }
-    },
-    makeMetadataCoordinator: { ImmediateMetadataCoordinator() }
+    }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
     parentFileDescriptor: fixture.parentFD,
@@ -265,21 +389,16 @@ func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
     return
   }
   #expect(evidence.identityDisposition == .identifierAbsent)
-  #expect(evidence.traversal == .doNotDescendUnverifiedProviderOwnership)
+  #expect(evidence.traversal == .doNotDescendNonDirectory)
   #expect(reads.value >= 10)
 }
 
 @Test
-func boundProviderProbeTypesIdentityTimeoutWithoutMetadataStart() throws {
+func boundProviderProbeTypesIdentityTimeoutWithoutMetadataWork() throws {
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }
-  let metadataCreated = LockedFlag()
   let operations = FileProviderProbeOperations(
-    startIdentity: { _, _ in },
-    makeMetadataCoordinator: {
-      metadataCreated.set()
-      return ImmediateMetadataCoordinator()
-    }
+    startIdentity: { _, _ in }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
     parentFileDescriptor: fixture.parentFD,
@@ -288,28 +407,44 @@ func boundProviderProbeTypesIdentityTimeoutWithoutMetadataStart() throws {
     timeout: .milliseconds(2)
   )
   #expect(outcome == .rejected(.timedOut(stage: .identityLookup)))
-  #expect(!metadataCreated.value)
   #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
 }
 
 @Test
-func boundProviderProbeCancelsBlockingMetadataAtSharedDeadline() throws {
+func deadlineResultBoxDiscardsCompletionAfterTimeoutBeforeCloseLock() {
+  let box = DeadlineResultBox<Int>()
+  let callbackRan = LockedFlag()
+  let result = box.wait(until: .now()) {
+    callbackRan.set()
+    box.complete(42)
+  }
+  #expect(callbackRan.value)
+  #expect(result == nil)
+
+  box.complete(43)
+  #expect(box.wait(until: .now()) == nil)
+}
+
+@Test
+func boundProviderProbeReturnsMetadataUnavailableWithoutInProcessCoordination() throws {
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }
-  let coordinator = BlockingMetadataCoordinator()
   let operations = FileProviderProbeOperations(
-    startIdentity: { _, completion in completion(.identifierAbsent) },
-    makeMetadataCoordinator: { coordinator }
+    startIdentity: { _, completion in completion(.identifierAbsent) }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
     parentFileDescriptor: fixture.parentFD,
     rawName: fixture.rawName,
     policy: try injectedPolicy(),
-    timeout: .milliseconds(10)
+    timeout: .milliseconds(100)
   )
-  #expect(outcome == .rejected(.timedOut(stage: .metadata)))
-  #expect(coordinator.cancelled)
-  #expect(outcome.handling == .reportOnly)
+  guard case .evidence(let evidence) = outcome else {
+    Issue.record("expected provider evidence, got \(outcome)")
+    return
+  }
+  #expect(evidence.promisedMetadata.status == .unavailable)
+  #expect(evidence.promisedMetadata.value == nil)
+  #expect(evidence.promisedMetadata.detail?.contains("disabled") == true)
 }
 
 @Test
@@ -333,12 +468,16 @@ func boundProviderProbeKeepsMissingUnreadableAndFailureDistinct() throws {
     for: Capability<Bool>(status: .failed, detail: "fixture", errorCode: EIO),
     stage: .preflight
   )
+  let unreadableParent = probe.posixRejection(EACCES, stage: .derivedParentPostflight)
   #expect(unreadable == .unreadable(stage: .preflight, errorCode: EACCES))
   #expect(
     failed
       == .failed(stage: .preflight, status: .failed, detail: "fixture", errorCode: EIO)
   )
   #expect(FileProviderProbeOutcome.rejected(unreadable).handling == .reportOnly)
+  #expect(
+    unreadableParent == .unreadable(stage: .derivedParentPostflight, errorCode: EACCES)
+  )
   #expect(
     FileProviderProbeOutcome.rejected(failed).traversal
       == .doNotDescendUnverifiedProviderOwnership
@@ -356,8 +495,7 @@ func boundProviderProbeDetectsReplacementAcrossFoundationOperations() throws {
     startIdentity: { url, completion in
       if rename(replacement.path, url.path) == 0 { renamed.set() }
       completion(.identifierAbsent)
-    },
-    makeMetadataCoordinator: { ImmediateMetadataCoordinator() }
+    }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
     parentFileDescriptor: fixture.parentFD,
@@ -372,6 +510,153 @@ func boundProviderProbeDetectsReplacementAcrossFoundationOperations() throws {
   }
   #expect(stage == .postflight)
   #expect(expected != observed)
+  #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
+func boundProviderProbeDetectsParentReplacementDespiteChildHardlinkIdentity() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let movedParent = fixture.container.appendingPathComponent("moved-parent", isDirectory: true)
+  let replacementParent = fixture.container.appendingPathComponent(
+    "replacement-parent",
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(
+    at: replacementParent,
+    withIntermediateDirectories: false
+  )
+  let replacementItem = replacementParent.appendingPathComponent("item")
+  #expect(link(fixture.root.appendingPathComponent("item").path, replacementItem.path) == 0)
+  let replaced = LockedFlag()
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in
+      if rename(fixture.root.path, movedParent.path) == 0,
+        rename(replacementParent.path, fixture.root.path) == 0
+      {
+        replaced.set()
+      }
+      completion(.identifierAbsent)
+    }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  #expect(replaced.value)
+  guard case .rejected(.parentIdentityMismatch(let stage, let expected, let observed)) = outcome
+  else {
+    Issue.record("expected parent identity mismatch, got \(outcome)")
+    return
+  }
+  #expect(stage == .derivedParentPostflight)
+  #expect(expected != observed)
+  #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
+func boundProviderProbeKeepsRenamedDerivedParentMissingDistinct() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let movedParent = fixture.container.appendingPathComponent("moved-parent", isDirectory: true)
+  let renamed = LockedFlag()
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in
+      if rename(fixture.root.path, movedParent.path) == 0 { renamed.set() }
+      completion(.identifierAbsent)
+    }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  #expect(renamed.value)
+  #expect(outcome == .rejected(.missing(stage: .derivedParentPostflight)))
+  #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
+func boundProviderProbeRejectsDatalessToMaterializedTransitionOnSameObject() throws {
+  let outcome = try contentTransitionOutcome(fromDataless: true, toDataless: false)
+  #expect(
+    outcome
+      == .rejected(
+        .contentStateMismatch(
+          stage: .postflight,
+          expectedDataless: true,
+          observedDataless: false
+        )
+      )
+  )
+  #expect(outcome.traversal == .doNotDescendUnverifiedContentState)
+}
+
+@Test
+func boundProviderProbeRejectsMaterializedToDatalessTransitionOnSameObject() throws {
+  let outcome = try contentTransitionOutcome(fromDataless: false, toDataless: true)
+  #expect(
+    outcome
+      == .rejected(
+        .contentStateMismatch(
+          stage: .postflight,
+          expectedDataless: false,
+          observedDataless: true
+        )
+      )
+  )
+  #expect(outcome.traversal == .doNotDescendUnverifiedContentState)
+}
+
+@Test
+func boundProviderProbeUsesStablePostflightBoundaryEvidence() throws {
+  let fixture = try BoundProbeFixture(isDirectory: true)
+  defer { fixture.close() }
+  let before = try providerItemEvidence(isDataless: false, isSyncRoot: false)
+  let after = try providerItemEvidence(isDataless: false, isSyncRoot: true)
+  let sequence = LockedEvidenceSequence([before, before, after, after])
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in completion(.identifierAbsent) },
+    readItem: { _, _, _ in sequence.next() }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  guard case .evidence(let evidence) = outcome else {
+    Issue.record("expected stable postflight evidence, got \(outcome)")
+    return
+  }
+  #expect(evidence.traversal == .descendMetadataOnlyProviderBoundary)
+  #expect(sequence.remaining == 0)
+}
+
+@Test
+func unavailableRealDeviceIdentityFailsClosed() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let evidence = try providerItemEvidence(isDataless: false, includeDevice: false)
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in completion(.identifierAbsent) },
+    readItem: { _, _, _ in .known(evidence) }
+  )
+  let outcome = FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  guard case .rejected(.failed(let stage, let status, _, _)) = outcome else {
+    Issue.record("expected unavailable identity rejection, got \(outcome)")
+    return
+  }
+  #expect(stage == .preflight)
+  #expect(status == .unavailable)
   #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
 }
 
@@ -413,12 +698,16 @@ func liveTempRootProbeAndCloneEvidenceWhenAvailable() throws {
 }
 
 @Test
-func liveItemProbeDoesNotFollowSymlinksOrEscapeItsParent() throws {
+func liveItemProbeParsesDirectoryRegularAndSymlinkWithoutEscapingParent() throws {
   let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
   let manager = FileManager.default
   let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
   try manager.createDirectory(at: root, withIntermediateDirectories: false)
   defer { try? manager.removeItem(at: root) }
+  try manager.createDirectory(
+    at: root.appendingPathComponent("directory", isDirectory: true),
+    withIntermediateDirectories: false
+  )
   try Data([1]).write(to: root.appendingPathComponent("target"))
   try manager.createSymbolicLink(
     at: root.appendingPathComponent("link"),
@@ -428,9 +717,18 @@ func liveItemProbeDoesNotFollowSymlinksOrEscapeItsParent() throws {
   let fd = try #require(parentFD >= 0 ? parentFD : nil)
   defer { close(fd) }
   let probe = ItemProbe()
+  let directory = try #require(
+    probe.probe(parentFileDescriptor: fd, rawName: Data("directory".utf8), policy: policy).value
+  )
+  let regular = try #require(
+    probe.probe(parentFileDescriptor: fd, rawName: Data("target".utf8), policy: policy).value
+  )
   let link = try #require(
     probe.probe(parentFileDescriptor: fd, rawName: Data("link".utf8), policy: policy).value
   )
+  #expect(directory.objectType.value == .directory)
+  #expect(directory.logicalBytes.status == .unavailable)
+  #expect(regular.objectType.value == .regular)
   #expect(link.objectType.value == .symbolicLink)
   let escape = probe.probe(
     parentFileDescriptor: fd,
@@ -439,6 +737,77 @@ func liveItemProbeDoesNotFollowSymlinksOrEscapeItsParent() throws {
   )
   #expect(escape.status == .failed)
   #expect(escape.errorCode == EINVAL)
+}
+
+private func packedKernelItemBuffer(
+  objectType: UInt32,
+  returnedCommon: UInt32? = nil,
+  returnedFile: UInt32? = nil,
+  returnedExtended: UInt32? = nil,
+  directoryLayout: Bool = false
+) -> Data {
+  let common =
+    returnedCommon
+    ?? (UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_device()
+      | dp_attr_common_object_type() | dp_attr_common_flags() | dp_attr_common_file_id())
+  let file =
+    returnedFile
+    ?? (directoryLayout
+      ? 0
+      : dp_attr_file_link_count() | dp_attr_file_total_size()
+        | dp_attr_file_allocated_size())
+  let extended =
+    returnedExtended
+    ?? (dp_attr_extended_private_size() | dp_attr_extended_clone_id()
+      | dp_attr_extended_flags() | dp_attr_extended_clone_refcount())
+  let size = directoryLayout ? 72 : 92
+  var data = Data(repeating: 0, count: size)
+  data.store(UInt32(size), at: 0)
+  data.store(common, at: 4)
+  data.store(file, at: 16)
+  data.store(extended, at: 20)
+  data.store(UInt32(15), at: 24)
+  data.store(objectType, at: 28)
+  data.store(dp_flag_dataless(), at: 32)
+  data.store(UInt64(42), at: 36)
+
+  var cursor = 44
+  if !directoryLayout {
+    data.store(UInt32(1), at: cursor)
+    cursor += 4
+    data.store(UInt64(100), at: cursor)
+    cursor += 8
+    data.store(UInt64(80), at: cursor)
+    cursor += 8
+  }
+  data.store(UInt64(20), at: cursor)
+  cursor += 8
+  data.store(UInt64(3), at: cursor)
+  cursor += 8
+  data.store(dp_flag_sync_root(), at: cursor)
+  cursor += 8
+  data.store(UInt32(2), at: cursor)
+  return data
+}
+
+private func parseKernelItemBuffer(_ raw: Data) -> (
+  result: Int32, error: Int32, written: Int, wire: Data
+) {
+  var wire = Data(repeating: 0, count: ItemWireV1.size)
+  var written = 999
+  errno = 0
+  let result = wire.withUnsafeMutableBytes { output in
+    raw.withUnsafeBytes { input in
+      dp_parse_item_buffer(
+        input.bindMemory(to: UInt8.self).baseAddress,
+        input.count,
+        output.bindMemory(to: UInt8.self).baseAddress,
+        output.count,
+        &written
+      )
+    }
+  }
+  return (result, errno, written, wire)
 }
 
 private func validWire() -> Data {
@@ -472,6 +841,48 @@ private func validWire() -> Data {
   return data
 }
 
+private func providerItemEvidence(
+  isDataless: Bool,
+  isSyncRoot: Bool = false,
+  objectType: UInt32 = 2,
+  includeDevice: Bool = true,
+  includeObjectType: Bool = true
+) throws -> ItemStorageEvidence {
+  var wire = validWire()
+  var common =
+    UInt32(ATTR_CMN_RETURNED_ATTRS) | dp_attr_common_flags() | dp_attr_common_file_id()
+  if includeDevice { common |= dp_attr_common_device() }
+  if includeObjectType { common |= dp_attr_common_object_type() }
+  wire.store(common, at: 4)
+  wire.store(objectType, at: 32)
+  wire.store(isDataless ? dp_flag_dataless() : UInt32(0), at: 36)
+  var extendedFlags = dp_flag_may_share_blocks()
+  if isSyncRoot { extendedFlags |= dp_flag_sync_root() }
+  wire.store(extendedFlags, at: 84)
+  return try ItemWireV1.parse(wire)
+}
+
+private func contentTransitionOutcome(
+  fromDataless: Bool,
+  toDataless: Bool
+) throws -> FileProviderProbeOutcome {
+  let fixture = try BoundProbeFixture(isDirectory: true)
+  defer { fixture.close() }
+  let before = try providerItemEvidence(isDataless: fromDataless)
+  let after = try providerItemEvidence(isDataless: toDataless)
+  let sequence = LockedEvidenceSequence([before, before, after, after])
+  let operations = FileProviderProbeOperations(
+    startIdentity: { _, completion in completion(.identifierAbsent) },
+    readItem: { _, _, _ in sequence.next() }
+  )
+  return FileProviderBoundaryProbe(operations: operations).probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+}
+
 extension Data {
   fileprivate mutating func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
     var littleEndian = value.littleEndian
@@ -503,52 +914,51 @@ private final class LockedFlag: @unchecked Sendable {
   }
 }
 
-private final class ImmediateMetadataCoordinator: FileProviderMetadataCoordinating,
-  @unchecked Sendable
-{
-  func collect(url _: URL) -> Capability<[String: String]> { .known([:]) }
-  func cancel() {}
-}
-
-private final class BlockingMetadataCoordinator: FileProviderMetadataCoordinating,
-  @unchecked Sendable
-{
+private final class LockedEvidenceSequence: @unchecked Sendable {
   private let lock = NSLock()
-  private let release = DispatchSemaphore(value: 0)
-  private var wasCancelled = false
+  private var values: [ItemStorageEvidence]
 
-  var cancelled: Bool { lock.withLock { wasCancelled } }
+  init(_ values: [ItemStorageEvidence]) { self.values = values }
 
-  func collect(url _: URL) -> Capability<[String: String]> {
-    release.wait()
-    return .known([:])
-  }
+  var remaining: Int { lock.withLock { values.count } }
 
-  func cancel() {
-    lock.withLock { wasCancelled = true }
-    release.signal()
+  func next() -> Capability<ItemStorageEvidence> {
+    lock.withLock {
+      guard !values.isEmpty else {
+        return Capability(status: .inconsistent, detail: "item evidence fixture exhausted")
+      }
+      return .known(values.removeFirst())
+    }
   }
 }
 
 private struct BoundProbeFixture {
+  let container: URL
   let root: URL
   let parentFD: Int32
   let rawName = Data("item".utf8)
 
-  init() throws {
-    root = FileManager.default.temporaryDirectory.appendingPathComponent(
+  init(isDirectory: Bool = false) throws {
+    container = FileManager.default.temporaryDirectory.appendingPathComponent(
       UUID().uuidString,
       isDirectory: true
     )
+    root = container.appendingPathComponent("parent", isDirectory: true)
+    try FileManager.default.createDirectory(at: container, withIntermediateDirectories: false)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-    try Data([1]).write(to: root.appendingPathComponent("item"))
+    let item = root.appendingPathComponent("item", isDirectory: isDirectory)
+    if isDirectory {
+      try FileManager.default.createDirectory(at: item, withIntermediateDirectories: false)
+    } else {
+      try Data([1]).write(to: item)
+    }
     parentFD = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
     guard parentFD >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
   }
 
   func close() {
     Darwin.close(parentFD)
-    try? FileManager.default.removeItem(at: root)
+    try? FileManager.default.removeItem(at: container)
   }
 }
 

@@ -19,6 +19,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = prost_build::Config::new();
     config.protoc_executable(protoc);
     config.out_dir(out_dir);
+    // Envelope.Body intentionally carries the complete semantic event union.
+    // Its large variant is generated code and stays inline to keep the public
+    // prost API stable across the protocol 1.3 schema update.
+    config.enum_attribute(
+        ".diskplan.v1.Envelope.body",
+        "#[allow(clippy::large_enum_variant)]",
+    );
     config.compile_protos(&["proto/diskplan/v1/ipc.proto"], &["proto"])?;
     Ok(())
 }

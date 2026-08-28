@@ -57,9 +57,12 @@ case .evidence(let providerEvidence):
   providerIdentityStatus = providerEvidence.identity.status.rawValue
   providerFixtureAcceptance =
     providerEvidence.controlledNonMaterializationAcceptance.status.rawValue
-case .rejected:
+case .rejected(let rejection):
   providerIdentityStatus = "rejected"
   providerFixtureAcceptance = "unavailable"
+  FileHandle.standardError.write(
+    Data("file-provider-probe: \(rejection)\n".utf8)
+  )
 }
 let fields = [
   "\"materialization_policy\":\"off\"",

@@ -6,10 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+crossterm.workspace = true
 diskplan-core = { path = "../diskplan-core" }
 diskplan-proto = { path = "../diskplan-proto" }
+futures-util.workspace = true
+hex.workspace = true
 prost.workspace = true
+ratatui.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 tempfile.workspace = true

@@ -42,16 +42,620 @@ pub struct BusinessEnvelope {
     #[prost(bytes = "vec", tag = "2")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StartScanRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(string, tag = "2")]
+    pub profile: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub roots: ::prost::alloc::vec::Vec<ScanRootRequest>,
+    #[prost(uint64, tag = "4")]
+    pub maximum_duration_millis: u64,
+    #[prost(uint32, tag = "5")]
+    pub batch_size: u32,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanRootRequest {
+    #[prost(string, tag = "1")]
+    pub root_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub raw_absolute_path: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub display_path: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanControlRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(enumeration = "ScanControlKind", tag = "2")]
+    pub control: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ControlAccepted {
+    #[prost(enumeration = "ScanControlKind", tag = "1")]
+    pub control: i32,
+    #[prost(enumeration = "ScanState", tag = "2")]
+    pub resulting_state: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ControlRejected {
+    #[prost(enumeration = "ScanControlKind", tag = "1")]
+    pub control: i32,
+    #[prost(enumeration = "ControlRejectCode", tag = "2")]
+    pub code: i32,
+    #[prost(string, tag = "3")]
+    pub detail: ::prost::alloc::string::String,
+    #[prost(enumeration = "ScanState", tag = "4")]
+    pub current_state: i32,
+    #[prost(enumeration = "ScanSetupRejectCode", tag = "5")]
+    pub setup_code: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanStateChanged {
+    #[prost(enumeration = "ScanState", tag = "1")]
+    pub state: i32,
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanProgress {
+    #[prost(string, tag = "1")]
+    pub profile: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub elapsed_millis: u64,
+    #[prost(uint64, tag = "3")]
+    pub entries: u64,
+    #[prost(uint64, tag = "4")]
+    pub directories: u64,
+    #[prost(uint64, tag = "5")]
+    pub candidates: u64,
+    #[prost(uint64, tag = "6")]
+    pub allocated_bytes_observed: u64,
+    #[prost(uint64, tag = "7")]
+    pub reclaim_estimate_bytes: u64,
+    #[prost(uint64, tag = "8")]
+    pub complete_roots: u64,
+    #[prost(uint64, tag = "9")]
+    pub partial_roots: u64,
+    #[prost(uint64, tag = "10")]
+    pub entries_per_second: u64,
+    #[prost(string, tag = "11")]
+    pub current_root: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "12")]
+    pub structural_budget: u64,
+    #[prost(uint64, tag = "13")]
+    pub retained_nodes: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EvidenceFailure {
+    #[prost(enumeration = "EvidenceStatus", tag = "1")]
+    pub status: i32,
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub error_code: i32,
+    #[prost(bool, tag = "4")]
+    pub has_error_code: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RawPath {
+    #[prost(string, tag = "1")]
+    pub root_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", repeated, tag = "2")]
+    pub components: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    #[prost(string, tag = "3")]
+    pub display_path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CoverageEvidence {
+    #[prost(bool, tag = "1")]
+    pub complete: bool,
+    #[prost(string, repeated, tag = "2")]
+    pub reasons: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ByteMeasureEvidence {
+    #[prost(enumeration = "ByteMeasureKind", tag = "1")]
+    pub kind: i32,
+    #[prost(uint64, tag = "2")]
+    pub bytes: u64,
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ObjectIdentityEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(int64, tag = "2")]
+    pub device: i64,
+    #[prost(uint64, tag = "3")]
+    pub file_id: u64,
+    #[prost(string, tag = "4")]
+    pub object_type: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TimeValue {
+    #[prost(int64, tag = "1")]
+    pub seconds_since_epoch: i64,
+    #[prost(int32, tag = "2")]
+    pub nanoseconds: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TimeEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, optional, tag = "2")]
+    pub value: ::core::option::Option<TimeValue>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FilesystemTimeEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub access_time: ::core::option::Option<TimeEvidence>,
+    #[prost(message, optional, tag = "2")]
+    pub modification_time: ::core::option::Option<TimeEvidence>,
+    #[prost(message, optional, tag = "3")]
+    pub status_change_time: ::core::option::Option<TimeEvidence>,
+    #[prost(message, optional, tag = "4")]
+    pub birth_time: ::core::option::Option<TimeEvidence>,
+    #[prost(string, tag = "5")]
+    pub trust: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AccessPolicyEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(uint32, tag = "2")]
+    pub owner_user_id: u32,
+    #[prost(uint32, tag = "3")]
+    pub owner_group_id: u32,
+    #[prost(uint32, tag = "4")]
+    pub mode: u32,
+    #[prost(uint32, tag = "5")]
+    pub flags: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BoolEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(bool, tag = "2")]
+    pub value: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UInt64Evidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(uint64, tag = "2")]
+    pub value: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UInt32Evidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(uint32, tag = "2")]
+    pub value: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ItemByteEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub logical: ::core::option::Option<ByteMeasureEvidence>,
+    #[prost(message, optional, tag = "2")]
+    pub nominal_allocated: ::core::option::Option<ByteMeasureEvidence>,
+    #[prost(message, optional, tag = "3")]
+    pub immediate_private_reclaim: ::core::option::Option<ByteMeasureEvidence>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StorageTopologyEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub link_count: ::core::option::Option<UInt32Evidence>,
+    #[prost(message, optional, tag = "2")]
+    pub may_share_blocks: ::core::option::Option<BoolEvidence>,
+    #[prost(message, optional, tag = "3")]
+    pub shares_all_blocks: ::core::option::Option<BoolEvidence>,
+    #[prost(message, optional, tag = "4")]
+    pub clone_id: ::core::option::Option<UInt64Evidence>,
+    #[prost(message, optional, tag = "5")]
+    pub clone_refcount: ::core::option::Option<UInt32Evidence>,
+    #[prost(message, optional, tag = "6")]
+    pub conditional_group_reclaim: ::core::option::Option<ByteMeasureEvidence>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProviderObjectIdentityEvidence {
+    #[prost(string, tag = "1")]
+    pub item_identifier: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub domain_identifier: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StringPair {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub value: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProviderScanEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, optional, tag = "2")]
+    pub identity_observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, optional, tag = "3")]
+    pub identity: ::core::option::Option<ProviderObjectIdentityEvidence>,
+    #[prost(message, optional, tag = "4")]
+    pub promised_metadata_observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, repeated, tag = "5")]
+    pub promised_metadata: ::prost::alloc::vec::Vec<StringPair>,
+    #[prost(message, optional, tag = "6")]
+    pub hidden_backing_bytes: ::core::option::Option<ByteMeasureEvidence>,
+    #[prost(message, optional, tag = "7")]
+    pub controlled_non_materialization_acceptance: ::core::option::Option<BoolEvidence>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScannedNodeEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub path: ::core::option::Option<RawPath>,
+    #[prost(message, optional, tag = "2")]
+    pub identity: ::core::option::Option<ObjectIdentityEvidence>,
+    #[prost(message, optional, tag = "3")]
+    pub bytes: ::core::option::Option<ItemByteEvidence>,
+    #[prost(message, optional, tag = "4")]
+    pub storage_topology: ::core::option::Option<StorageTopologyEvidence>,
+    #[prost(message, optional, tag = "5")]
+    pub filesystem_times: ::core::option::Option<FilesystemTimeEvidence>,
+    #[prost(message, optional, tag = "6")]
+    pub access_policy: ::core::option::Option<AccessPolicyEvidence>,
+    #[prost(message, optional, tag = "7")]
+    pub coverage: ::core::option::Option<CoverageEvidence>,
+    #[prost(string, tag = "8")]
+    pub provider_boundary: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub provider_boundary_reason: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "10")]
+    pub provider_evidence: ::core::option::Option<ProviderScanEvidence>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanNodeObserved {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<ScannedNodeEvidence>,
+    #[prost(bool, tag = "2")]
+    pub directory_closed: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RootScanEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub root: ::core::option::Option<ScanRootRequest>,
+    #[prost(message, optional, tag = "2")]
+    pub identity: ::core::option::Option<ObjectIdentityEvidence>,
+    #[prost(string, tag = "3")]
+    pub provider_boundary: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub provider_boundary_reason: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub aggregate_bytes: ::core::option::Option<ItemByteEvidence>,
+    #[prost(message, optional, tag = "6")]
+    pub coverage: ::core::option::Option<CoverageEvidence>,
+    #[prost(uint64, tag = "7")]
+    pub entries_observed: u64,
+    #[prost(uint64, tag = "8")]
+    pub directories_closed: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RootFailureEvidence {
+    #[prost(string, tag = "1")]
+    pub root_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProcessActivityEvidence {
+    #[prost(int32, tag = "1")]
+    pub process_id: i32,
+    #[prost(string, tag = "2")]
+    pub command: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub file_descriptor: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "4")]
+    pub raw_path: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "5")]
+    pub display_path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StringUInt64Pair {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub value: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GlobalFactEvidence {
+    #[prost(bool, tag = "1")]
+    pub known: bool,
+    #[prost(string, tag = "2")]
+    pub unavailable_reason: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub uint64_values: ::prost::alloc::vec::Vec<StringUInt64Pair>,
+    #[prost(string, repeated, tag = "4")]
+    pub string_values: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanCollectorConfigurationEvidence {
+    #[prost(string, tag = "1")]
+    pub process_activity_collector_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub process_activity_deadline_nanoseconds: u64,
+    #[prost(bool, tag = "3")]
+    pub has_process_activity_deadline: bool,
+    #[prost(string, repeated, tag = "4")]
+    pub global_fact_collector_ids: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanCheckpointEvidence {
+    #[prost(string, tag = "1")]
+    pub profile: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub resolver_version: u32,
+    #[prost(uint64, tag = "3")]
+    pub wall_clock_unix_millis: u64,
+    #[prost(uint64, tag = "4")]
+    pub monotonic_nanoseconds: u64,
+    #[prost(uint64, tag = "5")]
+    pub maximum_entries_per_root: u64,
+    #[prost(uint32, tag = "6")]
+    pub maximum_depth: u32,
+    #[prost(uint64, tag = "7")]
+    pub maximum_entries_per_directory: u64,
+    #[prost(uint64, tag = "8")]
+    pub maximum_pending_name_bytes: u64,
+    #[prost(uint32, tag = "9")]
+    pub retained_node_count: u32,
+    #[prost(uint64, tag = "10")]
+    pub maximum_duration_millis: u64,
+    #[prost(message, repeated, tag = "11")]
+    pub resolved_roots: ::prost::alloc::vec::Vec<ScanRootRequest>,
+    #[prost(message, optional, tag = "12")]
+    pub progress: ::core::option::Option<ScanProgress>,
+    #[prost(message, optional, tag = "13")]
+    pub coverage: ::core::option::Option<CoverageEvidence>,
+    #[prost(message, repeated, tag = "14")]
+    pub retained_nodes: ::prost::alloc::vec::Vec<ScannedNodeEvidence>,
+    #[prost(message, repeated, tag = "15")]
+    pub completed_roots: ::prost::alloc::vec::Vec<RootScanEvidence>,
+    #[prost(message, repeated, tag = "16")]
+    pub root_failures: ::prost::alloc::vec::Vec<RootFailureEvidence>,
+    #[prost(message, optional, tag = "17")]
+    pub process_activity_observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, repeated, tag = "18")]
+    pub process_activity: ::prost::alloc::vec::Vec<ProcessActivityEvidence>,
+    #[prost(enumeration = "ScanMachineState", tag = "19")]
+    pub machine_state: i32,
+    #[prost(bool, tag = "20")]
+    pub resumable_in_process: bool,
+    #[prost(bool, tag = "21")]
+    pub provisional: bool,
+    #[prost(message, optional, tag = "22")]
+    pub collector_configuration: ::core::option::Option<
+        ScanCollectorConfigurationEvidence,
+    >,
+    #[prost(message, optional, tag = "23")]
+    pub vm: ::core::option::Option<GlobalFactEvidence>,
+    #[prost(message, optional, tag = "24")]
+    pub swap: ::core::option::Option<GlobalFactEvidence>,
+    #[prost(message, optional, tag = "25")]
+    pub apfs_snapshots: ::core::option::Option<GlobalFactEvidence>,
+}
+/// A chunk payload is a concatenation of records. Each record is a four-byte
+/// big-endian length followed by the canonical protobuf encoding of one
+/// ScannedNodeEvidence. The digest covers canonical_node_payload exactly.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanCheckpointChunk {
+    #[prost(string, tag = "1")]
+    pub checkpoint_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub chunk_index: u32,
+    #[prost(string, tag = "3")]
+    pub chunk_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub node_count: u32,
+    #[prost(bytes = "vec", tag = "5")]
+    pub canonical_node_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub payload_sha256: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanCheckpointChunkDescriptor {
+    #[prost(uint32, tag = "1")]
+    pub chunk_index: u32,
+    #[prost(string, tag = "2")]
+    pub chunk_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub node_count: u32,
+    #[prost(uint64, tag = "4")]
+    pub payload_bytes: u64,
+    #[prost(bytes = "vec", tag = "5")]
+    pub payload_sha256: ::prost::alloc::vec::Vec<u8>,
+}
+/// This manifest binds the checkpoint's coverage/frontier metadata and every
+/// retained-node chunk. checkpoint_evidence_sha256 covers the exact
+/// canonical_checkpoint_payload bytes carried by ScanCheckpointReady or
+/// ScanFinalized. final_evidence_sha256 is the protocol-defined canonical hash
+/// over that evidence digest, all budgets, and the ordered descriptors. The
+/// coverage/frontier mirrors must exactly match the digested checkpoint.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanCheckpointManifest {
+    #[prost(uint32, tag = "1")]
+    pub manifest_version: u32,
+    #[prost(string, tag = "2")]
+    pub checkpoint_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub chunk_count: u32,
+    #[prost(uint64, tag = "4")]
+    pub retained_node_count: u64,
+    #[prost(uint32, tag = "5")]
+    pub retained_node_entry_budget: u32,
+    #[prost(uint64, tag = "6")]
+    pub retained_node_payload_bytes: u64,
+    #[prost(uint32, tag = "7")]
+    pub maximum_checkpoint_payload_bytes: u32,
+    #[prost(uint32, tag = "8")]
+    pub maximum_chunk_payload_bytes: u32,
+    #[prost(uint32, tag = "9")]
+    pub maximum_manifest_encoded_bytes: u32,
+    #[prost(message, repeated, tag = "10")]
+    pub chunks: ::prost::alloc::vec::Vec<ScanCheckpointChunkDescriptor>,
+    #[prost(bytes = "vec", tag = "11")]
+    pub checkpoint_evidence_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "12")]
+    pub final_evidence_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "13")]
+    pub frontier: ::core::option::Option<ScanProgress>,
+    #[prost(message, optional, tag = "14")]
+    pub coverage: ::core::option::Option<CoverageEvidence>,
+    #[prost(string, repeated, tag = "15")]
+    pub completed_root_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "16")]
+    pub failed_root_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(enumeration = "ScanMachineState", tag = "17")]
+    pub machine_state: i32,
+    #[prost(bool, tag = "18")]
+    pub resumable_in_process: bool,
+    #[prost(bool, tag = "19")]
+    pub provisional: bool,
+    #[prost(uint64, tag = "20")]
+    pub maximum_retained_node_payload_bytes: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanCheckpointReady {
+    /// Deprecated Phase 0 field. Protocol 1.3 producers leave this unset and use
+    /// canonical_checkpoint_payload plus manifest so receivers can verify the
+    /// exact bytes before exposing checkpoint evidence.
+    #[prost(message, optional, tag = "1")]
+    pub checkpoint: ::core::option::Option<ScanCheckpointEvidence>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub canonical_checkpoint_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    pub manifest: ::core::option::Option<ScanCheckpointManifest>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanFinalized {
+    /// Deprecated Phase 0 field; see ScanCheckpointReady.checkpoint.
+    #[prost(message, optional, tag = "1")]
+    pub checkpoint: ::core::option::Option<ScanCheckpointEvidence>,
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "3")]
+    pub canonical_checkpoint_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    pub manifest: ::core::option::Option<ScanCheckpointManifest>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvisionalPlanGroupSummary {
+    #[prost(string, tag = "1")]
+    pub group_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub action_count: u64,
+    #[prost(uint64, tag = "4")]
+    pub immediate_reclaim_bytes: u64,
+    #[prost(uint64, tag = "5")]
+    pub conditional_reclaim_bytes: u64,
+    #[prost(string, tag = "6")]
+    pub status: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProvisionalPlanReady {
+    #[prost(string, tag = "1")]
+    pub plan_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub action_count: u64,
+    #[prost(uint64, tag = "3")]
+    pub immediate_reclaim_bytes: u64,
+    #[prost(uint64, tag = "4")]
+    pub conditional_reclaim_bytes: u64,
+    #[prost(message, repeated, tag = "5")]
+    pub groups: ::prost::alloc::vec::Vec<ProvisionalPlanGroupSummary>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvisionalPlanInvalidated {
+    #[prost(string, tag = "1")]
+    pub previous_plan_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanCancelled {
+    #[prost(string, tag = "1")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanFinished {
+    #[prost(string, tag = "1")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EngineFailed {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub detail: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EngineEvent {
+    #[prost(uint64, tag = "1")]
+    pub event_sequence: u64,
+    #[prost(uint64, tag = "2")]
+    pub request_id: u64,
+    #[prost(string, tag = "3")]
+    pub scan_session_id: ::prost::alloc::string::String,
+    #[prost(
+        oneof = "engine_event::Body",
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22"
+    )]
+    pub body: ::core::option::Option<engine_event::Body>,
+}
+/// Nested message and enum types in `EngineEvent`.
+pub mod engine_event {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "10")]
+        ControlAccepted(super::ControlAccepted),
+        #[prost(message, tag = "11")]
+        ControlRejected(super::ControlRejected),
+        #[prost(message, tag = "12")]
+        ScanStateChanged(super::ScanStateChanged),
+        #[prost(message, tag = "13")]
+        ScanProgress(super::ScanProgress),
+        #[prost(message, tag = "14")]
+        ProvisionalPlanReady(super::ProvisionalPlanReady),
+        #[prost(message, tag = "15")]
+        ProvisionalPlanInvalidated(super::ProvisionalPlanInvalidated),
+        #[prost(message, tag = "16")]
+        ScanCancelled(super::ScanCancelled),
+        #[prost(message, tag = "17")]
+        ScanFinished(super::ScanFinished),
+        #[prost(message, tag = "18")]
+        EngineFailed(super::EngineFailed),
+        #[prost(message, tag = "19")]
+        ScanNodeObserved(super::ScanNodeObserved),
+        #[prost(message, tag = "20")]
+        ScanCheckpointReady(super::ScanCheckpointReady),
+        #[prost(message, tag = "21")]
+        ScanFinalized(super::ScanFinalized),
+        #[prost(message, tag = "22")]
+        ScanCheckpointChunk(super::ScanCheckpointChunk),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Envelope {
     #[prost(uint64, tag = "1")]
     pub sequence: u64,
-    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 20")]
+    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 20, 21, 22, 23")]
     pub body: ::core::option::Option<envelope::Body>,
 }
 /// Nested message and enum types in `Envelope`.
 pub mod envelope {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[allow(clippy::large_enum_variant)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Body {
         #[prost(message, tag = "10")]
         Hello(super::Hello),
@@ -61,6 +665,12 @@ pub mod envelope {
         HelloRejected(super::HelloRejected),
         #[prost(message, tag = "20")]
         Business(super::BusinessEnvelope),
+        #[prost(message, tag = "21")]
+        StartScanRequest(super::StartScanRequest),
+        #[prost(message, tag = "22")]
+        ScanControlRequest(super::ScanControlRequest),
+        #[prost(message, tag = "23")]
+        EngineEvent(super::EngineEvent),
     }
 }
 /// Stable rejection codes are part of the v1 compatibility contract.
@@ -111,6 +721,333 @@ impl RejectCode {
             "REJECT_CODE_FRAME_TOO_LARGE" => Some(Self::FrameTooLarge),
             "REJECT_CODE_INTERNAL_ERROR" => Some(Self::InternalError),
             "REJECT_CODE_BUSINESS_UNSUPPORTED" => Some(Self::BusinessUnsupported),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScanControlKind {
+    Unspecified = 0,
+    StartScan = 1,
+    PauseScan = 2,
+    ResumeScan = 3,
+    /// Retained for protocol-minor compatibility with the Phase 0 shell. The
+    /// Phase 1 evidence producer rejects this control and never emits plan data.
+    PauseAndBuildProvisionalPlan = 4,
+    CancelScan = 5,
+    CheckpointScan = 6,
+    FinalizePartialScan = 7,
+    CheckpointProvisionalEvidence = 8,
+}
+impl ScanControlKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCAN_CONTROL_KIND_UNSPECIFIED",
+            Self::StartScan => "SCAN_CONTROL_KIND_START_SCAN",
+            Self::PauseScan => "SCAN_CONTROL_KIND_PAUSE_SCAN",
+            Self::ResumeScan => "SCAN_CONTROL_KIND_RESUME_SCAN",
+            Self::PauseAndBuildProvisionalPlan => {
+                "SCAN_CONTROL_KIND_PAUSE_AND_BUILD_PROVISIONAL_PLAN"
+            }
+            Self::CancelScan => "SCAN_CONTROL_KIND_CANCEL_SCAN",
+            Self::CheckpointScan => "SCAN_CONTROL_KIND_CHECKPOINT_SCAN",
+            Self::FinalizePartialScan => "SCAN_CONTROL_KIND_FINALIZE_PARTIAL_SCAN",
+            Self::CheckpointProvisionalEvidence => {
+                "SCAN_CONTROL_KIND_CHECKPOINT_PROVISIONAL_EVIDENCE"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCAN_CONTROL_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCAN_CONTROL_KIND_START_SCAN" => Some(Self::StartScan),
+            "SCAN_CONTROL_KIND_PAUSE_SCAN" => Some(Self::PauseScan),
+            "SCAN_CONTROL_KIND_RESUME_SCAN" => Some(Self::ResumeScan),
+            "SCAN_CONTROL_KIND_PAUSE_AND_BUILD_PROVISIONAL_PLAN" => {
+                Some(Self::PauseAndBuildProvisionalPlan)
+            }
+            "SCAN_CONTROL_KIND_CANCEL_SCAN" => Some(Self::CancelScan),
+            "SCAN_CONTROL_KIND_CHECKPOINT_SCAN" => Some(Self::CheckpointScan),
+            "SCAN_CONTROL_KIND_FINALIZE_PARTIAL_SCAN" => Some(Self::FinalizePartialScan),
+            "SCAN_CONTROL_KIND_CHECKPOINT_PROVISIONAL_EVIDENCE" => {
+                Some(Self::CheckpointProvisionalEvidence)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScanState {
+    Unspecified = 0,
+    Idle = 1,
+    Running = 2,
+    Paused = 3,
+    BuildingProvisionalPlan = 4,
+    ProvisionalPlanReady = 5,
+    Cancelling = 6,
+    Cancelled = 7,
+    Finished = 8,
+    Failed = 9,
+    FinalizingPartial = 10,
+    FinalizedPartial = 11,
+}
+impl ScanState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCAN_STATE_UNSPECIFIED",
+            Self::Idle => "SCAN_STATE_IDLE",
+            Self::Running => "SCAN_STATE_RUNNING",
+            Self::Paused => "SCAN_STATE_PAUSED",
+            Self::BuildingProvisionalPlan => "SCAN_STATE_BUILDING_PROVISIONAL_PLAN",
+            Self::ProvisionalPlanReady => "SCAN_STATE_PROVISIONAL_PLAN_READY",
+            Self::Cancelling => "SCAN_STATE_CANCELLING",
+            Self::Cancelled => "SCAN_STATE_CANCELLED",
+            Self::Finished => "SCAN_STATE_FINISHED",
+            Self::Failed => "SCAN_STATE_FAILED",
+            Self::FinalizingPartial => "SCAN_STATE_FINALIZING_PARTIAL",
+            Self::FinalizedPartial => "SCAN_STATE_FINALIZED_PARTIAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCAN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCAN_STATE_IDLE" => Some(Self::Idle),
+            "SCAN_STATE_RUNNING" => Some(Self::Running),
+            "SCAN_STATE_PAUSED" => Some(Self::Paused),
+            "SCAN_STATE_BUILDING_PROVISIONAL_PLAN" => Some(Self::BuildingProvisionalPlan),
+            "SCAN_STATE_PROVISIONAL_PLAN_READY" => Some(Self::ProvisionalPlanReady),
+            "SCAN_STATE_CANCELLING" => Some(Self::Cancelling),
+            "SCAN_STATE_CANCELLED" => Some(Self::Cancelled),
+            "SCAN_STATE_FINISHED" => Some(Self::Finished),
+            "SCAN_STATE_FAILED" => Some(Self::Failed),
+            "SCAN_STATE_FINALIZING_PARTIAL" => Some(Self::FinalizingPartial),
+            "SCAN_STATE_FINALIZED_PARTIAL" => Some(Self::FinalizedPartial),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScanMachineState {
+    Unspecified = 0,
+    Ready = 1,
+    Scanning = 2,
+    Complete = 3,
+    Partial = 4,
+    Cancelled = 5,
+}
+impl ScanMachineState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCAN_MACHINE_STATE_UNSPECIFIED",
+            Self::Ready => "SCAN_MACHINE_STATE_READY",
+            Self::Scanning => "SCAN_MACHINE_STATE_SCANNING",
+            Self::Complete => "SCAN_MACHINE_STATE_COMPLETE",
+            Self::Partial => "SCAN_MACHINE_STATE_PARTIAL",
+            Self::Cancelled => "SCAN_MACHINE_STATE_CANCELLED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCAN_MACHINE_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCAN_MACHINE_STATE_READY" => Some(Self::Ready),
+            "SCAN_MACHINE_STATE_SCANNING" => Some(Self::Scanning),
+            "SCAN_MACHINE_STATE_COMPLETE" => Some(Self::Complete),
+            "SCAN_MACHINE_STATE_PARTIAL" => Some(Self::Partial),
+            "SCAN_MACHINE_STATE_CANCELLED" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ControlRejectCode {
+    Unspecified = 0,
+    InvalidState = 1,
+    DuplicateRequestId = 2,
+    MalformedRequest = 3,
+    Unavailable = 4,
+    /// The finite producer command queue was full at the admission boundary.
+    CapacityExceeded = 5,
+}
+impl ControlRejectCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONTROL_REJECT_CODE_UNSPECIFIED",
+            Self::InvalidState => "CONTROL_REJECT_CODE_INVALID_STATE",
+            Self::DuplicateRequestId => "CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID",
+            Self::MalformedRequest => "CONTROL_REJECT_CODE_MALFORMED_REQUEST",
+            Self::Unavailable => "CONTROL_REJECT_CODE_UNAVAILABLE",
+            Self::CapacityExceeded => "CONTROL_REJECT_CODE_CAPACITY_EXCEEDED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONTROL_REJECT_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "CONTROL_REJECT_CODE_INVALID_STATE" => Some(Self::InvalidState),
+            "CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID" => Some(Self::DuplicateRequestId),
+            "CONTROL_REJECT_CODE_MALFORMED_REQUEST" => Some(Self::MalformedRequest),
+            "CONTROL_REJECT_CODE_UNAVAILABLE" => Some(Self::Unavailable),
+            "CONTROL_REJECT_CODE_CAPACITY_EXCEEDED" => Some(Self::CapacityExceeded),
+            _ => None,
+        }
+    }
+}
+/// A stable machine-readable reason for a rejected StartScanRequest. This is
+/// deliberately separate from ControlRejectCode: the latter describes the
+/// control-plane class, while this enum identifies the setup boundary that
+/// could not be established. Non-start controls leave this unspecified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScanSetupRejectCode {
+    Unspecified = 0,
+    CapabilityNotNegotiated = 1,
+    InvalidProfile = 2,
+    InvalidRoot = 3,
+    InvalidBudget = 4,
+    DuplicateRootId = 5,
+    MaterializationPolicyUnavailable = 6,
+    RootDiscoveryUnavailable = 7,
+    ScannerInitializationFailed = 8,
+}
+impl ScanSetupRejectCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCAN_SETUP_REJECT_CODE_UNSPECIFIED",
+            Self::CapabilityNotNegotiated => {
+                "SCAN_SETUP_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED"
+            }
+            Self::InvalidProfile => "SCAN_SETUP_REJECT_CODE_INVALID_PROFILE",
+            Self::InvalidRoot => "SCAN_SETUP_REJECT_CODE_INVALID_ROOT",
+            Self::InvalidBudget => "SCAN_SETUP_REJECT_CODE_INVALID_BUDGET",
+            Self::DuplicateRootId => "SCAN_SETUP_REJECT_CODE_DUPLICATE_ROOT_ID",
+            Self::MaterializationPolicyUnavailable => {
+                "SCAN_SETUP_REJECT_CODE_MATERIALIZATION_POLICY_UNAVAILABLE"
+            }
+            Self::RootDiscoveryUnavailable => {
+                "SCAN_SETUP_REJECT_CODE_ROOT_DISCOVERY_UNAVAILABLE"
+            }
+            Self::ScannerInitializationFailed => {
+                "SCAN_SETUP_REJECT_CODE_SCANNER_INITIALIZATION_FAILED"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCAN_SETUP_REJECT_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCAN_SETUP_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED" => {
+                Some(Self::CapabilityNotNegotiated)
+            }
+            "SCAN_SETUP_REJECT_CODE_INVALID_PROFILE" => Some(Self::InvalidProfile),
+            "SCAN_SETUP_REJECT_CODE_INVALID_ROOT" => Some(Self::InvalidRoot),
+            "SCAN_SETUP_REJECT_CODE_INVALID_BUDGET" => Some(Self::InvalidBudget),
+            "SCAN_SETUP_REJECT_CODE_DUPLICATE_ROOT_ID" => Some(Self::DuplicateRootId),
+            "SCAN_SETUP_REJECT_CODE_MATERIALIZATION_POLICY_UNAVAILABLE" => {
+                Some(Self::MaterializationPolicyUnavailable)
+            }
+            "SCAN_SETUP_REJECT_CODE_ROOT_DISCOVERY_UNAVAILABLE" => {
+                Some(Self::RootDiscoveryUnavailable)
+            }
+            "SCAN_SETUP_REJECT_CODE_SCANNER_INITIALIZATION_FAILED" => {
+                Some(Self::ScannerInitializationFailed)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EvidenceStatus {
+    Unspecified = 0,
+    Known = 1,
+    Absent = 2,
+    Unknown = 3,
+    Unreadable = 4,
+    Failed = 5,
+}
+impl EvidenceStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EVIDENCE_STATUS_UNSPECIFIED",
+            Self::Known => "EVIDENCE_STATUS_KNOWN",
+            Self::Absent => "EVIDENCE_STATUS_ABSENT",
+            Self::Unknown => "EVIDENCE_STATUS_UNKNOWN",
+            Self::Unreadable => "EVIDENCE_STATUS_UNREADABLE",
+            Self::Failed => "EVIDENCE_STATUS_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EVIDENCE_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "EVIDENCE_STATUS_KNOWN" => Some(Self::Known),
+            "EVIDENCE_STATUS_ABSENT" => Some(Self::Absent),
+            "EVIDENCE_STATUS_UNKNOWN" => Some(Self::Unknown),
+            "EVIDENCE_STATUS_UNREADABLE" => Some(Self::Unreadable),
+            "EVIDENCE_STATUS_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ByteMeasureKind {
+    Unspecified = 0,
+    Exact = 1,
+    LowerBound = 2,
+    Unknown = 3,
+}
+impl ByteMeasureKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "BYTE_MEASURE_KIND_UNSPECIFIED",
+            Self::Exact => "BYTE_MEASURE_KIND_EXACT",
+            Self::LowerBound => "BYTE_MEASURE_KIND_LOWER_BOUND",
+            Self::Unknown => "BYTE_MEASURE_KIND_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "BYTE_MEASURE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "BYTE_MEASURE_KIND_EXACT" => Some(Self::Exact),
+            "BYTE_MEASURE_KIND_LOWER_BOUND" => Some(Self::LowerBound),
+            "BYTE_MEASURE_KIND_UNKNOWN" => Some(Self::Unknown),
             _ => None,
         }
     }

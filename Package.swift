@@ -8,6 +8,8 @@ let package = Package(
   products: [
     .library(name: "DiskplanCore", targets: ["DiskplanCore"]),
     .library(name: "DiskplanMacOS", targets: ["DiskplanMacOS"]),
+    .library(name: "DiskplanScan", targets: ["DiskplanScan"]),
+    .library(name: "DiskplanEngineCore", targets: ["DiskplanEngineCore"]),
     .library(name: "DiskplanPolicy", targets: ["DiskplanPolicy"]),
     .library(name: "DiskplanExecution", targets: ["DiskplanExecution"]),
     .executable(name: "diskplan-engine", targets: ["DiskplanEngine"]),
@@ -44,6 +46,16 @@ let package = Package(
       linkerSettings: [.linkedFramework("FileProvider")]
     ),
     .target(
+      name: "DiskplanScan",
+      dependencies: ["DiskplanMacOS"],
+      path: "swift/Sources/DiskplanScan"
+    ),
+    .target(
+      name: "DiskplanEngineCore",
+      dependencies: ["DiskplanCore", "DiskplanMacOS", "DiskplanProto", "DiskplanScan"],
+      path: "swift/Sources/DiskplanEngineCore"
+    ),
+    .target(
       name: "DiskplanPolicy",
       path: "swift/Sources/DiskplanPolicy"
     ),
@@ -54,13 +66,18 @@ let package = Package(
     ),
     .executableTarget(
       name: "DiskplanEngine",
-      dependencies: ["DiskplanCore", "DiskplanExecution", "DiskplanProto"],
+      dependencies: ["DiskplanEngineCore", "DiskplanExecution"],
       path: "swift/Sources/DiskplanEngine"
     ),
     .executableTarget(
       name: "DiskplanFixtureGenerator",
       dependencies: ["DiskplanCore"],
       path: "swift/Tools/DiskplanFixtureGenerator"
+    ),
+    .executableTarget(
+      name: "DiskplanProtocolFixtureGenerator",
+      dependencies: ["DiskplanEngineCore", "DiskplanProto"],
+      path: "swift/Tools/DiskplanProtocolFixtureGenerator"
     ),
     .executableTarget(
       name: "DiskplanMacOSProbe",
@@ -76,6 +93,22 @@ let package = Package(
       name: "DiskplanMacOSTests",
       dependencies: ["DiskplanMacOS"],
       path: "swift/Tests/DiskplanMacOSTests"
+    ),
+    .testTarget(
+      name: "DiskplanScanTests",
+      dependencies: ["DiskplanScan", "DiskplanMacOS"],
+      path: "swift/Tests/DiskplanScanTests"
+    ),
+    .testTarget(
+      name: "DiskplanEngineCoreTests",
+      dependencies: [
+        "DiskplanCore",
+        "DiskplanEngineCore",
+        "DiskplanProto",
+        "DiskplanScan",
+        .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+      ],
+      path: "swift/Tests/DiskplanEngineCoreTests"
     ),
     .testTarget(
       name: "DiskplanPolicyTests",
