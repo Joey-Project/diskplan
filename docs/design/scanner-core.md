@@ -17,7 +17,8 @@ object type for one descriptor-relative directory slot. The walker:
 3. binds each accepted root to an open directory descriptor and stable identity;
 4. enumerates raw directory-entry bytes into a bounded lexicographic retention set;
 5. inspects children relative to the held parent descriptor without following
-   symbolic links;
+   symbolic links, then binds real identity, access policy, and all filesystem
+   times to one event-only descriptor (`O_SYMLINK` for the link object itself);
 6. opens a child directory relative to that same descriptor and compares all three
    identity fields before enumeration; and
 7. retains the parent-slot descriptor, raw name, identity, and access-policy seal
@@ -37,6 +38,10 @@ read successfully.
 `ItemProbe`, root descriptors, child descriptors, mount comparisons, and close
 revalidation all use the same real-device, file-ID, and object-type namespace.
 Ordinary `st_dev` is never compared with an `FSOPT_RETURN_REALDEV` identity.
+An item seal is accepted only after its bound descriptor identity exactly matches
+the immediately preceding `ItemProbe` identity. Provider postflight then repeats
+both observations. This prevents identity/byte evidence from one object being
+combined with policy or time evidence from a transient replacement.
 
 A missing slot, unreadable slot, access-policy mutation, collector failure, and
 replacement mismatch are different observations both during inspection and at
@@ -49,7 +54,9 @@ itself first opens the parent slot descriptor-relative with no-follow semantics,
 then reads real identity and policy from that same bound descriptor. A replacement
 policy is therefore rejected even if the original slot is restored before the
 outer postflight; a known policy is discarded whenever its bound identity is not
-the expected directory.
+the expected directory. `ELOOP` and `ENOTDIR` while binding an expected directory
+mean the slot temporarily became a symlink or non-directory and are reported as
+`ESTALE` identity/type mismatches, not generic collector failures.
 The production backend never constructs descendant paths; only the configured root's
 parent path is path-opened to establish the descriptor-relative root slot. A root
 with unproved provider ownership is retained in provenance and root failures but is

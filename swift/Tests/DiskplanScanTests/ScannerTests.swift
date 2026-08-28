@@ -306,6 +306,39 @@ private func openDirectorySlot(parentFD: Int32, name: Data) -> Int32 {
   }
 }
 
+private func openReplacementThenRestore(
+  parentFD: Int32,
+  slotName: Data,
+  replacementName: Data,
+  parkedName: Data
+) -> Int32 {
+  guard renameSlot(parentFD: parentFD, from: slotName, to: parkedName) == 0 else {
+    return -1
+  }
+  guard renameSlot(parentFD: parentFD, from: replacementName, to: slotName) == 0 else {
+    let code = errno
+    _ = renameSlot(parentFD: parentFD, from: parkedName, to: slotName)
+    errno = code
+    return -1
+  }
+  let replacementFD = openDirectorySlot(parentFD: parentFD, name: slotName)
+  let openCode = errno
+  guard renameSlot(parentFD: parentFD, from: slotName, to: replacementName) == 0 else {
+    let code = errno
+    if replacementFD >= 0 { close(replacementFD) }
+    errno = code
+    return -1
+  }
+  guard renameSlot(parentFD: parentFD, from: parkedName, to: slotName) == 0 else {
+    let code = errno
+    if replacementFD >= 0 { close(replacementFD) }
+    errno = code
+    return -1
+  }
+  errno = openCode
+  return replacementFD
+}
+
 private let fakeAccessPolicy = AccessPolicyEvidence(
   ownerUserID: 501,
   ownerGroupID: 20,
@@ -315,6 +348,8 @@ private let fakeAccessPolicy = AccessPolicyEvidence(
 
 private func replacingItemEvidence(
   _ item: ItemStorageEvidence,
+  device: Capability<Int64>? = nil,
+  objectType: Capability<FileSystemObjectType>? = nil,
   fileID: Capability<UInt64>? = nil,
   logicalBytes: Capability<UInt64>? = nil,
   sharing: SharingEvidence? = nil,
@@ -323,8 +358,8 @@ private func replacingItemEvidence(
 ) -> ItemStorageEvidence {
   ItemStorageEvidence(
     returnedAttributes: item.returnedAttributes,
-    device: item.device,
-    objectType: item.objectType,
+    device: device ?? item.device,
+    objectType: objectType ?? item.objectType,
     fileID: fileID ?? item.fileID,
     linkCount: item.linkCount,
     logicalBytes: logicalBytes ?? item.logicalBytes,
@@ -1235,7 +1270,13 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   }
   let fd = try #require(rootFD >= 0 ? rootFD : nil)
   defer { close(fd) }
-  let before = fixtureItemEvidence()
+  let before = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: Data("child".utf8),
+      policy: policy
+    ).value
+  )
   let variants = [
     replacingItemEvidence(
       before,
@@ -1299,8 +1340,15 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   }
   let fd = try #require(rootFD >= 0 ? rootFD : nil)
   defer { close(fd) }
+  let actualItem = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: Data("child".utf8),
+      policy: policy
+    ).value
+  )
   let item = replacingItemEvidence(
-    fixtureItemEvidence(),
+    actualItem,
     isSyncRoot: .unavailable("sync-root state unavailable")
   )
   let provider = LockedProviderOutcome(confirmedProviderEvidence())
@@ -1340,7 +1388,20 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   }
   let fd = try #require(rootFD >= 0 ? rootFD : nil)
   defer { close(fd) }
-  let item = replacingItemEvidence(fixtureItemEvidence(), isDataless: .known(true))
+  let actualItem = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: Data("child".utf8),
+      policy: policy
+    ).value
+  )
+  let item = replacingItemEvidence(
+    fixtureItemEvidence(),
+    device: actualItem.device,
+    objectType: actualItem.objectType,
+    fileID: actualItem.fileID,
+    isDataless: .known(true)
+  )
   let rejectedBoundary = FileProviderProbeOutcome.evidence(
     FileProviderEvidence(
       identity: .known(
@@ -1391,10 +1452,23 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     .appendingPathComponent("diskplan-provider-state-test-\(UUID().uuidString)", isDirectory: true)
   try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
   defer { try? FileManager.default.removeItem(at: rootURL) }
-  let rawRoot = rootURL.withUnsafeFileSystemRepresentation {
+  let scanRootURL = rootURL.appendingPathComponent("scan-root", isDirectory: true)
+  try FileManager.default.createDirectory(at: scanRootURL, withIntermediateDirectories: false)
+  let rawRoot = scanRootURL.withUnsafeFileSystemRepresentation {
     Data(bytes: $0!, count: strlen($0!))
   }
-  let before = fixtureItemEvidence()
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let before = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: Data("scan-root".utf8),
+      policy: policy
+    ).value
+  )
   let changedSharing = SharingEvidence(
     mayShareBlocks: before.sharing.mayShareBlocks,
     sharesAllBlocks: before.sharing.sharesAllBlocks,
@@ -1446,10 +1520,23 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
       "diskplan-provider-rejection-test-\(UUID().uuidString)", isDirectory: true)
   try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
   defer { try? FileManager.default.removeItem(at: rootURL) }
-  let rawRoot = rootURL.withUnsafeFileSystemRepresentation {
+  let scanRootURL = rootURL.appendingPathComponent("scan-root", isDirectory: true)
+  try FileManager.default.createDirectory(at: scanRootURL, withIntermediateDirectories: false)
+  let rawRoot = scanRootURL.withUnsafeFileSystemRepresentation {
     Data(bytes: $0!, count: strlen($0!))
   }
-  let item = fixtureItemEvidence()
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let item = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: Data("scan-root".utf8),
+      policy: policy
+    ).value
+  )
   let expected = FileObjectIdentity(device: 1, fileID: 1, objectType: .directory)
   let observed = FileObjectIdentity(device: 1, fileID: 2, objectType: .directory)
 
@@ -1736,26 +1823,17 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let replacingFilesystem = DarwinScanFilesystem(
     policy: policy,
     pathAccessValidator: { .known(policy) },
-    boundAccessPolicyOpener: { parentFD, observedName in
+    slotSealOpener: { parentFD, observedName in
       guard observedName == childName else {
         errno = EINVAL
         return -1
       }
-      guard renameSlot(parentFD: parentFD, from: childName, to: parkedName) == 0 else {
-        return -1
-      }
-      guard renameSlot(parentFD: parentFD, from: replacementName, to: childName) == 0 else {
-        let code = errno
-        _ = renameSlot(parentFD: parentFD, from: parkedName, to: childName)
-        errno = code
-        return -1
-      }
-      let replacementFD = openDirectorySlot(parentFD: parentFD, name: childName)
-      let openCode = errno
-      #expect(renameSlot(parentFD: parentFD, from: childName, to: replacementName) == 0)
-      #expect(renameSlot(parentFD: parentFD, from: parkedName, to: childName) == 0)
-      errno = openCode
-      return replacementFD
+      return openReplacementThenRestore(
+        parentFD: parentFD,
+        slotName: childName,
+        replacementName: replacementName,
+        parkedName: parkedName
+      )
     }
   )
 
@@ -1765,10 +1843,11 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     return
   }
   #expect(identityCode == ESTALE)
-  guard case .unknown = closeEvidence.accessPolicy else {
-    Issue.record("replacement policy was accepted after the original slot was restored")
+  guard case .failed(_, let policyCode) = closeEvidence.accessPolicy else {
+    Issue.record("replacement policy was not attributed to the bound slot identity")
     return
   }
+  #expect(policyCode == ESTALE)
   let restoredItem = try #require(
     ItemProbe().probe(
       parentFileDescriptor: fd,
@@ -1777,6 +1856,215 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     ).value
   )
   #expect(restoredItem.fileID.value == inspected.identity.fileID)
+}
+
+@Test func inspectRejectsIdentityBytesWithReplacementPolicyTimesSeal() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-inspect-seal-interleaving-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  let childName = Data("child".utf8)
+  let replacementName = Data("replacement".utf8)
+  let parkedName = Data("parked-original".utf8)
+  try FileManager.default.createDirectory(
+    at: rootURL.appendingPathComponent("child"),
+    withIntermediateDirectories: false
+  )
+  try FileManager.default.createDirectory(
+    at: rootURL.appendingPathComponent("replacement"),
+    withIntermediateDirectories: false
+  )
+  try FileManager.default.setAttributes(
+    [.posixPermissions: 0o500],
+    ofItemAtPath: rootURL.appendingPathComponent("replacement").path
+  )
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let original = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: childName,
+      policy: policy
+    ).value
+  )
+  let filesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { .known(policy) },
+    slotSealOpener: { parentFD, observedName in
+      guard observedName == childName else {
+        errno = EINVAL
+        return -1
+      }
+      return openReplacementThenRestore(
+        parentFD: parentFD,
+        slotName: childName,
+        replacementName: replacementName,
+        parkedName: parkedName
+      )
+    }
+  )
+
+  let observation = filesystem.inspect(
+    parent: DirectoryHandle(rawValue: fd),
+    name: RawPathComponent(childName),
+    inheritedProviderBoundary: false,
+    requiresAuthoritativeProviderEvidence: false
+  )
+  guard case .failed(_, let code) = observation else {
+    Issue.record("replacement policy/times seal was combined with original identity")
+    return
+  }
+  #expect(code == ESTALE)
+  let restored = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: childName,
+      policy: policy
+    ).value
+  )
+  #expect(restored.fileID.value == original.fileID.value)
+}
+
+@Test func darwinInspectBindsPolicyAndTimesAcrossNoFollowObjectTypes() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-inspect-bound-seal-types-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  try FileManager.default.createDirectory(
+    at: rootURL.appendingPathComponent("directory"),
+    withIntermediateDirectories: false
+  )
+  try Data([1]).write(to: rootURL.appendingPathComponent("regular"))
+  try FileManager.default.createSymbolicLink(
+    at: rootURL.appendingPathComponent("symlink"),
+    withDestinationURL: rootURL.appendingPathComponent("regular")
+  )
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let filesystem = DarwinScanFilesystem(policy: policy)
+  let fixtures: [(Data, ScannedObjectType)] = [
+    (Data("directory".utf8), .directory),
+    (Data("regular".utf8), .regular),
+    (Data("symlink".utf8), .symbolicLink),
+  ]
+
+  for (rawName, expectedType) in fixtures {
+    let observation = filesystem.inspect(
+      parent: DirectoryHandle(rawValue: fd),
+      name: RawPathComponent(rawName),
+      inheritedProviderBoundary: false,
+      requiresAuthoritativeProviderEvidence: false
+    )
+    guard let inspected = observation.value else {
+      Issue.record(
+        "bound seal failed for \(String(decoding: rawName, as: UTF8.self)): \(observation)")
+      continue
+    }
+    #expect(inspected.identity.objectType == expectedType)
+    #expect(inspected.accessPolicy.value != nil)
+    #expect(inspected.filesystemTimes.accessTime.value != nil)
+    #expect(inspected.filesystemTimes.modificationTime.value != nil)
+    #expect(inspected.filesystemTimes.statusChangeTime.value != nil)
+    #expect(inspected.filesystemTimes.birthTime.value != nil)
+  }
+}
+
+@Test func closeClassifiesTemporarySymlinkAndRegularReplacementsAsIdentityMismatch() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  for kind in ["symlink", "regular"] {
+    let rootURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent(
+        "diskplan-close-type-replacement-\(kind)-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: rootURL) }
+    let childName = Data("child".utf8)
+    let replacementName = Data("replacement".utf8)
+    let parkedName = Data("parked-original".utf8)
+    try FileManager.default.createDirectory(
+      at: rootURL.appendingPathComponent("child"),
+      withIntermediateDirectories: false
+    )
+    let replacementURL = rootURL.appendingPathComponent("replacement")
+    if kind == "symlink" {
+      try FileManager.default.createSymbolicLink(
+        at: replacementURL,
+        withDestinationURL: rootURL.appendingPathComponent("missing-target")
+      )
+    } else {
+      try Data([1]).write(to: replacementURL)
+    }
+    let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+      open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    }
+    let fd = try #require(rootFD >= 0 ? rootFD : nil)
+    defer { close(fd) }
+    let parent = DirectoryHandle(rawValue: fd)
+    let name = RawPathComponent(childName)
+    let normal = DarwinScanFilesystem(policy: policy)
+    let inspected = try #require(
+      normal.inspect(
+        parent: parent,
+        name: name,
+        inheritedProviderBoundary: false,
+        requiresAuthoritativeProviderEvidence: false
+      ).value
+    )
+    let accessPolicy = try #require(inspected.accessPolicy.value)
+    let directory = try #require(
+      normal.openDirectory(
+        parent: parent,
+        name: name,
+        expectedIdentity: inspected.identity,
+        expectedAccessPolicy: accessPolicy
+      ).value
+    )
+    let replacingFilesystem = DarwinScanFilesystem(
+      policy: policy,
+      pathAccessValidator: { .known(policy) },
+      slotSealOpener: { parentFD, observedName in
+        guard observedName == childName else {
+          errno = EINVAL
+          return -1
+        }
+        return openReplacementThenRestore(
+          parentFD: parentFD,
+          slotName: childName,
+          replacementName: replacementName,
+          parkedName: parkedName
+        )
+      }
+    )
+
+    let closeEvidence = replacingFilesystem.close(directory)
+    guard case .failed(_, let identityCode) = closeEvidence.identity else {
+      Issue.record("temporary \(kind) replacement was not an identity mismatch")
+      continue
+    }
+    #expect(identityCode == ESTALE)
+    guard case .failed(_, let policyCode) = closeEvidence.accessPolicy else {
+      Issue.record("temporary \(kind) replacement remained a generic policy failure")
+      continue
+    }
+    #expect(policyCode == ESTALE)
+    let restored = try #require(
+      ItemProbe().probe(
+        parentFileDescriptor: fd,
+        rawName: childName,
+        policy: policy
+      ).value
+    )
+    #expect(restored.fileID.value == inspected.identity.fileID)
+  }
 }
 
 @Test func configuredDarwinRootFailsClosedWithoutAuthoritativeProviderOwnership() throws {

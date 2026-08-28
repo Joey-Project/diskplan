@@ -57,6 +57,10 @@ superseded_by:
   and after the policy read.
 - [x] Bind close-time access policy and real identity to the same no-follow slot
   descriptor so replace-policy-restore cannot cross-associate evidence.
+- [x] Bind every inspection policy/time seal to exact real identity on the same
+  event-only no-follow descriptor before accepting item evidence.
+- [x] Classify temporary symlink or non-directory close-slot replacements as
+  `ESTALE` identity/type mismatches.
 - [x] Preserve active-frame provider, mount, and frontier coverage on cancellation.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [ ] Integrate scanner evidence into the versioned IPC workstream.
@@ -70,7 +74,7 @@ superseded_by:
 
 ## Handoff
 
-- Phase: Phase 1 fifth frozen-review repair complete and validated.
+- Phase: Phase 1 sixth frozen-review repair complete and locally validated.
 - Next step: repeat independent frozen-range review, then prepare PR delivery.
 - Blocker: none for the scanner slice. The authoritative directory packed-attribute
   parser fix is integrated from foundation head
@@ -164,3 +168,18 @@ superseded_by:
 - Strict Swift format lint on both changed Swift files, `git diff --check`, CI
   journal tests (6 tests), the repository journal validator, and the bundled
   project-journal validator pass for the fifth repair range.
+- The sixth frozen review identified that inspection policy/times could still come
+  from a different slot object than identity/byte evidence, and that close-time
+  `ELOOP`/`ENOTDIR` was not typed as replacement. The repair binds real identity,
+  policy, and times to one event-only descriptor and exact-compares that identity
+  before accepting the seal. Controlled regressions cover an A/B/A seal
+  interleaving, live directory/regular/symlink seals, and temporary symlink/regular
+  close replacements.
+- Focused scanner tests pass all 40 tests. The complete Swift suite passes all 88
+  tests, the explicit Swift build with automatic dependency resolution disabled
+  succeeds, and the macOS capability gate passes 32 focused tests plus the CLI
+  self-test. Controlled File Provider and APFS volume-group fixtures remain
+  explicitly unavailable on this local host.
+- Strict Swift format lint on both changed Swift files, `git diff --check`, CI
+  journal tests (6 tests), the repository journal validator, and the bundled
+  project-journal validator pass for the sixth repair range.

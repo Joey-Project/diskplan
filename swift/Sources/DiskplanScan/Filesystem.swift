@@ -36,13 +36,9 @@ public struct InspectedObject: Equatable, Sendable {
 }
 
 private struct SlotSeal: Equatable, Sendable {
-  let accessPolicy: AccessPolicyEvidence
-  let times: FilesystemTimeEvidence
-}
-
-struct IdentityBoundAccessPolicy: Equatable, Sendable {
   let identity: ObjectIdentity
   let accessPolicy: AccessPolicyEvidence
+  let times: FilesystemTimeEvidence
 }
 
 private struct PolicyRelevantItemState: Equatable, Sendable {
@@ -197,7 +193,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     @Sendable (Int32, Data, NoMaterializationPolicy) -> Capability<ItemStorageEvidence>
   private let providerEvidenceReader:
     @Sendable (Int32, Data, NoMaterializationPolicy, Bool) -> FileProviderProbeOutcome
-  private let boundAccessPolicyOpener: (@Sendable (Int32, Data) -> Int32)?
+  private let slotSealOpener: (@Sendable (Int32, Data) -> Int32)?
 
   public init(policy: NoMaterializationPolicy) {
     self.policy = policy
@@ -218,7 +214,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         inheritedProviderBoundary: inheritedBoundary
       )
     }
-    boundAccessPolicyOpener = nil
+    slotSealOpener = nil
   }
 
   init(
@@ -248,14 +244,14 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
           inheritedProviderBoundary: inheritedBoundary
         )
       },
-    boundAccessPolicyOpener: (@Sendable (Int32, Data) -> Int32)? = nil
+    slotSealOpener: (@Sendable (Int32, Data) -> Int32)? = nil
   ) {
     self.policy = policy
     self.pathAccessValidator = pathAccessValidator
     self.monotonicNow = monotonicNow
     self.itemEvidenceReader = itemEvidenceReader
     self.providerEvidenceReader = providerEvidenceReader
-    self.boundAccessPolicyOpener = boundAccessPolicyOpener
+    self.slotSealOpener = slotSealOpener
   }
 
   public func bindRoot(
@@ -439,8 +435,6 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     inheritedProviderBoundary: Bool,
     requiresAuthoritativeProviderEvidence: Bool
   ) -> Observation<InspectedObject> {
-    let before = statSlotSeal(parent: parent, name: name)
-    guard let beforeSeal = before.value else { return before.erasingValue() }
     let beforeCapability = itemEvidenceReader(parent.rawValue, name.bytes, policy)
     guard let beforeItem = beforeCapability.value else {
       return observation(beforeCapability, operation: "inspect item", as: InspectedObject.self)
@@ -448,6 +442,12 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     guard let beforeIdentity = itemIdentity(beforeItem).value else {
       return itemIdentity(beforeItem).erasingValue()
     }
+    let before = statSlotSeal(
+      parent: parent,
+      name: name,
+      expectedIdentity: beforeIdentity
+    )
+    guard let beforeSeal = before.value else { return before.erasingValue() }
     let boundary: ProviderBoundary
     let providerEvidence: Observation<ProviderScanEvidence>
     let providerStateIsFullyLocal =
@@ -515,7 +515,11 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         as: InspectedObject.self
       )
     }
-    let after = statSlotSeal(parent: parent, name: name)
+    let after = statSlotSeal(
+      parent: parent,
+      name: name,
+      expectedIdentity: afterIdentity
+    )
     guard let afterSeal = after.value else { return after.erasingValue() }
     guard beforeSeal.accessPolicy == afterSeal.accessPolicy else {
       return .failed(reason: "access policy changed during item inspection", errorCode: EAGAIN)
@@ -686,25 +690,15 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
   private func closeAccessPolicy(
     _ directory: BoundDirectory
   ) -> DirectoryCloseEvidence {
-    let boundSeal = identityBoundAccessPolicy(
+    let boundSeal = statSlotSeal(
       parent: directory.slotBinding.parent,
-      name: directory.slotBinding.name
+      name: directory.slotBinding.name,
+      expectedIdentity: directory.slotBinding.expectedIdentity
     )
     guard let observedSeal = boundSeal.value else {
       return DirectoryCloseEvidence(
         identity: boundSeal.erasingValue(),
         accessPolicy: boundSeal.erasingValue()
-      )
-    }
-    guard observedSeal.identity == directory.slotBinding.expectedIdentity else {
-      return DirectoryCloseEvidence(
-        identity: .failed(
-          reason: "directory slot identity changed during access-policy observation",
-          errorCode: ESTALE
-        ),
-        accessPolicy: .unknown(
-          reason: "access policy belongs to a replacement directory identity"
-        )
       )
     }
     let accessPolicy: Observation<AccessPolicyEvidence>
@@ -722,28 +716,33 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     )
   }
 
-  private func identityBoundAccessPolicy(
+  private func statSlotSeal(
     parent: DirectoryHandle,
-    name: RawPathComponent
-  ) -> Observation<IdentityBoundAccessPolicy> {
-    let gate = pathAccessGate(operation: "bind directory slot for access-policy inspection")
+    name: RawPathComponent,
+    expectedIdentity: ObjectIdentity
+  ) -> Observation<SlotSeal> {
+    let operation = "bind item identity, access policy, and times"
+    let gate = pathAccessGate(operation: operation)
     guard let livePolicy = gate.value else {
-      return observation(
-        gate,
-        operation: "bind directory slot for access-policy inspection",
-        as: IdentityBoundAccessPolicy.self
-      )
+      return observation(gate, operation: "inspect item access policy", as: SlotSeal.self)
     }
     let fd =
-      if let boundAccessPolicyOpener {
-        boundAccessPolicyOpener(parent.rawValue, name.bytes)
+      if let slotSealOpener {
+        slotSealOpener(parent.rawValue, name.bytes)
       } else {
         withNullTerminated(name.bytes) {
-          openat(parent.rawValue, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+          openat(parent.rawValue, $0, slotSealOpenFlags(for: expectedIdentity.objectType))
         }
       }
     guard fd >= 0 else {
-      return posixObservation(errno, operation: "open directory slot for access-policy inspection")
+      let code = errno
+      if code == ELOOP || code == ENOTDIR {
+        return .failed(
+          reason: "item identity or type changed before descriptor-bound seal",
+          errorCode: ESTALE
+        )
+      }
+      return posixObservation(code, operation: operation)
     }
     defer { Darwin.close(fd) }
     let identityCapability = descriptorIdentityProbe.probe(
@@ -753,42 +752,24 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     guard let descriptorIdentity = identityCapability.value else {
       return observation(
         identityCapability,
-        operation: "read identity bound to directory access policy",
-        as: IdentityBoundAccessPolicy.self
+        operation: "read identity bound to item policy and times",
+        as: SlotSeal.self
+      )
+    }
+    let observedIdentity = objectIdentity(descriptorIdentity)
+    guard observedIdentity == expectedIdentity else {
+      return .failed(
+        reason: "item identity changed before descriptor-bound policy and times",
+        errorCode: ESTALE
       )
     }
     var value = stat()
     guard fstat(fd, &value) == 0 else {
-      return posixObservation(errno, operation: "read descriptor-bound directory access policy")
+      return posixObservation(errno, operation: "read descriptor-bound item policy and times")
     }
-    return .known(
-      IdentityBoundAccessPolicy(
-        identity: objectIdentity(descriptorIdentity),
-        accessPolicy: AccessPolicyEvidence(
-          ownerUserID: value.st_uid,
-          ownerGroupID: value.st_gid,
-          mode: UInt32(value.st_mode),
-          flags: value.st_flags
-        )
-      )
-    )
-  }
-
-  private func statSlotSeal(
-    parent: DirectoryHandle,
-    name: RawPathComponent
-  ) -> Observation<SlotSeal> {
-    let gate = pathAccessGate(operation: "inspect item access policy")
-    guard gate.value != nil else {
-      return observation(gate, operation: "inspect item access policy", as: SlotSeal.self)
-    }
-    var value = stat()
-    let result = withNullTerminated(name.bytes) {
-      fstatat(parent.rawValue, $0, &value, AT_SYMLINK_NOFOLLOW)
-    }
-    guard result == 0 else { return posixObservation(errno, operation: "fstatat item identity") }
     return .known(
       SlotSeal(
+        identity: observedIdentity,
         accessPolicy: AccessPolicyEvidence(
           ownerUserID: value.st_uid,
           ownerGroupID: value.st_gid,
@@ -803,6 +784,15 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         )
       )
     )
+  }
+
+  private func slotSealOpenFlags(for objectType: ScannedObjectType) -> Int32 {
+    let base = O_EVTONLY | O_NOFOLLOW | O_CLOEXEC
+    switch objectType {
+    case .directory: return base | O_DIRECTORY
+    case .symbolicLink: return O_RDONLY | O_SYMLINK | O_CLOEXEC
+    case .regular, .other: return base
+    }
   }
 
   private func canonicalTime(_ value: timespec) -> CanonicalFilesystemTime {
