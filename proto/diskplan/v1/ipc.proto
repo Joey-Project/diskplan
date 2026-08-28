@@ -1,0 +1,180 @@
+syntax = "proto3";
+
+package diskplan.v1;
+
+// Stable rejection codes are part of the v1 compatibility contract.
+enum RejectCode {
+  REJECT_CODE_UNSPECIFIED = 0;
+  REJECT_CODE_PROTOCOL_MAJOR_MISMATCH = 1;
+  REJECT_CODE_MISSING_REQUIRED_CAPABILITY = 2;
+  REJECT_CODE_BUSINESS_BEFORE_HANDSHAKE = 3;
+  REJECT_CODE_MALFORMED_ENVELOPE = 4;
+  // Reserved for transports that can safely report an oversized frame. The
+  // stdio transport treats oversize as fatal because the unread payload would
+  // leave the stream without a trustworthy frame boundary.
+  REJECT_CODE_FRAME_TOO_LARGE = 5;
+  REJECT_CODE_INTERNAL_ERROR = 6;
+  REJECT_CODE_BUSINESS_UNSUPPORTED = 7;
+}
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message Hello {
+  ProtocolVersion version = 1;
+  repeated string required_capabilities = 2;
+  repeated string optional_capabilities = 3;
+  string implementation = 4;
+}
+
+message HelloAccepted {
+  ProtocolVersion selected_version = 1;
+  repeated string negotiated_capabilities = 2;
+}
+
+message HelloRejected {
+  RejectCode code = 1;
+  string detail = 2;
+  ProtocolVersion peer_version = 3;
+}
+
+message BusinessEnvelope {
+  string type = 1;
+  bytes payload = 2;
+}
+
+enum ScanControlKind {
+  SCAN_CONTROL_KIND_UNSPECIFIED = 0;
+  SCAN_CONTROL_KIND_START_SCAN = 1;
+  SCAN_CONTROL_KIND_PAUSE_SCAN = 2;
+  SCAN_CONTROL_KIND_RESUME_SCAN = 3;
+  SCAN_CONTROL_KIND_PAUSE_AND_BUILD_PROVISIONAL_PLAN = 4;
+  SCAN_CONTROL_KIND_CANCEL_SCAN = 5;
+}
+
+enum ScanState {
+  SCAN_STATE_UNSPECIFIED = 0;
+  SCAN_STATE_IDLE = 1;
+  SCAN_STATE_RUNNING = 2;
+  SCAN_STATE_PAUSED = 3;
+  SCAN_STATE_BUILDING_PROVISIONAL_PLAN = 4;
+  SCAN_STATE_PROVISIONAL_PLAN_READY = 5;
+  SCAN_STATE_CANCELLING = 6;
+  SCAN_STATE_CANCELLED = 7;
+  SCAN_STATE_FINISHED = 8;
+  SCAN_STATE_FAILED = 9;
+}
+
+enum ControlRejectCode {
+  CONTROL_REJECT_CODE_UNSPECIFIED = 0;
+  CONTROL_REJECT_CODE_INVALID_STATE = 1;
+  CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID = 2;
+  CONTROL_REJECT_CODE_MALFORMED_REQUEST = 3;
+}
+
+message StartScanRequest {
+  uint64 request_id = 1;
+  string profile = 2;
+}
+
+message ScanControlRequest {
+  uint64 request_id = 1;
+  ScanControlKind control = 2;
+}
+
+message ControlAccepted {
+  ScanControlKind control = 1;
+  ScanState resulting_state = 2;
+}
+
+message ControlRejected {
+  ScanControlKind control = 1;
+  ControlRejectCode code = 2;
+  string detail = 3;
+  ScanState current_state = 4;
+}
+
+message ScanStateChanged {
+  ScanState state = 1;
+  string reason = 2;
+}
+
+message ScanProgress {
+  string profile = 1;
+  uint64 elapsed_millis = 2;
+  uint64 entries = 3;
+  uint64 directories = 4;
+  uint64 candidates = 5;
+  uint64 allocated_bytes_observed = 6;
+  uint64 reclaim_estimate_bytes = 7;
+  uint64 complete_roots = 8;
+  uint64 partial_roots = 9;
+  uint64 entries_per_second = 10;
+  string current_root = 11;
+  uint64 structural_budget = 12;
+}
+
+message ProvisionalPlanGroupSummary {
+  string group_id = 1;
+  string title = 2;
+  uint64 action_count = 3;
+  uint64 immediate_reclaim_bytes = 4;
+  uint64 conditional_reclaim_bytes = 5;
+  string status = 6;
+}
+
+message ProvisionalPlanReady {
+  string plan_id = 1;
+  uint64 action_count = 2;
+  uint64 immediate_reclaim_bytes = 3;
+  uint64 conditional_reclaim_bytes = 4;
+  repeated ProvisionalPlanGroupSummary groups = 5;
+}
+
+message ProvisionalPlanInvalidated {
+  string previous_plan_id = 1;
+}
+
+message ScanCancelled {
+  string reason = 1;
+}
+
+message ScanFinished {
+  string summary = 1;
+}
+
+message EngineFailed {
+  string code = 1;
+  string detail = 2;
+}
+
+message EngineEvent {
+  uint64 event_sequence = 1;
+  uint64 request_id = 2;
+  oneof body {
+    ControlAccepted control_accepted = 10;
+    ControlRejected control_rejected = 11;
+    ScanStateChanged scan_state_changed = 12;
+    ScanProgress scan_progress = 13;
+    ProvisionalPlanReady provisional_plan_ready = 14;
+    ProvisionalPlanInvalidated provisional_plan_invalidated = 15;
+    ScanCancelled scan_cancelled = 16;
+    ScanFinished scan_finished = 17;
+    EngineFailed engine_failed = 18;
+  }
+}
+
+message Envelope {
+  uint64 sequence = 1;
+  oneof body {
+    Hello hello = 10;
+    HelloAccepted hello_accepted = 11;
+    HelloRejected hello_rejected = 12;
+    BusinessEnvelope business = 20;
+    StartScanRequest start_scan_request = 21;
+    ScanControlRequest scan_control_request = 22;
+    EngineEvent engine_event = 23;
+  }
+}

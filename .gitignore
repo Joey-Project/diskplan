@@ -4,6 +4,7 @@
 target/
 *.profraw
 *.profdata
+__pycache__/
 .codex-local/
 .codex-tmp/
 docs/project_journal/INDEX.md
