@@ -284,6 +284,9 @@ public nonisolated enum Diskplan_V1_ControlRejectCode: SwiftProtobuf.Enum, Swift
   case duplicateRequestID // = 2
   case malformedRequest // = 3
   case unavailable // = 4
+
+  /// The finite producer command queue was full at the admission boundary.
+  case capacityExceeded // = 5
   case UNRECOGNIZED(Int)
 
   public init() {
@@ -297,6 +300,7 @@ public nonisolated enum Diskplan_V1_ControlRejectCode: SwiftProtobuf.Enum, Swift
     case 2: self = .duplicateRequestID
     case 3: self = .malformedRequest
     case 4: self = .unavailable
+    case 5: self = .capacityExceeded
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -308,6 +312,7 @@ public nonisolated enum Diskplan_V1_ControlRejectCode: SwiftProtobuf.Enum, Swift
     case .duplicateRequestID: return 2
     case .malformedRequest: return 3
     case .unavailable: return 4
+    case .capacityExceeded: return 5
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -319,6 +324,7 @@ public nonisolated enum Diskplan_V1_ControlRejectCode: SwiftProtobuf.Enum, Swift
     .duplicateRequestID,
     .malformedRequest,
     .unavailable,
+    .capacityExceeded,
   ]
 
 }
@@ -2238,7 +2244,7 @@ nonisolated extension Diskplan_V1_ScanMachineState: SwiftProtobuf._ProtoNameProv
 }
 
 nonisolated extension Diskplan_V1_ControlRejectCode: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CONTROL_REJECT_CODE_UNSPECIFIED\0\u{1}CONTROL_REJECT_CODE_INVALID_STATE\0\u{1}CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID\0\u{1}CONTROL_REJECT_CODE_MALFORMED_REQUEST\0\u{1}CONTROL_REJECT_CODE_UNAVAILABLE\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CONTROL_REJECT_CODE_UNSPECIFIED\0\u{1}CONTROL_REJECT_CODE_INVALID_STATE\0\u{1}CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID\0\u{1}CONTROL_REJECT_CODE_MALFORMED_REQUEST\0\u{1}CONTROL_REJECT_CODE_UNAVAILABLE\0\u{1}CONTROL_REJECT_CODE_CAPACITY_EXCEEDED\0")
 }
 
 nonisolated extension Diskplan_V1_ScanSetupRejectCode: SwiftProtobuf._ProtoNameProviding {

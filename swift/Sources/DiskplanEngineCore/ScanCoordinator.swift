@@ -61,17 +61,78 @@ private final class StreamingNodeSink: ScanNodeSink, @unchecked Sendable {
   }
 }
 
-private enum WorkerCommand: Sendable {
+enum WorkerCommand: Sendable {
   case control(requestID: UInt64, kind: Diskplan_V1_ScanControlKind)
   case stop
 }
 
+struct BoundedWorkerCommandQueue: Sendable {
+  private struct QueuedControl: Sendable {
+    let requestID: UInt64
+    let kind: Diskplan_V1_ScanControlKind
+  }
+
+  let capacity: Int
+  private var storage: [QueuedControl?]
+  private var head = 0
+  private var tail = 0
+  private(set) var count = 0
+  private(set) var stopRequested = false
+
+  init(capacity: Int) {
+    precondition(capacity > 0)
+    self.capacity = capacity
+    storage = Array(repeating: nil, count: capacity)
+  }
+
+  var isEmpty: Bool { count == 0 }
+
+  mutating func enqueueControl(
+    requestID: UInt64,
+    kind: Diskplan_V1_ScanControlKind
+  ) -> Bool {
+    guard count < capacity else { return false }
+    storage[tail] = QueuedControl(requestID: requestID, kind: kind)
+    tail = (tail + 1) % capacity
+    count += 1
+    return true
+  }
+
+  mutating func requestStop() {
+    stopRequested = true
+  }
+
+  mutating func dequeuePrioritizingStop() -> WorkerCommand? {
+    if stopRequested { return .stop }
+    return dequeueControl()
+  }
+
+  mutating func drainControls() -> [WorkerCommand] {
+    var drained: [WorkerCommand] = []
+    drained.reserveCapacity(count)
+    while let command = dequeueControl() { drained.append(command) }
+    return drained
+  }
+
+  private mutating func dequeueControl() -> WorkerCommand? {
+    guard count > 0 else { return nil }
+    guard let control = storage[head] else {
+      preconditionFailure("occupied command queue slot is empty")
+    }
+    storage[head] = nil
+    head = (head + 1) % capacity
+    count -= 1
+    return .control(requestID: control.requestID, kind: control.kind)
+  }
+}
+
 final class ScanCoordinator: @unchecked Sendable {
   private static let maximumCheckpointRootBindingBytes = 1 * 1_024 * 1_024
+  static let commandCapacity = 256
 
   private let condition = NSCondition()
   private let broker: SerialEventBroker
-  private var commands: [WorkerCommand] = []
+  private var commands = BoundedWorkerCommandQueue(capacity: commandCapacity)
   private var state: Diskplan_V1_ScanState = .idle
   private var workerStarted = false
   private var workerFinished = false
@@ -179,7 +240,9 @@ final class ScanCoordinator: @unchecked Sendable {
 
   func control(_ request: Diskplan_V1_ScanControlRequest) throws {
     condition.lock()
-    if !workerStarted || workerFinished || (state != .running && state != .paused) {
+    if !workerStarted || workerFinished || commands.stopRequested
+      || (state != .running && state != .paused)
+    {
       let current = state
       condition.unlock()
       try reject(
@@ -191,7 +254,18 @@ final class ScanCoordinator: @unchecked Sendable {
       )
       return
     }
-    commands.append(.control(requestID: request.requestID, kind: request.control))
+    guard commands.enqueueControl(requestID: request.requestID, kind: request.control) else {
+      let current = state
+      condition.unlock()
+      try reject(
+        requestID: request.requestID,
+        control: request.control,
+        code: .capacityExceeded,
+        detail: "control queue capacity exceeded",
+        currentState: current
+      )
+      return
+    }
     condition.signal()
     condition.unlock()
   }
@@ -228,8 +302,8 @@ final class ScanCoordinator: @unchecked Sendable {
   func stopAndWait() {
     condition.lock()
     if workerStarted && !workerFinished {
-      commands.append(.stop)
-      condition.signal()
+      commands.requestStop()
+      condition.broadcast()
       while !workerFinished { condition.wait() }
     }
     condition.unlock()
@@ -245,15 +319,16 @@ final class ScanCoordinator: @unchecked Sendable {
     // small scan can run to completion. A control signal wakes this wait
     // early, while an ordinary scan pays only the bounded startup interval.
     condition.lock()
-    if commands.isEmpty {
+    if commands.isEmpty && !commands.stopRequested {
       _ = condition.wait(until: Date(timeIntervalSinceNow: 0.05))
     }
     condition.unlock()
     while true {
       condition.lock()
-      while commands.isEmpty && state == .paused { condition.wait() }
-      if !commands.isEmpty {
-        let command = commands.removeFirst()
+      while commands.isEmpty && !commands.stopRequested && state == .paused {
+        condition.wait()
+      }
+      if let command = commands.dequeuePrioritizingStop() {
         condition.unlock()
         if handle(command, scanner: scanner, scanSessionID: scanSessionID) { return }
         continue
@@ -278,11 +353,13 @@ final class ScanCoordinator: @unchecked Sendable {
         markWorkerFinished(state: .finished)
         return
       case .partial:
-        guard finishOrFail(
-          result,
-          state: .finalizedPartial,
-          reason: "scan finalized partial"
-        ) else {
+        guard
+          finishOrFail(
+            result,
+            state: .finalizedPartial,
+            reason: "scan finalized partial"
+          )
+        else {
           markWorkerFinished(state: .failed)
           return
         }
@@ -313,7 +390,9 @@ final class ScanCoordinator: @unchecked Sendable {
     switch command {
     case .stop:
       _ = scanner.cancel()
-      markWorkerFinished(state: lockedState())
+      let current = lockedState()
+      rejectQueuedControls(currentState: current)
+      markWorkerFinished(state: current)
       return true
     case .control(let requestID, let kind):
       let current = lockedState()
@@ -390,7 +469,8 @@ final class ScanCoordinator: @unchecked Sendable {
           )
         }
       } catch {
-        let code = error is CheckpointWireEncodingError
+        let code =
+          error is CheckpointWireEncodingError
           ? "checkpoint_encoding_failed" : "event_broker_failed"
         emitFailure(code: code, detail: String(describing: error))
         rejectQueuedControls(currentState: .failed)
@@ -466,7 +546,8 @@ final class ScanCoordinator: @unchecked Sendable {
       try finish(result, state: state, reason: reason)
       return true
     } catch {
-      let code = error is CheckpointWireEncodingError
+      let code =
+        error is CheckpointWireEncodingError
         ? "checkpoint_encoding_failed" : "event_broker_failed"
       emitFailure(code: code, detail: String(describing: error))
       return false
@@ -544,8 +625,7 @@ final class ScanCoordinator: @unchecked Sendable {
 
   private func rejectQueuedControls(currentState: Diskplan_V1_ScanState) {
     condition.lock()
-    let queued = commands
-    commands.removeAll()
+    let queued = commands.drainControls()
     condition.unlock()
     for command in queued {
       guard case .control(let requestID, let kind) = command else { continue }
@@ -638,10 +718,10 @@ final class ScanCoordinator: @unchecked Sendable {
           "duplicate root_id: \(root.rootID)"
         )
       }
-      guard isValidAbsolutePath(root.rawAbsolutePath) else {
+      guard isValidCanonicalRootPath(root.rawAbsolutePath) else {
         throw ScanCoordinatorError.malformed(
           .invalidRoot,
-          "raw_absolute_path must be a bounded absolute path without NUL bytes"
+          "raw_absolute_path must be a bounded canonical absolute raw path"
         )
       }
       return ScanRootRequest(rootID: root.rootID, rawAbsolutePath: root.rawAbsolutePath)
@@ -824,12 +904,12 @@ final class ScanCoordinator: @unchecked Sendable {
     }
   }
 
-  private static func isValidAbsolutePath(_ value: Data) -> Bool {
+  static func isValidCanonicalRootPath(_ value: Data) -> Bool {
     // This is deliberately far above Darwin's practical path limit while
     // leaving ample room for worst-case byte-escaped display projection inside
     // the independently bounded checkpoint chunk.
-    !value.isEmpty && value.count <= 256 * 1_024 && value.first == UInt8(ascii: "/")
-      && !value.contains(0)
+    guard value.count <= 256 * 1_024 else { return false }
+    return (try? CanonicalScanRootPath.parse(value)) != nil
   }
 }
 

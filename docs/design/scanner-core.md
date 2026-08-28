@@ -61,6 +61,11 @@ The production backend never constructs descendant paths; only the configured ro
 parent path is path-opened to establish the descriptor-relative root slot. A root
 with unproved provider ownership is retained in provenance and root failures but is
 never opened or treated as `localOrUnindicated`.
+Before any policy gate or filesystem call, `CanonicalScanRootPath` validates the
+original raw bytes. Exact `/` is the only separator-only form. Other roots reject
+relative or empty paths, NUL, a trailing or repeated separator, and `.` or `..`
+components instead of normalizing aliases. IPC setup calls this same parser, so
+the transport and scanner cannot assign different meanings to one root byte string.
 
 ## Evidence model
 

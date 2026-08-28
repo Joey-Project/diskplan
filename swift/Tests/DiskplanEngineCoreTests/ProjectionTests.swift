@@ -6,6 +6,84 @@ import Testing
 
 @testable import DiskplanEngineCore
 
+@Test func ipcRootAdmissionMatchesScannerCanonicalRawPathContract() throws {
+  let canonical: [(Data, CanonicalScanRootPath)] = [
+    (Data("/".utf8), .filesystemRoot),
+    (Data("/tmp".utf8), .parentSlot(parentPath: Data("/".utf8), rawName: Data("tmp".utf8))),
+    (
+      Data("/tmp/child".utf8),
+      .parentSlot(parentPath: Data("/tmp".utf8), rawName: Data("child".utf8))
+    ),
+    (
+      Data([UInt8(ascii: "/"), 0xff]),
+      .parentSlot(parentPath: Data("/".utf8), rawName: Data([0xff]))
+    ),
+  ]
+  for (path, expected) in canonical {
+    #expect(try CanonicalScanRootPath.parse(path) == expected)
+    #expect(ScanCoordinator.isValidCanonicalRootPath(path))
+  }
+
+  let aliasesAndMalformed = [
+    Data(), Data("relative".utf8), Data("//".utf8), Data("/tmp/".utf8),
+    Data("/tmp//child".utf8), Data("/tmp/./child".utf8),
+    Data("/tmp/../child".utf8), Data("/./tmp".utf8), Data("/../tmp".utf8),
+    Data([UInt8(ascii: "/"), 0]),
+  ]
+  for path in aliasesAndMalformed {
+    #expect(throws: ScanRootPathValidationError.self) {
+      try CanonicalScanRootPath.parse(path)
+    }
+    #expect(!ScanCoordinator.isValidCanonicalRootPath(path))
+  }
+}
+
+@Test func inboundControlFloodHasDeterministicFiniteCapacityAndFIFO() {
+  var queue = BoundedWorkerCommandQueue(capacity: ScanCoordinator.commandCapacity)
+  for requestID in 1...UInt64(ScanCoordinator.commandCapacity) {
+    let admitted = queue.enqueueControl(requestID: requestID, kind: .checkpointScan)
+    #expect(admitted)
+  }
+  for requestID in UInt64(ScanCoordinator.commandCapacity + 1)...10_000 {
+    let admitted = queue.enqueueControl(requestID: requestID, kind: .checkpointScan)
+    #expect(!admitted)
+  }
+  #expect(queue.count == ScanCoordinator.commandCapacity)
+
+  let drained = queue.drainControls()
+  #expect(drained.count == ScanCoordinator.commandCapacity)
+  for (offset, command) in drained.enumerated() {
+    guard case .control(let requestID, let kind) = command else {
+      Issue.record("control queue admitted a non-control command")
+      continue
+    }
+    #expect(requestID == UInt64(offset + 1))
+    #expect(kind == .checkpointScan)
+  }
+  #expect(queue.isEmpty)
+}
+
+@Test func eofStopPreemptsFloodedControlsWithoutDiscardingTheirOrder() {
+  var queue = BoundedWorkerCommandQueue(capacity: 4)
+  for requestID in 1...4 {
+    let admitted = queue.enqueueControl(requestID: UInt64(requestID), kind: .pauseScan)
+    #expect(admitted)
+  }
+  queue.requestStop()
+  guard case .stop? = queue.dequeuePrioritizingStop() else {
+    Issue.record("priority stop was queued behind ordinary controls")
+    return
+  }
+  #expect(queue.count == 4)
+  let drained = queue.drainControls()
+  #expect(
+    drained.compactMap { command -> UInt64? in
+      guard case .control(let requestID, _) = command else { return nil }
+      return requestID
+    } == [1, 2, 3, 4]
+  )
+}
+
 @Test func rawPathProjectionPreservesBytesAndSeparatesDisplay() {
   let component = RawPathComponent(Data([0x66, 0xff]))
   let node = ScannedNode(

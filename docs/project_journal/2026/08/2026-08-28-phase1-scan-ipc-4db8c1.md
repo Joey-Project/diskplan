@@ -42,6 +42,10 @@ superseded_by:
 - [x] Run broker pressure, progress coalescing, control flow, final evidence,
   cancellation, and cross-language session reuse.
 - [x] Update the protocol contract and project journal.
+- [x] Validate scanner/IPC canonical raw-root parity, including exact `/` and
+  rejection of lexical aliases.
+- [x] Validate finite O(1) inbound control admission and priority EOF shutdown
+  under a control flood.
 
 ## Current State
 
@@ -55,6 +59,12 @@ superseded_by:
   control rejection class.
 - Semantic events are lossless and bounded. Only a contiguous pending progress
   run can be replaced by newer telemetry.
+- Inbound controls use a separate 256-entry FIFO ring. Overflow is rejected
+  with a typed capacity code, while out-of-band shutdown preempts queued
+  controls and drains their bounded remainder in request order.
+- IPC setup calls the scanner-owned canonical raw-root parser on the original
+  bytes, preserving exact `/` while rejecting relative, empty, NUL-containing,
+  trailing-separator, repeated-separator, dot, and dot-dot forms.
 - Retained checkpoint nodes use lossless, contiguous, digest-bound chunks. The
   manifest binds explicit entry/byte budgets, ordered chunk descriptors, the
   checkpoint coverage/frontier payload, and the final evidence hash; Rust
@@ -68,16 +78,13 @@ superseded_by:
 
 ## Handoff
 
-- Phase: protocol 1.3 bindings, bounded checkpoint transport, both receivers,
-  compatibility fixtures, and executable validation are ready for the signed
-  checkpoint commit.
-- Next step: create and verify the signed checkpoint commit, then wait for the
-  scanner-core integration instruction before merging its frozen head and
-  repeating the full gate and frozen review.
-- Follow-up: the full-audit default root `/` is rejected by the current Darwin
-  root binding. Resolve that scanner-core seam before treating full-audit scope
-  as release-ready; this IPC slice intentionally does not relax root-binding
-  semantics.
+- Phase: two IPC advisory follow-ups are implemented and validated on top of signed
+  checkpoint `12bf91e76b8d9aa2efc643f08fbc91e44cd486f2`.
+- Next step: freeze a signed IPC follow-up checkpoint, then integrate the frozen
+  scanner-core head and repeat the full gate on the combined implementation.
+- Follow-up: replace scanner core's private parser with the shared
+  `CanonicalScanRootPath` during scanner-head integration so both call sites
+  retain one lexical contract.
 - Blocker: no product or design blocker is known; scanner-core integration is a
   separate authorized checkpoint after this commit.
 
@@ -95,8 +102,8 @@ superseded_by:
 - Cross-language cases are authored for pause, resume, checkpoint, provisional
   evidence, deterministic root failures, typed setup rejection, partial
   finalization, cancellation, and post-finalization session reuse.
-- `swift test --disable-automatic-resolution`: 96 tests passed.
-- `cargo test --locked --workspace`: 81 tests passed, 9 cross-language tests
+- `swift test --disable-automatic-resolution`: 100 tests passed.
+- `cargo test --locked --workspace`: 82 tests passed, 9 cross-language tests
   intentionally ignored by the ordinary workspace invocation.
 - `scripts/test-cross-language.sh`: 9 ignored-process cases passed and the
   canonical Swift-authority fixture matched.
@@ -107,3 +114,6 @@ superseded_by:
 - Internal advisory findings were closed with fail-closed legacy-finalization
   handling, setup-time root-binding budget admission, exact checkpoint frontier
   validation, and regression coverage for each case.
+- Follow-up tests passed for canonical raw-root parity, finite 10,000-request
+  flood admission, FIFO drain order, priority EOF stop, typed Rust capacity
+  rejection, lexical-alias setup rejection, and exact `/` setup admission.

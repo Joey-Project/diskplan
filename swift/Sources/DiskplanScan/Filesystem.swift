@@ -258,26 +258,18 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     _ request: ScanRootRequest,
     resolverVersion: UInt32
   ) -> Observation<BoundScanRoot> {
-    guard !request.rawAbsolutePath.isEmpty, request.rawAbsolutePath.first == UInt8(ascii: "/"),
-      !request.rawAbsolutePath.contains(0)
-    else {
-      return .failed(reason: "root path is not an absolute raw filesystem path", errorCode: nil)
+    let parsed: CanonicalScanRootPath
+    do {
+      parsed = try CanonicalScanRootPath.parse(request.rawAbsolutePath)
+    } catch {
+      return .failed(reason: "root path is not a canonical absolute raw path", errorCode: EINVAL)
     }
-    guard request.rawAbsolutePath != Data("/".utf8),
-      request.rawAbsolutePath.last != UInt8(ascii: "/"),
-      let separator = request.rawAbsolutePath.lastIndex(of: UInt8(ascii: "/"))
-    else {
+    guard case .parentSlot(let parentPath, let rawName) = parsed else {
       return .failed(
         reason: "configured root has no authoritative parent-slot provider proof",
         errorCode: ENODATA
       )
     }
-    let rawName = Data(request.rawAbsolutePath[request.rawAbsolutePath.index(after: separator)...])
-    guard !rawName.isEmpty, rawName != Data(".".utf8), rawName != Data("..".utf8) else {
-      return .failed(reason: "root path has an invalid final component", errorCode: EINVAL)
-    }
-    var parentPath = Data(request.rawAbsolutePath[..<separator])
-    if parentPath.isEmpty { parentPath = Data("/".utf8) }
     let parentGate = pathAccessGate(operation: "open scan root parent")
     guard parentGate.value != nil else {
       return observation(

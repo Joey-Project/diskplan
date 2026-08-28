@@ -100,6 +100,15 @@ are assigned at write time, so coalescing never creates a protocol gap and can
 never discard node evidence, state changes, control responses, checkpoints,
 finalization, cancellation, or failures.
 
+Inbound controls use a separate 256-entry FIFO ring. Admission is O(1); a
+request that arrives while all slots are occupied receives
+`CAPACITY_EXCEEDED` and is never partially admitted. Admitted controls retain
+request order and produce exactly one accepted or rejected response. Engine
+shutdown is an out-of-band priority signal rather than another FIFO member: it
+cancels the scanner before executing any queued control, then drains the
+bounded remainder as ordered rejections so an input flood cannot starve EOF
+shutdown.
+
 Node observations are lossless stream events. Retained checkpoint nodes are
 also encoded as an ordered stream of `ScanCheckpointChunk` events before the
 matching ready or finalized event. Each chunk contains at most 4 MiB of
@@ -182,3 +191,10 @@ an authoritative path from display text or use display strings for filesystem
 operations. The engine ignores `display_path` on an inbound scan-root request
 and replaces it in emitted evidence. Invalid UTF-8 and terminal control or
 format characters are rendered as byte escapes rather than passed through.
+
+Before any path access, scan setup applies the scanner's lexical root contract
+to the original bytes. Exact `/` is supported. Every other root must start with
+one `/`, end in a non-empty ordinary component, and contain neither NUL,
+repeated separators, a trailing separator, nor `.` or `..` components. Alias
+forms are rejected rather than normalized, so setup cannot bind two different
+wire values to one canonical scanner root.

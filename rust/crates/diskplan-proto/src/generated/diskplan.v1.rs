@@ -884,6 +884,8 @@ pub enum ControlRejectCode {
     DuplicateRequestId = 2,
     MalformedRequest = 3,
     Unavailable = 4,
+    /// The finite producer command queue was full at the admission boundary.
+    CapacityExceeded = 5,
 }
 impl ControlRejectCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -897,6 +899,7 @@ impl ControlRejectCode {
             Self::DuplicateRequestId => "CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID",
             Self::MalformedRequest => "CONTROL_REJECT_CODE_MALFORMED_REQUEST",
             Self::Unavailable => "CONTROL_REJECT_CODE_UNAVAILABLE",
+            Self::CapacityExceeded => "CONTROL_REJECT_CODE_CAPACITY_EXCEEDED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -907,6 +910,7 @@ impl ControlRejectCode {
             "CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID" => Some(Self::DuplicateRequestId),
             "CONTROL_REJECT_CODE_MALFORMED_REQUEST" => Some(Self::MalformedRequest),
             "CONTROL_REJECT_CODE_UNAVAILABLE" => Some(Self::Unavailable),
+            "CONTROL_REJECT_CODE_CAPACITY_EXCEEDED" => Some(Self::CapacityExceeded),
             _ => None,
         }
     }

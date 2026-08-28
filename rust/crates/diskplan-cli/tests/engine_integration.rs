@@ -192,6 +192,37 @@ fn swift_engine_reports_typed_scan_setup_rejections() {
         ScanSetupRejectCode::InvalidRoot,
     );
 
+    let lexical_aliases: [&[u8]; 7] = [
+        b"//",
+        b"/tmp/",
+        b"/tmp//child",
+        b"/tmp/./child",
+        b"/tmp/../child",
+        b"/./tmp",
+        b"/../tmp",
+    ];
+    for (offset, raw_path) in lexical_aliases.into_iter().enumerate() {
+        let request_id = 11 + offset as u64;
+        session
+            .send_start_scan_request(StartScanRequest {
+                request_id,
+                profile: "standard".into(),
+                roots: vec![EngineSession::scan_root(
+                    format!("alias-{offset}"),
+                    raw_path.to_vec(),
+                )],
+                maximum_duration_millis: 0,
+                batch_size: 1,
+            })
+            .unwrap();
+        assert_control_rejected_with_setup(
+            read_until_event(&mut session, |event| event.request_id == request_id),
+            request_id,
+            ControlRejectCode::MalformedRequest,
+            ScanSetupRejectCode::InvalidRoot,
+        );
+    }
+
     let oversized_roots = (0..17)
         .map(|index| {
             let mut raw_path = vec![b'a'; 256 * 1_024];
@@ -201,7 +232,7 @@ fn swift_engine_reports_typed_scan_setup_rejections() {
         .collect();
     session
         .send_start_scan_request(StartScanRequest {
-            request_id: 11,
+            request_id: 20,
             profile: "standard".into(),
             roots: oversized_roots,
             maximum_duration_millis: 0,
@@ -209,20 +240,52 @@ fn swift_engine_reports_typed_scan_setup_rejections() {
         })
         .unwrap();
     assert_control_rejected_with_setup(
-        read_until_event(&mut session, |event| event.request_id == 11),
-        11,
+        read_until_event(&mut session, |event| event.request_id == 20),
+        20,
         ControlRejectCode::MalformedRequest,
         ScanSetupRejectCode::InvalidBudget,
     );
 
     let response = session
-        .request_business(12, "still-ready", Vec::new())
+        .request_business(21, "still-ready", Vec::new())
         .unwrap();
     assert!(matches!(
         response.body,
         Some(envelope::Body::HelloRejected(_))
     ));
     session.shutdown().unwrap();
+
+    let mut root_session = EngineSession::connect(&engine).unwrap();
+    root_session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 30,
+            profile: "quick".into(),
+            roots: vec![EngineSession::scan_root("filesystem-root", b"/".to_vec())],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut root_session, |event| event.request_id == 30),
+        30,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    let finalized = read_until_event(&mut root_session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    let Some(engine_event::Body::ScanFinalized(finalized)) = finalized.body else {
+        unreachable!();
+    };
+    assert_eq!(
+        finalized
+            .checkpoint
+            .expect("filesystem-root final checkpoint")
+            .resolved_roots[0]
+            .raw_absolute_path,
+        b"/"
+    );
+    root_session.shutdown().unwrap();
 }
 
 #[test]
@@ -413,39 +476,15 @@ fn rust_client_drives_swift_scan_control_protocol() {
     assert!(!ready.checkpoint.unwrap().provisional);
 
     session
-        .send_scan_control(104, ScanControlKind::ResumeScan)
+        .send_scan_control(104, ScanControlKind::FinalizePartialScan)
         .unwrap();
-    session
-        .send_scan_control(105, ScanControlKind::PauseScan)
-        .unwrap();
+
     assert_control_accepted(
         read_until_event(&mut session, |event| {
             matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
                 && event.request_id == 104
         }),
         104,
-        ScanControlKind::ResumeScan,
-        ScanState::Running,
-    );
-    assert_control_accepted(
-        read_until_event(&mut session, |event| {
-            matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
-                && event.request_id == 105
-        }),
-        105,
-        ScanControlKind::PauseScan,
-        ScanState::Paused,
-    );
-    session
-        .send_scan_control(106, ScanControlKind::FinalizePartialScan)
-        .unwrap();
-
-    assert_control_accepted(
-        read_until_event(&mut session, |event| {
-            matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
-                && event.request_id == 106
-        }),
-        106,
         ScanControlKind::FinalizePartialScan,
         ScanState::FinalizingPartial,
     );
@@ -463,22 +502,72 @@ fn rust_client_drives_swift_scan_control_protocol() {
     );
 
     session
-        .send_scan_control(107, ScanControlKind::CheckpointScan)
+        .send_scan_control(105, ScanControlKind::CheckpointScan)
         .unwrap();
     assert_control_rejected(
-        read_until_event(&mut session, |event| event.request_id == 107),
-        107,
+        read_until_event(&mut session, |event| event.request_id == 105),
+        105,
         ControlRejectCode::InvalidState,
     );
 
     let response = session
-        .request_business(108, "still-ready", Vec::new())
+        .request_business(106, "still-ready", Vec::new())
         .unwrap();
     assert!(matches!(
         response.body,
         Some(envelope::Body::HelloRejected(_))
     ));
     session.shutdown().unwrap();
+
+    let mut resume_session = EngineSession::connect(&engine).unwrap();
+    resume_session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 200,
+            profile: "standard".into(),
+            roots: vec![EngineSession::scan_root(
+                "resume-fixture",
+                fixture.path().as_os_str().as_bytes().to_vec(),
+            )],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    resume_session
+        .send_scan_control(201, ScanControlKind::PauseScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut resume_session, |event| event.request_id == 200),
+        200,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    assert_control_accepted(
+        read_until_event(&mut resume_session, |event| event.request_id == 201),
+        201,
+        ScanControlKind::PauseScan,
+        ScanState::Paused,
+    );
+    resume_session
+        .send_scan_control(202, ScanControlKind::ResumeScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut resume_session, |event| event.request_id == 202),
+        202,
+        ScanControlKind::ResumeScan,
+        ScanState::Running,
+    );
+    let finalized = read_until_event(&mut resume_session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    assert_eq!(finalized.request_id, 0);
+    let response = resume_session
+        .request_business(203, "still-ready-after-resume", Vec::new())
+        .unwrap();
+    assert!(matches!(
+        response.body,
+        Some(envelope::Body::HelloRejected(_))
+    ));
+    resume_session.shutdown().unwrap();
 }
 
 #[test]

@@ -89,6 +89,8 @@ enum ControlRejectCode {
   CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID = 2;
   CONTROL_REJECT_CODE_MALFORMED_REQUEST = 3;
   CONTROL_REJECT_CODE_UNAVAILABLE = 4;
+  // The finite producer command queue was full at the admission boundary.
+  CONTROL_REJECT_CODE_CAPACITY_EXCEEDED = 5;
 }
 
 // A stable machine-readable reason for a rejected StartScanRequest. This is

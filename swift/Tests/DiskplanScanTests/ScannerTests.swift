@@ -1113,6 +1113,32 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   #expect(result.roots[0].coverage.reasons == [.notRequestedByProfile])
 }
 
+@Test func malformedAndAliasRootPathsFailBeforePolicyOrFilesystemTouch() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let policyGate = LockedPolicyGate(policy: policy)
+  let filesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { policyGate.validate() }
+  )
+  let invalidPaths = [
+    Data(), Data("relative".utf8), Data("//".utf8), Data("/tmp/".utf8),
+    Data("/tmp//child".utf8), Data("/tmp/./child".utf8),
+    Data("/tmp/../child".utf8), Data([UInt8(ascii: "/"), 0]),
+  ]
+  for (index, path) in invalidPaths.enumerated() {
+    let result = filesystem.bindRoot(
+      ScanRootRequest(rootID: "invalid-\(index)", rawAbsolutePath: path),
+      resolverVersion: 1
+    )
+    guard case .failed(_, let code) = result else {
+      Issue.record("malformed root path was accepted")
+      continue
+    }
+    #expect(code == EINVAL)
+  }
+  #expect(policyGate.callCount == 0)
+}
+
 @Test func darwinReaddirIsGatedAndEnumerationDeadlineIsInternal() throws {
   let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
   let rootURL = FileManager.default.temporaryDirectory

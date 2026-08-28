@@ -1178,6 +1178,34 @@ mod tests {
     }
 
     #[test]
+    fn inbound_control_capacity_rejection_is_typed_and_non_terminal() {
+        let mut state = pending_state(2, ScanControlKind::CheckpointScan);
+        let effects = reduce(
+            &mut state,
+            UiEvent::Engine(EngineDelivery::exact(engine_event(
+                1,
+                2,
+                engine_event::Body::ControlRejected(ControlRejected {
+                    control: ScanControlKind::CheckpointScan as i32,
+                    code: ControlRejectCode::CapacityExceeded as i32,
+                    detail: "control queue capacity exceeded".into(),
+                    current_state: ScanState::Running as i32,
+                    ..Default::default()
+                }),
+            ))),
+        );
+
+        assert!(effects.is_empty());
+        assert!(state.terminal.is_none());
+        assert!(state.pending_controls.is_empty());
+        assert_eq!(state.scan_state, ScanState::Running);
+        assert_eq!(
+            state.banner.as_deref(),
+            Some("control rejected: control queue capacity exceeded")
+        );
+    }
+
+    #[test]
     fn invalid_control_rejection_code_table_fails_terminally() {
         for code in [ControlRejectCode::Unspecified as i32, 999] {
             let mut state = pending_state(2, ScanControlKind::CancelScan);

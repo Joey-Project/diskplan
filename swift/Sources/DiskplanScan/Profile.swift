@@ -40,6 +40,42 @@ public struct ScanRootRequest: Equatable, Sendable {
   }
 }
 
+public enum ScanRootPathValidationError: Error, Equatable, Sendable {
+  case malformed
+}
+
+public enum CanonicalScanRootPath: Equatable, Sendable {
+  case filesystemRoot
+  case parentSlot(parentPath: Data, rawName: Data)
+
+  public static func parse(_ rawPath: Data) throws -> Self {
+    let separator = UInt8(ascii: "/")
+    guard !rawPath.isEmpty, rawPath.first == separator, !rawPath.contains(0) else {
+      throw ScanRootPathValidationError.malformed
+    }
+    if rawPath == Data([separator]) { return .filesystemRoot }
+    guard rawPath.last != separator else { throw ScanRootPathValidationError.malformed }
+    let components = rawPath.dropFirst().split(
+      separator: separator,
+      omittingEmptySubsequences: false
+    )
+    guard
+      !components.isEmpty,
+      components.allSatisfy({
+        !$0.isEmpty && $0 != Data(".".utf8) && $0 != Data("..".utf8)
+      }),
+      let finalSeparator = rawPath.lastIndex(of: separator)
+    else {
+      throw ScanRootPathValidationError.malformed
+    }
+    let parentPath =
+      finalSeparator == rawPath.startIndex
+      ? Data([separator]) : Data(rawPath[..<finalSeparator])
+    let rawName = Data(rawPath[rawPath.index(after: finalSeparator)...])
+    return .parentSlot(parentPath: parentPath, rawName: rawName)
+  }
+}
+
 public enum ScanScopeValidationError: Error, Equatable, Sendable {
   case duplicateRootID(String)
 }
