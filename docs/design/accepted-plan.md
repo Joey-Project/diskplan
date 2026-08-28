@@ -411,6 +411,8 @@ directory child-entry churn、directory size/link-count/mtime 变化只有在 ac
 - nested repositories、submodules、linked worktrees 和 sparse-checkout state 被显式识别；其本地内容必须分别证明 recoverable 或作为用户可见的 unique/local changes 进入同一 action；
 - action 执行前重新验证 filesystem coverage、Git state 和所有已声明 local-change entries，任何新增或未观察项目都阻止 stage/apply。
 
+首版专用 adapter 只执行 linked-worktree 的 `.git` gitdir-file 布局：linkage 中的 registration ID 必须精确匹配 registration evidence，administrative directory 和 common directory 必须是两个不同的已绑定 object，并保留两者的精确 identity、registration/metadata digest 和 raw registration binding。执行时再从 no-follow 打开的 `.git` 文件固定 administrative directory，并通过 descriptor-relative parent traversal 证明它位于 common Git directory 的 `worktrees` namespace 下。ordinary worktree 的 in-root common `.git` directory 不属于当前 adapter 的删除模型，因此保持 report-only；不能用伪造的 admin/common identity 相等来绕过此边界。
+
 只有满足上述 coverage 的 action 才能使用 `Fully observed local Git work discard` waiver；否则只能 report-only。adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。
 
 point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use。mutation 前必须证明 source parent chain 是 owner-private、无 group/other writer、无 provider/mount boundary，并且 activity snapshot 没有其他 process reference；adapter 将它标记为 `trusted-exclusive-namespace`。同一用户的恶意或不可观测并发 namespace mutation不在首版可安全执行的 threat model 内；无法满足该 trust precondition 时必须 report-only，不能先移动后判断。

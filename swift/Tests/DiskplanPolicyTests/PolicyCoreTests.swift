@@ -950,7 +950,7 @@ func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() t
     ),
     gitWorktreeEvidence(
       localChanges: .present(changeSetDigest: digest(60)),
-      linkage: .known(.linked(registrationID: digest(75)))
+      linkage: .known(.linked(registrationID: digest(76)))
     ),
     gitWorktreeEvidence(
       localChanges: .present(changeSetDigest: digest(60)),
@@ -988,17 +988,17 @@ func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() t
 }
 
 @Test
-func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
-  let ordinaryEvidence = snapshot(
-    candidateID: "ordinary", path: "ordinary", object: 1,
+func gitWorktreeRegistrationTopologyAndSparseFactsFailClosed() throws {
+  let linkedEvidence = snapshot(
+    candidateID: "linked", path: "linked", object: 1,
     adapterScope: .gitWorktree,
     gitWorktree: gitWorktreeEvidence()
   )
-  let ordinaryAction = try makeAction(
-    evidence: ordinaryEvidence,
+  let linkedAction = try makeAction(
+    evidence: linkedEvidence,
     request: .gitWorktreeRemove
   )
-  #expect(ordinaryAction.evaluation.stageability == .stageable)
+  #expect(linkedAction.evaluation.stageability == .stageable)
 
   let changedRegistration = try GitWorktreeRegistrationEvidence(
     registeredWorktreeIdentity: ObjectIdentity(
@@ -1006,12 +1006,12 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
     administrativeDirectoryIdentity: ObjectIdentity(
       device: 1, object: 702, generation: .known(1), type: .directory),
     commonDirectoryIdentity: ObjectIdentity(
-      device: 1, object: 702, generation: .known(1), type: .directory),
+      device: 1, object: 703, generation: .known(1), type: .directory),
     registrationID: digest(75),
     metadataDigest: digest(77)
   )
   let changedEvidence = snapshot(
-    candidateID: "ordinary", path: "ordinary", object: 1,
+    candidateID: "linked", path: "linked", object: 1,
     adapterScope: .gitWorktree,
     gitWorktree: gitWorktreeEvidence(registration: .known(changedRegistration))
   )
@@ -1019,23 +1019,55 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
     evidence: changedEvidence,
     request: .gitWorktreeRemove
   )
-  #expect(changedEvidence.evidenceID != ordinaryEvidence.evidenceID)
-  #expect(changedAction.lineageID != ordinaryAction.lineageID)
-  #expect(changedAction.id != ordinaryAction.id)
+  #expect(changedAction.evaluation.stageability == .stageable)
+  #expect(changedEvidence.evidenceID != linkedEvidence.evidenceID)
+  #expect(changedAction.lineageID != linkedAction.lineageID)
+  #expect(changedAction.id != linkedAction.id)
 
-  let linkedEvidence = snapshot(
-    candidateID: "linked", path: "linked", object: 1,
-    adapterScope: .gitWorktree,
-    gitWorktree: gitWorktreeEvidence(
-      linkage: .known(.linked(registrationID: digest(75))))
+  let sameIdentityRegistration = try GitWorktreeRegistrationEvidence(
+    registeredWorktreeIdentity: ObjectIdentity(
+      device: 1, object: 1, generation: .known(1), type: .directory),
+    administrativeDirectoryIdentity: ObjectIdentity(
+      device: 1, object: 700, generation: .known(1), type: .directory),
+    commonDirectoryIdentity: ObjectIdentity(
+      device: 1, object: 700, generation: .known(1), type: .directory),
+    registrationID: digest(75),
+    metadataDigest: digest(74)
   )
-  let linkedEvaluation = try OneVotePolicy.evaluate(
-    OneVotePolicyInputs.build(evidence: linkedEvidence, globalFacts: globalFacts())
-  )
-  #expect(linkedEvaluation.stageability == .blocked)
-  #expect(linkedEvidence.evidenceID != ordinaryEvidence.evidenceID)
-  #expect(throws: PolicyModelError.invalidActionContract) {
-    try ActionPrototype.build(request: .gitWorktreeRemove, evidence: linkedEvidence)
+  let topologyMatrix: [(String, GitWorktreeEvidence)] = [
+    (
+      "linked-registration-id-mismatch",
+      gitWorktreeEvidence(linkage: .known(.linked(registrationID: digest(76))))
+    ),
+    (
+      "linked-same-admin-common-identity",
+      gitWorktreeEvidence(registration: .known(sameIdentityRegistration))
+    ),
+    (
+      "ordinary-distinct-admin-common-identity",
+      gitWorktreeEvidence(linkage: .known(.ordinary))
+    ),
+    (
+      "ordinary-same-admin-common-identity",
+      gitWorktreeEvidence(
+        registration: .known(sameIdentityRegistration),
+        linkage: .known(.ordinary)
+      )
+    ),
+  ]
+  for (label, worktree) in topologyMatrix {
+    let evidence = snapshot(
+      candidateID: label, path: label, object: 1,
+      adapterScope: .gitWorktree,
+      gitWorktree: worktree
+    )
+    let evaluation = try OneVotePolicy.evaluate(
+      OneVotePolicyInputs.build(evidence: evidence, globalFacts: globalFacts())
+    )
+    #expect(evaluation.stageability == .blocked)
+    #expect(throws: PolicyModelError.invalidActionContract) {
+      try ActionPrototype.build(request: .gitWorktreeRemove, evidence: evidence)
+    }
   }
 
   let sparseEvidence = snapshot(
@@ -1048,28 +1080,13 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
     OneVotePolicyInputs.build(evidence: sparseEvidence, globalFacts: globalFacts())
   )
   #expect(sparseEvaluation.stageability == .blocked)
-  #expect(sparseEvidence.evidenceID != ordinaryEvidence.evidenceID)
+  #expect(sparseEvidence.evidenceID != linkedEvidence.evidenceID)
   #expect(throws: PolicyModelError.invalidActionContract) {
     try ActionPrototype.build(request: .gitWorktreeRemove, evidence: sparseEvidence)
   }
 
   let invalidFacts = [
     gitWorktreeEvidence(worktreeObject: 2),
-    gitWorktreeEvidence(
-      registration: .known(
-        try GitWorktreeRegistrationEvidence(
-          registeredWorktreeIdentity: ObjectIdentity(
-            device: 1, object: 1, generation: .known(1), type: .directory),
-          administrativeDirectoryIdentity: ObjectIdentity(
-            device: 1, object: 700, generation: .known(1), type: .directory),
-          commonDirectoryIdentity: ObjectIdentity(
-            device: 1, object: 701, generation: .known(1), type: .directory),
-          registrationID: digest(75),
-          metadataDigest: digest(74)
-        )
-      )
-    ),
-    gitWorktreeEvidence(linkage: .known(.linked(registrationID: digest(75)))),
     gitWorktreeEvidence(
       sparseCheckout: .known(.enabled(configurationDigest: digest(76)))),
     gitWorktreeEvidence(registration: .unknown(.unavailableViaPublicAPI)),
@@ -3317,7 +3334,8 @@ private func gitWorktreeEvidence(
   indexDigest: Observation<PolicyDigest> = .known(digest(71)),
   localChanges: GitLocalChangesState = .clean,
   registration: Observation<GitWorktreeRegistrationEvidence>? = nil,
-  linkage: Observation<GitWorktreeLinkageState> = .known(.ordinary),
+  linkage: Observation<GitWorktreeLinkageState> = .known(
+    .linked(registrationID: digest(75))),
   sparseCheckout: Observation<GitSparseCheckoutState> = .known(.disabled),
   nestedRepositories: Observation<GitContainedRepositoryState> = .known(.none),
   submodules: Observation<GitContainedRepositoryState> = .known(.none),
@@ -3354,7 +3372,7 @@ private func gitWorktreeEvidence(
     ),
     commonDirectoryIdentity: ObjectIdentity(
       device: 1,
-      object: 700,
+      object: 701,
       generation: .known(1),
       type: .directory
     ),

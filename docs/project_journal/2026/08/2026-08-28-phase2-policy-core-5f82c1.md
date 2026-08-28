@@ -57,12 +57,13 @@ superseded_by:
   worktree registration/root identity, administrative and common directory identity,
   registration/metadata digests, linked-worktree and sparse-checkout state, nested
   repositories, submodules, trusted-exclusive namespace, and post-quarantine coverage. V1
-  execution requires an ordinary worktree with sparse checkout disabled and exact equality
-  between administrative and common directory identity; linked, sparse, identity-mismatched,
-  absent, unknown, unreadable, or failed evidence stays report-only. Dirty work requires a
-  separate explicit discard action prerequisite whose typed clean successor preserves HEAD
-  identity and becomes the remove action's JIT content baseline. Action-aware policy records
-  the prerequisite discharge before action hashing.
+  execution requires a linked registration whose linkage ID exactly matches the raw registration
+  binding, sparse checkout disabled, and distinct administrative/common directory identities;
+  both exact identities and registration/metadata digests remain hash-bound. Ordinary, sparse,
+  linkage-mismatched, same-identity, target-mismatched, absent, unknown, unreadable, or failed
+  evidence stays report-only. Dirty work requires a separate explicit discard action prerequisite
+  whose typed clean successor preserves HEAD identity and becomes the remove action's JIT content
+  baseline. Action-aware policy records the prerequisite discharge before action hashing.
 - Complete-release actions bind the exact verified release graph, owner topology, actions,
   candidates, and bytes; plans reject empty, duplicate, or mismatched action bindings. Public
   builders require the aggregate evidence to match an exact owner prerequisite, and reject
@@ -158,6 +159,9 @@ superseded_by:
   projection, and canonicalize StorageGraph diagnostics before observable validation.
 - [x] Cover the simultaneous multi-component contraction guard through public action, plan,
   release-bundle, and overlay construction.
+- [x] Align Git staging with the linked-worktree gitdir-file adapter: require an exact linkage
+  registration ID and distinct administrative/common identities while keeping ordinary
+  worktrees report-only.
 
 ## Handoff
 
@@ -172,8 +176,9 @@ superseded_by:
 - Policy contract: `docs/design/policy-core.md`.
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
-  overlay consent binding, public API construction boundaries, and forged vote/tier rejection;
-  the latest focused run passed all 63 tests.
+  overlay consent binding, public API construction boundaries, forged vote/tier rejection, and
+  the linked/ordinary registration-ID and administrative/common-identity topology matrix; the
+  latest focused run passed all 63 tests.
 - The final full local serial `swift test --no-parallel` run passed all 91 tests, including
   all 63 focused policy tests; `swift build -c release` also completed successfully.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
