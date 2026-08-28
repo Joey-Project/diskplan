@@ -167,7 +167,6 @@ impl EngineSession {
         self.stdin.take();
         let status = self.wait_or_terminate();
         let drain = self.drain_stdout();
-        self.child.take();
         let status = status?;
         drain?;
         match status {
@@ -263,45 +262,76 @@ impl EngineSession {
     }
 
     fn wait_or_terminate(&mut self) -> Result<ExitStatus, ClientError> {
-        if let Some(status) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE)? {
-            terminate_remaining_process_group(self.process_group_id)?;
-            return Ok(status);
+        if let Ok(Some(status)) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE) {
+            return self.finish_reaped_child(status);
         }
 
-        signal_process_group(self.process_group_id, "-TERM")?;
-        if let Some(status) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE)? {
-            terminate_remaining_process_group(self.process_group_id)?;
-            return Ok(status);
+        // Group signalling is best-effort until the directly owned child has either been
+        // reaped or handed to the reaper. The child may have left the group, and an I/O
+        // error while invoking `kill` must not make us drop its only wait handle.
+        let _ = signal_process_group(self.process_group_id, "-TERM");
+        if let Ok(Some(status)) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE) {
+            return self.finish_reaped_child(status);
         }
 
-        signal_process_group(self.process_group_id, "-KILL")?;
-        if let Some(status) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE)? {
-            self.child.take();
-            if wait_for_process_group_exit(self.process_group_id, SHUTDOWN_GRACE)? {
-                return Ok(status);
-            }
-            return Err(ClientError::ProcessGroupCleanupIncomplete {
-                process_group_id: self.process_group_id,
-                timeout: SHUTDOWN_GRACE,
-            });
+        let _ = signal_process_group(self.process_group_id, "-KILL");
+        if let Ok(Some(status)) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE) {
+            return self.finish_reaped_child(status);
         }
 
-        let child = self
-            .child
-            .take()
-            .expect("a running engine child must still be owned by the session");
-        let child_process_id = child.id();
-        self.reaper.send(child).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "engine background reaper stopped unexpectedly",
-            )
-        })?;
+        // The process-group kill cannot prove anything about a child that escaped the
+        // original group. Target the Child itself, then poll only for a bounded interval.
+        // Child::kill errors are followed by the same bounded observation because the
+        // process may have exited concurrently.
+        let _ = self.child_mut()?.kill();
+        if let Ok(Some(status)) = wait_for_exit(self.child_mut()?, SHUTDOWN_GRACE) {
+            return self.finish_reaped_child(status);
+        }
+
+        let child_process_id = self.handoff_live_child()?;
+        let _ = terminate_remaining_process_group(self.process_group_id);
         Err(ClientError::CleanupIncomplete {
             child_process_id,
             process_group_id: self.process_group_id,
             timeout: SHUTDOWN_GRACE,
         })
+    }
+
+    fn finish_reaped_child(&mut self, status: ExitStatus) -> Result<ExitStatus, ClientError> {
+        // try_wait already reaped the process, so releasing this handle cannot abandon a
+        // live direct child even if descendant process-group cleanup fails afterwards.
+        self.child.take();
+        terminate_remaining_process_group(self.process_group_id)?;
+        Ok(status)
+    }
+
+    fn handoff_live_child(&mut self) -> Result<u32, io::Error> {
+        if let Ok(process_id) = self.try_handoff_child() {
+            return Ok(process_id);
+        }
+
+        // A disconnected per-session reaper is not expected, but replace it before
+        // retrying. try_handoff_child restores ownership on every failed send.
+        self.reaper = spawn_reaper()?;
+        self.try_handoff_child()
+    }
+
+    fn try_handoff_child(&mut self) -> Result<u32, io::Error> {
+        let child = self
+            .child
+            .take()
+            .expect("a running engine child must still be owned by the session");
+        let process_id = child.id();
+        match self.reaper.send(child) {
+            Ok(()) => Ok(process_id),
+            Err(error) => {
+                self.child = Some(error.0);
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "engine background reaper stopped unexpectedly",
+                ))
+            }
+        }
     }
 
     fn drain_stdout(&mut self) -> Result<(), ClientError> {
@@ -321,7 +351,9 @@ impl EngineSession {
 impl Drop for EngineSession {
     fn drop(&mut self) {
         self.stdin.take();
-        let _ = self.wait_or_terminate();
+        if self.child.is_some() {
+            let _ = self.wait_or_terminate();
+        }
     }
 }
 
@@ -412,5 +444,110 @@ fn wait_for_process_group_exit(process_group_id: u32, timeout: Duration) -> io::
             return Ok(false);
         }
         thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::unix::process::ExitStatusExt;
+
+    const NONEXISTENT_PROCESS_GROUP: u32 = 2_000_000_000;
+
+    #[test]
+    fn direct_child_outside_recorded_group_is_killed_and_reaped_within_bound() {
+        let child = spawn_blocking_fake_engine();
+        let process_id = child.id();
+        let mut session = test_session(child, spawn_reaper().unwrap());
+
+        let started = Instant::now();
+        let status = session
+            .wait_or_terminate()
+            .expect("direct child cleanup must complete");
+
+        assert!(!status.success());
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "a child outside the recorded group must reach direct Child::kill"
+        );
+        assert!(session.child.is_none(), "the reaped Child must be released");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "direct child cleanup exceeded its bounded TERM/KILL windows"
+        );
+        assert!(
+            !process_exists(process_id),
+            "fake engine {process_id} survived direct Child::kill cleanup"
+        );
+    }
+
+    #[test]
+    fn failed_reaper_handoff_restores_child_ownership() {
+        let child = spawn_blocking_fake_engine();
+        let process_id = child.id();
+        let (disconnected_reaper, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        let mut session = test_session(child, disconnected_reaper);
+
+        let error = session
+            .try_handoff_child()
+            .expect_err("the disconnected reaper must reject the child");
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(
+            session.child.as_ref().map(Child::id),
+            Some(process_id),
+            "failed handoff must restore the exact Child handle"
+        );
+
+        session.child_mut().unwrap().kill().unwrap();
+        let status = wait_for_exit(session.child_mut().unwrap(), Duration::from_secs(1))
+            .unwrap()
+            .expect("test cleanup must reap the fake engine");
+        assert!(!status.success());
+        session.child.take();
+    }
+
+    fn spawn_blocking_fake_engine() -> Child {
+        let mut child = Command::new("/bin/bash")
+            .args(["-c", "trap '' TERM; printf r; read -r _"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("fake engine must start");
+        let mut ready = [0_u8; 1];
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_exact(&mut ready)
+            .expect("fake engine must install its TERM handler before blocking");
+        assert_eq!(&ready, b"r");
+        child
+    }
+
+    fn test_session(child: Child, reaper: SyncSender<Child>) -> EngineSession {
+        let (_frame_sender, frames) = mpsc::sync_channel(FRAME_QUEUE_CAPACITY);
+        EngineSession {
+            child: Some(child),
+            stdin: None,
+            frames,
+            response_timeout: Duration::from_secs(1),
+            accepted: HelloAccepted::default(),
+            process_group_id: NONEXISTENT_PROCESS_GROUP,
+            reaper,
+        }
+    }
+
+    fn process_exists(process_id: u32) -> bool {
+        Command::new("/bin/kill")
+            .args(["-0", &process_id.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }

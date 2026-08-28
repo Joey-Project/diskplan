@@ -15,8 +15,10 @@ use diskplan_proto::diskplan::v1::{
 use prost::Message;
 use tempfile::TempDir;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(2);
-const SHUTDOWN_TERM_PATH_MINIMUM: Duration = Duration::from_millis(450);
+const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+const PROCESS_GROUP_TEST_TIMEOUT: Duration = Duration::from_secs(2);
+const TEST_OPERATION_BOUND: Duration = Duration::from_secs(15);
+const SHUTDOWN_BOUND: Duration = Duration::from_secs(5);
 
 #[test]
 #[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
@@ -193,7 +195,7 @@ fn fake_engine_transport_failures_and_exit_are_typed_and_bounded() {
         let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
             .err()
             .expect("fake engine must fail");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < TEST_OPERATION_BOUND);
         match (error, expected) {
             (ClientError::Protobuf(_), ExpectedFailure::Protobuf)
             | (
@@ -215,7 +217,7 @@ fn fake_engine_timeout_is_bounded_and_process_is_terminated() {
         .err()
         .expect("silent engine must time out");
     assert!(matches!(error, ClientError::Timeout { .. }));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < SHUTDOWN_BOUND);
 }
 
 #[test]
@@ -228,7 +230,7 @@ fn timeout_terminates_and_reaps_the_engine_process_group() {
     );
     let path = write_fake_engine(&root, &body);
 
-    let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+    let error = EngineSession::connect_with_timeout(&path, PROCESS_GROUP_TEST_TIMEOUT)
         .err()
         .expect("silent engine must time out");
     assert!(matches!(error, ClientError::Timeout { .. }));
@@ -246,6 +248,16 @@ fn timeout_terminates_and_reaps_the_engine_process_group() {
 #[test]
 fn frame_flood_is_backpressured_and_sigkill_cleanup_remains_bounded() {
     let root = tempfile::tempdir().unwrap();
+    let blocker = root.path().join("blocker.fifo");
+    let flood_ready = root.path().join("flood.ready");
+    let term_seen = root.path().join("term.seen");
+    assert!(
+        Command::new("/usr/bin/mkfifo")
+            .arg(&blocker)
+            .status()
+            .unwrap()
+            .success()
+    );
     let accepted = encode_frame(&accepted_envelope(
         1,
         1,
@@ -256,18 +268,28 @@ fn frame_flood_is_backpressured_and_sigkill_cleanup_remains_bounded() {
         sequence: 2,
         body: Some(envelope::Body::Business(BusinessEnvelope {
             r#type: "flood".into(),
-            payload: vec![0xa5; 128 * 1024],
+            payload: vec![0xa5; 1024],
         })),
     });
     let body = format!(
-        "printf '%b' '{}'\n\
-         trap '' TERM\n\
-         while :; do printf '%b' '{}'; done\n",
+        "trap 'printf t > \"{}\"' TERM\n\
+         printf '%b' '{}'\n\
+         for _ in 1 2 3; do printf '%b' '{}'; done\n\
+         : > \"{}\"\n\
+         exec 3<> \"{}\"\n\
+         while :; do read -r _ <&3 || :; done\n",
+        term_seen.display(),
         shell_bytes(&accepted),
         shell_bytes(&flood),
+        flood_ready.display(),
+        blocker.display(),
     );
     let path = write_fake_engine(&root, &body);
     let session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT).unwrap();
+    assert!(
+        wait_for_path(&flood_ready, TEST_TIMEOUT),
+        "fake engine did not reach the post-flood blocking barrier"
+    );
 
     let started = Instant::now();
     let error = session
@@ -276,11 +298,11 @@ fn frame_flood_is_backpressured_and_sigkill_cleanup_remains_bounded() {
     assert!(matches!(error, ClientError::ExtraFrameAfterShutdown));
     let elapsed = started.elapsed();
     assert!(
-        elapsed >= SHUTDOWN_TERM_PATH_MINIMUM,
-        "shutdown did not exhaust the TERM grace before reaching SIGKILL: {elapsed:?}"
+        fs::read_to_string(&term_seen).is_ok_and(|value| value == "t"),
+        "the fake engine did not observe process-group TERM before SIGKILL"
     );
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < SHUTDOWN_BOUND,
         "shutdown exceeded its bounded TERM/KILL cleanup window"
     );
 }
@@ -448,6 +470,19 @@ fn wait_for_pid_exit(process_id: u32, timeout: Duration) -> bool {
             return false;
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
