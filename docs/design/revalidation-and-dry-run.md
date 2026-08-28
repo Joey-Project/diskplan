@@ -74,7 +74,8 @@ when collector completions arrive out of order.
 ## Dry-run and apply capabilities
 
 Dry-run returns `DryRunReport`, which structurally has no capability field and has no dependency
-on an execution adapter. The module contains no filesystem mutation API.
+on an execution adapter. The dry-run preparation path never constructs or invokes an adapter,
+final-descriptor verifier, authorization, or mutation context.
 
 Apply preparation returns a separate `ApplyReadyReport` plus `ApplyCapability`. The public engine
 API obtains issue and authorization times from its private wall clock; the frontend cannot extend
@@ -84,9 +85,16 @@ registry. The registry binds them to the exact plan,
 overlay, epoch, deadline, and manifest. Authorization removes the registry entry before checking
 the supplied binding, so replay and wrong-binding attempts consume the capability. Expired,
 forged, and unknown capabilities fail closed. The resulting `ApplyAuthorization` permits its
-manifest to be claimed once. Its internal-only initializer means Phase 5 can treat it as proof
+manifest to be claimed once and remains tied to the preparation registry generation until that
+claim. Starting any newer preparation revokes an older unclaimed authorization, even if its
+deadline has not expired. Its internal-only initializer means Phase 5 can treat it as proof
 that the engine performed authoritative current collection and whole-plan revalidation, without
 making the editable overlay or dry-run output mutation-capable.
+
+When any selected mutation requires force, `ApplyReadyReport` carries the exact sorted ActionID
+list and a review binding derived from the manifest, plan, overlay, epoch, and warning list.
+Authorization requires an explicit `ApplyReviewConfirmation` for the same binding and exact
+list. A runtime warning is additional observability, not the consent boundary.
 
 ## Phase 5 boundary
 

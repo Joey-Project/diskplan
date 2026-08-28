@@ -1,63 +1,59 @@
 import DiskplanPolicy
 import Foundation
 
-/// Engine composition may pass this handle across its target boundary, but cannot construct or
-/// inspect its source. Snapshot construction remains inside DiskplanExecution.
-@_spi(DiskplanEngine)
-public final class EngineJITRevalidationCollector: @unchecked Sendable {
-  private let source: any JITRevalidationEvidenceSource
-
-  init(source: any JITRevalidationEvidenceSource) { self.source = source }
-
-  fileprivate func collect(_ request: JITRevalidationRequest) async throws
-    -> CurrentRevalidationSnapshot
-  {
-    try await source.collectJITEvidence(for: request)
-  }
-}
-
 public actor BestEffortApplyCoordinator {
+  private struct MutationStep: Sendable {
+    let action: ActionDefinition
+    let operation: ExecutionAdapterOperation
+    let prerequisiteActionIDs: [ActionID]
+  }
+
   private struct RuntimeUnit: Sendable {
     let id: ExecutionUnitID
     let logicalActionIDs: [ActionID]
     let prerequisiteActionIDs: [ActionID]
     let jitActionIDs: [ActionID]
     let releaseGroupIDs: [String]
-    let mutationActions: [ActionDefinition]
+    let mutationSteps: [MutationStep]
   }
 
-  private let collector: EngineJITRevalidationCollector
   private let adapter: any ExecutionMutationAdapter
   private let eventSink: any ExecutionEventSink
   private let auditSink: (any ExecutionAuditSink)?
   private let clock: @Sendable () -> Int64
+  private let nonceGenerator: @Sendable () -> Data
 
   @_spi(DiskplanEngine)
   public init(
-    collector: EngineJITRevalidationCollector,
     adapter: any ExecutionMutationAdapter,
     eventSink: any ExecutionEventSink = ShellExecutionEventSink(),
     auditSink: (any ExecutionAuditSink)? = nil
   ) {
-    self.collector = collector
     self.adapter = adapter
     self.eventSink = eventSink
     self.auditSink = auditSink
     self.clock = { Int64(Date().timeIntervalSince1970.rounded(.down)) }
+    self.nonceGenerator = {
+      var generator = SystemRandomNumberGenerator()
+      return Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+    }
   }
 
   init(
-    collector: EngineJITRevalidationCollector,
     adapter: any ExecutionMutationAdapter,
     eventSink: any ExecutionEventSink,
     auditSink: (any ExecutionAuditSink)?,
-    clock: @escaping @Sendable () -> Int64
+    clock: @escaping @Sendable () -> Int64,
+    nonceGenerator: @escaping @Sendable () -> Data = {
+      var generator = SystemRandomNumberGenerator()
+      return Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+    }
   ) {
-    self.collector = collector
     self.adapter = adapter
     self.eventSink = eventSink
     self.auditSink = auditSink
     self.clock = clock
+    self.nonceGenerator = nonceGenerator
   }
 
   /// Claims one Phase 4 authorization and never accepts a dry-run report or serialized token.
@@ -66,9 +62,13 @@ public actor BestEffortApplyCoordinator {
     plan: ImmutablePlan,
     overlay: DecisionOverlay
   ) async -> BestEffortApplyReport {
-    guard let manifest = await authorization.claimManifest() else {
-      return startFailure(.authorizationAlreadyClaimed)
+    let claimed: ClaimedApplyAuthorization
+    switch await authorization.claimForExecution() {
+    case .claimed(let value): claimed = value
+    case .replayed: return startFailure(.authorizationAlreadyClaimed)
+    case .superseded: return startFailure(.preparationSuperseded)
     }
+    let manifest = claimed.manifest
     guard clock() < manifest.epoch.deadlineSeconds else {
       return startFailure(.expired, manifest: manifest)
     }
@@ -93,6 +93,17 @@ public actor BestEffortApplyCoordinator {
     } catch {
       return startFailure(.invalidExecutionGraph, manifest: manifest)
     }
+    let forceWarningActionIDs = Set(
+      units.flatMap(\.mutationSteps).compactMap { step -> ActionID? in
+        guard step.operation.forceRequirement == .requiresForceWithWarning else {
+          return nil
+        }
+        return step.action.id
+      }
+    ).sorted()
+    guard forceWarningActionIDs == claimed.confirmedForceActionIDs else {
+      return startFailure(.forceConfirmationBindingMismatch, manifest: manifest)
+    }
 
     var auditFailures: [AuditWriteFailure] = []
     var eventIndex = 0
@@ -104,6 +115,8 @@ public actor BestEffortApplyCoordinator {
 
     var outcomes: [ExecutionUnitOutcome] = []
     var statusByLogicalActionID: [ActionID: ExecutionUnitStatus] = [:]
+    var usedJITCaptureIDs = Set<PolicyDigest>()
+    var usedJITNonces = Set<Data>()
     for unit in units {
       if unit.prerequisiteActionIDs.contains(where: {
         statusByLogicalActionID[$0] != .succeeded
@@ -129,6 +142,17 @@ public actor BestEffortApplyCoordinator {
         )
         continue
       }
+      guard await claimed.generationIsCurrent() else {
+        let outcome = unitOutcome(unit, status: .superseded)
+        outcomes.append(outcome)
+        record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
+        await emit(
+          .unitFinished(unit.id, outcome.status),
+          index: &eventIndex,
+          auditFailures: &auditFailures
+        )
+        continue
+      }
       guard clock() < manifest.epoch.deadlineSeconds else {
         let outcome = unitOutcome(unit, status: .expired)
         outcomes.append(outcome)
@@ -143,7 +167,8 @@ public actor BestEffortApplyCoordinator {
 
       await emit(
         .unitStarted(unit.id), index: &eventIndex, auditFailures: &auditFailures)
-      for action in unit.mutationActions {
+      for mutationStep in unit.mutationSteps {
+        let action = mutationStep.action
         guard
           case .genericRemove(let contract) = action.prototype.adapterContract,
           contract.forceRequirement == .requiresForceWithWarning
@@ -155,14 +180,69 @@ public actor BestEffortApplyCoordinator {
         )
       }
 
+      let oneShotNonce = nonceGenerator()
       let jitRequest = JITRevalidationRequest(
         plan: plan,
         validatedOverlay: validated,
-        epoch: manifest.epoch,
+        manifest: manifest,
         actionIDs: unit.jitActionIDs,
-        releaseGroupIDs: unit.releaseGroupIDs
+        releaseGroupIDs: unit.releaseGroupIDs,
+        preparationGeneration: claimed.generation,
+        oneShotNonce: oneShotNonce
       )
-      let jitReport = await collectJITReport(jitRequest)
+      var jitReport: JITRevalidationReport
+      if oneShotNonce.count != 32 || !usedJITNonces.insert(oneShotNonce).inserted {
+        jitReport = invalidJITReport(
+          request: jitRequest,
+          code: "invalid-or-reused-jit-nonce"
+        )
+      } else {
+        jitReport = await collectJITReport(
+          jitRequest,
+          collector: claimed.collector
+        )
+      }
+      if let captureID = jitReport.captureID,
+        !usedJITCaptureIDs.insert(captureID).inserted
+      {
+        jitReport = appendingJITFinding(
+          jitReport,
+          code: "reused-jit-capture"
+        )
+      }
+      if Task.isCancelled {
+        let outcome = unitOutcome(unit, status: .cancelled, jitReport: jitReport)
+        outcomes.append(outcome)
+        record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
+        await emit(
+          .unitFinished(unit.id, outcome.status),
+          index: &eventIndex,
+          auditFailures: &auditFailures
+        )
+        continue
+      }
+      guard await claimed.generationIsCurrent() else {
+        let outcome = unitOutcome(unit, status: .superseded, jitReport: jitReport)
+        outcomes.append(outcome)
+        record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
+        await emit(
+          .unitFinished(unit.id, outcome.status),
+          index: &eventIndex,
+          auditFailures: &auditFailures
+        )
+        continue
+      }
+      guard clock() < manifest.epoch.deadlineSeconds else {
+        let outcome = unitOutcome(unit, status: .expired, jitReport: jitReport)
+        outcomes.append(outcome)
+        record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
+        await emit(
+          .unitFinished(unit.id, outcome.status),
+          index: &eventIndex,
+          auditFailures: &auditFailures
+        )
+        continue
+      }
       guard jitReport.isCurrent else {
         let outcome = ExecutionUnitOutcome(
           id: unit.id,
@@ -183,29 +263,86 @@ public actor BestEffortApplyCoordinator {
       }
 
       var stepOutcomes: [ExecutionStepOutcome] = []
-      for action in unit.mutationActions {
+      var stepStatusByActionID: [ActionID: ExecutionStepStatus] = [:]
+      for mutationStep in unit.mutationSteps {
+        let action = mutationStep.action
+        if mutationStep.prerequisiteActionIDs.contains(where: {
+          stepStatusByActionID[$0] != .succeeded
+        }) {
+          let step = ExecutionStepOutcome(
+            actionID: action.id,
+            status: .skippedPrerequisite,
+            adapterOutcome: .notStarted(.prerequisiteFailed),
+            postVerification: .unknown(.notRequested)
+          )
+          stepOutcomes.append(step)
+          stepStatusByActionID[action.id] = step.status
+          await emit(
+            .stepFinished(step),
+            index: &eventIndex,
+            auditFailures: &auditFailures
+          )
+          continue
+        }
+        if Task.isCancelled {
+          let step = ExecutionStepOutcome(
+            actionID: action.id,
+            status: .cancelled,
+            adapterOutcome: .notStarted(.taskCancelled),
+            postVerification: .unknown(.notRequested)
+          )
+          stepOutcomes.append(step)
+          stepStatusByActionID[action.id] = step.status
+          await emit(
+            .stepFinished(step),
+            index: &eventIndex,
+            auditFailures: &auditFailures
+          )
+          continue
+        }
+        guard await claimed.generationIsCurrent() else {
+          let step = ExecutionStepOutcome(
+            actionID: action.id,
+            status: .superseded,
+            adapterOutcome: .notStarted(.preparationSuperseded),
+            postVerification: .unknown(.notRequested)
+          )
+          stepOutcomes.append(step)
+          stepStatusByActionID[action.id] = step.status
+          await emit(
+            .stepFinished(step),
+            index: &eventIndex,
+            auditFailures: &auditFailures
+          )
+          continue
+        }
         guard clock() < manifest.epoch.deadlineSeconds else {
-          stepOutcomes.append(
-            ExecutionStepOutcome(
-              actionID: action.id,
-              status: .expired,
-              adapterOutcome: .cancelled,
-              postVerification: .unknown(.timedOut)
-            ))
+          let step = ExecutionStepOutcome(
+            actionID: action.id,
+            status: .expired,
+            adapterOutcome: .notStarted(.epochExpired),
+            postVerification: .unknown(.timedOut)
+          )
+          stepOutcomes.append(step)
+          stepStatusByActionID[action.id] = step.status
+          await emit(
+            .stepFinished(step),
+            index: &eventIndex,
+            auditFailures: &auditFailures
+          )
           continue
         }
-        guard let operation = operation(for: action) else {
-          stepOutcomes.append(
-            ExecutionStepOutcome(
-              actionID: action.id,
-              status: .failed,
-              adapterOutcome: .failed(
-                ExecutionAdapterFailure(code: "unsupported-action-adapter")),
-              postVerification: .unknown(.unsupported)
-            ))
-          continue
-        }
-        let adapterOutcome = await adapter.apply(operation)
+        let operation = mutationStep.operation
+        let adapterOutcome = await adapter.apply(
+          operation,
+          context: MutationExecutionContext(
+            deadlineSeconds: manifest.epoch.deadlineSeconds,
+            nowSeconds: clock,
+            finalDescriptorPreflight: { request in
+              await claimed.collector.finalDescriptorPreflight(for: request)
+            }
+          )
+        )
         let postVerification = await adapter.postverify(operation)
         let stepStatus = stepStatus(
           adapterOutcome: adapterOutcome, postVerification: postVerification)
@@ -216,21 +353,39 @@ public actor BestEffortApplyCoordinator {
           postVerification: postVerification
         )
         stepOutcomes.append(step)
+        stepStatusByActionID[action.id] = step.status
         await emit(
-          .stepFinished(action.id, stepStatus),
+          .stepFinished(step),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
       }
 
-      let status = unitStatus(stepOutcomes)
+      let releasePostVerification = await collectReleasePostVerification(
+        groupIDs: unit.releaseGroupIDs,
+        plan: plan,
+        manifest: manifest,
+        collector: claimed.collector
+      )
+      for releaseOutcome in releasePostVerification {
+        await emit(
+          .releasePostVerificationFinished(releaseOutcome),
+          index: &eventIndex,
+          auditFailures: &auditFailures
+        )
+      }
+      let status = unitStatus(
+        stepOutcomes,
+        releasePostVerification: releasePostVerification
+      )
       let outcome = ExecutionUnitOutcome(
         id: unit.id,
         logicalActionIDs: unit.logicalActionIDs,
         prerequisiteActionIDs: unit.prerequisiteActionIDs,
         status: status,
         jitReport: jitReport,
-        steps: stepOutcomes
+        steps: stepOutcomes,
+        releasePostVerification: releasePostVerification
       )
       outcomes.append(outcome)
       record(status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
@@ -250,25 +405,149 @@ public actor BestEffortApplyCoordinator {
     )
   }
 
-  private func collectJITReport(_ request: JITRevalidationRequest) async
+  private func collectJITReport(
+    _ request: JITRevalidationRequest,
+    collector: EngineRevalidationCollector
+  ) async
     -> JITRevalidationReport
   {
     do {
-      let snapshot = try await collector.collect(request)
-      return Revalidator.evaluateJIT(request: request, snapshot: snapshot)
+      let collected = try await collector.collectJITEvidence(for: request)
+      return Revalidator.evaluateJIT(request: request, collected: collected)
     } catch {
       return JITRevalidationReport(
+        captureID: nil,
+        oneShotNonce: request.oneShotNonce,
         actionOutcomes: [],
         globalFindings: [
           RevalidationFinding(
             actionID: nil,
             subject: .collector,
-            kind: .collectionFailed,
+            kind: error is CancellationError ? .cancelled : .collectionFailed,
             observationFailure: ObservationFailure(
               code: String(reflecting: type(of: error)), collector: "jit-revalidation-source")
           )
         ]
       )
+    }
+  }
+
+  private func invalidJITReport(
+    request: JITRevalidationRequest,
+    code: String
+  ) -> JITRevalidationReport {
+    JITRevalidationReport(
+      captureID: nil,
+      oneShotNonce: request.oneShotNonce,
+      actionOutcomes: [],
+      globalFindings: [
+        RevalidationFinding(
+          actionID: nil,
+          subject: .collector,
+          kind: .policyEvidenceMismatch,
+          observationFailure: ObservationFailure(
+            code: code,
+            collector: "jit-revalidation-source"
+          )
+        )
+      ]
+    )
+  }
+
+  private func appendingJITFinding(
+    _ report: JITRevalidationReport,
+    code: String
+  ) -> JITRevalidationReport {
+    JITRevalidationReport(
+      captureID: report.captureID,
+      oneShotNonce: report.oneShotNonce,
+      actionOutcomes: report.actionOutcomes,
+      globalFindings: report.globalFindings + [
+        RevalidationFinding(
+          actionID: nil,
+          subject: .collector,
+          kind: .policyEvidenceMismatch,
+          observationFailure: ObservationFailure(
+            code: code,
+            collector: "jit-revalidation-source"
+          )
+        )
+      ]
+    )
+  }
+
+  private func collectReleasePostVerification(
+    groupIDs: [String],
+    plan: ImmutablePlan,
+    manifest: ExecutionManifest,
+    collector: EngineRevalidationCollector
+  ) async -> [ReleasePostVerificationOutcome] {
+    guard !groupIDs.isEmpty else { return [] }
+    do {
+      let observations = try await collector.collectReleasePostVerification(
+        for: ReleasePostVerificationRequest(
+          plan: plan,
+          manifest: manifest,
+          allocationGroupIDs: groupIDs
+        ))
+      let groups = Dictionary(grouping: observations, by: \.allocationGroupID)
+      let hasUnexpected = groups.keys.contains { !groupIDs.contains($0) }
+      return groupIDs.map { groupID in
+        guard !hasUnexpected else {
+          return ReleasePostVerificationOutcome(
+            allocationGroupID: groupID,
+            outcome: .failed(
+              ObservationFailure(
+                code: "unexpected-release-postverification",
+                collector: "release-postverification-source"
+              ))
+          )
+        }
+        guard let matches = groups[groupID] else {
+          return ReleasePostVerificationOutcome(
+            allocationGroupID: groupID,
+            outcome: .missing
+          )
+        }
+        guard matches.count == 1, let observation = matches.first else {
+          return ReleasePostVerificationOutcome(
+            allocationGroupID: groupID,
+            outcome: .failed(
+              ObservationFailure(
+                code: "duplicate-release-postverification",
+                collector: "release-postverification-source"
+              ))
+          )
+        }
+        return ReleasePostVerificationOutcome(
+          allocationGroupID: groupID,
+          outcome: releasePostVerificationOutcome(observation.released)
+        )
+      }
+    } catch {
+      return groupIDs.map {
+        ReleasePostVerificationOutcome(
+          allocationGroupID: $0,
+          outcome: .failed(
+            ObservationFailure(
+              code: String(reflecting: type(of: error)),
+              collector: "release-postverification-source"
+            ))
+        )
+      }
+    }
+  }
+
+  private func releasePostVerificationOutcome(
+    _ observation: Observation<Bool>
+  ) -> PostVerificationOutcome {
+    switch observation {
+    case .known(true): return .satisfied
+    case .known(false): return .notSatisfied(code: "allocation-group-not-released")
+    case .absent: return .missing
+    case .unknown(let reason): return .unknown(reason)
+    case .unreadable(let failure): return .unreadable(failure)
+    case .failed(let failure): return .failed(failure)
     }
   }
 
@@ -284,9 +563,15 @@ public actor BestEffortApplyCoordinator {
     do {
       try await auditSink.record(event)
     } catch {
+      let errorValue = error as NSError
+      let posixErrno =
+        errorValue.domain == NSPOSIXErrorDomain
+        ? Int32(exactly: errorValue.code)
+        : nil
       let failure = AuditWriteFailure(
         eventIndex: currentIndex,
-        code: String(reflecting: type(of: error))
+        code: String(reflecting: type(of: error)),
+        errno: posixErrno
       )
       auditFailures.append(failure)
       await eventSink.emit(.auditWriteFailed(failure))
@@ -313,8 +598,14 @@ public actor BestEffortApplyCoordinator {
   ) -> Bool {
     manifest.planHash == plan.planHash
       && manifest.overlayHash == overlay.overlayHash
-      && manifest.epoch.semanticReferenceTimeSeconds
-        == plan.globalFacts.semanticReferenceTimeSeconds
+      && manifest.epoch.semanticReferenceTimeSeconds == manifest.epoch.issuedAtSeconds
+      && manifest.currentCaptureID != plan.globalFacts.captureID
+      && manifest.consentRequirements.allSatisfy {
+        $0.originalSemanticReferenceTimeSeconds
+          == plan.globalFacts.semanticReferenceTimeSeconds
+          && $0.executionReferenceTimeSeconds
+            == manifest.epoch.semanticReferenceTimeSeconds
+      }
       && manifest.executionActionIDs == validated.executionSteps.map(\.action.id)
       && manifest.jitRevalidationActionIDs
         == validated.executionSteps.map { $0.jitRevalidationActions.map(\.id) }
@@ -352,9 +643,12 @@ public actor BestEffortApplyCoordinator {
 
     var units: [RuntimeUnit] = []
     var emittedCompounds = Set<ExecutionUnitID>()
-    var mutationOwnerIDs = Set<ActionID>()
+    var mutationActionIDs = Set<ActionID>()
     for step in validated.executionSteps {
       guard let releaseSet = step.releaseSet else {
+        guard mutationActionIDs.insert(step.action.id).inserted else {
+          throw GraphError.invalid
+        }
         units.append(
           RuntimeUnit(
             id: .action(step.action.id),
@@ -362,7 +656,9 @@ public actor BestEffortApplyCoordinator {
             prerequisiteActionIDs: step.prerequisiteStepActionIDs,
             jitActionIDs: step.jitRevalidationActions.map(\.id),
             releaseGroupIDs: [],
-            mutationActions: [step.action]
+            mutationSteps: [
+              try mutationStep(for: step.action, internalPrerequisiteIDs: [])
+            ]
           ))
         continue
       }
@@ -381,11 +677,13 @@ public actor BestEffortApplyCoordinator {
       ).subtracting(logicalIDs).sorted()
       let jitIDs = Set(memberSteps.flatMap { $0.jitRevalidationActions.map(\.id) }).sorted()
       let ownerActions = try compound.ownerActionIDs.map { actionID -> ActionDefinition in
-        guard mutationOwnerIDs.insert(actionID).inserted,
+        guard mutationActionIDs.insert(actionID).inserted,
           let action = actionByID[actionID]
         else { throw GraphError.invalid }
         return action
       }
+      let ownerIDs = Set(ownerActions.map(\.id))
+      let orderedOwnerActions = try topologicallyOrderedOwnerActions(ownerActions)
       units.append(
         RuntimeUnit(
           id: unitID,
@@ -393,14 +691,23 @@ public actor BestEffortApplyCoordinator {
           prerequisiteActionIDs: prerequisiteIDs,
           jitActionIDs: jitIDs,
           releaseGroupIDs: compound.allocationGroupIDs,
-          mutationActions: ownerActions
+          mutationSteps: try orderedOwnerActions.map {
+            try mutationStep(
+              for: $0,
+              internalPrerequisiteIDs: $0.prerequisiteActionIDs.filter(ownerIDs.contains)
+            )
+          }
         ))
     }
 
-    let unitByLogicalID = Dictionary(
-      uniqueKeysWithValues: units.flatMap { unit in
-        unit.logicalActionIDs.map { ($0, unit.id) }
-      })
+    var unitByLogicalID: [ActionID: ExecutionUnitID] = [:]
+    for unit in units {
+      for actionID in unit.logicalActionIDs {
+        guard unitByLogicalID.updateValue(unit.id, forKey: actionID) == nil else {
+          throw GraphError.invalid
+        }
+      }
+    }
     guard
       units.allSatisfy({ unit in
         unit.prerequisiteActionIDs.allSatisfy { unitByLogicalID[$0] != nil }
@@ -423,18 +730,54 @@ public actor BestEffortApplyCoordinator {
     return ordered
   }
 
-  private func operation(for action: ActionDefinition) -> ExecutionAdapterOperation? {
+  private func mutationStep(
+    for action: ActionDefinition,
+    internalPrerequisiteIDs: [ActionID]
+  ) throws -> MutationStep {
+    enum OperationError: Error { case unsupported }
     let target = BoundMutationTarget(action: action)
+    let operation: ExecutionAdapterOperation
     switch action.prototype.adapterContract {
-    case .genericRemove(let contract): return .genericRemove(target, contract)
-    case .gitWorktreeRemove(let contract): return .gitWorktreeRemove(target, contract)
+    case .genericRemove(let contract):
+      guard case .explicitlyNotApplicable = target.expectedContent else {
+        throw OperationError.unsupported
+      }
+      operation = .genericRemove(target, contract)
+    case .gitWorktreeRemove(let contract): operation = .gitWorktreeRemove(target, contract)
     case .gitWorktreeDiscardLocalChanges(let contract):
-      return .gitWorktreeDiscardLocalChanges(target, contract)
-    case .codexCleanTemporary(let contract): return .codexCleanTemporary(target, contract)
+      operation = .gitWorktreeDiscardLocalChanges(target, contract)
+    case .codexCleanTemporary(let contract): operation = .codexCleanTemporary(target, contract)
     case .versionedArtifactRemove(let contract):
-      return .versionedArtifactRemove(target, contract)
-    case .completeReleaseSetRemove: return nil
+      operation = .versionedArtifactRemove(target, contract)
+    case .completeReleaseSetRemove: throw OperationError.unsupported
     }
+    return MutationStep(
+      action: action,
+      operation: operation,
+      prerequisiteActionIDs: internalPrerequisiteIDs.sorted()
+    )
+  }
+
+  private func topologicallyOrderedOwnerActions(
+    _ actions: [ActionDefinition]
+  ) throws -> [ActionDefinition] {
+    enum OwnerGraphError: Error { case invalid }
+    let actionIDs = Set(actions.map(\.id))
+    guard actionIDs.count == actions.count else { throw OwnerGraphError.invalid }
+    var remaining = actions.sorted { $0.id < $1.id }
+    var emitted = Set<ActionID>()
+    var result: [ActionDefinition] = []
+    while !remaining.isEmpty {
+      guard
+        let index = remaining.firstIndex(where: {
+          Set($0.prerequisiteActionIDs.filter(actionIDs.contains)).isSubset(of: emitted)
+        })
+      else { throw OwnerGraphError.invalid }
+      let next = remaining.remove(at: index)
+      result.append(next)
+      emitted.insert(next.id)
+    }
+    return result
   }
 
   private func stepStatus(
@@ -442,16 +785,37 @@ public actor BestEffortApplyCoordinator {
     postVerification: PostVerificationOutcome
   ) -> ExecutionStepStatus {
     if case .cancelled = adapterOutcome { return .cancelled }
+    if case .timedOut = adapterOutcome { return .expired }
+    if case .notStarted(let reason) = adapterOutcome {
+      switch reason {
+      case .taskCancelled: return .cancelled
+      case .epochExpired: return .expired
+      case .preparationSuperseded: return .superseded
+      case .prerequisiteFailed: return .skippedPrerequisite
+      }
+    }
     guard case .succeeded = adapterOutcome, case .satisfied = postVerification else {
       return .failed
     }
     return .succeeded
   }
 
-  private func unitStatus(_ steps: [ExecutionStepOutcome]) -> ExecutionUnitStatus {
+  private func unitStatus(
+    _ steps: [ExecutionStepOutcome],
+    releasePostVerification: [ReleasePostVerificationOutcome]
+  ) -> ExecutionUnitStatus {
     guard !steps.isEmpty else { return .failed }
-    if steps.allSatisfy({ $0.status == .succeeded }) { return .succeeded }
+    if steps.allSatisfy({ $0.status == .succeeded }) {
+      if releasePostVerification.allSatisfy({ $0.outcome == .satisfied }) {
+        return .succeeded
+      }
+      if releasePostVerification.contains(where: { $0.outcome == .satisfied }) {
+        return .partiallyFailed
+      }
+      return .failed
+    }
     if steps.allSatisfy({ $0.status == .expired }) { return .expired }
+    if steps.allSatisfy({ $0.status == .superseded }) { return .superseded }
     if steps.allSatisfy({ $0.status == .cancelled }) { return .cancelled }
     if steps.contains(where: { $0.status == .succeeded }) { return .partiallyFailed }
     return .failed
@@ -459,14 +823,15 @@ public actor BestEffortApplyCoordinator {
 
   private func unitOutcome(
     _ unit: RuntimeUnit,
-    status: ExecutionUnitStatus
+    status: ExecutionUnitStatus,
+    jitReport: JITRevalidationReport? = nil
   ) -> ExecutionUnitOutcome {
     ExecutionUnitOutcome(
       id: unit.id,
       logicalActionIDs: unit.logicalActionIDs,
       prerequisiteActionIDs: unit.prerequisiteActionIDs,
       status: status,
-      jitReport: nil,
+      jitReport: jitReport,
       steps: []
     )
   }

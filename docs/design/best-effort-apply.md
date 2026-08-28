@@ -21,12 +21,14 @@ A compound unit:
 
 The scheduler preserves `prerequisite -> dependent` direction. A failed, partial, cancelled,
 expired, skipped, or JIT-rejected unit blocks only its downstream dependents. Independent
-units continue. Task cancellation starts no new unit, while a cancellation reported by one
-adapter remains a typed outcome and does not cancel independent units.
+units continue. Compound owners retain their internal DAG: a failed owner skips only its
+downstream owners, while independent owners continue. Task cancellation, epoch expiry, or a
+superseding preparation starts no new owner action. An adapter call that has already begun is
+allowed to finish and is post-verified before later owners are marked not started.
 
 ## JIT protected properties
 
-Immediately before one unit begins mutation, a sealed `EngineJITRevalidationCollector` handle
+Immediately before one unit begins mutation, the sealed `EngineRevalidationCollector` handle
 collects exactly that unit's actions, global survivor/namespace invariants, and release
 topologies. Its source, factory, collection method, and snapshot construction remain internal;
 only the engine-composition SPI may receive the opaque handle. JIT evaluation uses the same
@@ -45,12 +47,20 @@ access-policy-mismatched evidence remain distinct. Directory child churn and unr
 metadata are not promoted into a protected-property change. No mutation adapter is called
 after a JIT rejection.
 
+Each JIT request binds the authorization's current binding hash, preparation generation,
+epoch/reference time, exact unit actions, exact allocation groups, and a random 32-byte
+one-shot nonce. The collector must echo that envelope and return a complete fresh policy
+snapshot from a capture distinct from both the immutable plan and whole-plan preparation.
+Absent, failed, stale, or reused captures and nonces fail closed. A newer preparation also
+revokes any older authorization that has not yet been claimed.
+
 ## Typed adapters and generic remove
 
 All mutations use an `ExecutionAdapterOperation` derived from the immutable action contract.
-The operation carries raw root/path bytes, expected namespace identities, the expected target
-identity, and the typed postcondition. Specialized Git, Codex temporary, and versioned artifact
-operations cannot silently fall back to generic removal.
+The operation carries raw root/path bytes, root and parent namespace identity/access seals,
+the target identity/access/content contract, and the typed postcondition. Specialized Git,
+Codex temporary, and versioned artifact operations cannot silently fall back to generic
+removal.
 
 The first generic adapter invokes `/bin/rm` with raw argv bytes through `posix_spawn`; it never
 uses a shell, glob expansion, or UTF-8 reconstruction:
@@ -62,23 +72,54 @@ uses a shell, glob expansion, or UTF-8 reconstruction:
 | Directory | `rm -Rx -- <raw-path>` |
 | Forced directory | `rm -Rfx -- <raw-path>` |
 
-Before spawn it opens the root and each parent descriptor-relative with no-follow flags,
-compares device, inode, type, and available generation against the authorized namespace, and
-performs one final no-follow leaf check. This protects the point-in-time root/parent/target
-object identities. The pathname consumed by `/bin/rm` still has the explicit
+Before spawn it opens the root, each parent, and target descriptor-relative with no-follow
+flags; compares device, inode, type, and available generation; and asks the engine-owned
+collector to recollect the selected root/parent seals and target access/content properties
+through those held descriptors. Missing, unreadable, identity mismatch, access mismatch, and
+namespace mismatch remain distinct. This protects the point-in-time root/parent/target
+preconditions. The pathname consumed by `/bin/rm` still has the explicit
 `path_race_residual` recorded by policy; this adapter does not claim continuous identity or
 content stability after its final check.
 
-`requiresForceWithWarning` is the only source of `-f`. The coordinator publishes a force
+Generic removal therefore accepts only an explicit path-slot action whose content contract is
+`explicitlyNotApplicable`. An action that requires content stability must use a native
+descriptor-bound/quarantine adapter or remain report-only; it cannot silently reach `/bin/rm`.
+The child receives `/dev/null` as stdin and runs in its own process group. Cancellation or epoch
+expiry supervises it with `TERM`, a bounded grace interval, `KILL`, and reap; POSIX errno,
+normal exit status, terminating signal, cancellation, and timeout stay typed separately.
+
+Git worktree removal uses a dedicated descriptor-bound quarantine adapter. It verifies the
+owner-private source namespace and complete raw-byte subtree coverage, atomically moves the
+exact root into an exclusive same-filesystem quarantine slot, proves the held source and
+destination descriptors name the same object, and repeats coverage before recursive native
+deletion. Verification failure attempts an exclusive restore; restore collision or deletion
+failure retains a typed recovery locator. Only after root deletion may Git prune administrative
+metadata, and that cleanup can produce an explicit residual without changing the root-deletion
+result. Dirty-worktree discard uses only its dedicated typed Git reset/clean operation and
+verifies the authorized clean successor. Neither Git operation can route to generic removal.
+
+`EngineExecutionComposition` is the production Phase 4/5 factory. It binds one sealed collector
+to the preparation engine, final descriptor verification, JIT/release verification, and a typed
+adapter router. Codex-temporary and versioned-artifact operations remain explicitly
+unconfigured in this slice and return a typed unsupported failure; they never fall back to
+generic removal.
+
+`requiresForceWithWarning` is the only source of `-f`. `ApplyReadyReport` lists every such
+action and binds the exact list into an apply-review hash. Authorization requires an explicit
+frontend confirmation of that hash and list. The coordinator publishes a second runtime
 warning before JIT and mutation. An ordinary failure is never retried with force, privilege,
 or a different adapter.
 
 ## Outcomes, post-verification, and recovery
 
-Every mutation step records its adapter outcome and post-verification separately. The unit
+Every mutation step records its adapter outcome and post-verification separately. After all
+owners of a compound release unit have stopped, the engine recollects a typed
+`allocationGroupReleased` proof for every connected allocation group. Target absence alone is
+not sufficient; false, missing, duplicate, unknown, unreadable, or failed topology proof makes
+the compound result partial or failed. The unit
 status is derived from all steps, preserving success, partial failure, failure, cancellation,
 prerequisite skip, JIT rejection, and epoch expiry. Target absence is the generic adapter's
-authoritative postcondition; free-space deltas are not used as success proof.
+authoritative ordinary postcondition; free-space deltas are not used as success proof.
 
 There is no rollback. Failures, cancellations, post-verification uncertainty, and expected
 residuals remain observable, and the next ordinary scan is the recovery source of truth.

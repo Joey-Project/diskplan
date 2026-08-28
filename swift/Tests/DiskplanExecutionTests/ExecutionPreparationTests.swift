@@ -57,6 +57,72 @@ func applyCapabilityAndAuthorizationAreSingleUse() async throws {
 }
 
 @Test
+func forceWarningsRequireAnExactlyBoundApplyReviewConfirmation() async throws {
+  let fixture = try Fixture(
+    content: .explicitlyNotApplicable(.metadataOnlyObject),
+    forceRequirement: .requiresForceWithWarning
+  )
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([fixture.currentSnapshot(), fixture.currentSnapshot()]),
+    randomBytes: deterministicEntropy
+  )
+  let (missingReady, missingCapability) = try await prepareApply(engine, fixture: fixture)
+  #expect(missingReady.forceWarningActionIDs == [fixture.action.id])
+  await #expect(throws: ExecutionPreparationError.forceConfirmationRequired) {
+    try await engine.authorizeApply(
+      missingCapability,
+      ready: missingReady,
+      plan: fixture.plan,
+      overlay: fixture.overlay,
+      nowSeconds: 205
+    )
+  }
+
+  let (ready, capability) = try await prepareApply(engine, fixture: fixture)
+  let forgedReview = ApplyReadyReport(
+    revalidation: ready.revalidation,
+    forceWarningActionIDs: ready.forceWarningActionIDs,
+    reviewBindingHash: digest(0xfe)
+  )
+  await #expect(throws: ExecutionPreparationError.forceConfirmationMismatch) {
+    try await engine.authorizeApply(
+      capability,
+      ready: ready,
+      plan: fixture.plan,
+      overlay: fixture.overlay,
+      confirmation: ApplyReviewConfirmation.confirm(forgedReview),
+      nowSeconds: 205
+    )
+  }
+}
+
+@Test
+func newerPreparationRevokesAnUnclaimedMintedAuthorization() async throws {
+  let fixture = try Fixture()
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([fixture.currentSnapshot(), fixture.currentSnapshot()]),
+    randomBytes: deterministicEntropy
+  )
+  let (ready, capability) = try await prepareApply(engine, fixture: fixture)
+  let authorization = try await engine.authorizeApply(
+    capability,
+    ready: ready,
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    nowSeconds: 205
+  )
+  _ = try await engine.prepare(
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    mode: .dryRun,
+    issuedAtSeconds: 210,
+    lifetimeSeconds: 30
+  )
+
+  #expect(await authorization.claimManifest() == nil)
+}
+
+@Test
 func publicCapabilityLifetimeUsesTheEngineClock() async throws {
   let fixture = try Fixture()
   let engine = ExecutionPreparationEngine(
@@ -109,6 +175,41 @@ func sealedCollectorHandleFeedsTheProductionPreparationBoundary() async throws {
   )
   guard case .dryRun(let report) = result else {
     Issue.record("the sealed engine collector must feed production preparation")
+    return
+  }
+  #expect(report.revalidation.isCurrent)
+}
+
+@Test
+func productionCompositionBindsTheSealedCollectorToPreparation() async throws {
+  let fixture = try Fixture()
+  let action = fixture.action
+  let collector = EngineRevalidationCollector { request in
+    CurrentRevalidationSnapshot(
+      captureID: digest(90),
+      actions: [
+        currentEvidence(
+          action,
+          executionReferenceTimeSeconds: request.epoch.semanticReferenceTimeSeconds
+        )
+      ],
+      releaseTopologies: [],
+      invariants: passingInvariants
+    )
+  }
+  let composition = EngineExecutionComposition(
+    collector: collector,
+    eventSink: NoOpExecutionEventSink()
+  )
+  let result = try await composition.preparation.prepare(
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    mode: .dryRun,
+    lifetimeSeconds: 30
+  )
+
+  guard case .dryRun(let report) = result else {
+    Issue.record("production composition must expose the sealed preparation boundary")
     return
   }
   #expect(report.revalidation.isCurrent)
@@ -924,11 +1025,17 @@ struct Fixture {
     candidateID: String = "a",
     path: String = "a",
     object: UInt64 = 1,
-    content: ContentProtectionBaseline = .requiredDigest(digest(92))
+    content: ContentProtectionBaseline = .requiredDigest(digest(92)),
+    forceRequirement: ForceRequirement = .notRequired
   ) throws {
     facts = globalFacts()
     evidence = snapshot(
-      candidateID: candidateID, path: path, object: object, content: content)
+      candidateID: candidateID,
+      path: path,
+      object: object,
+      content: content,
+      forceRequirement: forceRequirement
+    )
     action = try makeAction(evidence: evidence, facts: facts)
     plan = try ImmutablePlan(
       policyVersion: "policy-1",
@@ -978,17 +1085,25 @@ struct ReleaseFixture {
   let plan: ImmutablePlan
   let overlay: DecisionOverlay
 
-  init() throws {
+  init(
+    content: ContentProtectionBaseline = .requiredDigest(digest(92)),
+    ownerDependency: Bool = false
+  ) throws {
     let facts = globalFacts()
     let aEvidence = snapshot(
       candidateID: "a",
       path: "a",
       object: 1,
+      content: content,
       additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "clone-group")]
     )
-    let bEvidence = snapshot(candidateID: "b", path: "b", object: 2)
+    let bEvidence = snapshot(candidateID: "b", path: "b", object: 2, content: content)
     let a = try makeAction(evidence: aEvidence, facts: facts)
-    let b = try makeAction(evidence: bEvidence, facts: facts)
+    let b = try makeAction(
+      evidence: bEvidence,
+      facts: facts,
+      prerequisites: ownerDependency ? [a] : []
+    )
     let graph = try completeStorageGraph(aEvidence: aEvidence, bEvidence: bEvidence)
     let bindings = [
       CandidateActionBinding(candidateID: "a", action: a),
@@ -1084,6 +1199,7 @@ func currentEvidence(
   providerState: Observation<ProviderState>? = nil,
   dependencyState: Observation<DependencyState>? = nil,
   executionReferenceTimeSeconds: Int64 = 200,
+  freshCaptureID: PolicyDigest = digest(90),
   freshPolicyEvidence: Observation<FreshPolicyEvidence>? = nil
 ) -> CurrentActionEvidence {
   let namespace = action.prototype.namespaceBinding
@@ -1103,7 +1219,11 @@ func currentEvidence(
     dependencyState: dependencyState ?? action.evidence.dependencyState,
     freshPolicyEvidence: freshPolicyEvidence
       ?? .known(
-        retimedPolicyEvidence(action, referenceTimeSeconds: executionReferenceTimeSeconds)),
+        retimedPolicyEvidence(
+          action,
+          referenceTimeSeconds: executionReferenceTimeSeconds,
+          captureID: freshCaptureID
+        )),
     root: CurrentNamespaceComponent(
       relativePath: nil,
       identity: .known(namespace.rootIdentity),

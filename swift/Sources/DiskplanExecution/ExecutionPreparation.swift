@@ -8,10 +8,13 @@ public actor ExecutionPreparationEngine {
     let overlayHash: PolicyDigest
     let epochID: String
     let deadlineSeconds: Int64
+    let generation: UInt64
+    let forceWarningActionIDs: [ActionID]
+    let reviewBindingHash: PolicyDigest
     let manifest: ExecutionManifest
   }
 
-  private let evidenceSource: any RevalidationEvidenceSource
+  private let collector: EngineRevalidationCollector
   private let randomBytes: @Sendable (Int) throws -> Data
   private let clock: @Sendable () -> Int64
   private var capabilities: [Data: CapabilityRecord] = [:]
@@ -19,7 +22,7 @@ public actor ExecutionPreparationEngine {
   private var preparationGenerationExhausted = false
 
   @_spi(DiskplanEngine) public init(collector: EngineRevalidationCollector) {
-    self.evidenceSource = collector
+    self.collector = collector
     self.randomBytes = { count in
       var generator = SystemRandomNumberGenerator()
       return Data((0..<count).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
@@ -29,12 +32,16 @@ public actor ExecutionPreparationEngine {
 
   init(
     evidenceSource: any RevalidationEvidenceSource,
+    jitEvidenceSource: (any JITRevalidationEvidenceSource)? = nil,
     randomBytes: @escaping @Sendable (Int) throws -> Data,
     clock: @escaping @Sendable () -> Int64 = {
       Int64(Date().timeIntervalSince1970.rounded(.down))
     }
   ) {
-    self.evidenceSource = evidenceSource
+    self.collector = EngineRevalidationCollector(
+      currentSource: evidenceSource,
+      jitSource: jitEvidenceSource
+    )
     self.randomBytes = randomBytes
     self.clock = clock
   }
@@ -91,7 +98,7 @@ public actor ExecutionPreparationEngine {
 
     let report: RevalidationReport
     do {
-      let snapshot = try await evidenceSource.collectCurrentEvidence(for: request)
+      let snapshot = try await collector.collectCurrentEvidence(for: request)
       guard generationIsCurrent(generation) else {
         throw ExecutionPreparationError.preparationSuperseded
       }
@@ -128,9 +135,26 @@ public actor ExecutionPreparationEngine {
     guard generationIsCurrent(generation) else {
       throw ExecutionPreparationError.preparationSuperseded
     }
+    let forceWarningActionIDs = Set<ActionID>(
+      validated.executionSteps.flatMap(\.jitRevalidationActions).compactMap { action in
+        guard
+          case .genericRemove(let contract) = action.prototype.adapterContract,
+          contract.forceRequirement == .requiresForceWithWarning
+        else { return nil }
+        return action.id
+      }
+    ).sorted()
+    let reviewBindingHash = applyReviewBindingHash(
+      manifest: manifest,
+      forceWarningActionIDs: forceWarningActionIDs
+    )
     switch mode {
     case .dryRun:
-      return .dryRun(DryRunReport(revalidation: report))
+      return .dryRun(
+        DryRunReport(
+          revalidation: report,
+          forceWarningActionIDs: forceWarningActionIDs
+        ))
     case .apply:
       guard generationIsCurrent(generation) else {
         throw ExecutionPreparationError.preparationSuperseded
@@ -152,10 +176,17 @@ public actor ExecutionPreparationEngine {
         overlayHash: overlay.overlayHash,
         epochID: epoch.epochID,
         deadlineSeconds: epoch.deadlineSeconds,
+        generation: generation,
+        forceWarningActionIDs: forceWarningActionIDs,
+        reviewBindingHash: reviewBindingHash,
         manifest: manifest
       )
       return .applyReady(
-        ApplyReadyReport(revalidation: report),
+        ApplyReadyReport(
+          revalidation: report,
+          forceWarningActionIDs: forceWarningActionIDs,
+          reviewBindingHash: reviewBindingHash
+        ),
         ApplyCapability(opaqueBytes: token)
       )
     }
@@ -165,13 +196,15 @@ public actor ExecutionPreparationEngine {
     _ capability: ApplyCapability,
     ready: ApplyReadyReport,
     plan: ImmutablePlan,
-    overlay: DecisionOverlay
+    overlay: DecisionOverlay,
+    confirmation: ApplyReviewConfirmation? = nil
   ) throws -> ApplyAuthorization {
     try authorizeApply(
       capability,
       ready: ready,
       plan: plan,
       overlay: overlay,
+      confirmation: confirmation,
       nowSeconds: clock()
     )
   }
@@ -181,10 +214,14 @@ public actor ExecutionPreparationEngine {
     ready: ApplyReadyReport,
     plan: ImmutablePlan,
     overlay: DecisionOverlay,
+    confirmation: ApplyReviewConfirmation? = nil,
     nowSeconds: Int64
   ) throws -> ApplyAuthorization {
     guard let record = capabilities.removeValue(forKey: capability.opaqueBytes) else {
       throw ExecutionPreparationError.capabilityUnknown
+    }
+    guard generationIsCurrent(record.generation) else {
+      throw ExecutionPreparationError.preparationSuperseded
     }
     guard nowSeconds < record.deadlineSeconds else {
       throw ExecutionPreparationError.capabilityExpired
@@ -195,15 +232,47 @@ public actor ExecutionPreparationEngine {
     guard record.planHash == plan.planHash,
       record.overlayHash == overlay.overlayHash,
       record.epochID == ready.revalidation.epoch.epochID,
-      record.manifest == readyManifest
+      record.manifest == readyManifest,
+      record.forceWarningActionIDs == ready.forceWarningActionIDs,
+      record.reviewBindingHash == ready.reviewBindingHash
     else { throw ExecutionPreparationError.capabilityBindingMismatch }
-    return ApplyAuthorization(manifest: record.manifest)
+    if !record.forceWarningActionIDs.isEmpty, confirmation == nil {
+      throw ExecutionPreparationError.forceConfirmationRequired
+    }
+    if let confirmation {
+      guard confirmation.reviewBindingHash == record.reviewBindingHash,
+        confirmation.confirmedForceActionIDs == record.forceWarningActionIDs
+      else { throw ExecutionPreparationError.forceConfirmationMismatch }
+    }
+    let authorizedGeneration = record.generation
+    return ApplyAuthorization(
+      manifest: record.manifest,
+      collector: collector,
+      generation: authorizedGeneration,
+      confirmedForceActionIDs: record.forceWarningActionIDs,
+      generationIsCurrent: { [self] in
+        return await self.generationIsCurrent(authorizedGeneration)
+      }
+    )
   }
 
   private func entropy(count: Int) throws -> Data {
     let bytes = try randomBytes(count)
     guard bytes.count == count else { throw ExecutionPreparationError.entropyFailure }
     return bytes
+  }
+
+  private func applyReviewBindingHash(
+    manifest: ExecutionManifest,
+    forceWarningActionIDs: [ActionID]
+  ) -> PolicyDigest {
+    var bytes = Data("diskplan/apply-review/v1\0".utf8)
+    bytes.append(manifest.currentBindingHash.bytes)
+    bytes.append(manifest.planHash.bytes)
+    bytes.append(manifest.overlayHash.bytes)
+    bytes.append(Data(manifest.epoch.epochID.utf8))
+    for actionID in forceWarningActionIDs { bytes.append(actionID.digest.bytes) }
+    return try! PolicyDigest(bytes: Data(SHA256.hash(data: bytes)))
   }
 
   private func invalidateAllCapabilities() { capabilities.removeAll(keepingCapacity: true) }
@@ -402,11 +471,33 @@ enum Revalidator {
 
   static func evaluateJIT(
     request: JITRevalidationRequest,
-    snapshot: CurrentRevalidationSnapshot
+    collected: JITRevalidationSnapshot
   ) -> JITRevalidationReport {
+    let snapshot = collected.snapshot
     let expectedIDs = Set(request.actionIDs)
     let actionByID = Dictionary(uniqueKeysWithValues: request.plan.actions.map { ($0.id, $0) })
     var globalFindings: [RevalidationFinding] = []
+    if request.oneShotNonce.count != 32
+      || collected.oneShotNonce != request.oneShotNonce
+      || collected.authorizationCurrentBindingHash
+        != request.authorizationCurrentBindingHash
+      || request.authorizationCurrentBindingHash != request.manifest.currentBindingHash
+      || collected.preparationGeneration != request.preparationGeneration
+      || collected.epochID != request.epoch.epochID
+      || request.epoch.semanticReferenceTimeSeconds != request.epoch.issuedAtSeconds
+    {
+      globalFindings.append(
+        RevalidationFinding(
+          actionID: nil,
+          subject: .policyEvidence,
+          kind: .policyEvidenceMismatch
+        ))
+    }
+    if expectedIDs.count != request.actionIDs.count {
+      globalFindings.append(
+        RevalidationFinding(
+          actionID: nil, subject: .collector, kind: .duplicateObservation))
+    }
     let currentByID = observationsByActionID(snapshot.actions, findings: &globalFindings)
     for extra in currentByID.keys where !expectedIDs.contains(extra) {
       globalFindings.append(
@@ -414,7 +505,14 @@ enum Revalidator {
           actionID: extra, subject: .collector, kind: .unexpectedObservation))
     }
 
-    let outcomes = request.actionIDs.sorted().map { actionID -> ActionRevalidationOutcome in
+    let policyRequest = RevalidationRequest(
+      plan: request.plan,
+      validatedOverlay: request.validatedOverlay,
+      epoch: request.epoch
+    )
+    var policyBindings: [CurrentPolicyBinding] = []
+    var consentRequirements: [ExecutionConsentRequirement] = []
+    let outcomes = expectedIDs.sorted().map { actionID -> ActionRevalidationOutcome in
       guard let expected = actionByID[actionID] else {
         globalFindings.append(
           RevalidationFinding(
@@ -428,7 +526,55 @@ enum Revalidator {
             RevalidationFinding(actionID: actionID, subject: .collector, kind: .missing)
           ])
       }
-      return evaluateAction(expected, current: current)
+      let actionOutcome = evaluateAction(expected, current: current)
+      let policy = evaluateFreshPolicy(
+        expected,
+        current: current,
+        request: policyRequest
+      )
+      if let binding = policy.binding { policyBindings.append(binding) }
+      consentRequirements.append(contentsOf: policy.consentRequirements)
+      return ActionRevalidationOutcome(
+        actionID: actionID,
+        findings: (actionOutcome.findings + policy.findings).sorted(by: findingPrecedes)
+      )
+    }
+
+    let authorizedBindings = request.manifest.currentPolicyBindings.filter {
+      expectedIDs.contains($0.actionID)
+    }
+    if snapshot.captureID == request.plan.globalFacts.captureID
+      || snapshot.captureID == request.manifest.currentCaptureID
+      || policyBindings.count != expectedIDs.count
+      || authorizedBindings.count != expectedIDs.count
+      || policyBindings.contains(where: { $0.captureID != snapshot.captureID })
+      || !policyBindings.allSatisfy({ current in
+        authorizedBindings.contains(where: {
+          $0.actionID == current.actionID && $0.requiredWaivers == current.requiredWaivers
+        })
+      })
+    {
+      globalFindings.append(
+        RevalidationFinding(
+          actionID: nil,
+          subject: .policyEvidence,
+          kind: .policyEvidenceMismatch
+        ))
+    }
+    let authorizedConsents = request.manifest.consentRequirements.filter {
+      expectedIDs.contains($0.actionID)
+    }
+    if consentRequirements.count != authorizedConsents.count
+      || !consentRequirements.allSatisfy({ current in
+        authorizedConsents.contains(where: { jitConsentMatches(current, authorized: $0) })
+      })
+    {
+      globalFindings.append(
+        RevalidationFinding(
+          actionID: nil,
+          subject: .policyEvidence,
+          kind: .staleConsent
+        ))
     }
 
     globalFindings.append(
@@ -489,9 +635,26 @@ enum Revalidator {
     }
     globalFindings.sort(by: findingPrecedes)
     return JITRevalidationReport(
+      captureID: snapshot.captureID,
+      oneShotNonce: request.oneShotNonce,
       actionOutcomes: outcomes.sorted { $0.actionID < $1.actionID },
       globalFindings: globalFindings
     )
+  }
+
+  private static func jitConsentMatches(
+    _ current: ExecutionConsentRequirement,
+    authorized: ExecutionConsentRequirement
+  ) -> Bool {
+    current.consentHash == authorized.consentHash
+      && current.actionID == authorized.actionID
+      && current.planHash == authorized.planHash
+      && current.planEvidenceHash == authorized.planEvidenceHash
+      && current.overlayHash == authorized.overlayHash
+      && current.originalSemanticReferenceTimeSeconds
+        == authorized.originalSemanticReferenceTimeSeconds
+      && current.executionReferenceTimeSeconds == authorized.executionReferenceTimeSeconds
+      && current.currentPredicate == authorized.currentPredicate
   }
 
   private static func uniqueJITActions(

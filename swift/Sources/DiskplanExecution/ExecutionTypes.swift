@@ -103,32 +103,211 @@ protocol RevalidationEvidenceSource: Sendable {
 /// The only production collector accepted by `ExecutionPreparationEngine`.
 /// Its factory is internal; the engine SPI exposes only the sealed collector handle.
 @_spi(DiskplanEngine) public final class EngineRevalidationCollector: @unchecked Sendable {
-  private let collect:
+  private let collectCurrent:
     @Sendable (RevalidationRequest) async throws
       -> CurrentRevalidationSnapshot
+  private let collectJIT:
+    @Sendable (JITRevalidationRequest) async throws
+      -> JITRevalidationSnapshot
+  private let collectReleasePostconditions:
+    @Sendable (ReleasePostVerificationRequest) async throws
+      -> [CurrentReleasePostcondition]
+  private let collectFinalDescriptors:
+    @Sendable (FinalDescriptorPreflightRequest) async throws
+      -> FinalDescriptorEvidenceSnapshot
 
   init(
     collect:
       @escaping @Sendable (RevalidationRequest) async throws
       -> CurrentRevalidationSnapshot
   ) {
-    self.collect = collect
+    self.collectCurrent = collect
+    self.collectJIT = { _ in throw EngineCollectorError.jitUnavailable }
+    self.collectReleasePostconditions = { _ in
+      throw EngineCollectorError.releasePostVerificationUnavailable
+    }
+    self.collectFinalDescriptors = { _ in
+      throw EngineCollectorError.finalDescriptorPreflightUnavailable
+    }
+  }
+
+  init(
+    collectCurrent:
+      @escaping @Sendable (RevalidationRequest) async throws
+      -> CurrentRevalidationSnapshot,
+    collectJIT:
+      @escaping @Sendable (JITRevalidationRequest) async throws
+      -> JITRevalidationSnapshot,
+    collectReleasePostconditions:
+      @escaping @Sendable (ReleasePostVerificationRequest) async throws
+      -> [CurrentReleasePostcondition],
+    collectFinalDescriptors:
+      @escaping @Sendable (FinalDescriptorPreflightRequest) async throws
+      -> FinalDescriptorEvidenceSnapshot
+  ) {
+    self.collectCurrent = collectCurrent
+    self.collectJIT = collectJIT
+    self.collectReleasePostconditions = collectReleasePostconditions
+    self.collectFinalDescriptors = collectFinalDescriptors
+  }
+
+  init(
+    currentSource: any RevalidationEvidenceSource,
+    jitSource: (any JITRevalidationEvidenceSource)? = nil
+  ) {
+    self.collectCurrent = { request in
+      try await currentSource.collectCurrentEvidence(for: request)
+    }
+    self.collectJIT = { request in
+      guard let jitSource else { throw EngineCollectorError.jitUnavailable }
+      return try await jitSource.collectJITEvidence(for: request)
+    }
+    self.collectReleasePostconditions = { request in
+      guard let jitSource else {
+        throw EngineCollectorError.releasePostVerificationUnavailable
+      }
+      return try await jitSource.collectReleasePostVerification(for: request)
+    }
+    self.collectFinalDescriptors = { request in
+      guard let jitSource else {
+        throw EngineCollectorError.finalDescriptorPreflightUnavailable
+      }
+      return try await jitSource.collectFinalDescriptorEvidence(for: request)
+    }
   }
 
   func collectCurrentEvidence(for request: RevalidationRequest) async throws
     -> CurrentRevalidationSnapshot
   {
-    try await collect(request)
+    try await collectCurrent(request)
+  }
+
+  func collectJITEvidence(for request: JITRevalidationRequest) async throws
+    -> JITRevalidationSnapshot
+  {
+    try await collectJIT(request)
+  }
+
+  func collectReleasePostVerification(
+    for request: ReleasePostVerificationRequest
+  ) async throws -> [CurrentReleasePostcondition] {
+    try await collectReleasePostconditions(request)
+  }
+
+  func finalDescriptorPreflight(
+    for request: FinalDescriptorPreflightRequest
+  ) async -> FinalDescriptorPreflightOutcome {
+    do {
+      let snapshot = try await collectFinalDescriptors(request)
+      return Self.evaluateFinalDescriptorEvidence(snapshot, target: request.target)
+    } catch is CancellationError {
+      return .failed(
+        ObservationFailure(
+          code: "cancelled", collector: "final-descriptor-revalidation-source"))
+    } catch {
+      return .failed(
+        ObservationFailure(
+          code: String(reflecting: type(of: error)),
+          collector: "final-descriptor-revalidation-source"
+        ))
+    }
+  }
+
+  static func evaluateFinalDescriptorEvidence(
+    _ snapshot: FinalDescriptorEvidenceSnapshot,
+    target: BoundMutationTarget
+  ) -> FinalDescriptorPreflightOutcome {
+    switch snapshot.targetIdentity {
+    case .absent: return .missing
+    case .unknown(let reason):
+      return .failed(
+        ObservationFailure(
+          code: "unknown-\(String(describing: reason))",
+          collector: "final-descriptor-revalidation-source"))
+    case .unreadable(let failure): return .unreadable(failure)
+    case .failed(let failure): return .failed(failure)
+    case .known(let identity):
+      guard identity == target.expectedIdentity else { return .identityMismatch }
+    }
+    switch snapshot.targetAccessPolicy {
+    case .known(let baseline):
+      guard baseline == target.expectedTargetAccessPolicy else {
+        return .accessPolicyMismatch
+      }
+    case .unreadable(let failure): return .unreadable(failure)
+    case .failed(let failure): return .failed(failure)
+    case .absent, .unknown: return .accessPolicyMismatch
+    }
+    switch snapshot.targetContent {
+    case .known(let baseline):
+      guard baseline == target.expectedContent else { return .contentMismatch }
+    case .unreadable(let failure): return .unreadable(failure)
+    case .failed(let failure): return .failed(failure)
+    case .absent, .unknown: return .contentMismatch
+    }
+    guard snapshot.root.relativePath == nil else { return .namespaceIdentityMismatch }
+    switch snapshot.root.identity {
+    case .known(let identity):
+      guard identity == target.expectedRootIdentity else {
+        return .namespaceIdentityMismatch
+      }
+    case .unreadable(let failure): return .unreadable(failure)
+    case .failed(let failure): return .failed(failure)
+    case .absent, .unknown: return .namespaceIdentityMismatch
+    }
+    switch snapshot.root.seal {
+    case .known(let seal):
+      guard seal == target.expectedRootSeal else {
+        return .namespaceAccessPolicyMismatch
+      }
+    case .unreadable(let failure): return .unreadable(failure)
+    case .failed(let failure): return .failed(failure)
+    case .absent, .unknown: return .namespaceAccessPolicyMismatch
+    }
+    guard snapshot.parents.count == target.expectedParentIdentities.count,
+      snapshot.parents.count == target.expectedParentSeals.count
+    else { return .namespaceIdentityMismatch }
+    for (index, parent) in snapshot.parents.enumerated() {
+      let expectedPath = try? RawTargetPath(
+        components: Array(target.targetPath.components.prefix(index + 1)))
+      guard parent.relativePath == expectedPath else { return .namespaceIdentityMismatch }
+      switch parent.identity {
+      case .known(let identity):
+        guard identity == target.expectedParentIdentities[index] else {
+          return .namespaceIdentityMismatch
+        }
+      case .unreadable(let failure): return .unreadable(failure)
+      case .failed(let failure): return .failed(failure)
+      case .absent, .unknown: return .namespaceIdentityMismatch
+      }
+      switch parent.seal {
+      case .known(let seal):
+        guard seal == target.expectedParentSeals[index] else {
+          return .namespaceAccessPolicyMismatch
+        }
+      case .unreadable(let failure): return .unreadable(failure)
+      case .failed(let failure): return .failed(failure)
+      case .absent, .unknown: return .namespaceAccessPolicyMismatch
+      }
+    }
+    return .verified
   }
 }
 
 extension EngineRevalidationCollector: RevalidationEvidenceSource {}
+
+private enum EngineCollectorError: Error {
+  case jitUnavailable
+  case releasePostVerificationUnavailable
+  case finalDescriptorPreflightUnavailable
+}
 
 public enum RevalidationFailureKind: String, CaseIterable, Equatable, Hashable, Sendable {
   case missing
   case unknown
   case unreadable
   case collectionFailed
+  case cancelled
   case identityMismatch
   case contentMismatch
   case accessPolicyMismatch
@@ -352,11 +531,52 @@ public struct RevalidationReport: Equatable, Sendable {
 /// A dry-run result has no capability field and cannot be passed to apply authorization.
 public struct DryRunReport: Equatable, Sendable {
   public let revalidation: RevalidationReport
-  public init(revalidation: RevalidationReport) { self.revalidation = revalidation }
+  public let forceWarningActionIDs: [ActionID]
+
+  public init(
+    revalidation: RevalidationReport,
+    forceWarningActionIDs: [ActionID] = []
+  ) {
+    self.revalidation = revalidation
+    self.forceWarningActionIDs = forceWarningActionIDs
+  }
 }
 
 public struct ApplyReadyReport: Equatable, Sendable {
   public let revalidation: RevalidationReport
+  public let forceWarningActionIDs: [ActionID]
+  public let reviewBindingHash: PolicyDigest
+
+  public init(
+    revalidation: RevalidationReport,
+    forceWarningActionIDs: [ActionID] = [],
+    reviewBindingHash: PolicyDigest? = nil
+  ) {
+    self.revalidation = revalidation
+    self.forceWarningActionIDs = forceWarningActionIDs
+    self.reviewBindingHash = reviewBindingHash ?? revalidation.overlayHash
+  }
+}
+
+public struct ApplyReviewConfirmation: Equatable, Sendable {
+  public let reviewBindingHash: PolicyDigest
+  public let confirmedForceActionIDs: [ActionID]
+
+  private init(
+    reviewBindingHash: PolicyDigest,
+    confirmedForceActionIDs: [ActionID]
+  ) {
+    self.reviewBindingHash = reviewBindingHash
+    self.confirmedForceActionIDs = confirmedForceActionIDs
+  }
+
+  /// The frontend calls this only after rendering and confirming every force warning.
+  public static func confirm(_ ready: ApplyReadyReport) -> Self {
+    Self(
+      reviewBindingHash: ready.reviewBindingHash,
+      confirmedForceActionIDs: ready.forceWarningActionIDs
+    )
+  }
 }
 
 /// Opaque, registry-backed, non-Codable capability. Its bytes never leave this module.
@@ -365,15 +585,50 @@ public final class ApplyCapability: @unchecked Sendable {
   init(opaqueBytes: Data) { self.opaqueBytes = opaqueBytes }
 }
 
-public actor ApplyAuthorization {
-  private var manifest: ExecutionManifest?
+struct ClaimedApplyAuthorization: Sendable {
+  let manifest: ExecutionManifest
+  let collector: EngineRevalidationCollector
+  let generation: UInt64
+  let confirmedForceActionIDs: [ActionID]
+  let generationIsCurrent: @Sendable () async -> Bool
+}
 
-  init(manifest: ExecutionManifest) { self.manifest = manifest }
+enum ApplyAuthorizationClaimResult: Sendable {
+  case claimed(ClaimedApplyAuthorization)
+  case replayed
+  case superseded
+}
+
+public actor ApplyAuthorization {
+  private var claim: ClaimedApplyAuthorization?
+
+  init(
+    manifest: ExecutionManifest,
+    collector: EngineRevalidationCollector,
+    generation: UInt64,
+    confirmedForceActionIDs: [ActionID],
+    generationIsCurrent: @escaping @Sendable () async -> Bool
+  ) {
+    claim = ClaimedApplyAuthorization(
+      manifest: manifest,
+      collector: collector,
+      generation: generation,
+      confirmedForceActionIDs: confirmedForceActionIDs,
+      generationIsCurrent: generationIsCurrent
+    )
+  }
+
+  func claimForExecution() async -> ApplyAuthorizationClaimResult {
+    guard let candidate = claim else { return .replayed }
+    claim = nil
+    guard await candidate.generationIsCurrent() else { return .superseded }
+    return .claimed(candidate)
+  }
 
   /// Phase 5 may claim the authorization once. A second claim is a replay and returns nil.
-  public func claimManifest() -> ExecutionManifest? {
-    defer { manifest = nil }
-    return manifest
+  public func claimManifest() async -> ExecutionManifest? {
+    guard case .claimed(let candidate) = await claimForExecution() else { return nil }
+    return candidate.manifest
   }
 }
 
@@ -392,4 +647,6 @@ public enum ExecutionPreparationError: Error, Equatable {
   case applyReportNotCurrent
   case preparationSuperseded
   case generationExhausted
+  case forceConfirmationRequired
+  case forceConfirmationMismatch
 }
