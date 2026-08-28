@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEventKind};
-use diskplan_proto::diskplan::v1::{ScanControlKind, ScanState, engine_event};
+use diskplan_proto::diskplan::v1::{ControlRejectCode, ScanControlKind, ScanState, engine_event};
 
 use super::model::{
     ActiveRequest, AppState, Effect, EngineDelivery, RequestPhase, Screen, TerminalState, UiEvent,
@@ -182,6 +182,15 @@ fn reduce_engine_event(state: &mut AppState, delivery: EngineDelivery) -> Vec<Ef
                         "engine rejected request {} with a different control",
                         event.request_id
                     ),
+                );
+            }
+            let Ok(code) = ControlRejectCode::try_from(rejected.code) else {
+                return protocol_failure(state, "engine returned an unknown rejection code".into());
+            };
+            if code == ControlRejectCode::Unspecified {
+                return protocol_failure(
+                    state,
+                    "engine returned an unspecified rejection code".into(),
                 );
             }
             let Ok(current_state) = ScanState::try_from(rejected.current_state) else {
@@ -699,9 +708,9 @@ mod tests {
                 2,
                 engine_event::Body::ControlRejected(ControlRejected {
                     control: ScanControlKind::CancelScan as i32,
+                    code: ControlRejectCode::InvalidState as i32,
                     detail: "too late".into(),
                     current_state: ScanState::Running as i32,
-                    ..Default::default()
                 }),
             ))),
         );
@@ -711,6 +720,35 @@ mod tests {
         assert!(!state.cancel_requested);
         assert!(state.pending_controls.is_empty());
         assert_eq!(state.scan_state, ScanState::Running);
+    }
+
+    #[test]
+    fn invalid_control_rejection_code_table_fails_terminally() {
+        for code in [ControlRejectCode::Unspecified as i32, 999] {
+            let mut state = pending_state(2, ScanControlKind::CancelScan);
+            state.cancel_requested = true;
+            let effects = reduce(
+                &mut state,
+                UiEvent::Engine(EngineDelivery::exact(engine_event(
+                    1,
+                    2,
+                    engine_event::Body::ControlRejected(ControlRejected {
+                        control: ScanControlKind::CancelScan as i32,
+                        code,
+                        detail: "invalid rejection code".into(),
+                        current_state: ScanState::Running as i32,
+                    }),
+                ))),
+            );
+
+            assert_eq!(effects, vec![Effect::StopDriver], "code {code}");
+            assert!(matches!(state.terminal, Some(TerminalState::Failed(_))));
+            assert!(
+                state.cancel_requested,
+                "failed ack must not mutate pending state"
+            );
+            assert_eq!(state.pending_controls.len(), 1);
+        }
     }
 
     #[test]

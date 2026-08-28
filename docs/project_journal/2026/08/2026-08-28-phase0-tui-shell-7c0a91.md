@@ -22,12 +22,12 @@ superseded_by:
 
 - Protocol minor 1.2 defines typed start, pause, resume, provisional-plan, cancel, acknowledgement, progress, projection, invalidation, and terminal events.
 - Every engine event has a request ID and strictly monotonic event sequence; the Rust session validates every wire event before the UI bridge coalesces a contiguous progress run to its latest value.
-- Semantic acknowledgements, state changes, projections, and terminal events use bounded lossless delivery. The reducer accepts only explicitly proven progress gaps; malformed acknowledgements or state values terminal-fail the session and stop the driver.
+- Semantic acknowledgements, state changes, projections, and terminal events use bounded lossless delivery. The reducer accepts only explicitly proven progress gaps; malformed acknowledgements, rejection codes, or state values terminal-fail the session and stop the driver.
 - Rust tracks one finite active-request lifecycle: every non-ack event must bind to its known non-zero origin, accepted control/state transitions are exhaustive, and plan invalidation must name the exact current plan.
 - Swift uses a constant-space monotonic request-ID high-water mark. Malformed envelope/request embedding mismatches consume IDs through the same duplicate-aware path as ordinary requests.
 - The TUI is implemented as a pure reducer plus renderer and replaceable event source. It has wide, medium, compact, and 1x1-safe layouts.
 - `q`, `Space`, `p`, `r`, `?`, and the scan-only `/` help alias follow engine acknowledgement barriers. Repeat/release key events and duplicate pending controls are ignored.
-- Engine supervision remains bounded: cancellation waits for the terminal event and direct-child/process-group cleanup; terminal state restoration is covered by a real PTY smoke path.
+- Engine supervision remains bounded: cancellation waits for the terminal event and direct-child/process-group cleanup. Terminal entry pre-arms every inverse operation, including partial command-write and flush failures, and restoration is covered by injected-failure unit tests plus a real PTY smoke path.
 
 ## Task List
 
@@ -48,7 +48,7 @@ superseded_by:
 
 - Accepted design: `docs/design/accepted-plan.md`.
 - `swift test` passed 16 tests, including monotonic high-water, malformed-request consumption, duplicate/out-of-order rejection, and control transition suites.
-- `INSTA_UPDATE=no cargo test --locked --workspace` passed on the final worktree state: 23 TUI/session library tests (including exhaustive accepted-transition and event-provenance tables, exact/stale/unknown invalidation, bounded semantic backpressure, progress-flood coalescing, checked request/event-ID exhaustion, driver-stop cleanup, six unchanged snapshots, and the complete 1x1 through 160x50 resize matrix), 9 fake-engine process tests with 4 explicit real-engine ignores, 8 core tests, 5 canonical tests, and 20 generated-source publisher tests.
+- `INSTA_UPDATE=no cargo test --locked --workspace` passed on the final worktree state: 26 TUI/session library tests (including exhaustive accepted-transition, rejection-code, and event-provenance tables; exact/stale/unknown invalidation; bounded semantic backpressure; progress-flood coalescing; checked request/event-ID exhaustion; injected partial-write/flush terminal restoration; driver-stop cleanup; six unchanged snapshots; and the complete 1x1 through 160x50 resize matrix), 9 fake-engine process tests with 4 explicit real-engine ignores, 8 core tests, 5 canonical tests, and 20 generated-source publisher tests.
 - `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, and `cargo clippy --locked --workspace --all-targets -- -D warnings` passed.
 - `scripts/test-cross-language.sh` passed after the final review fixes: four real Swift/Rust process tests, including the full scan-control loop and envelope/embed mismatch ID consumption, plus canonical fixture drift.
 - `scripts/test-tui-pty.sh` passed after the final review fixes: 80x24 contextual-help content, pause acknowledgement, provisional-plan identity, resume invalidation, single cancel, terminal cancellation, alternate-screen enter/leave, exact pre/post terminal modes, restored canonical input/echo, and process exit.
