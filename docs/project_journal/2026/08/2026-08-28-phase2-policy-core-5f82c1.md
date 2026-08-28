@@ -53,8 +53,12 @@ superseded_by:
 - Independent semantic, agent-per-missing-facet, recoverability, and local-Git-discard
   predicates are unioned with all reasons preserved. Fact collections and gate payloads are
   canonicalized before their respective evidence/action hash boundaries.
-- Git worktree remove contracts bind no-follow traversal, HEAD, index, local changes, nested
-  repositories, submodules, trusted-exclusive namespace, and post-quarantine coverage. Dirty
+- Git worktree remove contracts bind no-follow traversal, HEAD, index, local changes, exact
+  worktree registration/root identity, administrative and common directory identity,
+  registration/metadata digests, linked-worktree and sparse-checkout state, nested
+  repositories, submodules, trusted-exclusive namespace, and post-quarantine coverage. V1
+  execution requires an ordinary worktree with sparse checkout disabled; linked, sparse,
+  target-mismatched, absent, unknown, unreadable, or failed evidence stays report-only. Dirty
   work requires a separate explicit discard action prerequisite whose typed clean successor
   preserves HEAD identity and becomes the remove action's JIT content baseline. Action-aware
   policy records the prerequisite discharge before action hashing.
@@ -94,6 +98,8 @@ superseded_by:
   exact verified release-set action bindings, and canonicalize all gate payloads.
 - [x] Close frozen-review execution findings with successor baselines, action-aware Git
   discharge, composite release steps, terminal namespace exclusivity, and survivor invariants.
+- [x] Bind Git worktree registration and administrative metadata plus linked/sparse typed
+  facts, and fail closed outside the exact ordinary, sparse-disabled v1 execution predicate.
 
 ## Handoff
 
@@ -108,8 +114,8 @@ superseded_by:
 - Policy contract: `docs/design/policy-core.md`.
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
-  overlay consent binding; the latest focused run passed all 42 tests.
-- The final full local `swift test --package-path swift` run passed all 70 tests, including
-  all 42 focused policy tests.
+  overlay consent binding; the latest focused run passed all 43 tests.
+- The final full local `swift test --package-path swift` run passed all 71 tests, including
+  all 43 focused policy tests.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.

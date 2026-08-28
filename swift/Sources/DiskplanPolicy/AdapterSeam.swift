@@ -185,7 +185,9 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
     var gitWorktreeEvidenceComplete = !evidence.hasGitWorktreeScope
     if let gitWorktree = evidence.gitWorktree {
       gitWorktreeEvidenceComplete = true
-      switch gitWorktree.verifiedLocalChanges {
+      switch gitWorktree.verifiedLocalChanges(
+        targetIdentity: evidence.namespaceBinding.targetIdentity)
+      {
       case .clean:
         break
       case .present(let changeSetDigest):
@@ -444,10 +446,16 @@ extension RecoverabilityReviewFact {
 }
 
 extension GitWorktreeEvidence {
-  var verifiedLocalChanges: GitLocalChangesState? {
+  func verifiedLocalChanges(
+    targetIdentity: ObjectIdentity
+  ) -> GitLocalChangesState? {
     guard noFollowTraversalComplete == .known(true),
       case .known = headIdentity,
       case .known = indexDigest,
+      case .known(let registration) = registration,
+      registration.registeredWorktreeIdentity == targetIdentity,
+      linkage == .known(.ordinary),
+      sparseCheckout == .known(.disabled),
       nestedRepositories == .known(.none),
       submodules == .known(.none),
       trustedExclusiveNamespace == .known(true),
@@ -458,13 +466,18 @@ extension GitWorktreeEvidence {
     case .clean:
       guard postDiscardSuccessor == .absent else { return nil }
     case .present:
-      guard case .known = postDiscardSuccessor else { return nil }
+      guard case .known(let currentHeadIdentity) = headIdentity,
+        case .known(let successor) = postDiscardSuccessor,
+        successor.headIdentity == currentHeadIdentity
+      else { return nil }
     }
     return changes
   }
 
-  var verifiedDiscardSuccessor: GitWorktreeExecutionBaseline? {
-    guard case .present = verifiedLocalChanges,
+  func verifiedDiscardSuccessor(
+    targetIdentity: ObjectIdentity
+  ) -> GitWorktreeExecutionBaseline? {
+    guard case .present = verifiedLocalChanges(targetIdentity: targetIdentity),
       case .known(let currentHeadIdentity) = headIdentity,
       case .known(let successor) = postDiscardSuccessor,
       successor.headIdentity == currentHeadIdentity
@@ -473,11 +486,12 @@ extension GitWorktreeEvidence {
   }
 
   func verifiedExecutionBaseline(
-    currentContent: ContentProtectionBaseline
+    currentContent: ContentProtectionBaseline,
+    targetIdentity: ObjectIdentity
   ) -> GitWorktreeExecutionBaseline? {
     guard case .known(let headIdentity) = headIdentity,
       case .known(let indexDigest) = indexDigest,
-      let changes = verifiedLocalChanges
+      let changes = verifiedLocalChanges(targetIdentity: targetIdentity)
     else { return nil }
     switch changes {
     case .clean:
@@ -488,7 +502,7 @@ extension GitWorktreeEvidence {
         contentProtection: currentContent
       )
     case .present:
-      return verifiedDiscardSuccessor
+      return verifiedDiscardSuccessor(targetIdentity: targetIdentity)
     }
   }
 }

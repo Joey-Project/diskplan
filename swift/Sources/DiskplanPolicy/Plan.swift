@@ -263,6 +263,52 @@ public enum GitContainedRepositoryState: String, Equatable, Sendable {
   case present
 }
 
+public struct GitWorktreeRegistrationEvidence: Equatable, Sendable {
+  public let registeredWorktreeIdentity: ObjectIdentity
+  public let administrativeDirectoryIdentity: ObjectIdentity
+  public let commonDirectoryIdentity: ObjectIdentity
+  public let registrationID: PolicyDigest
+  public let metadataDigest: PolicyDigest
+
+  public init(
+    registeredWorktreeIdentity: ObjectIdentity,
+    administrativeDirectoryIdentity: ObjectIdentity,
+    commonDirectoryIdentity: ObjectIdentity,
+    registrationID: PolicyDigest,
+    metadataDigest: PolicyDigest
+  ) throws {
+    guard registeredWorktreeIdentity.type == .directory,
+      administrativeDirectoryIdentity.type == .directory,
+      commonDirectoryIdentity.type == .directory
+    else { throw PolicyModelError.invalidActionContract }
+    self.registeredWorktreeIdentity = registeredWorktreeIdentity
+    self.administrativeDirectoryIdentity = administrativeDirectoryIdentity
+    self.commonDirectoryIdentity = commonDirectoryIdentity
+    self.registrationID = registrationID
+    self.metadataDigest = metadataDigest
+  }
+
+  var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encodeIdentity(registeredWorktreeIdentity, into: &encoder)
+    encodeIdentity(administrativeDirectoryIdentity, into: &encoder)
+    encodeIdentity(commonDirectoryIdentity, into: &encoder)
+    encoder.data(registrationID.bytes)
+    encoder.data(metadataDigest.bytes)
+    return encoder.data
+  }
+}
+
+public enum GitWorktreeLinkageState: Equatable, Sendable {
+  case ordinary
+  case linked(registrationID: PolicyDigest)
+}
+
+public enum GitSparseCheckoutState: Equatable, Sendable {
+  case disabled
+  case enabled(configurationDigest: PolicyDigest)
+}
+
 public struct GitWorktreeExecutionBaseline: Equatable, Sendable {
   public let headIdentity: PolicyDigest
   public let indexDigest: PolicyDigest
@@ -304,6 +350,9 @@ public struct GitWorktreeEvidence: Equatable, Sendable {
   public let headIdentity: Observation<PolicyDigest>
   public let indexDigest: Observation<PolicyDigest>
   public let localChanges: Observation<GitLocalChangesState>
+  public let registration: Observation<GitWorktreeRegistrationEvidence>
+  public let linkage: Observation<GitWorktreeLinkageState>
+  public let sparseCheckout: Observation<GitSparseCheckoutState>
   public let nestedRepositories: Observation<GitContainedRepositoryState>
   public let submodules: Observation<GitContainedRepositoryState>
   public let trustedExclusiveNamespace: Observation<Bool>
@@ -315,6 +364,9 @@ public struct GitWorktreeEvidence: Equatable, Sendable {
     headIdentity: Observation<PolicyDigest>,
     indexDigest: Observation<PolicyDigest>,
     localChanges: Observation<GitLocalChangesState>,
+    registration: Observation<GitWorktreeRegistrationEvidence>,
+    linkage: Observation<GitWorktreeLinkageState>,
+    sparseCheckout: Observation<GitSparseCheckoutState>,
     nestedRepositories: Observation<GitContainedRepositoryState>,
     submodules: Observation<GitContainedRepositoryState>,
     trustedExclusiveNamespace: Observation<Bool>,
@@ -325,6 +377,9 @@ public struct GitWorktreeEvidence: Equatable, Sendable {
     self.headIdentity = headIdentity
     self.indexDigest = indexDigest
     self.localChanges = localChanges
+    self.registration = registration
+    self.linkage = linkage
+    self.sparseCheckout = sparseCheckout
     self.nestedRepositories = nestedRepositories
     self.submodules = submodules
     self.trustedExclusiveNamespace = trustedExclusiveNamespace
@@ -344,6 +399,25 @@ public struct GitWorktreeEvidence: Equatable, Sendable {
       case .present(let digest):
         encoder.uint8(1)
         encoder.data(digest.bytes)
+      }
+    }
+    encoder.observation(registration) { $0.data($1.bindingBytes) }
+    encoder.observation(linkage) { encoder, state in
+      switch state {
+      case .ordinary:
+        encoder.uint8(0)
+      case .linked(let registrationID):
+        encoder.uint8(1)
+        encoder.data(registrationID.bytes)
+      }
+    }
+    encoder.observation(sparseCheckout) { encoder, state in
+      switch state {
+      case .disabled:
+        encoder.uint8(0)
+      case .enabled(let configurationDigest):
+        encoder.uint8(1)
+        encoder.data(configurationDigest.bytes)
       }
     }
     encoder.observation(nestedRepositories) { $0.string($1.rawValue) }
@@ -983,9 +1057,10 @@ public struct ActionPrototype: Equatable, Sendable {
         evidence.quarantineCapability == .known(true),
         evidence.namespaceBinding.trustedNamespace == .ownerPrivate,
         let gitWorktree = evidence.gitWorktree,
-        let localChanges = gitWorktree.verifiedLocalChanges,
+        let localChanges = gitWorktree.verifiedLocalChanges(targetIdentity: identity),
         let executionBaseline = gitWorktree.verifiedExecutionBaseline(
-          currentContent: contentBaseline)
+          currentContent: contentBaseline,
+          targetIdentity: identity)
       else {
         throw PolicyModelError.invalidActionContract
       }
@@ -1005,8 +1080,10 @@ public struct ActionPrototype: Equatable, Sendable {
       guard evidenceSupportsAdapterScope(evidence, .gitWorktree), identity.type == .directory,
         evidence.namespaceBinding.trustedNamespace == .ownerPrivate,
         let gitWorktree = evidence.gitWorktree,
-        case .present(let changeSetDigest) = gitWorktree.verifiedLocalChanges,
-        let successorBaseline = gitWorktree.verifiedDiscardSuccessor
+        case .present(let changeSetDigest) = gitWorktree.verifiedLocalChanges(
+          targetIdentity: identity),
+        let successorBaseline = gitWorktree.verifiedDiscardSuccessor(
+          targetIdentity: identity)
       else {
         throw PolicyModelError.invalidActionContract
       }
@@ -1211,16 +1288,20 @@ public struct ActionDefinition: Equatable, Sendable {
         evidence.quarantineCapability == .known(true),
         evidence.namespaceBinding.trustedNamespace == .ownerPrivate,
         evidence.gitWorktree == contract.verifiedEvidence,
-        contract.verifiedEvidence.verifiedLocalChanges != nil,
+        contract.verifiedEvidence.verifiedLocalChanges(targetIdentity: identity) != nil,
         case .known(let currentContent) = evidence.contentProtection,
-        contract.verifiedEvidence.verifiedExecutionBaseline(currentContent: currentContent)
+        contract.verifiedEvidence.verifiedExecutionBaseline(
+          currentContent: currentContent,
+          targetIdentity: identity)
           == contract.executionBaseline,
         prototype.protectedProperties.content.expectedBaseline
           == contract.executionBaseline.contentProtection,
         prototype.postcondition == .worktreeQuarantinedThenAbsent
       else { throw PolicyModelError.invalidActionContract }
       let expectedRequiresDiscard: Bool
-      if case .present = contract.verifiedEvidence.verifiedLocalChanges {
+      if case .present = contract.verifiedEvidence.verifiedLocalChanges(
+        targetIdentity: identity)
+      {
         expectedRequiresDiscard = true
       } else {
         expectedRequiresDiscard = false
@@ -1233,9 +1314,10 @@ public struct ActionDefinition: Equatable, Sendable {
         identity.type == .directory,
         evidence.namespaceBinding.trustedNamespace == .ownerPrivate,
         evidence.gitWorktree == contract.verifiedEvidence,
-        contract.verifiedEvidence.verifiedLocalChanges
+        contract.verifiedEvidence.verifiedLocalChanges(targetIdentity: identity)
           == .present(changeSetDigest: contract.changeSetDigest),
-        contract.verifiedEvidence.verifiedDiscardSuccessor == contract.successorBaseline,
+        contract.verifiedEvidence.verifiedDiscardSuccessor(targetIdentity: identity)
+          == contract.successorBaseline,
         prototype.postcondition
           == .gitWorktreeLocalChangesDiscarded(
             changeSetDigest: contract.changeSetDigest,
@@ -1279,7 +1361,8 @@ public struct ActionDefinition: Equatable, Sendable {
   ) throws -> PolicyEvaluation {
     guard case .gitWorktreeRemove(let contract) = prototype.adapterContract,
       contract.requiresDiscardLocalChanges,
-      case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges,
+      case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges(
+        targetIdentity: prototype.targetIdentity),
       prerequisites.contains(where: { prerequisite in
         guard
           case .gitWorktreeDiscardLocalChanges(let discard) =
@@ -1778,7 +1861,8 @@ public struct ImmutablePlan: Equatable, Sendable {
         return prerequisite.prototype.namespaceBinding.bindingBytes
           == action.prototype.namespaceBinding.bindingBytes
           && discard.verifiedEvidence == contract.verifiedEvidence
-          && contract.verifiedEvidence.verifiedLocalChanges
+          && contract.verifiedEvidence.verifiedLocalChanges(
+            targetIdentity: action.prototype.targetIdentity)
             == .present(changeSetDigest: discard.changeSetDigest)
           && discard.successorBaseline == contract.executionBaseline
       }
@@ -2558,7 +2642,8 @@ public enum DecisionOverlayValidator {
     else { return false }
     return discard.verifiedEvidence == contract.verifiedEvidence
       && discard.successorBaseline == contract.executionBaseline
-      && contract.verifiedEvidence.verifiedLocalChanges
+      && contract.verifiedEvidence.verifiedLocalChanges(
+        targetIdentity: remove.prototype.targetIdentity)
         == .present(changeSetDigest: discard.changeSetDigest)
       && discardAction.prototype.namespaceBinding.bindingBytes
         == remove.prototype.namespaceBinding.bindingBytes

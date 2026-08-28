@@ -830,15 +830,139 @@ func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() t
         )
       )
     ),
+    gitWorktreeEvidence(
+      localChanges: .present(changeSetDigest: digest(60)),
+      linkage: .known(.linked(registrationID: digest(75)))
+    ),
+    gitWorktreeEvidence(
+      localChanges: .present(changeSetDigest: digest(60)),
+      sparseCheckout: .known(.enabled(configurationDigest: digest(76)))
+    ),
+    gitWorktreeEvidence(
+      localChanges: .present(changeSetDigest: digest(60)),
+      registration: .unknown(.unavailableViaPublicAPI)
+    ),
+    gitWorktreeEvidence(
+      localChanges: .present(changeSetDigest: digest(60)),
+      linkage: .unreadable(
+        ObservationFailure(code: "unreadable", collector: "git-registration"))
+    ),
+    gitWorktreeEvidence(
+      localChanges: .present(changeSetDigest: digest(60)),
+      sparseCheckout: .failed(
+        ObservationFailure(code: "failed", collector: "git-config"))
+    ),
   ]
   for (index, invalid) in invalidEvidence.enumerated() {
     let invalidSnapshot = snapshot(
       candidateID: "invalid-\(index)", path: "invalid-\(index)",
-      object: UInt64(index + 10), adapterScope: .gitWorktree,
+      object: 1, adapterScope: .gitWorktree,
       gitWorktree: invalid
     )
+    let invalidEvaluation = try OneVotePolicy.evaluate(
+      OneVotePolicyInputs.build(evidence: invalidSnapshot, globalFacts: globalFacts())
+    )
+    #expect(invalidEvaluation.stageability == .blocked)
     #expect(throws: PolicyModelError.invalidActionContract) {
       try ActionPrototype.build(request: .gitWorktreeRemove, evidence: invalidSnapshot)
+    }
+  }
+}
+
+@Test
+func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
+  let ordinaryEvidence = snapshot(
+    candidateID: "ordinary", path: "ordinary", object: 1,
+    adapterScope: .gitWorktree,
+    gitWorktree: gitWorktreeEvidence()
+  )
+  let ordinaryAction = try makeAction(
+    evidence: ordinaryEvidence,
+    request: .gitWorktreeRemove
+  )
+  #expect(ordinaryAction.evaluation.stageability == .stageable)
+
+  let changedRegistration = try GitWorktreeRegistrationEvidence(
+    registeredWorktreeIdentity: ObjectIdentity(
+      device: 1, object: 1, generation: .known(1), type: .directory),
+    administrativeDirectoryIdentity: ObjectIdentity(
+      device: 1, object: 702, generation: .known(1), type: .directory),
+    commonDirectoryIdentity: ObjectIdentity(
+      device: 1, object: 703, generation: .known(1), type: .directory),
+    registrationID: digest(75),
+    metadataDigest: digest(77)
+  )
+  let changedEvidence = snapshot(
+    candidateID: "ordinary", path: "ordinary", object: 1,
+    adapterScope: .gitWorktree,
+    gitWorktree: gitWorktreeEvidence(registration: .known(changedRegistration))
+  )
+  let changedAction = try makeAction(
+    evidence: changedEvidence,
+    request: .gitWorktreeRemove
+  )
+  #expect(changedEvidence.evidenceID != ordinaryEvidence.evidenceID)
+  #expect(changedAction.lineageID != ordinaryAction.lineageID)
+  #expect(changedAction.id != ordinaryAction.id)
+
+  let linkedEvidence = snapshot(
+    candidateID: "linked", path: "linked", object: 1,
+    adapterScope: .gitWorktree,
+    gitWorktree: gitWorktreeEvidence(
+      linkage: .known(.linked(registrationID: digest(75))))
+  )
+  let linkedEvaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(evidence: linkedEvidence, globalFacts: globalFacts())
+  )
+  #expect(linkedEvaluation.stageability == .blocked)
+  #expect(linkedEvidence.evidenceID != ordinaryEvidence.evidenceID)
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try ActionPrototype.build(request: .gitWorktreeRemove, evidence: linkedEvidence)
+  }
+
+  let sparseEvidence = snapshot(
+    candidateID: "sparse", path: "sparse", object: 1,
+    adapterScope: .gitWorktree,
+    gitWorktree: gitWorktreeEvidence(
+      sparseCheckout: .known(.enabled(configurationDigest: digest(76))))
+  )
+  let sparseEvaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(evidence: sparseEvidence, globalFacts: globalFacts())
+  )
+  #expect(sparseEvaluation.stageability == .blocked)
+  #expect(sparseEvidence.evidenceID != ordinaryEvidence.evidenceID)
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try ActionPrototype.build(request: .gitWorktreeRemove, evidence: sparseEvidence)
+  }
+
+  let invalidFacts = [
+    gitWorktreeEvidence(worktreeObject: 2),
+    gitWorktreeEvidence(linkage: .known(.linked(registrationID: digest(75)))),
+    gitWorktreeEvidence(
+      sparseCheckout: .known(.enabled(configurationDigest: digest(76)))),
+    gitWorktreeEvidence(registration: .unknown(.unavailableViaPublicAPI)),
+    gitWorktreeEvidence(registration: .absent),
+    gitWorktreeEvidence(linkage: .unknown(.unavailableViaPublicAPI)),
+    gitWorktreeEvidence(sparseCheckout: .unknown(.unavailableViaPublicAPI)),
+    gitWorktreeEvidence(
+      linkage: .unreadable(
+        ObservationFailure(code: "unreadable", collector: "git-registration"))),
+    gitWorktreeEvidence(
+      sparseCheckout: .failed(
+        ObservationFailure(code: "failed", collector: "git-config"))),
+  ]
+  for (index, invalid) in invalidFacts.enumerated() {
+    let invalidEvidence = snapshot(
+      candidateID: "typed-git-invalid-\(index)", path: "typed-git-invalid-\(index)", object: 1,
+      adapterScope: .gitWorktree,
+      gitWorktree: invalid
+    )
+    let evaluation = try OneVotePolicy.evaluate(
+      OneVotePolicyInputs.build(evidence: invalidEvidence, globalFacts: globalFacts())
+    )
+    #expect(evaluation.stageability == .blocked)
+    #expect(throws: PolicyModelError.invalidActionContract) {
+      try ActionPrototype.build(request: .gitWorktreeRemove, evidence: invalidEvidence)
     }
   }
 }
@@ -995,6 +1119,7 @@ func planRejectsCrossSnapshotGitContractDowngrades() throws {
     candidateID: "git", path: "tree/worktree", object: 20,
     adapterScope: .gitWorktree,
     gitWorktree: gitWorktreeEvidence(
+      worktreeObject: 20,
       localChanges: .present(changeSetDigest: digest(60)))
   )
   let aliasEvidence = snapshot(
@@ -2071,10 +2196,14 @@ private func allowEvaluation() throws -> PolicyEvaluation {
 }
 
 private func gitWorktreeEvidence(
+  worktreeObject: UInt64 = 1,
   noFollowTraversalComplete: Observation<Bool> = .known(true),
   headIdentity: Observation<PolicyDigest> = .known(digest(70)),
   indexDigest: Observation<PolicyDigest> = .known(digest(71)),
   localChanges: GitLocalChangesState = .clean,
+  registration: Observation<GitWorktreeRegistrationEvidence>? = nil,
+  linkage: Observation<GitWorktreeLinkageState> = .known(.ordinary),
+  sparseCheckout: Observation<GitSparseCheckoutState> = .known(.disabled),
   nestedRepositories: Observation<GitContainedRepositoryState> = .known(.none),
   submodules: Observation<GitContainedRepositoryState> = .known(.none),
   trustedExclusiveNamespace: Observation<Bool> = .known(true),
@@ -2095,11 +2224,36 @@ private func gitWorktreeEvidence(
       )
     )
   }
+  let defaultRegistration = try! GitWorktreeRegistrationEvidence(
+    registeredWorktreeIdentity: ObjectIdentity(
+      device: 1,
+      object: worktreeObject,
+      generation: .known(1),
+      type: .directory
+    ),
+    administrativeDirectoryIdentity: ObjectIdentity(
+      device: 1,
+      object: 700,
+      generation: .known(1),
+      type: .directory
+    ),
+    commonDirectoryIdentity: ObjectIdentity(
+      device: 1,
+      object: 701,
+      generation: .known(1),
+      type: .directory
+    ),
+    registrationID: digest(75),
+    metadataDigest: digest(74)
+  )
   return GitWorktreeEvidence(
     noFollowTraversalComplete: noFollowTraversalComplete,
     headIdentity: headIdentity,
     indexDigest: indexDigest,
     localChanges: .known(localChanges),
+    registration: registration ?? .known(defaultRegistration),
+    linkage: linkage,
+    sparseCheckout: sparseCheckout,
     nestedRepositories: nestedRepositories,
     submodules: submodules,
     trustedExclusiveNamespace: trustedExclusiveNamespace,
@@ -2184,7 +2338,7 @@ private func snapshot(
     targetIdentity: targetIdentity,
     parentChain: parentChain
   )
-  let defaultGitWorktree = gitWorktreeEvidence()
+  let defaultGitWorktree = gitWorktreeEvidence(worktreeObject: object)
   return try! FrozenEvidenceSnapshot(
     captureID: facts.captureID,
     globalFactsHash: facts.globalFactsHash,

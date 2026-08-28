@@ -144,9 +144,16 @@ The unified action-prototype builder has no arbitrary argv surface. Generic remo
 the exact target kind, prototype path slot, unavoidable path-race residual, trusted namespace,
 and `rm -f` warning state from evidence. Worktree removal requires directory identity and
 known quarantine capability. Its closed contract also binds a complete no-follow traversal,
-HEAD identity, index digest, local-change digest, absence of nested repositories and
-submodules, trusted-exclusive namespace, and complete post-quarantine coverage. Dirty local
-work is represented by a separate discard-local-changes action and exact waiver. Its typed
+HEAD identity, index digest, local-change digest, exact registered worktree/root identity,
+administrative-directory and common-directory identities, registration/metadata digests,
+linked-worktree state, sparse-checkout state, absence of nested repositories and submodules,
+trusted-exclusive namespace, and complete post-quarantine coverage. The v1 executable
+predicate is intentionally closed to an exact registration, an ordinary worktree, and
+disabled sparse checkout. Known linked worktrees, known enabled sparse checkout, and any
+absent, unknown, unreadable, failed, or target-mismatched registration fact remain report-only
+until a specialized adapter proves their additional cleanup and coverage semantics. All such
+typed facts remain in evidence, lineage, action, and plan hashes. Dirty local work is
+represented by a separate discard-local-changes action and exact waiver. Its typed
 postcondition seals a clean successor HEAD/index/content baseline, preserves HEAD identity,
 and becomes the dependent remove action's JIT baseline. The remove's action-aware evaluation
 records that the exact discard prerequisite discharges the local-work predicate, rather than
