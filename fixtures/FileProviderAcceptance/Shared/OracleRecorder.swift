@@ -3,6 +3,13 @@ import Foundation
 public enum OracleRecorderError: Error, Equatable, Sendable {
   case unavailable
   case poisoned
+  case sealed
+}
+
+public enum OracleRecorderState: Equatable, Sendable {
+  case healthy
+  case poisoned
+  case sealed
 }
 
 public final class OracleRecorder: @unchecked Sendable {
@@ -10,24 +17,46 @@ public final class OracleRecorder: @unchecked Sendable {
 
   private let lock = NSLock()
   private let appendEvent: Append
+  private let recorderState: @Sendable () throws -> OracleRecorderState
+  private let poisonRecorder: @Sendable () throws -> Void
   private var poisoned = false
 
-  public init(append: @escaping Append) {
+  public init(
+    append: @escaping Append,
+    state: @escaping @Sendable () throws -> OracleRecorderState = { .healthy },
+    poison: @escaping @Sendable () throws -> Void = {}
+  ) {
     appendEvent = append
+    recorderState = state
+    poisonRecorder = poison
   }
 
   public convenience init(log: OracleLog) {
-    self.init { event in try log.append(event) }
+    self.init(
+      append: { event in try log.append(event) },
+      state: { try log.recorderState() },
+      poison: { try log.poisonRecorder() }
+    )
   }
 
   public func record(_ event: OracleEvent) throws {
     lock.lock()
     defer { lock.unlock() }
     guard !poisoned else { throw OracleRecorderError.poisoned }
+    switch try recorderState() {
+    case .healthy:
+      break
+    case .poisoned:
+      poisoned = true
+      throw OracleRecorderError.poisoned
+    case .sealed:
+      throw OracleRecorderError.sealed
+    }
     do {
       try appendEvent(event)
     } catch {
       poisoned = true
+      try poisonRecorder()
       throw error
     }
   }

@@ -13,34 +13,44 @@ HEADER = re.compile(r"^\s*([+!-])\s+([^\s(]+)(?:\(|\s|$)")
 PATH_LINE = re.compile(r"^\s*Path\s*=\s*(.*?)\s*$")
 
 
-def elected_paths(output: str, bundle_id: str) -> list[str]:
-    matches: list[str] = []
-    elected = False
+def exact_bundle_records(output: str, bundle_id: str) -> list[tuple[str, str]]:
+    records: list[tuple[str, str]] = []
+    marker: str | None = None
+    paths: list[str] = []
+
+    def finish() -> None:
+        nonlocal marker, paths
+        if marker is None:
+            return
+        if len(paths) != 1:
+            raise ValueError(f"exact bundle record has {len(paths)} Path fields")
+        path = paths[0]
+        if not path or not Path(path).is_absolute():
+            raise ValueError("exact bundle record Path is not absolute")
+        records.append((marker, path))
+        marker = None
+        paths = []
+
     for line in output.splitlines():
         header = HEADER.match(line)
         if header:
-            elected = header.group(1) == "+" and header.group(2) == bundle_id
+            finish()
+            if header.group(2) == bundle_id:
+                marker = header.group(1)
             continue
         path = PATH_LINE.match(line)
-        if elected and path:
-            matches.append(path.group(1))
-            elected = False
-    return matches
+        if marker is not None and path:
+            paths.append(path.group(1))
+    finish()
+    return records
+
+
+def elected_paths(output: str, bundle_id: str) -> list[str]:
+    return [path for marker, path in exact_bundle_records(output, bundle_id) if marker == "+"]
 
 
 def registered_paths(output: str, bundle_id: str) -> list[str]:
-    matches: list[str] = []
-    exact_bundle = False
-    for line in output.splitlines():
-        header = HEADER.match(line)
-        if header:
-            exact_bundle = header.group(2) == bundle_id
-            continue
-        path = PATH_LINE.match(line)
-        if exact_bundle and path:
-            matches.append(path.group(1))
-            exact_bundle = False
-    return matches
+    return [path for _, path in exact_bundle_records(output, bundle_id)]
 
 
 def verify_registration(bundle_id: str, expected_path: Path, output: str) -> None:

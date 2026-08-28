@@ -24,7 +24,7 @@ def main() -> int:
     require("domain.isHidden = true" in swift, "fixture domain must be hidden")
     require("Data(contentsOf:" not in swift, "control files must not use pathname-following reads")
     require("O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW" in swift, "oracle append flags changed")
-    require("flock(descriptor, LOCK_EX)" in swift, "oracle events must be lock-serialized")
+    require("flock(lock, LOCK_EX)" in swift, "oracle events must be session-lock serialized")
     require("O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK" in swift, "secure control read flags changed")
     require("renameatx_np" in swift and "RENAME_EXCL" in swift, "cleanup must isolate the exact run atomically")
     require("FixtureContract.sentinelContents().write" in swift, "fetchContents must write real bytes")
@@ -60,6 +60,9 @@ def main() -> int:
     require('"$host" status --manifest' in lifecycle, "recovery must validate with the known host first")
     require("sleep 2" not in lifecycle, "fixed sleeps are not a quiescence oracle")
     require("closeWindowAfterQuiescence" in swift, "oracle close must use bounded event quiescence")
+    require("sealRecorder" in swift, "teardown must persistently seal the recorder")
+    require("try? recreateManifest" not in swift, "manifest recovery failures must not be discarded")
+    require(".manifest-recovery" in swift, "cleanup must retain a manifest recovery link")
     require(
         '"$host" oracle-end --manifest "$manifest" --quiet-ms 2000 --timeout-ms 30000' in lifecycle,
         "acceptance must require a two-second quiet window within a 30-second bound",

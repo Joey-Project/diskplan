@@ -20,42 +20,68 @@ public struct OracleLog: Sendable {
     let parent = runDirectory.deletingLastPathComponent()
     try makeOwnerPrivateDirectory(parent)
     try makeOwnerPrivateDirectory(runDirectory)
+    let directory = try openExistingRunDirectory(runDirectory)
+    defer { close(directory) }
+    let lock = openat(
+      directory,
+      "recorder.lock",
+      O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+      0o600
+    )
+    guard lock >= 0 else { throw makePOSIXError(code: errno) }
+    defer { close(lock) }
+    try validateOwnerPrivateRegularFile(descriptor: lock)
   }
 
   public func append(_ original: OracleEvent) throws {
-    try prepare()
-    let path = runDirectory.appendingPathComponent("events.jsonl").path
-    let descriptor = open(path, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0o600)
-    guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
-    defer { close(descriptor) }
-    guard flock(descriptor, LOCK_EX) == 0 else { throw makePOSIXError(code: errno) }
-    defer { flock(descriptor, LOCK_UN) }
-    var metadata = stat()
-    guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
-    try validateOwnerPrivateRegularFile(metadata)
-    guard metadata.st_size >= 0, metadata.st_size <= FixtureContract.maximumOracleBytes else {
-      throw FixtureContractError.oracleTooLarge
-    }
-    let existing = try readAll(descriptor: descriptor, count: Int(metadata.st_size))
-    let next = try nextSequence(existing)
-    var event = original
-    event.sequence = next
-    var encoded = try JSONEncoder().encode(event)
-    encoded.append(0x0a)
-    guard existing.count + encoded.count <= FixtureContract.maximumOracleBytes else {
-      throw FixtureContractError.oracleTooLarge
-    }
-    try encoded.withUnsafeBytes { bytes in
-      var remaining = bytes.count
-      var pointer = bytes.baseAddress!
-      while remaining > 0 {
-        let written = Darwin.write(descriptor, pointer, remaining)
-        if written < 0, errno == EINTR { continue }
-        guard written > 0 else { throw makePOSIXError(code: errno == 0 ? EIO : errno) }
-        remaining -= written
-        pointer = pointer.advanced(by: written)
+    try withRecorderLock { directory in
+      guard try lockedRecorderState(directory: directory) == .healthy else {
+        throw try recorderError(directory: directory)
+      }
+      do {
+        let descriptor = openat(
+          directory,
+          "events.jsonl",
+          O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+          0o600
+        )
+        guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
+        defer { close(descriptor) }
+        try validateOwnerPrivateRegularFile(descriptor: descriptor)
+        guard flock(descriptor, LOCK_EX) == 0 else { throw makePOSIXError(code: errno) }
+        defer { flock(descriptor, LOCK_UN) }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
+        guard metadata.st_size >= 0, metadata.st_size <= FixtureContract.maximumOracleBytes else {
+          throw FixtureContractError.oracleTooLarge
+        }
+        let existing = try readAll(descriptor: descriptor, count: Int(metadata.st_size))
+        let next = try nextSequence(existing)
+        var event = original
+        event.sequence = next
+        var encoded = try JSONEncoder().encode(event)
+        encoded.append(0x0a)
+        guard existing.count + encoded.count <= FixtureContract.maximumOracleBytes else {
+          throw FixtureContractError.oracleTooLarge
+        }
+        try writeAll(encoded, descriptor: descriptor)
+      } catch {
+        try createRecorderMarker("recorder-poisoned", directory: directory)
+        throw error
       }
     }
+  }
+
+  public func recorderState() throws -> OracleRecorderState {
+    try withRecorderLock { try lockedRecorderState(directory: $0) }
+  }
+
+  public func poisonRecorder() throws {
+    try withRecorderLock { try createRecorderMarker("recorder-poisoned", directory: $0) }
+  }
+
+  public func sealRecorder() throws {
+    try withRecorderLock { try createRecorderMarker("recorder-sealed", directory: $0) }
   }
 
   public func events() throws -> [OracleEvent] {
@@ -114,11 +140,20 @@ public struct OracleLog: Sendable {
     else { throw OracleQuiescenceError.invalidBounds }
     let openedWindow = try window()
     let start = clock.nowNanoseconds()
-    var quietStart = start
     var fingerprint = try eventFingerprint()
+    var quietStart = clock.nowNanoseconds()
+    guard quietStart - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
+      throw OracleQuiescenceError.timedOut
+    }
     while true {
-      let now = clock.nowNanoseconds()
+      guard clock.nowNanoseconds() - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
+        throw OracleQuiescenceError.timedOut
+      }
       let current = try eventFingerprint()
+      let now = clock.nowNanoseconds()
+      guard now - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
+        throw OracleQuiescenceError.timedOut
+      }
       if current != fingerprint {
         fingerprint = current
         quietStart = now
@@ -139,16 +174,18 @@ public struct OracleLog: Sendable {
           quietMilliseconds: quietMilliseconds
         )
       }
-      guard now - start < UInt64(timeoutMilliseconds) * 1_000_000 else {
-        throw OracleQuiescenceError.timedOut
-      }
       clock.sleepForPoll()
     }
   }
 
   private func eventFingerprint() throws -> (count: Int, lastSequence: UInt64) {
-    let values = try events()
-    return (values.count, values.last?.sequence ?? 0)
+    try withRecorderLock { directory in
+      guard try lockedRecorderState(directory: directory) == .healthy else {
+        throw try recorderError(directory: directory)
+      }
+      let values = try events()
+      return (values.count, values.last?.sequence ?? 0)
+    }
   }
 }
 
@@ -175,6 +212,95 @@ private func validateOwnerPrivateRegularFile(_ metadata: stat) throws {
   guard metadata.st_uid == geteuid(), metadata.st_mode & S_IFMT == S_IFREG,
     metadata.st_mode & 0o077 == 0
   else { throw FixtureContractError.unsafePath }
+}
+
+private func validateOwnerPrivateRegularFile(descriptor: Int32) throws {
+  var metadata = stat()
+  guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
+  try validateOwnerPrivateRegularFile(metadata)
+}
+
+private func openExistingRunDirectory(_ url: URL) throws -> Int32 {
+  let descriptor = open(
+    url.path,
+    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+  )
+  guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
+  var metadata = stat()
+  guard fstat(descriptor, &metadata) == 0 else {
+    let code = errno
+    close(descriptor)
+    throw makePOSIXError(code: code)
+  }
+  guard metadata.st_uid == geteuid(), metadata.st_mode & S_IFMT == S_IFDIR,
+    metadata.st_mode & 0o077 == 0
+  else {
+    close(descriptor)
+    throw FixtureContractError.unsafePath
+  }
+  return descriptor
+}
+
+extension OracleLog {
+  fileprivate func withRecorderLock<Result>(
+    _ body: (Int32) throws -> Result
+  ) throws -> Result {
+    let directory = try openExistingRunDirectory(runDirectory)
+    defer { close(directory) }
+    let lock = openat(directory, "recorder.lock", O_RDWR | O_CLOEXEC | O_NOFOLLOW)
+    guard lock >= 0 else { throw makePOSIXError(code: errno) }
+    defer { close(lock) }
+    try validateOwnerPrivateRegularFile(descriptor: lock)
+    guard flock(lock, LOCK_EX) == 0 else { throw makePOSIXError(code: errno) }
+    defer { flock(lock, LOCK_UN) }
+    return try body(directory)
+  }
+}
+
+private func lockedRecorderState(directory: Int32) throws -> OracleRecorderState {
+  if try recorderMarkerExists("recorder-poisoned", directory: directory) { return .poisoned }
+  if try recorderMarkerExists("recorder-sealed", directory: directory) { return .sealed }
+  return .healthy
+}
+
+private func recorderError(directory: Int32) throws -> OracleRecorderError {
+  switch try lockedRecorderState(directory: directory) {
+  case .healthy: .unavailable
+  case .poisoned: .poisoned
+  case .sealed: .sealed
+  }
+}
+
+private func recorderMarkerExists(_ name: String, directory: Int32) throws -> Bool {
+  let descriptor = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+  if descriptor < 0 {
+    if errno == ENOENT { return false }
+    throw makePOSIXError(code: errno)
+  }
+  defer { close(descriptor) }
+  try validateOwnerPrivateRegularFile(descriptor: descriptor)
+  return true
+}
+
+private func createRecorderMarker(_ name: String, directory: Int32) throws {
+  let descriptor = openat(
+    directory,
+    name,
+    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+    0o600
+  )
+  if descriptor < 0 {
+    if errno == EEXIST {
+      guard try recorderMarkerExists(name, directory: directory) else {
+        throw FixtureContractError.unsafePath
+      }
+      return
+    }
+    throw makePOSIXError(code: errno)
+  }
+  defer { close(descriptor) }
+  try validateOwnerPrivateRegularFile(descriptor: descriptor)
+  try writeAll(Data("diskplan-recorder-state-v1\n".utf8), descriptor: descriptor)
 }
 
 private func secureCreate(_ data: Data, at url: URL) throws {

@@ -30,6 +30,7 @@ func oracleAssignsMonotonicSequenceUnderOneLockedFile() throws {
   let runID = UUID()
   let root = container.appendingPathComponent("runs").appendingPathComponent(runID.uuidString)
   let log = OracleLog(runDirectory: root)
+  try log.prepare()
   for kind in [OracleEventKind.itemMetadata, .fetchContents] {
     try log.append(
       OracleEvent(
@@ -55,6 +56,7 @@ func oracleSerializesConcurrentWriters() async throws {
   let runID = UUID()
   let root = container.appendingPathComponent("runs").appendingPathComponent(runID.uuidString)
   let log = OracleLog(runDirectory: root)
+  try log.prepare()
   try await withThrowingTaskGroup(of: Void.self) { group in
     for index in 0..<32 {
       group.addTask {
@@ -313,6 +315,7 @@ func oracleCloseRequiresTwoSecondsAfterALateCallback() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
   let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
   try log.append(
     OracleEvent(
       runID: fixture.runID,
@@ -372,6 +375,101 @@ func oracleRecorderPoisonsAfterInjectedAppendFailure() throws {
 }
 
 @Test
+func recorderPoisonPersistsAcrossRecorderRecreation() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  let eventsURL = fixture.runDirectory.appendingPathComponent("events.jsonl")
+  try fixture.writePrivate(Data(), to: eventsURL)
+  guard chmod(eventsURL.path, 0o644) == 0 else { throw POSIXError(.EIO) }
+  let event = OracleEvent(
+    runID: fixture.runID,
+    domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+    itemIdentifier: FixtureContract.sentinelIdentifier,
+    kind: .fetchContents,
+    processID: 1,
+    monotonicNanoseconds: 1
+  )
+  #expect(throws: FixtureContractError.self) { try OracleRecorder(log: log).record(event) }
+  #expect(try log.recorderState() == .poisoned)
+  guard chmod(eventsURL.path, 0o600) == 0 else { throw POSIXError(.EIO) }
+  #expect(throws: OracleRecorderError.poisoned) {
+    try OracleRecorder(log: log).record(event)
+  }
+}
+
+@Test
+func appendDoesNotRecreateMissingRunDirectory() throws {
+  let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: container) }
+  let runDirectory = container.appendingPathComponent("missing-run")
+  let log = OracleLog(runDirectory: runDirectory)
+  let event = OracleEvent(
+    runID: UUID(),
+    domainIdentifier: "missing",
+    itemIdentifier: FixtureContract.sentinelIdentifier,
+    kind: .itemMetadata,
+    processID: 1,
+    monotonicNanoseconds: 1
+  )
+  #expect(throws: POSIXError.self) { try log.append(event) }
+  #expect(!FileManager.default.fileExists(atPath: runDirectory.path))
+}
+
+@Test
+func sealedRecorderRejectsLateAppendWithoutRecreatingState() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  try log.sealRecorder()
+  let event = OracleEvent(
+    runID: fixture.runID,
+    domainIdentifier: FixtureContract.domainIdentifier(runID: fixture.runID),
+    itemIdentifier: FixtureContract.sentinelIdentifier,
+    kind: .itemMetadata,
+    processID: 1,
+    monotonicNanoseconds: 1
+  )
+  #expect(throws: OracleRecorderError.sealed) { try log.append(event) }
+  #expect(try log.events().isEmpty)
+}
+
+@Test
+func oracleDeadlineWinsWhenQuietAndTimeoutBecomeEligibleTogether() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  let clock = DeterministicOracleClock()
+  #expect(throws: OracleQuiescenceError.timedOut) {
+    try log.closeWindowAfterQuiescence(
+      quietMilliseconds: 50,
+      timeoutMilliseconds: 50,
+      clock: clock
+    )
+  }
+}
+
+@Test
+func oracleQuietStartsAfterInitialFingerprintRead() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  let clock = AdvancingOracleClock()
+  _ = try log.closeWindowAfterQuiescence(
+    quietMilliseconds: 2_000,
+    timeoutMilliseconds: 5_000,
+    clock: clock
+  )
+  #expect(try log.window().endNanoseconds == 3_000_000_000)
+}
+
+@Test
 func callbackGateDeterministicallyRejectsLateAndNeverCallbacks() {
   let lateCallback = OneShotCallbackGate()
   #expect(lateCallback.claimCompletion(from: .callback))
@@ -420,6 +518,17 @@ private final class DeterministicOracleClock: OracleQuiescenceClock {
     nanoseconds += 50_000_000
     onAdvance?(nanoseconds)
   }
+}
+
+private final class AdvancingOracleClock: OracleQuiescenceClock {
+  private var next: UInt64 = 0
+
+  func nowNanoseconds() -> UInt64 {
+    defer { next += 1_000_000_000 }
+    return next
+  }
+
+  func sleepForPoll() {}
 }
 
 private final class LockedCounter: @unchecked Sendable {

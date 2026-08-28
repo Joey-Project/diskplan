@@ -55,16 +55,24 @@ control can prove real materialization rather than passing because fetch is a st
 Both provider/path postflight probes and the oracle-health barrier run before the window closes.
 After closure, assertion reads only descriptor-bound control and oracle files; it never touches
 the provider path. The window closes only after the JSONL sequence/count fingerprint remains
-unchanged for a continuous two seconds, within a 30-second total bound. The persisted close
-record binds its end timestamp, quiet interval, event count, and final sequence. Assertion
+unchanged for a continuous two seconds, within a 30-second total bound. Each timestamp is taken
+after the fingerprint read and its locks complete, and the total deadline is checked before
+quiet success. Time spent reading is never credited as silence, and quiet cannot pass at the
+timeout boundary. The persisted close record binds its end timestamp, quiet interval, event count, and final sequence. Assertion
 rechecks that fingerprint, and malformed or internally inconsistent close metadata fails as a
 typed semantic mismatch.
 
-Oracle writes fail closed. The extension serializes recording through a poison latch: the first
-append failure fails that provider callback and permanently rejects later callbacks in that
-extension process. The in-window oracle-health barrier therefore cannot succeed after a hidden
-recording failure. Callback APIs with an error result return the recording error; enumeration
-fails its observer, and callbacks without an error channel do not report completion.
+Oracle writes fail closed. A run-scoped recorder lock serializes all extension instances. The
+first append failure creates immutable `recorder-poisoned` evidence checked by existing and
+recreated instances and by host health, closure, and assertion. The in-window oracle-health
+barrier therefore cannot succeed after a hidden recording failure. Callback APIs with an error
+result return the recording error; enumeration fails its observer, and callbacks without an
+error channel do not report completion.
+
+Extension append opens only the already-existing owner-private run directory and pre-created
+recorder lock; it never prepares or recreates the run. Teardown writes an immutable
+`recorder-sealed` marker under that lock before domain removal, so late callbacks fail without
+creating an orphan App Group path.
 
 ## Acceptance Levels
 
@@ -103,6 +111,9 @@ registry no longer references that physical extension path, and removes only the
 named by the validated manifest. Registry add/remove mutation and convergence checks are each
 bounded. A timeout or stale exact-path registration fails closed and retains the manifest and
 build artifacts for recovery.
+Every exact-bundle registry block must contain exactly one absolute `Path`; missing, duplicate,
+empty, relative, or otherwise malformed path records fail closed instead of being interpreted
+as successful removal.
 
 All File Provider add, list, remove, signal, and user-visible-URL callbacks share one monotonic
 20-second deadline per lifecycle phase. A one-shot atomic gate discards callbacks arriving after
@@ -132,8 +143,11 @@ remain on that root device. A mount point or any directory whose device cannot b
 fails closed before inventory, so cleanup never traverses or deletes a mounted volume.
 The exact UUID directory is atomically renamed with exclusive semantics inside the held
 owner-private `runs` directory before recursive deletion; symlinks and special objects fail
-closed. The manifest is deleted last, and an ordinary failure restores the isolated directory
-to its original path for recovery. These are point-in-time replacement checks and do not claim
+closed. Cleanup creates an owner-private recovery copy of the validated manifest before
+deletion. The manifest is deleted last; on failure, the recovery copy is renamed back when
+needed, validated byte-for-byte, and the isolated directory is restored. Recovery-copy and
+manifest-restoration errors are explicit retained-state failures, never discarded with `try?`.
+These are point-in-time replacement checks and do not claim
 to exclude a malicious same-UID process that races after the final identity check.
 
 The device-boundary contract has a deterministic synthetic-device unit test. Creating and

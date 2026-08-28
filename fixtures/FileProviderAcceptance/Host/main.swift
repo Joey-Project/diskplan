@@ -187,6 +187,7 @@ enum FixtureHost {
     let window = try log.window()
     guard window.endNanoseconds != nil else { throw HostError.oracleWindowOpen }
     let events = try log.events()
+    guard try log.recorderState() == .healthy else { throw HostError.oracleRecorderUnhealthy }
     guard window.eventCount == events.count,
       window.lastSequence == (events.last?.sequence ?? 0)
     else { throw HostError.oracleWindowMismatch }
@@ -228,6 +229,9 @@ enum FixtureHost {
 
   private static func teardown(manifest: FixtureManifest) async throws {
     let deadline = ContinuousClock.now + .seconds(20)
+    try OracleLog(
+      runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath)
+    ).sealRecorder()
     let matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
       $0 == manifest.domainIdentifier
     }
@@ -256,6 +260,7 @@ enum FixtureHost {
     let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
     let window = try log.window()
     guard window.endNanoseconds == nil else { throw HostError.oracleWindowClosed }
+    guard try log.recorderState() == .healthy else { throw HostError.oracleRecorderUnhealthy }
     let baseline = try log.events().last?.sequence ?? 0
     let domain = NSFileProviderDomain(
       identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
@@ -271,7 +276,7 @@ enum FixtureHost {
           && $0.domainIdentifier == manifest.domainIdentifier && window.contains($0)
           && !FixtureContract.forbiddenEventKinds.contains($0.kind)
       }
-      if healthy {
+      if healthy, try log.recorderState() == .healthy {
         printJSON(["status": "oracle-healthy", "domain": manifest.domainIdentifier])
         return
       }
@@ -366,6 +371,7 @@ private enum HostError: Error {
   case oracleWindowMismatch
   case oracleSilent
   case oracleHealthTimedOut
+  case oracleRecorderUnhealthy
   case callbackTimedOut
   case forbiddenCallbacks([String])
   case duplicateExactDomain

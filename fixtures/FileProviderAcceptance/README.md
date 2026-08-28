@@ -23,9 +23,12 @@ postflight extension-liveness signal run inside the open window. Closure require
 seconds without a new event within a 30-second total bound; assertion after closure reads only
 sealed control/oracle data.
 
-An append error poisons the extension recorder and fails later callbacks, so a write failure
-cannot masquerade as callback-zero. File Provider callbacks and `pluginkit` mutation/query steps
-have bounded monotonic deadlines and discard late completions.
+An append error writes immutable run-scoped poison evidence checked by recreated extension
+instances and fails later callbacks, so a write failure cannot masquerade as callback-zero.
+Teardown persistently seals the recorder before domain removal, and append never recreates a
+missing run directory. File Provider callbacks and `pluginkit` mutation/query steps have bounded
+monotonic deadlines and discard late completions. Exact-bundle registry records require one
+absolute path.
 
 This is a probe-level fixture, not the eventual full scanner acceptance. A passing result proves
 the macOS File Provider evidence primitive against controlled placeholders and explicitly reports
@@ -37,4 +40,5 @@ stability checks. Cleanup atomically isolates only the manifest-bound UUID run d
 rejects symlinks, special objects, identity replacement, or access-policy changes while keeping
 the manifest recoverable on ordinary failures. It also rejects the run root or any descendant
 directory on a different device, and unregister cleanup proceeds only after the registry no
-longer references the exact embedded extension path.
+longer references the exact embedded extension path. A validated recovery copy prevents
+manifest restoration failures from being silently discarded.

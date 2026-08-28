@@ -79,6 +79,34 @@ class RegistrationParserTests(unittest.TestCase):
             output = f"+    com.example.fixture(1.0)\n    Path = {other}\n"
             MODULE.verify_removal("com.example.fixture", expected, output)
 
+    def test_removal_rejects_exact_bundle_record_without_path(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            expected = Path(root) / "Fixture.appex"
+            expected.mkdir()
+            output = "-    com.example.fixture(1.0)\n    Version = 1\n"
+            with self.assertRaisesRegex(ValueError, "0 Path fields"):
+                MODULE.verify_removal("com.example.fixture", expected, output)
+
+    def test_removal_rejects_nonabsolute_path(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            expected = Path(root) / "Fixture.appex"
+            expected.mkdir()
+            output = "-    com.example.fixture(1.0)\n    Path = relative/Fixture.appex\n"
+            with self.assertRaisesRegex(ValueError, "not absolute"):
+                MODULE.verify_removal("com.example.fixture", expected, output)
+
+    def test_removal_rejects_multiple_path_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            expected = Path(root) / "Fixture.appex"
+            expected.mkdir()
+            output = (
+                "-    com.example.fixture(1.0)\n"
+                "    Path = /one/Fixture.appex\n"
+                "    Path = /two/Fixture.appex\n"
+            )
+            with self.assertRaisesRegex(ValueError, "2 Path fields"):
+                MODULE.verify_removal("com.example.fixture", expected, output)
+
 
 if __name__ == "__main__":
     unittest.main()
