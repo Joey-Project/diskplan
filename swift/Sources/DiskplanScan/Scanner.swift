@@ -414,8 +414,8 @@ public final class DeterministicScanner {
 
   private func closeTopDirectory() {
     var frame = stack.removeLast()
-    let closeObservation = filesystem.close(frame.directory)
-    let closeCoverage = coverage(for: closeObservation)
+    let closeEvidence = filesystem.close(frame.directory)
+    let closeCoverage = coverage(for: closeEvidence)
     frame.coverage = frame.coverage.merging(closeCoverage)
     directoriesInCurrentRoot += 1
     totalDirectories += 1
@@ -436,12 +436,11 @@ public final class DeterministicScanner {
       stack[parent].coverage = stack[parent].coverage.merging(frame.coverage)
       let node = ScannedNode(
         path: frame.path,
-        identity: closeObservation.value == nil
-          ? closeObservation.erasingValue() : .known(frame.identity),
+        identity: closeEvidence.identity,
         bytes: frame.aggregate,
         storageTopology: frame.storageTopology,
         filesystemTimes: frame.filesystemTimes,
-        accessPolicy: frame.accessPolicy,
+        accessPolicy: closeEvidence.accessPolicy,
         coverage: frame.coverage,
         providerBoundary: frame.inheritedProviderBoundary
           ? .metadataOnly(reason: "inherited provider boundary") : .localOrUnindicated,
@@ -536,10 +535,12 @@ public final class DeterministicScanner {
   }
 
   private func coverage(
-    for observation: Observation<DirectoryCloseEvidence>
+    for evidence: DirectoryCloseEvidence
   ) -> Coverage {
-    guard observation.value == nil else { return .complete }
-    return Coverage(completeness: .partial, reasons: coverageReasons(observation))
+    Coverage(
+      completeness: .complete,
+      reasons: coverageReasons(evidence.identity) + coverageReasons(evidence.accessPolicy)
+    )
   }
 
   private func addingSaturated(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
@@ -549,7 +550,7 @@ public final class DeterministicScanner {
 
   private func coverageReasons<Value>(_ observation: Observation<Value>) -> [CoverageReason] {
     switch observation {
-    case .known: [.collectorFailed]
+    case .known: []
     case .absent: [.missing]
     case .unknown: [.collectorFailed]
     case .unreadable: [.permissionDenied]
@@ -577,7 +578,7 @@ public final class DeterministicScanner {
     let completeRoots = UInt64(completedRoots.count) - partialRoots
     let allCoverage = completedRoots.reduce(globalCoverage.merging(forcedCoverage)) {
       $0.merging($1.coverage)
-    }
+    }.merging(frontierCoverage)
     return ScanResult(
       reference: reference,
       state: state,
@@ -587,7 +588,7 @@ public final class DeterministicScanner {
         entriesObserved: totalEntries,
         directoriesClosed: totalDirectories,
         rootsComplete: completeRoots,
-        rootsPartial: partialRoots + UInt64(rootFailures.count),
+        rootsPartial: partialRoots + UInt64(rootFailures.count) + unresolvedRootCount,
         retainedNodes: retained
       ),
       coverage: allCoverage,
@@ -600,5 +601,21 @@ public final class DeterministicScanner {
     forcedCoverage.completeness == .partial || globalCoverage.completeness == .partial
       || !rootFailures.isEmpty
       || completedRoots.contains { $0.coverage.completeness == .partial }
+  }
+
+  private var unresolvedRootCount: UInt64 {
+    let accounted = completedRoots.count + rootFailures.count
+    guard scope.roots.count > accounted else { return 0 }
+    return UInt64(scope.roots.count - accounted)
+  }
+
+  private var frontierCoverage: Coverage {
+    var coverage = stack.reduce(Coverage.complete) { $0.merging($1.coverage) }
+    if unresolvedRootCount > 0 {
+      coverage = coverage.merging(
+        Coverage(completeness: .partial, reasons: [.subtreeIncomplete])
+      )
+    }
+    return coverage
   }
 }

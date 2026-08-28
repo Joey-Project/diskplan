@@ -12,7 +12,7 @@ private struct FakeNode: Sendable {
   let children: [RawPathComponent]
   let openFailure: Observation<BoundDirectory>?
   let enumerateFailure: Observation<DirectoryEnumeration>?
-  let closeFailure: Observation<DirectoryCloseEvidence>?
+  let closeFailure: DirectoryCloseEvidence?
   let providerEvidence: Observation<ProviderScanEvidence>
 
   init(
@@ -22,7 +22,7 @@ private struct FakeNode: Sendable {
     children: [RawPathComponent],
     openFailure: Observation<BoundDirectory>?,
     enumerateFailure: Observation<DirectoryEnumeration>?,
-    closeFailure: Observation<DirectoryCloseEvidence>? = nil,
+    closeFailure: DirectoryCloseEvidence? = nil,
     providerEvidence: Observation<ProviderScanEvidence> = .unknown(reason: "not observed")
   ) {
     self.identity = identity
@@ -42,7 +42,7 @@ private final class FakeFilesystem: ScanFilesystem, @unchecked Sendable {
   private let rootIdentity: ObjectIdentity
   private let nodes: [RawPath: FakeNode]
   private let rootChildren: [RawPathComponent]
-  private let rootCloseFailure: Observation<DirectoryCloseEvidence>?
+  private let rootCloseFailure: DirectoryCloseEvidence?
   private var handles: [Int32: RawPath] = [:]
   private var nextHandle: Int32 = 10
   private(set) var openedPaths = 0
@@ -53,7 +53,7 @@ private final class FakeFilesystem: ScanFilesystem, @unchecked Sendable {
     rootID: String = "root",
     rootChildren: [RawPathComponent],
     nodes: [RawPath: FakeNode],
-    rootCloseFailure: Observation<DirectoryCloseEvidence>? = nil
+    rootCloseFailure: DirectoryCloseEvidence? = nil
   ) {
     rootRequest = ScanRootRequest(rootID: rootID, rawAbsolutePath: Data("/fixture".utf8))
     rootIdentity = ObjectIdentity(device: 1, fileID: 1, objectType: .directory)
@@ -159,7 +159,7 @@ private final class FakeFilesystem: ScanFilesystem, @unchecked Sendable {
     )
   }
 
-  func close(_ directory: BoundDirectory) -> Observation<DirectoryCloseEvidence> {
+  func close(_ directory: BoundDirectory) -> DirectoryCloseEvidence {
     let path = lock.withLock { handles[directory.handle.rawValue] }
     lock.withLock {
       if handles.removeValue(forKey: directory.handle.rawValue) != nil { closedHandles += 1 }
@@ -171,11 +171,9 @@ private final class FakeFilesystem: ScanFilesystem, @unchecked Sendable {
     }
     if path?.components.isEmpty == true, let rootCloseFailure { return rootCloseFailure }
     if let path, let failure = nodes[path]?.closeFailure { return failure }
-    return .known(
-      DirectoryCloseEvidence(
-        identity: directory.slotBinding.expectedIdentity,
-        accessPolicy: directory.slotBinding.expectedAccessPolicy
-      )
+    return DirectoryCloseEvidence(
+      identity: .known(directory.slotBinding.expectedIdentity),
+      accessPolicy: .known(directory.slotBinding.expectedAccessPolicy)
     )
   }
 
@@ -250,6 +248,23 @@ private final class LockedItemEvidenceSequence: @unchecked Sendable {
       return .known(value)
     }
   }
+}
+
+private final class LockedProviderOutcome: @unchecked Sendable {
+  private let lock = NSLock()
+  private let outcome: FileProviderProbeOutcome
+  private var calls = 0
+
+  init(_ outcome: FileProviderProbeOutcome) { self.outcome = outcome }
+
+  func probe() -> FileProviderProbeOutcome {
+    lock.withLock {
+      calls += 1
+      return outcome
+    }
+  }
+
+  var callCount: Int { lock.withLock { calls } }
 }
 
 private final class CapturingSink: ScanNodeSink, @unchecked Sendable {
@@ -369,7 +384,7 @@ private func directory(
   boundary: ProviderBoundary = .localOrUnindicated,
   openFailure: Observation<BoundDirectory>? = nil,
   enumerateFailure: Observation<DirectoryEnumeration>? = nil,
-  closeFailure: Observation<DirectoryCloseEvidence>? = nil
+  closeFailure: DirectoryCloseEvidence? = nil
 ) -> FakeNode {
   FakeNode(
     identity: ObjectIdentity(device: 1, fileID: id, objectType: .directory),
@@ -719,6 +734,50 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   #expect(done.transcript.map(\.sequence) == [1, 2, 3, 4, 5, 6])
 }
 
+@Test func provisionalCoverageIncludesActiveFrontierAndUnstartedRoots() async {
+  let directoryName = component("directory")
+  let fileName = component("file")
+  let root = RawPath(rootID: "root")
+  let directoryPath = root.appending(directoryName)
+  let filesystem = FakeFilesystem(
+    rootChildren: [directoryName],
+    nodes: [
+      directoryPath: directory(2, children: [fileName]),
+      directoryPath.appending(fileName): file(3, bytes: 1),
+    ]
+  )
+  let unstarted = ScanRootRequest(
+    rootID: "unstarted",
+    rawAbsolutePath: Data("/unstarted".utf8)
+  )
+  let scope = try! ResolvedScanScope(
+    resolverVersion: 1,
+    profile: .deep,
+    roots: [filesystem.request, unstarted],
+    budget: StructuralBudget(maximumEntriesPerRoot: 10, maximumDepth: 2),
+    maximumDurationNanoseconds: nil
+  )
+  let session = ScanSession(
+    scanner: DeterministicScanner(
+      filesystem: filesystem,
+      scope: scope,
+      clock: FixedClock(times: [100])
+    )
+  )
+  _ = await session.start()
+  _ = await session.advance(maximumEntries: 1)
+  _ = await session.pause()
+  let provisional = await session.provisional()
+  #expect(provisional.result.coverage.completeness == .partial)
+  #expect(provisional.result.coverage.reasons.contains(.subtreeIncomplete))
+  #expect(provisional.result.progress.rootsPartial == 2)
+  #expect(
+    provisional.result.progress.retainedNodes.first(where: { $0.path == directoryPath })?
+      .coverage.reasons.contains(.subtreeIncomplete) == true
+  )
+  _ = await session.cancel()
+}
+
 @Test func finalizeAndCancelProduceDistinctTerminalTranscripts() async {
   let child = component("child")
   let root = RawPath(rootID: "root")
@@ -836,11 +895,36 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
 @Test func closeRevalidationKeepsMissingMismatchUnreadableAndPolicyChangeDistinct() {
   let child = component("child")
   let root = RawPath(rootID: "root")
-  let cases: [(Observation<DirectoryCloseEvidence>, CoverageReason)] = [
-    (.absent(reason: "removed before close"), .missing),
-    (.failed(reason: "replaced before close", errorCode: ESTALE), .identityMismatch),
-    (.unreadable(reason: "denied before close", errorCode: EACCES), .permissionDenied),
-    (.failed(reason: "policy changed before close", errorCode: EAGAIN), .accessPolicyChanged),
+  let identity = ObjectIdentity(device: 1, fileID: 2, objectType: .directory)
+  let cases: [(DirectoryCloseEvidence, CoverageReason)] = [
+    (
+      DirectoryCloseEvidence(
+        identity: .absent(reason: "removed before close"),
+        accessPolicy: .absent(reason: "removed before close")
+      ),
+      .missing
+    ),
+    (
+      DirectoryCloseEvidence(
+        identity: .failed(reason: "replaced before close", errorCode: ESTALE),
+        accessPolicy: .unknown(reason: "replacement policy is not comparable")
+      ),
+      .identityMismatch
+    ),
+    (
+      DirectoryCloseEvidence(
+        identity: .unreadable(reason: "denied before close", errorCode: EACCES),
+        accessPolicy: .unreadable(reason: "denied before close", errorCode: EACCES)
+      ),
+      .permissionDenied
+    ),
+    (
+      DirectoryCloseEvidence(
+        identity: .known(identity),
+        accessPolicy: .failed(reason: "policy changed before close", errorCode: EAGAIN)
+      ),
+      .accessPolicyChanged
+    ),
   ]
   for (failure, reason) in cases {
     let fs = FakeFilesystem(
@@ -1028,7 +1112,9 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     policy: policy,
     pathAccessValidator: { closeGate.validate() }
   )
-  #expect(closeFilesystem.close(opened).value == nil)
+  let closeEvidence = closeFilesystem.close(opened)
+  #expect(closeEvidence.identity.value == inspected.identity)
+  #expect(closeEvidence.accessPolicy.value == nil)
   #expect(closeGate.callCount == 1)
 
   let bindGate = LockedPolicyGate(policy: policy, failingCall: 1)
@@ -1046,6 +1132,69 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     ).value == nil
   )
   #expect(bindGate.callCount == 1)
+}
+
+@Test func unavailableProviderFlagsCannotFallThroughToLocalEvidence() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("diskplan-provider-flags-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  try FileManager.default.createDirectory(
+    at: rootURL.appendingPathComponent("child"),
+    withIntermediateDirectories: false
+  )
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let before = fixtureItemEvidence()
+  let variants = [
+    replacingItemEvidence(
+      before,
+      isDataless: .unavailable("dataless state unavailable")
+    ),
+    replacingItemEvidence(
+      before,
+      isSyncRoot: Capability(
+        status: .failed,
+        detail: "sync-root state failed",
+        errorCode: EIO
+      )
+    ),
+  ]
+
+  for item in variants {
+    let provider = LockedProviderOutcome(
+      .rejected(
+        .contentStateUnavailable(
+          stage: .preflight,
+          status: .unavailable,
+          detail: "provider flags are not authoritative",
+          errorCode: nil
+        )
+      )
+    )
+    let filesystem = DarwinScanFilesystem(
+      policy: policy,
+      pathAccessValidator: { .known(policy) },
+      itemEvidenceReader: { _, _, _ in .known(item) },
+      providerEvidenceReader: { _, _, _, _ in provider.probe() }
+    )
+    let observation = filesystem.inspect(
+      parent: DirectoryHandle(rawValue: fd),
+      name: component("child"),
+      inheritedProviderBoundary: false,
+      requiresAuthoritativeProviderEvidence: false
+    )
+    #expect(observation.value == nil)
+    guard case .unknown = observation else {
+      Issue.record("unavailable provider flags did not remain typed unknown")
+      continue
+    }
+    #expect(provider.callCount == 1)
+  }
 }
 
 @Test func providerPostflightRejectsChangedPolicyStateAndExactByteCredit() throws {
@@ -1250,8 +1399,13 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
         unlinkat(fd, raw.bindMemory(to: CChar.self).baseAddress!, AT_REMOVEDIR)
       }
       #expect(removed == 0)
-      guard case .absent = filesystem.close(directory) else {
+      let closeEvidence = filesystem.close(directory)
+      guard case .absent = closeEvidence.identity else {
         Issue.record("missing parent slot was not preserved at close")
+        continue
+      }
+      guard case .absent = closeEvidence.accessPolicy else {
+        Issue.record("missing access-policy slot was not preserved at close")
         continue
       }
     } else if rawName == Data("policy".utf8) {
@@ -1259,13 +1413,17 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
         fchmodat(fd, raw.bindMemory(to: CChar.self).baseAddress!, mode_t(S_IRUSR), 0)
       }
       #expect(changed == 0)
-      guard case .failed(_, let code) = filesystem.close(directory) else {
+      let closeEvidence = filesystem.close(directory)
+      #expect(closeEvidence.identity.value == inspected.identity)
+      guard case .failed(_, let code) = closeEvidence.accessPolicy else {
         Issue.record("access-policy mutation was not preserved at close")
         continue
       }
       #expect(code == EAGAIN)
     } else {
-      #expect(filesystem.close(directory).value?.identity == inspected.identity)
+      let closeEvidence = filesystem.close(directory)
+      #expect(closeEvidence.identity.value == inspected.identity)
+      #expect(closeEvidence.accessPolicy.value == accessPolicy)
     }
   }
 }

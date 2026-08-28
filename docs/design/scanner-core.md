@@ -36,7 +36,10 @@ Ordinary `st_dev` is never compared with an `FSOPT_RETURN_REALDEV` identity.
 
 A missing slot, unreadable slot, access-policy mutation, collector failure, and
 replacement mismatch are different observations both during inspection and at
-directory close. Child-entry churn alone does not constitute root identity mutation.
+directory close. Close evidence carries identity and access policy as independent
+observations: an access-policy mismatch cannot erase a stable identity, and its
+`EAGAIN` remains attached to the access-policy field. Child-entry churn alone does
+not constitute root identity mutation.
 The production backend never constructs descendant paths; only the configured root's
 parent path is path-opened to establish the descriptor-relative root slot. A root
 with unproved provider ownership is retained in provenance and root failures but is
@@ -57,6 +60,9 @@ never opened or treated as `localOrUnindicated`.
   exclusion tables. Dataless/rejected boundaries stop traversal. Positively
   provider-bound materialized directories may be enumerated metadata-only, remain
   partial/report-only evidence, and propagate the provider boundary to descendants.
+  `isDataless` and `isSyncRoot` must both be known false before established local
+  ancestry may avoid another authoritative probe. An unavailable or failed flag
+  can never fall through to `localOrUnindicated`, traversal, or exact byte credit.
   Provider item/domain identity, promised metadata, hidden-byte unavailability, and
   controlled non-materialization acceptance remain typed rather than being reduced
   to a Boolean boundary flag. Probe rejection is not converted into a known
@@ -94,6 +100,10 @@ binding by looking up a possibly aliased display/path ID.
 monotonic transcript for start, advance, pause, checkpoint, provisional snapshot,
 resume, partial finalization, completion, and cancellation. Checkpoints are
 resumable only while the original process retains its descriptor-bound scanner.
+Snapshots merge the active directory stack and every not-yet-completed root into
+top-level coverage and progress. A paused provisional result therefore remains
+`subtree_incomplete` while any frontier node or unstarted root exists, even though
+the already observed evidence itself is stable.
 
 Every `ScanResult.reference` binds the complete resolved scope, including failed and
 not-yet-started raw roots, the profile and resolver version, entry/depth/enumeration/

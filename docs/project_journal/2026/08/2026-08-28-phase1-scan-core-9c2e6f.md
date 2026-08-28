@@ -47,6 +47,10 @@ superseded_by:
 - [x] Preserve typed File Provider rejection outcomes through scan coverage.
 - [x] Reject duplicate root IDs before scope freeze and retain actual root bindings
   in traversal frames.
+- [x] Require authoritative provider probing whenever dataless or sync-root state
+  is unavailable instead of treating it as local evidence.
+- [x] Merge active stack and unstarted-root coverage into provisional snapshots.
+- [x] Preserve close-time identity and access-policy observations independently.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [ ] Integrate scanner evidence into the versioned IPC workstream.
 
@@ -59,7 +63,7 @@ superseded_by:
 
 ## Handoff
 
-- Phase: Phase 1 second frozen-review repair complete and validated.
+- Phase: Phase 1 third frozen-review repair complete and validated.
 - Next step: repeat independent frozen-range review, then prepare PR delivery.
 - Blocker: none for the scanner slice. The authoritative directory packed-attribute
   parser fix is integrated from foundation head
@@ -113,3 +117,15 @@ superseded_by:
   self-test, with controlled fixtures explicitly unavailable on this local host.
 - Strict Swift format lint, `git diff --check`, CI journal tests (17 tests), both
   journal validators, `bash -n`, and ShellCheck pass for the second repair range.
+- The third frozen review identified provider flags that could fall through from
+  unavailable to local, provisional coverage that omitted the active frontier, and
+  close evidence that coupled identity with access policy. The follow-up forces an
+  authoritative provider probe unless both flags are known false, merges active and
+  unstarted roots into snapshot coverage/progress, and carries close identity and
+  access policy as separate observations. Focused scanner tests pass all 32 tests.
+- After the third frozen-review repair, the complete Swift suite passes all 80 tests
+  and the explicit Swift build with automatic dependency resolution disabled
+  succeeds. The macOS capability gate again passes 32 focused tests plus the CLI
+  self-test, with controlled fixtures explicitly unavailable on this local host.
+- Strict Swift format lint, `git diff --check`, CI journal tests (17 tests), both
+  journal validators, `bash -n`, and ShellCheck pass for the third repair range.

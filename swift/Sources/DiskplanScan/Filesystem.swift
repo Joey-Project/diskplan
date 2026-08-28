@@ -125,10 +125,13 @@ public struct BoundDirectory: Equatable, Sendable {
 }
 
 public struct DirectoryCloseEvidence: Equatable, Sendable {
-  public let identity: ObjectIdentity
-  public let accessPolicy: AccessPolicyEvidence
+  public let identity: Observation<ObjectIdentity>
+  public let accessPolicy: Observation<AccessPolicyEvidence>
 
-  public init(identity: ObjectIdentity, accessPolicy: AccessPolicyEvidence) {
+  public init(
+    identity: Observation<ObjectIdentity>,
+    accessPolicy: Observation<AccessPolicyEvidence>
+  ) {
     self.identity = identity
     self.accessPolicy = accessPolicy
   }
@@ -177,7 +180,7 @@ public protocol ScanFilesystem: Sendable {
     expectedIdentity: ObjectIdentity,
     expectedAccessPolicy: AccessPolicyEvidence
   ) -> Observation<BoundDirectory>
-  func close(_ directory: BoundDirectory) -> Observation<DirectoryCloseEvidence>
+  func close(_ directory: BoundDirectory) -> DirectoryCloseEvidence
 }
 
 public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
@@ -438,10 +441,11 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     }
     let boundary: ProviderBoundary
     let providerEvidence: Observation<ProviderScanEvidence>
-    let hasProviderHint =
-      inheritedProviderBoundary || beforeItem.isDataless.value == true
-      || beforeItem.isSyncRoot.value == true
-    if requiresAuthoritativeProviderEvidence || hasProviderHint {
+    let providerStateIsFullyLocal =
+      beforeItem.isDataless.value == false && beforeItem.isSyncRoot.value == false
+    if requiresAuthoritativeProviderEvidence || inheritedProviderBoundary
+      || !providerStateIsFullyLocal
+    {
       let outcome = providerEvidenceReader(
         parent.rawValue,
         name.bytes,
@@ -548,13 +552,20 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     )
   }
 
-  public func close(_ directory: BoundDirectory) -> Observation<DirectoryCloseEvidence> {
+  public func close(_ directory: BoundDirectory) -> DirectoryCloseEvidence {
     defer {
       Darwin.close(directory.handle.rawValue)
       if directory.slotBinding.ownsParent {
         Darwin.close(directory.slotBinding.parent.rawValue)
       }
     }
+    return DirectoryCloseEvidence(
+      identity: closeIdentity(directory),
+      accessPolicy: closeAccessPolicy(directory)
+    )
+  }
+
+  private func closeIdentity(_ directory: BoundDirectory) -> Observation<ObjectIdentity> {
     let descriptorCapability = descriptorIdentityProbe.probe(
       fileDescriptor: directory.handle.rawValue,
       policy: policy
@@ -563,7 +574,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
       return observation(
         descriptorCapability,
         operation: "revalidate directory descriptor identity at close",
-        as: DirectoryCloseEvidence.self
+        as: ObjectIdentity.self
       )
     }
     let observedDescriptorIdentity = objectIdentity(descriptorIdentity)
@@ -582,7 +593,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
       return observation(
         slotCapability,
         operation: "revalidate directory parent slot at close",
-        as: DirectoryCloseEvidence.self
+        as: ObjectIdentity.self
       )
     }
     let slotIdentityObservation = itemIdentity(slotItem)
@@ -595,6 +606,12 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         errorCode: ESTALE
       )
     }
+    return .known(slotIdentity)
+  }
+
+  private func closeAccessPolicy(
+    _ directory: BoundDirectory
+  ) -> Observation<AccessPolicyEvidence> {
     let slotSeal = statSlotSeal(
       parent: directory.slotBinding.parent,
       name: directory.slotBinding.name
@@ -606,12 +623,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
         errorCode: EAGAIN
       )
     }
-    return .known(
-      DirectoryCloseEvidence(
-        identity: slotIdentity,
-        accessPolicy: observedSeal.accessPolicy
-      )
-    )
+    return .known(observedSeal.accessPolicy)
   }
 
   private func statSlotSeal(
