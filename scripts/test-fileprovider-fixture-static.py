@@ -131,6 +131,13 @@ def main() -> int:
         "acceptance sealing must publish persistent fail-closed transition evidence",
     )
     require(
+        '"recorder-incomplete-attempt-"' in swift
+        and "let markerName = try createIncompleteAttemptMarker" in swift
+        and "try attempt?.resolve()" in swift
+        and "try recorderHasIncompleteAttempts(directory: directory)" in swift,
+        "attempts must retain durable incomplete evidence until event or failure publication",
+    )
+    require(
         "recoveryURL.isFileURL, recoveryURL.path == expectedURL.path" in swift
         and "let parent = try openControlDirectory(at: parentURL, record: .manifest)" in swift
         and "name: expectedURL.lastPathComponent" in swift,

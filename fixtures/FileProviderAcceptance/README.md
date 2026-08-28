@@ -34,6 +34,10 @@ Successful append never clears this marker, and every host acceptance read treat
 Each record attempt holds the attempt gate through failure-marker publication, while health and
 seal take it exclusively and wait only until the shared absolute deadline. Acceptance therefore
 cannot seal across an in-flight failure, and gate contention fails closed.
+An admitted attempt first persists its own UUID-named incomplete marker. It removes that marker
+only after a durable JSONL event or durable global failure marker. Publication failure or process
+crash leaves the attempt marker behind, and recreated host/extension instances treat it as
+poisoned instead of callback-zero.
 Teardown persistently seals the recorder before domain removal, and append never recreates a
 missing run directory. File Provider callbacks and `pluginkit` mutation/query steps have bounded
 monotonic deadlines and discard late completions. A callback checks the absolute deadline before

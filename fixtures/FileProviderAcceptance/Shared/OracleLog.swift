@@ -48,7 +48,8 @@ public struct OracleLog: Sendable {
 
   func append(
     _ original: OracleEvent,
-    injecting failure: OracleAppendInjectedFailure?
+    injecting failure: OracleAppendInjectedFailure?,
+    duringRecordAttempt: Bool = false
   ) throws {
     let clock = SystemOracleQuiescenceClock()
     let (deadline, overflow) = clock.nowNanoseconds().addingReportingOverflow(30_000_000_000)
@@ -56,6 +57,7 @@ public struct OracleLog: Sendable {
     try append(
       original,
       injecting: failure,
+      duringRecordAttempt: duringRecordAttempt,
       deadlineNanoseconds: deadline,
       clock: clock
     )
@@ -64,6 +66,7 @@ public struct OracleLog: Sendable {
   func append(
     _ original: OracleEvent,
     injecting failure: OracleAppendInjectedFailure?,
+    duringRecordAttempt: Bool = false,
     deadlineNanoseconds: UInt64,
     clock: any OracleQuiescenceClock
   ) throws {
@@ -72,8 +75,16 @@ public struct OracleLog: Sendable {
       clock: clock,
       timeout: .recorder
     ) { directory in
-      guard try lockedRecorderState(directory: directory) == .healthy else {
-        throw try recorderError(directory: directory)
+      guard
+        try lockedRecorderState(
+          directory: directory,
+          includeIncompleteAttempts: !duringRecordAttempt
+        ) == .healthy
+      else {
+        throw try recorderError(
+          directory: directory,
+          includeIncompleteAttempts: !duringRecordAttempt
+        )
       }
       try createRecorderMarker(
         "recorder-poisoned",
@@ -133,7 +144,9 @@ public struct OracleLog: Sendable {
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
       timeout: .recorder
-    ) { try lockedRecorderState(directory: $0) }
+    ) {
+      try lockedRecorderState(directory: $0, includeIncompleteAttempts: false)
+    }
   }
 
   func recorderState(
@@ -180,7 +193,14 @@ public struct OracleLog: Sendable {
       if try recorderMarkerExists("recorder-sealing", directory: directory) {
         throw OracleRecorderError.sealed
       }
-      return OracleRecordAttempt(descriptor: descriptor)
+      let markerName = try createIncompleteAttemptMarker(directory: directory)
+      let runDirectoryDescriptor = dup(directory)
+      guard runDirectoryDescriptor >= 0 else { throw makePOSIXError(code: errno) }
+      return OracleRecordAttempt(
+        descriptor: descriptor,
+        runDirectoryDescriptor: runDirectoryDescriptor,
+        markerName: markerName
+      )
     } catch {
       close(descriptor)
       if (try? recorderMarkerExists("recorder-sealing", directory: directory)) == true
@@ -379,6 +399,7 @@ public struct OracleLog: Sendable {
         guard try recorderMarkerExists("recorder-sealing", directory: directory),
           try !recorderMarkerExists("recorder-failed", directory: directory),
           try !recorderMarkerExists("recorder-poisoned", directory: directory),
+          try !recorderHasIncompleteAttempts(directory: directory),
           try !recorderMarkerExists("recorder-sealed", directory: directory)
         else { throw OracleRecorderError.poisoned }
         let values = try lockedEvents(directory: directory)
@@ -501,8 +522,27 @@ struct SystemOracleQuiescenceClock: OracleQuiescenceClock {
 final class OracleRecordAttempt: @unchecked Sendable {
   private let lock = NSLock()
   private var descriptor: Int32?
+  private var runDirectoryDescriptor: Int32?
+  private var markerName: String?
 
-  fileprivate init(descriptor: Int32) { self.descriptor = descriptor }
+  fileprivate init(
+    descriptor: Int32,
+    runDirectoryDescriptor: Int32,
+    markerName: String
+  ) {
+    self.descriptor = descriptor
+    self.runDirectoryDescriptor = runDirectoryDescriptor
+    self.markerName = markerName
+  }
+
+  func resolve() throws {
+    try lock.withLock {
+      guard let directory = runDirectoryDescriptor, let markerName else { return }
+      guard unlinkat(directory, markerName, 0) == 0 else { throw makePOSIXError(code: errno) }
+      self.markerName = nil
+      guard fsync(directory) == 0 else { throw makePOSIXError(code: errno) }
+    }
+  }
 
   func finish() {
     lock.withLock {
@@ -510,6 +550,10 @@ final class OracleRecordAttempt: @unchecked Sendable {
       flock(descriptor, LOCK_UN)
       close(descriptor)
       self.descriptor = nil
+      if let runDirectoryDescriptor {
+        close(runDirectoryDescriptor)
+        self.runDirectoryDescriptor = nil
+      }
     }
   }
 
@@ -715,16 +759,80 @@ private func requireLockDeadline(
   }
 }
 
-private func lockedRecorderState(directory: Int32) throws -> OracleRecorderState {
+private func lockedRecorderState(
+  directory: Int32,
+  includeIncompleteAttempts: Bool = true
+) throws -> OracleRecorderState {
   if try recorderMarkerExists("recorder-failed", directory: directory) { return .poisoned }
   if try recorderMarkerExists("recorder-poisoned", directory: directory) { return .poisoned }
+  if includeIncompleteAttempts, try recorderHasIncompleteAttempts(directory: directory) {
+    return .poisoned
+  }
   if try recorderMarkerExists("recorder-sealed", directory: directory) { return .sealed }
   if try recorderMarkerExists("recorder-sealing", directory: directory) { return .poisoned }
   return .healthy
 }
 
-private func recorderError(directory: Int32) throws -> OracleRecorderError {
-  switch try lockedRecorderState(directory: directory) {
+private let incompleteAttemptPrefix = "recorder-incomplete-attempt-"
+private let incompleteAttemptSuffix = ".marker"
+
+private func createIncompleteAttemptMarker(directory: Int32) throws -> String {
+  let name = incompleteAttemptPrefix + UUID().uuidString.lowercased() + incompleteAttemptSuffix
+  let descriptor = openat(
+    directory,
+    name,
+    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+    0o600
+  )
+  guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
+  defer { close(descriptor) }
+  try validateOwnerPrivateRegularFile(descriptor: descriptor)
+  guard fsync(descriptor) == 0 else { throw makePOSIXError(code: errno) }
+  guard fsync(directory) == 0 else { throw makePOSIXError(code: errno) }
+  return name
+}
+
+private func recorderHasIncompleteAttempts(directory: Int32) throws -> Bool {
+  let duplicate = openat(
+    directory,
+    ".",
+    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+  )
+  guard duplicate >= 0 else { throw makePOSIXError(code: errno) }
+  guard let stream = fdopendir(duplicate) else {
+    let code = errno
+    close(duplicate)
+    throw makePOSIXError(code: code)
+  }
+  defer { closedir(stream) }
+  var count = 0
+  errno = 0
+  while let entry = readdir(stream) {
+    let name = withUnsafePointer(to: &entry.pointee.d_name) {
+      $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+        String(cString: $0)
+      }
+    }
+    if name == "." || name == ".." { continue }
+    count += 1
+    guard count <= FixtureContract.maximumOracleDirectoryEntries else {
+      throw FixtureContractError.unsafePath
+    }
+    if name.hasPrefix(incompleteAttemptPrefix) { return true }
+    errno = 0
+  }
+  guard errno == 0 else { throw makePOSIXError(code: errno) }
+  return false
+}
+
+private func recorderError(
+  directory: Int32,
+  includeIncompleteAttempts: Bool = true
+) throws -> OracleRecorderError {
+  switch try lockedRecorderState(
+    directory: directory,
+    includeIncompleteAttempts: includeIncompleteAttempts
+  ) {
   case .healthy: .unavailable
   case .poisoned: .poisoned
   case .sealed: .sealed

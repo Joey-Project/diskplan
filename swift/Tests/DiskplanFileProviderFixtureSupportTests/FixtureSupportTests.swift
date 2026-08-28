@@ -892,6 +892,58 @@ func sealAttemptGateContentionFailsWithinAbsoluteDeadline() throws {
 }
 
 @Test
+func failedFailureMarkerPublicationLeavesDurableIncompleteAttempt() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  let recorder = OracleRecorder(
+    append: { _, _ in Issue.record("append unexpectedly ran after state-read failure") },
+    state: { _ in throw POSIXError(.EIO) },
+    failure: { throw POSIXError(.ENOSPC) },
+    beginAttempt: { deadline in
+      try log.beginRecordAttempt(
+        deadlineNanoseconds: deadline,
+        clock: SystemOracleQuiescenceClock()
+      )
+    }
+  )
+  #expect(throws: POSIXError.self) {
+    try recorder.record(fixture.oracleEvent(kind: .materializedItemsDidChange))
+  }
+  #expect(try OracleLog(runDirectory: fixture.runDirectory).recorderState() == .poisoned)
+  #expect(throws: OracleRecorderError.poisoned) {
+    _ = try log.closeWindowAfterQuiescence(
+      quietMilliseconds: 50,
+      timeoutMilliseconds: 500
+    )
+  }
+}
+
+@Test
+func abandonedRecordAttemptRemainsFailClosedAfterRecorderRecreation() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  let attempt = try log.beginRecordAttempt(
+    deadlineNanoseconds: clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) + 1_000_000_000,
+    clock: SystemOracleQuiescenceClock()
+  )
+  attempt.finish()
+  let recreated = OracleLog(runDirectory: fixture.runDirectory)
+  #expect(try recreated.recorderState() == .poisoned)
+  #expect(throws: OracleRecorderError.poisoned) {
+    _ = try recreated.closeWindowAfterQuiescence(
+      quietMilliseconds: 50,
+      timeoutMilliseconds: 500
+    )
+  }
+}
+
+@Test
 func oracleRecorderUsesOneEntryDeadlineAcrossAllStages() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }

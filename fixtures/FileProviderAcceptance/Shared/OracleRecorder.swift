@@ -59,6 +59,7 @@ public final class OracleRecorder: @unchecked Sendable {
         try log.append(
           event,
           injecting: nil,
+          duringRecordAttempt: true,
           deadlineNanoseconds: deadline,
           clock: SystemOracleQuiescenceClock()
         )
@@ -104,10 +105,13 @@ public final class OracleRecorder: @unchecked Sendable {
     defer { attempt?.finish() }
     do {
       try recordAttempt(event, deadlineNanoseconds: deadline)
+      try attempt?.resolve()
     } catch let error as OracleRecorderError where error == .sealed {
+      try attempt?.resolve()
       throw error
     } catch {
       try failRecorder()
+      try attempt?.resolve()
       throw error
     }
   }

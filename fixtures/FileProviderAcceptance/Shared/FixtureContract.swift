@@ -16,6 +16,7 @@ public enum FixtureContract {
   public static let forbiddenChildName = "must-not-enumerate.txt"
   public static let sentinelByteCount = 65_536
   public static let maximumOracleBytes = 4 * 1_024 * 1_024
+  public static let maximumOracleDirectoryEntries = 4_096
   public static let forbiddenEventKinds: Set<OracleEventKind> = [
     .fetchContents,
     .createItem,

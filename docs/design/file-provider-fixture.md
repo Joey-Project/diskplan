@@ -87,7 +87,14 @@ append cannot clear that marker. Host health, closure, and sealed-snapshot asser
 it as poisoned, so the callback-only API cannot turn a recording failure into callback-zero. The
 record attempt retains its shared attempt-gate lock until this immutable failure marker is
 durable; therefore closure cannot observe healthy state and return a sealed snapshot while
-failure publication is still in flight.
+failure publication is still in flight. Each admitted attempt also creates and directory-syncs
+a unique `recorder-incomplete-attempt-<uuid>.marker` before running callback logic. It removes
+that marker descriptor-relative only after either the JSONL event or the immutable failure marker
+is durable. A crash or failure while publishing `recorder-failed` therefore leaves persistent
+incomplete-attempt evidence. Exclusive health, closure, and sealed-snapshot reads treat any such
+marker, or an over-limit run-directory inventory, as poisoned. Record-internal state and append
+ignore these markers while holding the shared attempt gate so concurrent live attempts do not
+poison one another.
 
 The attempt, recorder, and nested JSONL locks all use nonblocking `flock` acquisition and share
 the same absolute 30-second monotonic deadline for an append. Lock contention cannot turn a

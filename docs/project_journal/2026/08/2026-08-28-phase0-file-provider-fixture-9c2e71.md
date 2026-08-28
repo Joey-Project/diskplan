@@ -71,6 +71,9 @@ superseded_by:
   publication. Health, fingerprint, final seal, and sealed snapshot take the gate exclusively,
   share the original absolute deadline, and fail closed rather than accepting across an in-flight
   failure.
+- Every admitted record attempt persists a unique incomplete marker before callback logic and
+  clears it only after a durable event or failure marker. Publication failure and simulated crash
+  leave evidence that remains poisoned across recorder recreation.
 - Cleanup rejects mount/device-boundary traversal before inventory. The current gate is
   explicitly probe-level; full scanner acceptance remains a later engine integration.
 - Local unsigned compile and support tests are available without provisioning.
@@ -98,6 +101,8 @@ superseded_by:
   aliased sibling recovery manifests from the fifth frozen rereview.
 - [x] Close the record-failure publication race with bounded cross-process in-flight
   synchronization from the sixth frozen rereview.
+- [x] Preserve durable incomplete-attempt evidence across failure-marker publication errors and
+  process crashes from the seventh frozen rereview.
 - [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
 - [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
 - [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
@@ -115,7 +120,7 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 41 targeted support tests pass
+- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 43 targeted support tests pass
   and cover
   concurrent JSONL writers, manifest/ready validation, typed secure-read failures,
   symlink-retaining cleanup, recursive cleanup, device-boundary rejection, append-failure
@@ -125,18 +130,18 @@ superseded_by:
   evidence before and after parent-durable final removal, production recovery of partial and
   already-removed staging state, exact rejection of symlink-plus-dot-dot recovery aliases,
   durable poison after local-lock and state-read failure, bounded sealing contention, atomic
-  failure-marker publication against a racing final seal, deterministic final-rmdir recovery,
+  failure-marker publication against a racing final seal, injected failure-marker publication,
+  abandoned-attempt recovery across recorder recreation, deterministic final-rmdir recovery,
   semantic window validation, and deterministic two-second quiet-window reset after a
   one-second-late callback.
 - `python3 scripts/test-fileprovider-fixture-registration.py`: 12 parser/physical-path election,
   strict-UTF-8, malformed exact-bundle text, and exact-path removal tests pass.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
   compiled successfully with signing disabled.
-- The resolved-only complete Swift gate exercised 81 tests on the integrated tree. The fixture
-  and 80 other tests passed; the unrelated subsecond macOS probe deadline test timed out in both
-  standard complete runs but passed its focused rerun and the complete single-worker run, where
-  all 81 tests passed. Canonical binary generation and the Swift/Rust cross-language process
-  tests passed.
+- The resolved-only complete single-worker Swift gate passed all 83 tests on the integrated tree.
+  During the sixth-review gate, the unrelated subsecond macOS probe deadline test timed out in
+  two standard concurrent runs but passed its focused rerun and complete single-worker runs.
+  Canonical binary generation and the Swift/Rust cross-language process tests passed.
 - `scripts/test-macos-capabilities.sh`: 29 `DiskplanMacOS` tests and the live self-test passed;
   the signed fixture and real-host APFS fixture remained explicitly unavailable without their
   opt-in environment variables.
