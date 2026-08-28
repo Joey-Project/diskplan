@@ -43,7 +43,10 @@ also checks the shared `proto/toolchain.lock` and `Package.resolved` pins before
 installing generators. SwiftPM resolve, build, and test commands use
 resolved-only mode. A content-stability guard verifies the exact
 `Package.resolved` bytes before and after every such command, including failure
-paths; a same-byte file replacement is intentionally benign.
+paths; a same-byte file replacement is intentionally benign. The nested
+SwiftPM calls in `scripts/canonical-fixture.sh` and
+`scripts/test-cross-language.sh` also pass `--disable-automatic-resolution`, so
+the digest guard is not the first barrier against dependency resolution.
 
 Only Cargo and SwiftPM dependency downloads are cached. Compiled targets,
 generated sources, test results, and tool downloads are not cached. `Cargo.lock`,
@@ -58,5 +61,10 @@ all-zero before SHA to Git's empty tree, and manual dispatch checks the selected
 revision as a complete tree. Ref names and shell evaluation are not accepted.
 
 On failure, CI uploads only a small allowlisted runner/toolchain manifest for
-seven days. It does not upload source trees, dependency stores, build products,
+seven days. Each command probe has a one-second wall-clock deadline and a
+1 KiB output allowance enforced while its merged output is read; excess output
+or a timeout terminates the probe process group before the bounded result is
+appended. The private same-directory temporary manifest has a separately
+enforced 16 KiB total ceiling and is atomically published only after final
+validation. CI does not upload source trees, dependency stores, build products,
 process dumps, or unrestricted logs.

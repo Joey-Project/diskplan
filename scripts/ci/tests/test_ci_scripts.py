@@ -1,24 +1,33 @@
 from __future__ import annotations
 
+import os
+import re
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 
 CI_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = CI_ROOT.parents[1]
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 ZERO_SHA = "0" * 40
 BASE_SHA = "1" * 40
 HEAD_SHA = "2" * 40
 
 
-def run_script(name: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+def run_script(
+    name: str,
+    *arguments: str,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(CI_ROOT / name), *arguments],
         check=False,
+        env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -52,14 +61,29 @@ class CiScriptTests(unittest.TestCase):
         self.assertEqual(64, result.returncode)
         self.assertIn("exact lowercase 40-character SHA", result.stderr)
 
-    def test_oversized_diagnostics_leave_no_destination_or_temporary(self) -> None:
+    def test_huge_single_line_diagnostic_is_bounded_while_produced(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "runner.txt"
             output.write_bytes(b"stale" * 4096)
-            result = run_script("write-diagnostics.sh", str(output), "20000")
-            self.assertEqual(1, result.returncode)
-            self.assertIn("exceeded 16384 bytes", result.stderr)
-            self.assertFalse(output.exists())
+            started = time.monotonic()
+            result = run_script("write-diagnostics.sh", str(output), "huge")
+            elapsed = time.monotonic() - started
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertLess(elapsed, 5)
+            self.assertLessEqual(output.stat().st_size, 16384)
+            self.assertIn(b"[probe output truncated]", output.read_bytes())
+            self.assertEqual([], list(output.parent.glob(f".{output.name}.tmp.*")))
+
+    def test_hanging_diagnostic_probe_is_killed_before_job_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "runner.txt"
+            started = time.monotonic()
+            result = run_script("write-diagnostics.sh", str(output), "hang")
+            elapsed = time.monotonic() - started
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertLess(elapsed, 5)
+            self.assertLessEqual(output.stat().st_size, 16384)
+            self.assertIn(b"[probe timed out]", output.read_bytes())
             self.assertEqual([], list(output.parent.glob(f".{output.name}.tmp.*")))
 
     def test_valid_diagnostics_publish_private_bounded_file(self) -> None:
@@ -111,6 +135,64 @@ class CiScriptTests(unittest.TestCase):
             )
             self.assertEqual(7, result.returncode)
             self.assertEqual(b"locked", lockfile.read_bytes())
+
+    def test_nested_scripts_lock_every_swiftpm_invocation(self) -> None:
+        expected_counts = {
+            "scripts/canonical-fixture.sh": 1,
+            "scripts/test-cross-language.sh": 2,
+        }
+        pattern = re.compile(r"\bswift\s+(?:build|run)\b")
+        for relative_path, expected_count in expected_counts.items():
+            with self.subTest(script=relative_path):
+                source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                commands = [
+                    line.strip()
+                    for line in source.splitlines()
+                    if pattern.search(line) and not line.lstrip().startswith("#")
+                ]
+                self.assertEqual(expected_count, len(commands), commands)
+                for command in commands:
+                    self.assertIn("--disable-automatic-resolution", command)
+
+    def test_cross_language_executes_locked_nested_swiftpm_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool_directory = root / "tools"
+            engine_directory = root / "engine"
+            tool_directory.mkdir()
+            engine_directory.mkdir()
+            log = root / "swift.log"
+
+            fake_swift = tool_directory / "swift"
+            fake_swift.write_text(
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_SWIFT_LOG\"\n"
+                "if [[ \" $* \" == *\" --show-bin-path \"* ]]; then\n"
+                "    printf '%s\\n' \"$FAKE_SWIFT_BIN_DIR\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_swift.chmod(0o700)
+            fake_cargo = tool_directory / "cargo"
+            fake_cargo.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            fake_cargo.chmod(0o700)
+            fake_engine = engine_directory / "diskplan-engine"
+            fake_engine.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            fake_engine.chmod(0o700)
+
+            environment = os.environ.copy()
+            environment["PATH"] = f"{tool_directory}{os.pathsep}{environment['PATH']}"
+            environment["FAKE_SWIFT_LOG"] = str(log)
+            environment["FAKE_SWIFT_BIN_DIR"] = str(engine_directory)
+            result = run_script(
+                "../test-cross-language.sh",
+                environment=environment,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            invocations = log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(3, len(invocations), invocations)
+            for invocation in invocations:
+                self.assertIn("--disable-automatic-resolution", invocation)
 
 
 if __name__ == "__main__":
