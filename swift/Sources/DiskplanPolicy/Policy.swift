@@ -170,16 +170,12 @@ public struct PolicyEvaluation: Equatable, Sendable {
   public let sourceBinding: PolicyEvaluationSourceBinding?
 
   public init(
-    votes: [GateVote],
-    providerBound: Bool = false,
-    classificationConflict: Bool = false,
-    defaultReviewRecommendation: Recommendation = .needsSemanticReview
+    votes: [GateVote]
   ) throws {
     try self.init(
       votes: votes,
-      providerBound: providerBound,
-      classificationConflict: classificationConflict,
-      defaultReviewRecommendation: defaultReviewRecommendation,
+      providerBound: false,
+      classificationConflict: false,
       sourceBinding: nil
     )
   }
@@ -188,14 +184,12 @@ public struct PolicyEvaluation: Equatable, Sendable {
     votes: [GateVote],
     providerBound: Bool,
     classificationConflict: Bool,
-    defaultReviewRecommendation: Recommendation,
     sourceBinding: PolicyEvaluationSourceBinding
   ) throws {
     try self.init(
       votes: votes,
       providerBound: providerBound,
       classificationConflict: classificationConflict,
-      defaultReviewRecommendation: defaultReviewRecommendation,
       sourceBinding: Optional(sourceBinding)
     )
   }
@@ -204,14 +198,8 @@ public struct PolicyEvaluation: Equatable, Sendable {
     votes: [GateVote],
     providerBound: Bool,
     classificationConflict: Bool,
-    defaultReviewRecommendation: Recommendation,
     sourceBinding: PolicyEvaluationSourceBinding?
   ) throws {
-    guard
-      [.likelyRebuildable, .needsSemanticReview, .keep].contains(
-        defaultReviewRecommendation
-      )
-    else { throw PolicyModelError.invalidGateSet }
     let dimensions = votes.map(\.dimension)
     guard dimensions.count == GateDimension.allCases.count,
       Set(dimensions).count == GateDimension.allCases.count,
@@ -252,7 +240,15 @@ public struct PolicyEvaluation: Equatable, Sendable {
     } else if !conditions.isEmpty && predicates.isEmpty {
       recommendation = .safeAfterExit
     } else if !predicates.isEmpty || !conditions.isEmpty {
-      recommendation = defaultReviewRecommendation
+      if predicates.contains(where: { $0.kind == .normalKeepPolicy }) {
+        recommendation = .keep
+      } else if !predicates.isEmpty
+        && predicates.allSatisfy({ $0.kind == .staticOnlyRebuildEvidence })
+      {
+        recommendation = .likelyRebuildable
+      } else {
+        recommendation = .needsSemanticReview
+      }
     } else {
       recommendation = .safeToClean
     }
@@ -307,19 +303,11 @@ public struct PolicyEvaluation: Equatable, Sendable {
   func replacingVotesPreservingContext(_ votes: [GateVote]) throws -> Self {
     let providerBound = recommendation == .managedByProvider
     let classificationConflict = recommendation == .classificationConflict
-    let defaultReviewRecommendation: Recommendation
-    switch recommendation {
-    case .likelyRebuildable, .needsSemanticReview, .keep:
-      defaultReviewRecommendation = recommendation
-    default:
-      defaultReviewRecommendation = .needsSemanticReview
-    }
     if let sourceBinding {
       return try Self.init(
         votes: votes,
         providerBound: providerBound,
         classificationConflict: classificationConflict,
-        defaultReviewRecommendation: defaultReviewRecommendation,
         sourceBinding: sourceBinding
       )
     }
@@ -327,7 +315,7 @@ public struct PolicyEvaluation: Equatable, Sendable {
       votes: votes,
       providerBound: providerBound,
       classificationConflict: classificationConflict,
-      defaultReviewRecommendation: defaultReviewRecommendation
+      sourceBinding: nil
     )
   }
 }

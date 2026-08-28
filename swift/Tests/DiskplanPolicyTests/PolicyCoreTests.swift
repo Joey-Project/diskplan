@@ -1445,7 +1445,7 @@ func evidenceAndGlobalFactMutationsChangePlanHash() throws {
       globalFacts: changedFacts,
       evidenceSnapshots: [firstEvidence],
       actions: [firstAction],
-      releaseSets: []
+      releaseGraphBundle: nil
     )
   }
   let changedGlobalEvidence = snapshot(
@@ -1461,7 +1461,7 @@ func evidenceAndGlobalFactMutationsChangePlanHash() throws {
     globalFacts: changedFacts,
     evidenceSnapshots: [changedGlobalEvidence],
     actions: [changedGlobalAction],
-    releaseSets: []
+    releaseGraphBundle: nil
   )
   #expect(first.planHash != changedGlobal.planHash)
 
@@ -1492,7 +1492,7 @@ func evidenceAndGlobalFactMutationsChangePlanHash() throws {
       globalFacts: duplicateCoverageFacts,
       evidenceSnapshots: [firstEvidence],
       actions: [firstAction],
-      releaseSets: []
+      releaseGraphBundle: nil
     )
   }
 }
@@ -1534,11 +1534,10 @@ func planReleaseSetBuildsOnlyFromCompleteEvaluatedGraph() throws {
   let bEvidence = snapshot(candidateID: "b", path: "b", object: 2)
   let a = try makeAction(evidence: aEvidence)
   let b = try makeAction(evidence: bEvidence)
-  let release = try #require(
-    PlanReleaseSet.buildAll(
-      from: evaluated, candidateActions: actionBindings([("a", a), ("b", b)])
-    ).first
+  let releaseBundle = try PlanReleaseSet.buildAll(
+    from: evaluated, candidateActions: actionBindings([("a", a), ("b", b)])
   )
+  let release = try #require(releaseBundle.releaseSets.first)
   #expect(release.ownerCandidateIDs == ["a", "b"])
   #expect(release.conditionalReclaimBytes == 100)
   #expect(release.graphDigest == graph.graphDigest)
@@ -1559,7 +1558,7 @@ func planReleaseSetBuildsOnlyFromCompleteEvaluatedGraph() throws {
     candidateID: "a", path: "a", object: 1, rootObject: 999
   )
   let wrongA = try makeAction(evidence: wrongAEvidence)
-  #expect(throws: PolicyModelError.releaseOwnerBindingMismatch("a")) {
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
     try PlanReleaseSet.buildAll(
       from: evaluated, candidateActions: actionBindings([("a", wrongA), ("b", b)])
     )
@@ -1567,7 +1566,7 @@ func planReleaseSetBuildsOnlyFromCompleteEvaluatedGraph() throws {
 
   let alternateA = try makeAction(evidence: aEvidence, prerequisites: [b])
   #expect(alternateA.id != a.id)
-  #expect(throws: PolicyModelError.releaseOwnerBindingMismatch("a")) {
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
     try PlanReleaseSet.buildAll(
       from: evaluated, candidateActions: actionBindings([("a", alternateA), ("b", b)])
     )
@@ -1640,12 +1639,11 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
   let evaluated = try graph.evaluate(
     selectedCandidateActions: actionBindings([("a", a), ("b", b)])
   )
-  let release = try #require(
-    PlanReleaseSet.buildAll(
-      from: evaluated,
-      candidateActions: actionBindings([("a", a), ("b", b)])
-    ).first
+  let releaseBundle = try PlanReleaseSet.buildAll(
+    from: evaluated,
+    candidateActions: actionBindings([("a", a), ("b", b)])
   )
+  let release = try #require(releaseBundle.releaseSets.first)
   let releaseAction = try makeAction(
     evidence: aEvidence,
     facts: graph.globalFacts,
@@ -1656,21 +1654,15 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
     actions: [a, b, releaseAction],
     evidence: [aEvidence, bEvidence],
     facts: graph.globalFacts,
-    releaseSets: [release]
+    releaseGraphBundle: releaseBundle
   )
   #expect(plan.releaseSets == [release])
 
-  let unsequencedReleaseAction = try makeAction(
-    evidence: aEvidence,
-    facts: graph.globalFacts,
-    request: .completeReleaseSetRemove(binding: release.actionBinding)
-  )
   #expect(throws: PolicyModelError.invalidActionContract) {
-    try makePlan(
-      actions: [a, b, unsequencedReleaseAction],
-      evidence: [aEvidence, bEvidence],
+    try makeAction(
+      evidence: aEvidence,
       facts: graph.globalFacts,
-      releaseSets: [release]
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
     )
   }
 
@@ -1679,7 +1671,7 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
       actions: [a, b, releaseAction],
       evidence: [aEvidence, bEvidence],
       facts: graph.globalFacts,
-      releaseSets: []
+      releaseGraphBundle: nil
     )
   }
 
@@ -1687,12 +1679,11 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
   let changedEvaluation = try changedGraph.evaluate(
     selectedCandidateActions: actionBindings([("a", a), ("b", b)])
   )
-  let changedRelease = try #require(
-    PlanReleaseSet.buildAll(
-      from: changedEvaluation,
-      candidateActions: actionBindings([("a", a), ("b", b)])
-    ).first
+  let changedBundle = try PlanReleaseSet.buildAll(
+    from: changedEvaluation,
+    candidateActions: actionBindings([("a", a), ("b", b)])
   )
+  let changedRelease = try #require(changedBundle.releaseSets.first)
   let unmatchedAction = try makeAction(
     evidence: aEvidence,
     facts: graph.globalFacts,
@@ -1704,7 +1695,7 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
       actions: [a, b, unmatchedAction],
       evidence: [aEvidence, bEvidence],
       facts: graph.globalFacts,
-      releaseSets: [release]
+      releaseGraphBundle: releaseBundle
     )
   }
 
@@ -1732,7 +1723,332 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
         $0.id < $1.id
       })
   #expect(validated.executionSteps.first?.prerequisiteStepActionIDs == [])
+  #expect(validated.executionSteps.first?.releaseGraphManifest == releaseBundle.manifest)
   #expect(validated.activatedReleaseSets == [release])
+}
+
+@Test
+func releaseGraphManifestRejectsSlicesMixesDuplicatesAndMissingGroups() throws {
+  let graph = try twoGroupStorageGraph()
+  let actions = try graph.candidates.map {
+    try makeAction(evidence: $0.evidence, facts: graph.globalFacts)
+  }
+  let bindings = zip(graph.candidates, actions).map { pair in
+    CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+  }
+  let evaluation = try graph.evaluate(selectedCandidateActions: bindings)
+  let bundle = try PlanReleaseSet.buildAll(
+    from: evaluation, candidateActions: bindings
+  )
+  let reversedBundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: Array(bindings.reversed())),
+    candidateActions: Array(bindings.reversed())
+  )
+  #expect(bundle == reversedBundle)
+  #expect(bundle.manifest.allocationGroupIDs == ["group-one", "group-two"])
+  #expect(bundle.manifest.allocationGroupCount == 2)
+  #expect(bundle.manifest.candidateActions.map(\.candidateID) == ["a", "b", "c", "d"])
+  #expect(bundle.manifest.connectedComponents.count == 2)
+  _ = try makePlan(
+    actions: actions,
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+
+  let first = try #require(bundle.releaseSets.first)
+  let last = try #require(bundle.releaseSets.last)
+  let sliced = PlanReleaseGraphBundle(
+    uncheckedManifest: bundle.manifest, releaseSets: [first]
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try makePlan(
+      actions: actions,
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: sliced
+    )
+  }
+
+  let missing = PlanReleaseGraphBundle(
+    uncheckedManifest: bundle.manifest, releaseSets: [last]
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try makePlan(
+      actions: actions,
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: missing
+    )
+  }
+
+  let duplicated = PlanReleaseGraphBundle(
+    uncheckedManifest: bundle.manifest, releaseSets: [first, first, last]
+  )
+  #expect(throws: PolicyModelError.duplicateIdentifier) {
+    try makePlan(
+      actions: actions,
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: duplicated
+    )
+  }
+
+  let secondGroup = graph.allocationGroups[1]
+  let changedSecondGroup = AllocationGroupNode(
+    provenance: secondGroup.provenance,
+    id: secondGroup.id,
+    ownerFileObjectIDs: secondGroup.ownerFileObjectIDs,
+    cloneRefCount: secondGroup.cloneRefCount,
+    sharedBytes: .known(201),
+    snapshotBlocker: secondGroup.snapshotBlocker
+  )
+  let changedGraph = try StorageReleaseGraph(
+    globalFacts: graph.globalFacts,
+    candidates: graph.candidates,
+    fileObjects: graph.fileObjects,
+    allocationGroups: [graph.allocationGroups[0], changedSecondGroup]
+  )
+  let changedEvaluation = try changedGraph.evaluate(selectedCandidateActions: bindings)
+  let changedBundle = try PlanReleaseSet.buildAll(
+    from: changedEvaluation, candidateActions: bindings
+  )
+  let mixed = PlanReleaseGraphBundle(
+    uncheckedManifest: bundle.manifest,
+    releaseSets: [first, try #require(changedBundle.releaseSets.last)]
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try makePlan(
+      actions: actions,
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: mixed
+    )
+  }
+
+  let originalA = try #require(actions.first { $0.evidence.candidateID == "a" })
+  let originalB = try #require(actions.first { $0.evidence.candidateID == "b" })
+  let alternateA = try makeAction(
+    evidence: originalA.evidence,
+    facts: graph.globalFacts,
+    prerequisites: [originalB]
+  )
+  let alternateBindings = bindings.map { binding in
+    binding.candidateID == "a"
+      ? CandidateActionBinding(candidateID: "a", action: alternateA) : binding
+  }
+  let alternateBundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: alternateBindings),
+    candidateActions: alternateBindings
+  )
+  let mismatchedCandidateMap = PlanReleaseGraphBundle(
+    uncheckedManifest: alternateBundle.manifest,
+    releaseSets: bundle.releaseSets
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try makePlan(
+      actions: actions + [alternateA],
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: mismatchedCandidateMap
+    )
+  }
+}
+
+@Test
+func releaseManifestBindsPrivateOnlyCandidatesToTheirEvaluatedActionIDs() throws {
+  let base = try completeStorageGraph()
+  let privateOnly = storageCandidate("c", ["c"], 30)
+  let graph = try StorageReleaseGraph(
+    globalFacts: base.globalFacts,
+    candidates: base.candidates + [privateOnly],
+    fileObjects: base.fileObjects,
+    allocationGroups: base.allocationGroups
+  )
+  let actions = try graph.candidates.map {
+    try makeAction(evidence: $0.evidence, facts: graph.globalFacts)
+  }
+  let bindings = zip(graph.candidates, actions).map { pair in
+    CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+  }
+  let evaluation = try graph.evaluate(selectedCandidateActions: bindings)
+  let bundle = try PlanReleaseSet.buildAll(
+    from: evaluation, candidateActions: bindings
+  )
+  #expect(bundle.manifest.candidateActions.map(\.candidateID) == ["a", "b", "c"])
+
+  let omittedEvaluation = try graph.evaluate(
+    selectedCandidateActions: Array(bindings.prefix(2))
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try PlanReleaseSet.buildAll(from: omittedEvaluation, candidateActions: bindings)
+  }
+
+  let originalA = actions[0]
+  let originalC = actions[2]
+  let alternateC = try makeAction(
+    evidence: originalC.evidence,
+    facts: graph.globalFacts,
+    prerequisites: [originalA]
+  )
+  let substitutedBindings = bindings.map { binding in
+    binding.candidateID == "c"
+      ? CandidateActionBinding(candidateID: "c", action: alternateC) : binding
+  }
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try PlanReleaseSet.buildAll(
+      from: evaluation, candidateActions: substitutedBindings
+    )
+  }
+
+  let blockedSource = snapshot(
+    candidateID: "blocked-source", path: "blocked-source", object: 99,
+    explicitProtection: .known(.protected)
+  )
+  let blockedSourceAction = try makeAction(evidence: blockedSource)
+  let blockedC = ActionDefinition(
+    lineageID: alternateC.lineageID,
+    id: alternateC.id,
+    prototype: alternateC.prototype,
+    evidence: alternateC.evidence,
+    globalFactsHash: alternateC.globalFactsHash,
+    prerequisiteLineageIDs: alternateC.prerequisiteLineageIDs,
+    prerequisiteActionIDs: alternateC.prerequisiteActionIDs,
+    evaluation: blockedSourceAction.evaluation,
+    displayMetrics: alternateC.displayMetrics
+  )
+  let blockedBindings = bindings.map { binding in
+    binding.candidateID == "c"
+      ? CandidateActionBinding(candidateID: "c", action: blockedC) : binding
+  }
+  let blockedGraphEvaluation = try graph.evaluate(
+    selectedCandidateActions: blockedBindings
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try PlanReleaseSet.buildAll(
+      from: blockedGraphEvaluation, candidateActions: blockedBindings
+    )
+  }
+}
+
+@Test
+func fullReleaseManifestAllowsAggregateActionsForOnlyOneVerifiedGroup() throws {
+  let graph = try twoGroupStorageGraph()
+  let actions = try graph.candidates.map {
+    try makeAction(evidence: $0.evidence, facts: graph.globalFacts)
+  }
+  let bindings = zip(graph.candidates, actions).map { pair in
+    CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let firstRelease = try #require(
+    bundle.releaseSets.first { $0.allocationGroupID == "group-one" }
+  )
+  let ownerActions = actions.filter { firstRelease.ownerActionIDs.contains($0.id) }
+  let anchor = try #require(ownerActions.first { $0.evidence.candidateID == "a" })
+  let aggregate = try makeAction(
+    evidence: anchor.evidence,
+    facts: graph.globalFacts,
+    prerequisites: ownerActions,
+    request: .completeReleaseSetRemove(binding: firstRelease.actionBinding)
+  )
+  let plan = try makePlan(
+    actions: actions + [aggregate],
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: firstRelease.ownerActionIDs + [aggregate.id],
+    waiverConsents: [],
+    userNotes: []
+  )
+  let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
+  #expect(validated.activatedReleaseSets == [firstRelease])
+  #expect(validated.executionSteps.map(\.action) == [aggregate])
+  #expect(validated.executionSteps.first?.releaseGraphManifest == bundle.manifest)
+}
+
+@Test
+func completeReleaseLineageIgnoresReferenceEpochButBindsSemanticTopology() throws {
+  func aggregateAction(
+    facts: FrozenGlobalFacts,
+    changedTopology: Bool
+  ) throws -> ActionDefinition {
+    let original = try completeStorageGraph(
+      includeReleaseActionScope: true, facts: facts
+    )
+    let graph: StorageReleaseGraph
+    if changedTopology {
+      let changedFiles = original.fileObjects.map { file -> FileObjectNode in
+        guard file.id == "file-a" else { return file }
+        return FileObjectNode(
+          provenance: file.provenance,
+          id: "file-a-v2",
+          observedOwners: file.observedOwners,
+          linkCount: file.linkCount
+        )
+      }
+      let originalGroup = original.allocationGroups[0]
+      let changedGroup = AllocationGroupNode(
+        provenance: originalGroup.provenance,
+        id: originalGroup.id,
+        ownerFileObjectIDs: originalGroup.ownerFileObjectIDs.map {
+          $0 == "file-a" ? "file-a-v2" : $0
+        },
+        cloneRefCount: originalGroup.cloneRefCount,
+        sharedBytes: originalGroup.sharedBytes,
+        snapshotBlocker: originalGroup.snapshotBlocker
+      )
+      graph = try StorageReleaseGraph(
+        globalFacts: facts,
+        candidates: original.candidates,
+        fileObjects: changedFiles,
+        allocationGroups: [changedGroup]
+      )
+    } else {
+      graph = original
+    }
+    let ownerActions = try graph.candidates.map {
+      try makeAction(evidence: $0.evidence, facts: facts)
+    }
+    let bindings = zip(graph.candidates, ownerActions).map { pair in
+      CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+    }
+    let bundle = try PlanReleaseSet.buildAll(
+      from: graph.evaluate(selectedCandidateActions: bindings),
+      candidateActions: bindings
+    )
+    let release = try #require(bundle.releaseSets.first)
+    let anchor = try #require(ownerActions.first { $0.evidence.candidateID == "a" })
+    return try makeAction(
+      evidence: anchor.evidence,
+      facts: facts,
+      prerequisites: ownerActions,
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
+    )
+  }
+
+  let epoch100 = try aggregateAction(
+    facts: globalFacts(semanticReferenceTimeSeconds: 100),
+    changedTopology: false
+  )
+  let epoch101 = try aggregateAction(
+    facts: globalFacts(semanticReferenceTimeSeconds: 101),
+    changedTopology: false
+  )
+  #expect(epoch100.lineageID == epoch101.lineageID)
+  #expect(epoch100.id != epoch101.id)
+
+  let changedTopology = try aggregateAction(
+    facts: globalFacts(semanticReferenceTimeSeconds: 101),
+    changedTopology: true
+  )
+  #expect(epoch101.lineageID != changedTopology.lineageID)
 }
 
 @Test
@@ -1979,13 +2295,12 @@ func overlayActivatesSharedReleaseOnlyWhenEveryOwnerActionIsSelected() throws {
   let bEvidence = snapshot(candidateID: "b", path: "b", object: 2)
   let a = try makeAction(evidence: aEvidence)
   let b = try makeAction(evidence: bEvidence)
-  let release = try #require(
-    PlanReleaseSet.buildAll(
-      from: evaluated, candidateActions: actionBindings([("a", a), ("b", b)])
-    ).first
+  let releaseBundle = try PlanReleaseSet.buildAll(
+    from: evaluated, candidateActions: actionBindings([("a", a), ("b", b)])
   )
+  let release = try #require(releaseBundle.releaseSets.first)
   let plan = try makePlan(
-    actions: [a, b], evidence: [aEvidence, bEvidence], releaseSets: [release]
+    actions: [a, b], evidence: [aEvidence, bEvidence], releaseGraphBundle: releaseBundle
   )
   let partial = DecisionOverlay.create(
     plan: plan, selectedActionIDs: [a.id], waiverConsents: [], userNotes: []
@@ -1993,6 +2308,8 @@ func overlayActivatesSharedReleaseOnlyWhenEveryOwnerActionIsSelected() throws {
   let partialResult = try DecisionOverlayValidator.validate(partial, against: plan)
   #expect(partialResult.selectedActions == [a])
   #expect(partialResult.activatedReleaseSets.isEmpty)
+  #expect(partialResult.releaseGraphManifest == releaseBundle.manifest)
+  #expect(partialResult.executionSteps.first?.releaseGraphManifest == releaseBundle.manifest)
 
   let full = DecisionOverlay.create(
     plan: plan, selectedActionIDs: [a.id, b.id], waiverConsents: [], userNotes: []
@@ -2231,6 +2548,72 @@ func displayTierIsDerivedFromFinalSafetyAndRejectsForgedPlanMetrics() throws {
   )
   #expect(throws: PolicyModelError.invalidActionBinding(blocked.id)) {
     try makePlan(actions: [forgedBlocked], evidence: [blockedEvidence])
+  }
+}
+
+@Test
+func sourceBoundVotesAuthoritativelyDeriveRecommendationAndRejectTransplants() throws {
+  let rebuildableEvidence = snapshot(
+    candidateID: "rebuildable", path: "rebuildable", object: 1,
+    recoverability: .known(.reviewRequired),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(101))
+    ]
+  )
+  let rebuildable = try makeAction(evidence: rebuildableEvidence)
+  #expect(rebuildable.evaluation.sourceBinding != nil)
+  #expect(rebuildable.evaluation.recommendation == .likelyRebuildable)
+  #expect(rebuildable.evaluation.stageability != .stageable)
+  #expect(rebuildable.displayMetrics.tier == .rebuildable)
+
+  let reviewEvidence = snapshot(
+    candidateID: "review", path: "review", object: 2,
+    recoverability: .known(.reviewRequired),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(102)),
+      .unknownRebuildCost(valueBucket: "unknown", evidenceHash: digest(103)),
+    ]
+  )
+  let review = try makeAction(evidence: reviewEvidence)
+  #expect(review.evaluation.sourceBinding != nil)
+  #expect(review.evaluation.recommendation == .needsSemanticReview)
+  #expect(review.displayMetrics.tier == .review)
+
+  let semanticReviewEvidence = snapshot(
+    candidateID: "semantic", path: "semantic", object: 3,
+    recoverability: .known(.reviewRequired),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(104))
+    ],
+    semanticReviewFacts: [
+      .recencyAgePolicy(valueBucket: "recent", evidenceHash: digest(105))
+    ]
+  )
+  let semanticReview = try makeAction(evidence: semanticReviewEvidence)
+  #expect(semanticReview.evaluation.recommendation == .needsSemanticReview)
+  #expect(semanticReview.displayMetrics.tier == .review)
+
+  let blockedEvidence = snapshot(
+    candidateID: "blocked-recommendation", path: "blocked-recommendation", object: 4,
+    explicitProtection: .known(.protected)
+  )
+  let blocked = try makeAction(evidence: blockedEvidence)
+  #expect(blocked.evaluation.recommendation == .keep)
+  #expect(blocked.displayMetrics.tier == .blocked)
+
+  let forgedRecommendation = ActionDefinition(
+    lineageID: review.lineageID,
+    id: review.id,
+    prototype: review.prototype,
+    evidence: review.evidence,
+    globalFactsHash: review.globalFactsHash,
+    prerequisiteLineageIDs: review.prerequisiteLineageIDs,
+    prerequisiteActionIDs: review.prerequisiteActionIDs,
+    evaluation: rebuildable.evaluation,
+    displayMetrics: review.displayMetrics
+  )
+  #expect(throws: PolicyModelError.invalidActionBinding(review.id)) {
+    try makePlan(actions: [forgedRecommendation], evidence: [reviewEvidence])
   }
 }
 
@@ -2604,7 +2987,7 @@ private func makePlan(
   actions: [ActionDefinition],
   evidence: [FrozenEvidenceSnapshot],
   facts: FrozenGlobalFacts = globalFacts(),
-  releaseSets: [PlanReleaseSet] = []
+  releaseGraphBundle: PlanReleaseGraphBundle? = nil
 ) throws -> ImmutablePlan {
   try ImmutablePlan(
     policyVersion: "policy-1",
@@ -2612,7 +2995,7 @@ private func makePlan(
     globalFacts: facts,
     evidenceSnapshots: evidence,
     actions: actions,
-    releaseSets: releaseSets
+    releaseGraphBundle: releaseGraphBundle
   )
 }
 
@@ -2639,13 +3022,23 @@ private func storageCandidate(
   _ path: [String],
   _ bytes: UInt64,
   providerState: ProviderState = .local,
-  additionalAdapterScopes: [AdapterScopeEvidence] = []
+  additionalAdapterScopes: [AdapterScopeEvidence] = [],
+  facts: FrozenGlobalFacts = globalFacts()
 ) -> StorageCandidate {
-  let object: UInt64 = id == "a" ? 1 : (id == "b" ? 2 : 100)
+  let object: UInt64
+  switch id {
+  case "a": object = 1
+  case "b": object = 2
+  case "c": object = 3
+  case "d": object = 4
+  default: object = 100
+  }
   let evidence = snapshot(
     candidateID: id, path: path.joined(separator: "/"), object: object,
     additionalAdapterScopes: additionalAdapterScopes,
-    targetProviderState: providerState
+    targetProviderState: providerState,
+    semanticReferenceTimeSeconds: facts.semanticReferenceTimeSeconds,
+    globalFactsOverride: facts
   )
   return try! StorageCandidate(
     id: id,
@@ -2682,10 +3075,11 @@ private func allocationGroup(
   _ id: String,
   owners: [String],
   refCount: UInt32,
-  bytes: UInt64
+  bytes: UInt64,
+  facts: FrozenGlobalFacts = globalFacts()
 ) -> AllocationGroupNode {
   AllocationGroupNode(
-    provenance: graphProvenance(),
+    provenance: graphProvenance(facts: facts),
     id: id,
     ownerFileObjectIDs: owners,
     cloneRefCount: .known(refCount),
@@ -2702,34 +3096,83 @@ private func graphProvenance(
 
 private func completeStorageGraph(
   providerCandidateID: String? = nil,
-  includeReleaseActionScope: Bool = false
+  includeReleaseActionScope: Bool = false,
+  facts: FrozenGlobalFacts = globalFacts()
 ) throws -> StorageReleaseGraph {
   let releaseScopes: [AdapterScopeEvidence] =
     includeReleaseActionScope ? [.completeReleaseSetRemove(allocationGroupID: "clone")] : []
-  let a = storageCandidate("a", ["a"], 10, additionalAdapterScopes: releaseScopes)
+  let a = storageCandidate(
+    "a", ["a"], 10, additionalAdapterScopes: releaseScopes, facts: facts
+  )
   let b = storageCandidate(
     "b", ["b"], 20,
-    providerState: providerCandidateID == "b" ? .fileProviderManaged : .local
+    providerState: providerCandidateID == "b" ? .fileProviderManaged : .local,
+    facts: facts
   )
   return try StorageReleaseGraph(
-    globalFacts: globalFacts(),
+    globalFacts: facts,
     candidates: [a, b],
     fileObjects: [
       FileObjectNode(
-        provenance: graphProvenance(),
+        provenance: graphProvenance(facts: facts),
         id: "file-a",
         observedOwners: [FileOwnerLink(candidateID: "a", path: a.target)],
         linkCount: .known(1)
       ),
       FileObjectNode(
-        provenance: graphProvenance(),
+        provenance: graphProvenance(facts: facts),
         id: "file-b",
         observedOwners: [FileOwnerLink(candidateID: "b", path: b.target)],
         linkCount: .known(1)
       ),
     ],
     allocationGroups: [
-      allocationGroup("clone", owners: ["file-a", "file-b"], refCount: 2, bytes: 100)
+      allocationGroup(
+        "clone", owners: ["file-a", "file-b"], refCount: 2, bytes: 100, facts: facts
+      )
+    ]
+  )
+}
+
+private func twoGroupStorageGraph(
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let a = storageCandidate(
+    "a", ["a"], 10,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-one")],
+    facts: facts
+  )
+  let b = storageCandidate("b", ["b"], 20, facts: facts)
+  let c = storageCandidate(
+    "c", ["c"], 30,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-two")],
+    facts: facts
+  )
+  let d = storageCandidate("d", ["d"], 40, facts: facts)
+  let candidates = [a, b, c, d]
+  let files = candidates.map { candidate in
+    FileObjectNode(
+      provenance: graphProvenance(facts: facts),
+      id: "file-\(candidate.id)",
+      observedOwners: [
+        FileOwnerLink(candidateID: candidate.id, path: candidate.target)
+      ],
+      linkCount: .known(1)
+    )
+  }
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: candidates,
+    fileObjects: files,
+    allocationGroups: [
+      allocationGroup(
+        "group-one", owners: ["file-a", "file-b"], refCount: 2, bytes: 100,
+        facts: facts
+      ),
+      allocationGroup(
+        "group-two", owners: ["file-c", "file-d"], refCount: 2, bytes: 200,
+        facts: facts
+      ),
     ]
   )
 }

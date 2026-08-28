@@ -100,6 +100,7 @@ public struct NamespaceSealEvidence: Equatable, Sendable {
     encoder.observation(mountIdentity) { $0.string($1) }
     return encoder.data
   }
+
 }
 
 public struct ProtectedNamespaceBinding: Equatable, Sendable {
@@ -933,6 +934,35 @@ public struct CompleteReleaseSetActionBinding: Equatable, Sendable {
     encoder.uint64(conditionalReclaimBytes)
     return encoder.data
   }
+
+  var stableLineageBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encoder.string(allocationGroupID)
+    encoder.array(
+      topologyExpectation.fileObjects.sorted {
+        rawStringPrecedes($0.fileObjectID, $1.fileObjectID)
+      }
+    ) { file in
+      var nested = PolicyBindingEncoder()
+      nested.string(file.fileObjectID)
+      nested.array(
+        file.owners.sorted { left, right in
+          if !rawStringEqual(left.candidateID, right.candidateID) {
+            return rawStringPrecedes(left.candidateID, right.candidateID)
+          }
+          return left.path < right.path
+        }
+      ) { owner in
+        var ownerEncoder = PolicyBindingEncoder()
+        ownerEncoder.string(owner.candidateID)
+        ownerEncoder.data(owner.path.bindingBytes)
+        return ownerEncoder.data
+      }
+      return nested.data
+    }
+    encoder.array(ownerCandidateIDs) { Data($0.utf8) }
+    return encoder.data
+  }
 }
 
 public struct CompleteReleaseSetRemoveContract: Equatable, Sendable {
@@ -1210,6 +1240,11 @@ public struct ActionDefinition: Equatable, Sendable {
             == globalFacts.semanticReferenceTimeSeconds
       })
     else { throw PolicyModelError.mixedPolicyOrSchemaVersion }
+    if case .completeReleaseSetRemove(let contract) = prototype.adapterContract {
+      guard Set(contract.binding.ownerActionIDs).isSubset(of: Set(prerequisites.map(\.id))) else {
+        throw PolicyModelError.invalidActionContract
+      }
+    }
     let effectiveEvaluation = try actionAwareEvaluation(
       evaluation,
       prototype: prototype,
@@ -1417,7 +1452,15 @@ public struct ActionDefinition: Equatable, Sendable {
     )
     let lineage = ActionLineageID(
       digest: PolicyBindings.digest(kind: "action-lineage") { encoder in
-        encodePrototype(prototype, into: &encoder)
+        if case .completeReleaseSetRemove(let contract) = prototype.adapterContract {
+          encoder.string(prototype.policyVersion)
+          encoder.string(prototype.schemaVersion)
+          encoder.uint8(5)
+          encoder.data(contract.binding.stableLineageBytes)
+          encodePostcondition(prototype.postcondition, into: &encoder)
+        } else {
+          encodePrototype(prototype, into: &encoder)
+        }
         encoder.array(prerequisiteLineageIDs) { $0.digest.bytes }
       }
     )
@@ -1427,6 +1470,9 @@ public struct ActionDefinition: Equatable, Sendable {
         encoder.data(evidence.evidenceID.bytes)
         encoder.data(globalFactsHash.bytes)
         encoder.array(prerequisiteActionIDs) { $0.digest.bytes }
+        if case .completeReleaseSetRemove(let contract) = prototype.adapterContract {
+          encoder.data(contract.binding.bindingBytes)
+        }
         encodeEvaluation(evaluation, into: &encoder)
       }
     )
@@ -1733,10 +1779,13 @@ public struct PlanReleaseSet: Equatable, Sendable {
   public static func buildAll(
     from evaluation: ReleaseGraphEvaluation,
     candidateActions: [CandidateActionBinding]
-  ) throws -> [Self] {
+  ) throws -> PlanReleaseGraphBundle {
     guard evaluation.blockers.isEmpty,
       case .known(let immediateBytes) = evaluation.immediatePrivateReclaimBytes,
       case .known(let conditionalBytes) = evaluation.conditionalGroupReclaimBytes,
+      !evaluation.releaseSets.isEmpty,
+      Set(evaluation.releaseSets.map { Data($0.allocationGroupID.utf8) }).count
+        == evaluation.releaseSets.count,
       evaluation.releaseSets.allSatisfy({
         $0.isComplete && $0.graphDigest == evaluation.graphDigest
       })
@@ -1746,13 +1795,31 @@ public struct PlanReleaseSet: Equatable, Sendable {
     }
 
     let candidateActionKeys = candidateActions.map { Data($0.candidateID.utf8) }
-    guard Set(candidateActionKeys).count == candidateActions.count else {
-      throw PolicyModelError.duplicateIdentifier
+    let evaluationCandidateKeys = evaluation.candidateIDs.map { Data($0.utf8) }
+    guard Set(candidateActionKeys).count == candidateActions.count,
+      Set(evaluationCandidateKeys).count == evaluation.candidateIDs.count
+    else { throw PolicyModelError.duplicateIdentifier }
+    guard Set(candidateActionKeys) == Set(evaluationCandidateKeys),
+      evaluation.evaluatedActionIDByCandidate.count == evaluation.candidateIDs.count,
+      candidateActions.allSatisfy({ binding in
+        evaluation.evaluatedActionIDByCandidate[Data(binding.candidateID.utf8)]
+          == binding.action.id
+          && rawStringEqual(binding.candidateID, binding.action.evidence.candidateID)
+          && binding.action.globalFactsHash == evaluation.provenance.globalFactsHash
+          && rawStringEqual(
+            binding.action.prototype.policyVersion, evaluation.provenance.policyVersion)
+          && rawStringEqual(
+            binding.action.prototype.schemaVersion, evaluation.provenance.schemaVersion)
+          && binding.action.evidence.semanticReferenceTimeSeconds
+            == evaluation.provenance.semanticReferenceTimeSeconds
+      })
+    else {
+      throw PolicyModelError.incompleteReleaseGraph
     }
     let actionByCandidateID = Dictionary(
       uniqueKeysWithValues: zip(candidateActionKeys, candidateActions.map(\.action))
     )
-    return try evaluation.releaseSets.map { evaluated in
+    let releaseSets = try evaluation.releaseSets.map { evaluated in
       guard let bytes = evaluated.conditionalReclaimBytes, !evaluated.owners.isEmpty else {
         throw PolicyModelError.incompleteReleaseSet(evaluated.allocationGroupID)
       }
@@ -1781,6 +1848,13 @@ public struct PlanReleaseSet: Equatable, Sendable {
         conditionalReclaimBytes: bytes
       )
     }.sorted { rawStringPrecedes($0.allocationGroupID, $1.allocationGroupID) }
+    let manifest = ReleaseGraphManifest.make(
+      graphDigest: evaluation.graphDigest,
+      graphProvenance: evaluation.provenance,
+      releaseSets: releaseSets,
+      candidateActions: candidateActions
+    )
+    return PlanReleaseGraphBundle(manifest: manifest, releaseSets: releaseSets)
   }
 
   private static func actionReleasesOwner(
@@ -1808,6 +1882,127 @@ public struct PlanReleaseSet: Equatable, Sendable {
   }
 }
 
+public struct ReleaseGraphCandidateActionManifestEntry: Equatable, Sendable {
+  public let candidateID: String
+  public let actionID: ActionID
+
+  fileprivate var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encoder.string(candidateID)
+    encoder.data(actionID.digest.bytes)
+    return encoder.data
+  }
+}
+
+public struct ReleaseGraphComponentManifest: Equatable, Sendable {
+  public let allocationGroupIDs: [String]
+  public let candidateIDs: [String]
+  public let topologyDigest: PolicyDigest
+
+  fileprivate var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encoder.array(allocationGroupIDs) { Data($0.utf8) }
+    encoder.array(candidateIDs) { Data($0.utf8) }
+    encoder.data(topologyDigest.bytes)
+    return encoder.data
+  }
+}
+
+public struct ReleaseGraphManifest: Equatable, Sendable {
+  public let graphDigest: PolicyDigest
+  public let graphProvenance: StorageGraphProvenance
+  public let allocationGroupIDs: [String]
+  public let allocationGroupCount: UInt64
+  public let candidateActions: [ReleaseGraphCandidateActionManifestEntry]
+  public let connectedComponents: [ReleaseGraphComponentManifest]
+  public let manifestDigest: PolicyDigest
+
+  fileprivate static func make(
+    graphDigest: PolicyDigest,
+    graphProvenance: StorageGraphProvenance,
+    releaseSets: [PlanReleaseSet],
+    candidateActions: [CandidateActionBinding]
+  ) -> Self {
+    let actionEntries = candidateActions.map {
+      ReleaseGraphCandidateActionManifestEntry(
+        candidateID: $0.candidateID,
+        actionID: $0.action.id
+      )
+    }.sorted { rawStringPrecedes($0.candidateID, $1.candidateID) }
+    return make(
+      graphDigest: graphDigest,
+      graphProvenance: graphProvenance,
+      releaseSets: releaseSets,
+      candidateActionEntries: actionEntries
+    )
+  }
+
+  fileprivate static func make(
+    graphDigest: PolicyDigest,
+    graphProvenance: StorageGraphProvenance,
+    releaseSets: [PlanReleaseSet],
+    candidateActionEntries: [ReleaseGraphCandidateActionManifestEntry]
+  ) -> Self {
+    let groupIDs = releaseSets.map(\.allocationGroupID).sorted(by: rawStringPrecedes)
+    let actionEntries = candidateActionEntries.sorted {
+      rawStringPrecedes($0.candidateID, $1.candidateID)
+    }
+    let components = connectedReleaseComponents(releaseSets)
+    let binding = manifestBindingBytes(
+      graphDigest: graphDigest,
+      graphProvenance: graphProvenance,
+      allocationGroupIDs: groupIDs,
+      candidateActions: actionEntries,
+      connectedComponents: components
+    )
+    return Self(
+      graphDigest: graphDigest,
+      graphProvenance: graphProvenance,
+      allocationGroupIDs: groupIDs,
+      allocationGroupCount: UInt64(groupIDs.count),
+      candidateActions: actionEntries,
+      connectedComponents: components,
+      manifestDigest: PolicyBindings.digest(kind: "release-graph-manifest") {
+        $0.data(binding)
+      }
+    )
+  }
+
+  fileprivate var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encoder.data(manifestCoreBindingBytes)
+    encoder.data(manifestDigest.bytes)
+    return encoder.data
+  }
+
+  fileprivate var manifestCoreBindingBytes: Data {
+    manifestBindingBytes(
+      graphDigest: graphDigest,
+      graphProvenance: graphProvenance,
+      allocationGroupIDs: allocationGroupIDs,
+      candidateActions: candidateActions,
+      connectedComponents: connectedComponents
+    )
+  }
+}
+
+public struct PlanReleaseGraphBundle: Equatable, Sendable {
+  public let manifest: ReleaseGraphManifest
+  public let releaseSets: [PlanReleaseSet]
+
+  fileprivate init(manifest: ReleaseGraphManifest, releaseSets: [PlanReleaseSet]) {
+    self.manifest = manifest
+    self.releaseSets = releaseSets.sorted {
+      rawStringPrecedes($0.allocationGroupID, $1.allocationGroupID)
+    }
+  }
+
+  init(uncheckedManifest: ReleaseGraphManifest, releaseSets: [PlanReleaseSet]) {
+    manifest = uncheckedManifest
+    self.releaseSets = releaseSets
+  }
+}
+
 public struct ImmutablePlan: Equatable, Sendable {
   public let policyVersion: String
   public let schemaVersion: String
@@ -1815,6 +2010,7 @@ public struct ImmutablePlan: Equatable, Sendable {
   public let evidenceSnapshots: [FrozenEvidenceSnapshot]
   public let evidenceHash: PolicyDigest
   public let actions: [ActionDefinition]
+  public let releaseGraphManifest: ReleaseGraphManifest?
   public let releaseSets: [PlanReleaseSet]
   public let releaseGraphDigest: PolicyDigest?
   public let planHash: PolicyDigest
@@ -1825,7 +2021,7 @@ public struct ImmutablePlan: Equatable, Sendable {
     globalFacts: FrozenGlobalFacts,
     evidenceSnapshots: [FrozenEvidenceSnapshot],
     actions: [ActionDefinition],
-    releaseSets: [PlanReleaseSet]
+    releaseGraphBundle: PlanReleaseGraphBundle?
   ) throws {
     guard rawStringEqual(globalFacts.policyVersion, policyVersion),
       rawStringEqual(globalFacts.schemaVersion, schemaVersion)
@@ -1939,8 +2135,11 @@ public struct ImmutablePlan: Equatable, Sendable {
       else { throw PolicyModelError.invalidActionContract }
     }
 
-    let canonicalReleaseSets = releaseSets.sorted {
+    let canonicalReleaseSets = (releaseGraphBundle?.releaseSets ?? []).sorted {
       rawStringPrecedes($0.allocationGroupID, $1.allocationGroupID)
+    }
+    guard (releaseGraphBundle == nil) == canonicalReleaseSets.isEmpty else {
+      throw PolicyModelError.incompleteReleaseGraph
     }
     guard
       Set(canonicalReleaseSets.map { Data($0.allocationGroupID.utf8) }).count
@@ -1983,6 +2182,45 @@ public struct ImmutablePlan: Equatable, Sendable {
       encoder.array(evidence) { $0.bindingBytes }
     }
     guard graphProvenances.allSatisfy({ $0.evidenceHash == evidenceHash }) else {
+      throw PolicyModelError.incompleteReleaseGraph
+    }
+    if let manifest = releaseGraphBundle?.manifest {
+      let candidateKeys = manifest.candidateActions.map { Data($0.candidateID.utf8) }
+      guard !manifest.candidateActions.isEmpty,
+        Set(candidateKeys).count == manifest.candidateActions.count,
+        Set(manifest.candidateActions.map(\.actionID)).count
+          == manifest.candidateActions.count,
+        Set(candidateKeys) == Set(evidence.map { Data($0.candidateID.utf8) }),
+        graphDigests == Set([manifest.graphDigest]),
+        graphProvenances.allSatisfy({ $0 == manifest.graphProvenance })
+      else { throw PolicyModelError.incompleteReleaseGraph }
+      for entry in manifest.candidateActions {
+        guard let action = actionByID[entry.actionID],
+          rawStringEqual(action.evidence.candidateID, entry.candidateID)
+        else { throw PolicyModelError.incompleteReleaseGraph }
+      }
+      let manifestActionByCandidate = Dictionary(
+        uniqueKeysWithValues: manifest.candidateActions.map {
+          (Data($0.candidateID.utf8), $0.actionID)
+        }
+      )
+      guard
+        canonicalReleaseSets.allSatisfy({ releaseSet in
+          releaseSet.owners.allSatisfy { owner in
+            manifestActionByCandidate[Data(owner.candidateID.utf8)] == owner.actionID
+          }
+        })
+      else { throw PolicyModelError.incompleteReleaseGraph }
+      let expectedManifest = ReleaseGraphManifest.make(
+        graphDigest: manifest.graphDigest,
+        graphProvenance: manifest.graphProvenance,
+        releaseSets: canonicalReleaseSets,
+        candidateActionEntries: manifest.candidateActions
+      )
+      guard manifest == expectedManifest else {
+        throw PolicyModelError.incompleteReleaseGraph
+      }
+    } else if !canonicalReleaseSets.isEmpty {
       throw PolicyModelError.incompleteReleaseGraph
     }
     let releaseActionBindings = canonicalActions.compactMap { action -> Data? in
@@ -2036,6 +2274,7 @@ public struct ImmutablePlan: Equatable, Sendable {
     self.evidenceSnapshots = evidence
     self.evidenceHash = evidenceHash
     self.actions = canonicalActions
+    self.releaseGraphManifest = releaseGraphBundle?.manifest
     self.releaseSets = canonicalReleaseSets
     self.releaseGraphDigest = graphDigests.first
     self.planHash = PolicyBindings.digest(kind: "plan") { encoder in
@@ -2048,6 +2287,12 @@ public struct ImmutablePlan: Equatable, Sendable {
         nested.data(action.id.digest.bytes)
         Self.encodeDisplayMetrics(action.displayMetrics, into: &nested)
         return nested.data
+      }
+      if let manifest = releaseGraphBundle?.manifest {
+        encoder.bool(true)
+        encoder.data(manifest.bindingBytes)
+      } else {
+        encoder.bool(false)
       }
       encoder.array(canonicalReleaseSets) { releaseSet in
         var nested = PolicyBindingEncoder()
@@ -2367,23 +2612,27 @@ public struct ValidatedExecutionStep: Equatable, Sendable {
   public let prerequisiteStepActionIDs: [ActionID]
   public let jitRevalidationActions: [ActionDefinition]
   public let releaseSet: PlanReleaseSet?
+  public let releaseGraphManifest: ReleaseGraphManifest?
 
   fileprivate init(
     action: ActionDefinition,
     prerequisiteStepActionIDs: [ActionID],
     jitRevalidationActions: [ActionDefinition],
-    releaseSet: PlanReleaseSet?
+    releaseSet: PlanReleaseSet?,
+    releaseGraphManifest: ReleaseGraphManifest?
   ) {
     self.action = action
     self.prerequisiteStepActionIDs = prerequisiteStepActionIDs
     self.jitRevalidationActions = jitRevalidationActions
     self.releaseSet = releaseSet
+    self.releaseGraphManifest = releaseGraphManifest
   }
 }
 
 public struct ValidatedDecisionOverlay: Equatable, Sendable {
   public let selectedActions: [ActionDefinition]
   public let executionSteps: [ValidatedExecutionStep]
+  public let releaseGraphManifest: ReleaseGraphManifest?
   public let activatedReleaseSets: [PlanReleaseSet]
   public let waiverConsents: [WaiverConsentCore]
   public let epochRequirements: [WaiverEpochRequirement]
@@ -2536,7 +2785,8 @@ public enum DecisionOverlayValidator {
             action: action,
             prerequisiteStepActionIDs: prerequisiteIDs,
             jitRevalidationActions: ActionOrdering.canonical([action] + owners),
-            releaseSet: releaseSet
+            releaseSet: releaseSet,
+            releaseGraphManifest: plan.releaseGraphManifest
           )
         )
       } else {
@@ -2550,7 +2800,8 @@ public enum DecisionOverlayValidator {
             action: action,
             prerequisiteStepActionIDs: prerequisiteIDs,
             jitRevalidationActions: [action],
-            releaseSet: nil
+            releaseSet: nil,
+            releaseGraphManifest: plan.releaseGraphManifest
           )
         )
       }
@@ -2559,6 +2810,7 @@ public enum DecisionOverlayValidator {
     return ValidatedDecisionOverlay(
       selectedActions: selectedActions,
       executionSteps: executionSteps,
+      releaseGraphManifest: plan.releaseGraphManifest,
       activatedReleaseSets: activated,
       waiverConsents: overlay.waiverConsents.sorted(by: waiverConsentCorePrecedes),
       epochRequirements: epochRequirements.sorted { left, right in
@@ -3042,6 +3294,99 @@ private func encodeReleaseTopologyExpectation(
   encoder.observation(topology.sharedBytes) { $0.uint64($1) }
   encoder.observation(topology.snapshotBlocker) { $0.bool($1) }
   return encoder.data
+}
+
+private func manifestBindingBytes(
+  graphDigest: PolicyDigest,
+  graphProvenance: StorageGraphProvenance,
+  allocationGroupIDs: [String],
+  candidateActions: [ReleaseGraphCandidateActionManifestEntry],
+  connectedComponents: [ReleaseGraphComponentManifest]
+) -> Data {
+  var encoder = PolicyBindingEncoder()
+  encoder.data(graphDigest.bytes)
+  encoder.data(graphProvenance.globalFactsHash.bytes)
+  encoder.data(graphProvenance.evidenceHash.bytes)
+  encoder.string(graphProvenance.policyVersion)
+  encoder.string(graphProvenance.schemaVersion)
+  encoder.int64(graphProvenance.semanticReferenceTimeSeconds)
+  encoder.uint64(UInt64(allocationGroupIDs.count))
+  encoder.array(allocationGroupIDs) { Data($0.utf8) }
+  encoder.array(candidateActions) { $0.bindingBytes }
+  encoder.array(connectedComponents) { $0.bindingBytes }
+  return encoder.data
+}
+
+private func connectedReleaseComponents(
+  _ releaseSets: [PlanReleaseSet]
+) -> [ReleaseGraphComponentManifest] {
+  let canonicalSets = releaseSets.sorted {
+    rawStringPrecedes($0.allocationGroupID, $1.allocationGroupID)
+  }
+  let setByGroupID = Dictionary(
+    uniqueKeysWithValues: canonicalSets.map {
+      (Data($0.allocationGroupID.utf8), $0)
+    }
+  )
+  let groupsByCandidate = Dictionary(
+    grouping: canonicalSets.flatMap { releaseSet in
+      releaseSet.ownerCandidateIDs.map {
+        (Data($0.utf8), Data(releaseSet.allocationGroupID.utf8))
+      }
+    },
+    by: \.0
+  ).mapValues { Set($0.map(\.1)) }
+
+  var remaining = Set(setByGroupID.keys)
+  var components: [ReleaseGraphComponentManifest] = []
+  while let start = remaining.sorted(by: { $0.lexicographicallyPrecedes($1) }).first {
+    var queue = [start]
+    var groupKeys = Set<Data>()
+    var candidateKeys = Set<Data>()
+    while let groupKey = queue.first {
+      queue.removeFirst()
+      guard groupKeys.insert(groupKey).inserted,
+        let releaseSet = setByGroupID[groupKey]
+      else { continue }
+      remaining.remove(groupKey)
+      for candidateID in releaseSet.ownerCandidateIDs {
+        let candidateKey = Data(candidateID.utf8)
+        candidateKeys.insert(candidateKey)
+        for linkedGroup in groupsByCandidate[candidateKey] ?? []
+        where !groupKeys.contains(linkedGroup) {
+          queue.append(linkedGroup)
+        }
+      }
+      queue.sort { $0.lexicographicallyPrecedes($1) }
+    }
+
+    let orderedGroupKeys = groupKeys.sorted { $0.lexicographicallyPrecedes($1) }
+    let topologyDigest = PolicyBindings.digest(kind: "release-component-topology") {
+      encoder in
+      encoder.array(orderedGroupKeys) { groupKey in
+        var nested = PolicyBindingEncoder()
+        guard let releaseSet = setByGroupID[groupKey] else { return nested.data }
+        nested.string(releaseSet.allocationGroupID)
+        nested.data(encodeReleaseTopologyExpectation(releaseSet.topologyExpectation))
+        nested.array(releaseSet.ownerCandidateIDs) { Data($0.utf8) }
+        return nested.data
+      }
+    }
+    components.append(
+      ReleaseGraphComponentManifest(
+        allocationGroupIDs: orderedGroupKeys.compactMap {
+          setByGroupID[$0]?.allocationGroupID
+        },
+        candidateIDs: candidateKeys.sorted { $0.lexicographicallyPrecedes($1) }.map {
+          String(decoding: $0, as: UTF8.self)
+        },
+        topologyDigest: topologyDigest
+      )
+    )
+  }
+  return components.sorted { left, right in
+    rawStringArrayPrecedes(left.allocationGroupIDs, right.allocationGroupIDs)
+  }
 }
 
 private func rawStringArrayPrecedes(_ lhs: [String], _ rhs: [String]) -> Bool {

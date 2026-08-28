@@ -112,10 +112,20 @@ A file object appearing in multiple allocation groups blocks every affected grou
 same shared ownership cannot receive credit twice. The complete graph receives a canonical
 digest over candidates, exact identities and provenance, owner paths, hardlink counts,
 allocation groups, clone counts, snapshot observations, and byte observations.
-`PlanReleaseSet.buildAll` is atomic over one complete successful graph evaluation; any global
-or group blocker, unknown total, within-bucket or cross-bucket arithmetic failure rejects the
-aggregate. Selection uses raw-UTF8 `CandidateActionBinding` records rather than a Swift
+`PlanReleaseSet.buildAll` is atomic over one complete successful graph evaluation and returns
+one immutable graph bundle rather than a caller-sliceable release-set list. The bundle manifest
+binds the graph digest and provenance, complete allocation-group ID set and count, global
+candidate-to-ActionID map, and connected-component topology. `ImmutablePlan` recomputes that
+manifest and rejects missing, duplicated, sliced, or mixed groups. Aggregate actions may cover
+one verified group, but their JIT contract carries the full manifest so execution cannot mistake
+an aggregate subset for a complete graph. Any global or group blocker, unknown total,
+within-bucket or cross-bucket arithmetic failure rejects the bundle. Selection uses raw-UTF8
+`CandidateActionBinding` records rather than a Swift
 `String` dictionary, so canonically equivalent but byte-distinct identifiers cannot collapse.
+The graph evaluation itself freezes the complete candidate-to-ActionID map. Bundle construction
+matches every candidate against that exact evaluated action, including private-only candidates
+that own no shared allocation group, so omitted, substituted, or blocked actions cannot enter the
+manifest through a release-owner-only check.
 Each retained
 set carries the full graph digest, exact candidate/action/target/identity/evidence provenance,
 conditional bytes, and file-owner/refcount/snapshot topology expectations needed by Phase 4
@@ -134,8 +144,13 @@ unreadable, and failed content observations cannot form an action. Postcondition
 are a closed enum for ordinary removal, quarantined worktree removal, cleanup scope, artifact
 version, or allocation-group release; no string placeholder claims enforcement. Action
 lineage seals those contracts, the complete protected namespace, adapter contract, and
-prerequisite lineages. Action IDs add the full snapshot and global-facts digests,
-prerequisite action IDs, and seven canonical gate votes. A plan rejects mixed semantic
+prerequisite lineages. Complete-release lineage is narrower by design: it binds stable release
+scope and owner topology plus stable owner lineages, while excluding graph digest, reference
+time, current evidence and owner ActionIDs. Current graph topology, owner ActionIDs, evidence,
+and epoch facts remain in the ActionID, plan, and JIT bindings. Advancing reference time alone
+therefore preserves a consent lineage, while a semantic owner-topology change does not. Action
+IDs add the full snapshot and global-facts digests, prerequisite action IDs, and seven canonical
+gate votes. A plan rejects mixed semantic
 reference times, scan roots outside global coverage, or actions built from different global
 facts, then hashes complete global facts/evidence alongside ActionID-byte order, metrics, and
 release topology.
@@ -209,6 +224,10 @@ discard consent or quarantine. Directional mutation checks remain in place for n
 survivor semantics, and disjoint namespaces remain independent. Display order is separate
 from canonical action order: policy core derives the tier from final action-aware
 stageability/recommendation and force-warning semantics, while callers provide only the other
-typed known/unknown metrics. Recomputed plans reject forged tiers. Plan hashing uses
+typed known/unknown metrics. Recommendation is likewise derived from the final seven votes:
+`likelyRebuildable` is available only when every required consent is a static-only rebuild
+predicate, while any additional semantic or recoverability uncertainty remains review-tier and
+any hard reject remains blocked. Recomputed plans reject forged tiers or transplanted
+recommendations. Plan hashing uses
 ActionID-byte order; validated execution steps use deterministic topological order with
 ActionID-byte tie breaking.

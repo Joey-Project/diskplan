@@ -44,7 +44,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
   public let semanticUniqueness: PolicyGateInput
   public let recoverability: PolicyGateInput
   public let dependencyCompleteness: PolicyGateInput
-  public let defaultReviewRecommendation: Recommendation
   fileprivate let providerBound: Bool
   fileprivate let classificationConflict: Bool
   fileprivate let sourceBinding: PolicyEvaluationSourceBinding
@@ -59,7 +58,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
     dependencyCompleteness: GateResult,
     providerBound: Bool,
     classificationConflict: Bool,
-    defaultReviewRecommendation: Recommendation,
     sourceBinding: PolicyEvaluationSourceBinding
   ) {
     self.protectionAndProvider = PolicyGateInput(result: protectionAndProvider)
@@ -71,7 +69,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
     self.dependencyCompleteness = PolicyGateInput(result: dependencyCompleteness)
     self.providerBound = providerBound
     self.classificationConflict = classificationConflict
-    self.defaultReviewRecommendation = defaultReviewRecommendation
     self.sourceBinding = sourceBinding
   }
 
@@ -271,7 +268,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
       dependencyCompleteness: boundDependency,
       providerBound: providerBound,
       classificationConflict: classification.isConflict,
-      defaultReviewRecommendation: .needsSemanticReview,
       sourceBinding: Self.sourceBinding(
         evidence: evidence,
         globalFacts: globalFacts,
@@ -365,7 +361,6 @@ public enum OneVotePolicy {
       ],
       providerBound: inputs.providerBound,
       classificationConflict: inputs.classificationConflict,
-      defaultReviewRecommendation: inputs.defaultReviewRecommendation,
       sourceBinding: inputs.sourceBinding
     )
   }

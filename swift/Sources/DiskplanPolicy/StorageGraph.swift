@@ -264,6 +264,8 @@ public struct EvaluatedReleaseOwner: Equatable, Sendable {
 public struct ReleaseGraphEvaluation: Equatable, Sendable {
   public let graphDigest: PolicyDigest
   public let provenance: StorageGraphProvenance
+  public let candidateIDs: [String]
+  public let evaluatedActionIDByCandidate: [Data: ActionID]
   public let immediatePrivateReclaimByCandidate: [Data: UInt64]
   public let releaseSets: [EvaluatedReleaseSet]
   public let blockers: [ReleaseBlocker]
@@ -640,6 +642,8 @@ public struct StorageReleaseGraph: Equatable, Sendable {
     return ReleaseGraphEvaluation(
       graphDigest: graphDigest,
       provenance: provenance,
+      candidateIDs: candidates.map(\.id),
+      evaluatedActionIDByCandidate: actionByCandidateID.mapValues(\.id),
       immediatePrivateReclaimByCandidate: immediate,
       releaseSets: releaseSets,
       blockers: globalBlockers

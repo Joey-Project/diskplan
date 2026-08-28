@@ -82,6 +82,20 @@ superseded_by:
   directional non-Git survivor checks and allowing disjoint targets. Display tiers are derived
   from final action-aware policy and force-warning semantics; recomputation rejects forged
   safe labels for blocked or review-required actions.
+- Full release evaluation now yields one immutable manifest bundle binding every group, the
+  global candidate/action map, graph provenance, and connected-component topology. Plans reject
+  sliced, mixed, duplicated, or missing groups; a group-scoped aggregate keeps the full manifest
+  in its JIT execution contract. Evaluation freezes the exact ActionID for every graph candidate,
+  including private-only candidates outside all release groups, so bundle construction rejects
+  omitted, substituted, or blocked action mappings.
+- Complete-release lineage now binds stable semantic topology and stable owner lineages without
+  current graph/evidence/action/epoch data. Reference-time-only advancement preserves lineage,
+  while an owner-topology change invalidates it. Current graph and owner action bindings remain
+  sealed by ActionID, plan, and JIT contracts.
+- Recommendation and display tier are both derived from the final seven source-bound votes.
+  Rebuildable tier requires exclusively static-only rebuild predicates; additional uncertainty
+  remains review-tier, and hard rejects remain blocked. Plan recomputation rejects recommendation
+  transplants.
 
 ## Task List
 
@@ -108,6 +122,8 @@ superseded_by:
   facts, and fail closed outside the exact ordinary, sparse-disabled v1 execution predicate.
 - [x] Close full-range review findings for symmetric Git dominance, ordinary admin/common
   metadata consistency, and authoritative display tiers.
+- [x] Bind full release-graph manifests, stabilize complete-release lineage across pure
+  reference-time advancement, and derive recommendations authoritatively from final votes.
 
 ## Handoff
 
@@ -122,8 +138,8 @@ superseded_by:
 - Policy contract: `docs/design/policy-core.md`.
 - Focused Swift policy tests cover classification permutations, every gate and waiver,
   release-set failure modes, canonical ordering, DAG validation, immutable hashes, and exact
-  overlay consent binding; the latest focused run passed all 44 tests.
-- The final full local `swift test --package-path swift` run passed all 72 tests, including
-  all 44 focused policy tests.
+  overlay consent binding; the latest focused run passed all 49 tests.
+- The final full local `swift test --package-path swift` run passed all 77 tests, including
+  all 49 focused policy tests.
 - `swift-format lint --strict`, `git diff --check`, and project-journal validation passed after
   the final safety review fixes.
