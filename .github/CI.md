@@ -4,7 +4,9 @@
 
 - `Required / macOS 26 Apple Silicon` is the blocking foundation gate. It uses
   the explicit `macos-26` arm64 label and validates the complete Swift/Rust
-  foundation on the Xcode version pinned in `scripts/ci/toolchain.lock`.
+  foundation on the Xcode version pinned in `scripts/ci/toolchain.lock`. The
+  runtime assertion requires macOS 26 exactly; macOS 27+ remains best effort
+  until promoted by the accepted release policy.
 - `Best effort / macOS 14 deployment compatibility` is non-blocking. It verifies
   the Rust launcher still records a macOS 14 deployment target while that public
   runner remains available.
@@ -44,6 +46,11 @@ Only Cargo and SwiftPM dependency downloads are cached. Compiled targets,
 generated sources, test results, and tool downloads are not cached. `Cargo.lock`,
 `Package.resolved`, checksummed downloads, source-revision checks, and drift
 tests remain authoritative even when a cache is restored.
+
+The required job checks whitespace against the exact event SHA pair. Pull
+requests use base/head SHAs, pushes use before/after SHAs, new branches map the
+all-zero before SHA to Git's empty tree, and manual dispatch checks the selected
+revision as a complete tree. Ref names and shell evaluation are not accepted.
 
 On failure, CI uploads only a small allowlisted runner/toolchain manifest for
 seven days. It does not upload source trees, dependency stores, build products,

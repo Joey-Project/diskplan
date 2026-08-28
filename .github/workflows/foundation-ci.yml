@@ -29,10 +29,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Assert release runner
-        run: scripts/ci/assert-macos-runner.sh minimum 26 arm64
+        run: scripts/ci/assert-macos-runner.sh exact 26 arm64
 
       - name: Configure task-scoped build paths
         run: |
@@ -69,8 +70,26 @@ jobs:
           shellcheck --version
           actionlint -version
 
-      - name: Validate workflows and shell scripts
-        run: scripts/ci/validate-repository.sh
+      - name: Validate pull request range and repository
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/ci/validate-repository.sh pull_request "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Validate push range and repository
+        if: github.event_name == 'push'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.after }}
+        run: scripts/ci/validate-repository.sh push "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Validate dispatched revision and repository
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BASE_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: scripts/ci/validate-repository.sh workflow_dispatch "$BASE_SHA" "$HEAD_SHA"
 
       - name: Validate project journals
         run: |
@@ -102,14 +121,17 @@ jobs:
         run: scripts/test-deployment-target.sh aarch64-apple-darwin
 
       - name: Write bounded failure diagnostics
+        id: failure-diagnostics
         if: always()
         continue-on-error: true
-        run: scripts/ci/write-diagnostics.sh "$RUNNER_TEMP/diskplan-ci/runner.txt"
+        run: |
+          scripts/ci/write-diagnostics.sh "$RUNNER_TEMP/diskplan-ci/runner.txt"
+          echo "published=true" >> "$GITHUB_OUTPUT"
 
       # actions/upload-artifact v7.0.1. Upload only the small environment manifest,
       # never build trees, dependency caches, source archives, or broad logs.
       - name: Upload failure diagnostics
-        if: failure()
+        if: failure() && steps.failure-diagnostics.outputs.published == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: foundation-ci-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
