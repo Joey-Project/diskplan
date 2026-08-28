@@ -1,0 +1,38 @@
+---
+source: rust/crates/diskplan-cli/src/tui/render.rs
+expression: "snapshot(&state, 120, 34)"
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ diskplan Provisional plan  •  ProvisionalPlanReady                                                                   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Plan-first summary ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│Plan phase0-provisional-0001  Actions 11  Immediate 1.2 GiB  Shared unlock 256.0 MiB                                  │
+│                                                                                                                      │
+│Plan group              Actions      Immediate  Shared unlock  Status                                                 │
+│Ready                         8        1.0 GiB            0 B  ready                                                  │
+│Conditional                   3      256.0 MiB      256.0 MiB  needs complete release set                             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+q cancel  r resume + invalidate  ? help
+provisional plan ready

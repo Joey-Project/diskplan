@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod tui;
+
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -10,7 +12,10 @@ use std::time::{Duration, Instant};
 
 use diskplan_core::framing::{FrameError, read_frame, write_frame};
 use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello, validate_accepted};
-use diskplan_proto::diskplan::v1::{BusinessEnvelope, Envelope, HelloAccepted, envelope};
+use diskplan_proto::diskplan::v1::{
+    BusinessEnvelope, EngineEvent, Envelope, HelloAccepted, ScanControlKind, ScanControlRequest,
+    StartScanRequest, envelope,
+};
 use prost::Message;
 use thiserror::Error;
 
@@ -40,8 +45,16 @@ pub enum ClientError {
     },
     #[error("engine sent an unexpected response during {phase}")]
     UnexpectedResponse { phase: &'static str },
+    #[error("request_id must be non-zero")]
+    InvalidRequestId,
     #[error("engine response sequence {actual} does not match request sequence {expected}")]
     ResponseSequenceMismatch { expected: u64, actual: u64 },
+    #[error("engine event sequence {actual} does not immediately follow {previous}")]
+    EventSequenceMismatch { previous: u64, actual: u64 },
+    #[error("engine event sequence space is exhausted after {previous}")]
+    EventSequenceExhausted { previous: u64 },
+    #[error("engine event envelope sequence {envelope} does not match event sequence {event}")]
+    EventEnvelopeSequenceMismatch { envelope: u64, event: u64 },
     #[error("engine rejected the request with code {code}: {detail}")]
     Rejected { code: i32, detail: String },
     #[error("engine handshake acceptance is invalid: {0}")]
@@ -50,6 +63,8 @@ pub enum ClientError {
     EngineFailure { code: Option<i32> },
     #[error("engine exited after handshake instead of entering the ready state")]
     EngineExitedAfterHandshake,
+    #[error("engine did not negotiate the required scan-control-v1 capability")]
+    MissingScanControlCapability,
     #[error("engine emitted an extra framed message while shutting down")]
     ExtraFrameAfterShutdown,
     #[error("engine stdout decoder disconnected without reporting clean EOF")]
@@ -80,6 +95,7 @@ pub struct EngineSession {
     frames: Receiver<FrameResult>,
     response_timeout: Duration,
     accepted: HelloAccepted,
+    last_event_sequence: u64,
     process_group_id: u32,
     reaper: SyncSender<Child>,
 }
@@ -128,6 +144,7 @@ impl EngineSession {
             frames,
             response_timeout: timeout,
             accepted: HelloAccepted::default(),
+            last_event_sequence: 0,
             process_group_id,
             reaper,
         };
@@ -161,6 +178,76 @@ impl EngineSession {
             });
         }
         Ok(response)
+    }
+
+    pub fn send_start_scan(
+        &mut self,
+        request_id: u64,
+        profile: impl Into<String>,
+    ) -> Result<(), ClientError> {
+        if request_id == 0 {
+            return Err(ClientError::InvalidRequestId);
+        }
+        self.write_envelope(&Envelope {
+            sequence: request_id,
+            body: Some(envelope::Body::StartScanRequest(StartScanRequest {
+                request_id,
+                profile: profile.into(),
+            })),
+        })
+    }
+
+    pub fn send_scan_control(
+        &mut self,
+        request_id: u64,
+        control: ScanControlKind,
+    ) -> Result<(), ClientError> {
+        if request_id == 0 {
+            return Err(ClientError::InvalidRequestId);
+        }
+        self.write_envelope(&Envelope {
+            sequence: request_id,
+            body: Some(envelope::Body::ScanControlRequest(ScanControlRequest {
+                request_id,
+                control: control as i32,
+            })),
+        })
+    }
+
+    pub fn read_engine_event(&mut self) -> Result<EngineEvent, ClientError> {
+        self.read_engine_event_with_timeout(self.response_timeout)
+    }
+
+    pub fn read_engine_event_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<EngineEvent, ClientError> {
+        let envelope = self.read_envelope_with_timeout("engine event", timeout)?;
+        let Some(envelope::Body::EngineEvent(event)) = envelope.body else {
+            return Err(ClientError::UnexpectedResponse {
+                phase: "engine event",
+            });
+        };
+        if envelope.sequence != event.event_sequence {
+            return Err(ClientError::EventEnvelopeSequenceMismatch {
+                envelope: envelope.sequence,
+                event: event.event_sequence,
+            });
+        }
+        let expected =
+            self.last_event_sequence
+                .checked_add(1)
+                .ok_or(ClientError::EventSequenceExhausted {
+                    previous: self.last_event_sequence,
+                })?;
+        if event.event_sequence != expected {
+            return Err(ClientError::EventSequenceMismatch {
+                previous: self.last_event_sequence,
+                actual: event.event_sequence,
+            });
+        }
+        self.last_event_sequence = event.event_sequence;
+        Ok(event)
     }
 
     pub fn shutdown(mut self) -> Result<(), ClientError> {
@@ -224,7 +311,15 @@ impl EngineSession {
     }
 
     fn read_envelope(&mut self, phase: &'static str) -> Result<Envelope, ClientError> {
-        match self.frames.recv_timeout(self.response_timeout) {
+        self.read_envelope_with_timeout(phase, self.response_timeout)
+    }
+
+    fn read_envelope_with_timeout(
+        &mut self,
+        phase: &'static str,
+        timeout: Duration,
+    ) -> Result<Envelope, ClientError> {
+        match self.frames.recv_timeout(timeout) {
             Ok(Ok(Some(payload))) => Ok(Envelope::decode(payload.as_slice())?),
             Ok(Ok(None)) | Err(RecvTimeoutError::Disconnected) => {
                 if let Some(status) = self.observe_exit()? {
@@ -235,10 +330,7 @@ impl EngineSession {
                 Err(ClientError::CleanEof)
             }
             Ok(Err(error)) => Err(ClientError::Frame(error)),
-            Err(RecvTimeoutError::Timeout) => Err(ClientError::Timeout {
-                phase,
-                timeout: self.response_timeout,
-            }),
+            Err(RecvTimeoutError::Timeout) => Err(ClientError::Timeout { phase, timeout }),
         }
     }
 
@@ -354,6 +446,47 @@ impl Drop for EngineSession {
         if self.child.is_some() {
             let _ = self.wait_or_terminate();
         }
+    }
+}
+
+#[cfg(test)]
+mod event_sequence_tests {
+    use super::*;
+
+    #[test]
+    fn sequence_exhaustion_rejects_a_repeated_u64_max_event() {
+        let repeated = Envelope {
+            sequence: u64::MAX,
+            body: Some(envelope::Body::EngineEvent(EngineEvent {
+                event_sequence: u64::MAX,
+                ..Default::default()
+            })),
+        };
+        let (frame_sender, frames) = mpsc::sync_channel(FRAME_QUEUE_CAPACITY);
+        frame_sender
+            .send(Ok(Some(repeated.encode_to_vec())))
+            .unwrap();
+        let (reaper, _reaper_receiver) = mpsc::sync_channel(1);
+        let mut session = EngineSession {
+            child: None,
+            stdin: None,
+            frames,
+            response_timeout: Duration::from_secs(1),
+            accepted: HelloAccepted::default(),
+            last_event_sequence: u64::MAX,
+            process_group_id: 0,
+            reaper,
+        };
+
+        let error = session
+            .read_engine_event()
+            .expect_err("u64::MAX cannot immediately follow itself");
+
+        assert!(matches!(
+            error,
+            ClientError::EventSequenceExhausted { previous: u64::MAX }
+        ));
+        assert_eq!(session.last_event_sequence, u64::MAX);
     }
 }
 
@@ -537,6 +670,7 @@ mod cleanup_tests {
             frames,
             response_timeout: Duration::from_secs(1),
             accepted: HelloAccepted::default(),
+            last_event_sequence: 0,
             process_group_id: NONEXISTENT_PROCESS_GROUP,
             reaper,
         }
