@@ -1,7 +1,7 @@
 ---
 id: 20260828-c4a8f2
 title: Scanner Content Authority Shared API
-status: active
+status: completed
 created: 2026-08-28
 updated: 2026-08-28
 branch: wip/runtime-evidence-enrichment
@@ -55,10 +55,30 @@ superseded_by:
 - The final serial Swift suite passes all 423 tests. Final post-fix static review
   reports no P0-P3 findings after binding compile-fail module lookup exclusively
   to the currently loaded test bundle.
+- The required macOS 26 PR gate later exposed a diagnostic-model weakness rather
+  than an authority failure: three same-package compile-fail subprocesses returned
+  nonzero status with empty merged output, while the harness had discarded
+  termination reason, separate stdout/stderr, and capture/drain state. The
+  remaining 456 tests were green.
+- The follow-up harness records launch/setup errors, timeout, exit versus signal,
+  status, bounded stdout and stderr, truncation, and drain completion separately.
+  A compile-fail case is accepted only after a normal nonzero exit emits an LLVM-
+  style access-control error on its exact `#sourceLocation` marker. Synthetic
+  classifier coverage rejects empty stderr, timeout, signal, module lookup,
+  stdout-only diagnostics, launch failure, truncation, and drain timeout. Dynamic
+  validation also closed two portability gaps: the same-package compiler identity
+  is read from the current SwiftPM build description instead of hard-coded, the
+  description is retained through one held handle with a strict 16 MiB plus-one
+  rejection boundary, and fixture arguments are type-correct so each fixture
+  emits exactly one intended access-control error.
+- Post-fix gates pass on Apple Swift 6.3.3: the focused harness passes two tests
+  covering four real compile-fail fixtures plus thirteen synthetic rejection
+  cases, the shared-authority API passes 2/2, `DiskplanScanTests` passes 72/72,
+  and the serial full Swift suite passes 458/458.
 
 ## Next Steps
 
-1. Land the reviewed and dynamically verified follow-up.
+None for this workstream.
 
 ## Evidence
 
