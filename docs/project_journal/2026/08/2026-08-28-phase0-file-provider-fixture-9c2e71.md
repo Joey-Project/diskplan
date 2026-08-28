@@ -45,6 +45,11 @@ superseded_by:
 - Quiet timestamps follow fingerprint reads, deadline expiry wins over quiet success, and exact
   registry records require one absolute path.
 - Cleanup validates an explicit manifest recovery copy and never suppresses restoration errors.
+- Oracle append uses durable write-ahead poison and one absolute deadline for both recorder and
+  JSONL lock acquisition; injected poison/event-storage failures remain poisoned across instance
+  recreation.
+- Final directory-removal failure restores and directly validates `manifest.json` at the original
+  UUID path. Registry parsing requires strict UTF-8 and rejects malformed exact-bundle mentions.
 - Cleanup rejects mount/device-boundary traversal before inventory. The current gate is
   explicitly probe-level; full scanner acceptance remains a later engine integration.
 - Local unsigned compile and support tests are available without provisioning.
@@ -61,6 +66,8 @@ superseded_by:
   mounted-volume cleanup gaps found during integrated review.
 - [x] Close cross-instance poison, post-read quiet timing, deadline precedence, malformed
   registry, late-append orphan, and cleanup-manifest rollback gaps from frozen rereview.
+- [x] Close write-ahead poison durability, bounded lock contention, deterministic final-rmdir
+  recovery, and strict registry-text parsing gaps from the second frozen rereview.
 - [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
 - [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
 - [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
@@ -78,17 +85,18 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 22 targeted support tests pass
+- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 27 targeted support tests pass
   and cover
   concurrent JSONL writers, manifest/ready validation, typed secure-read failures,
   symlink-retaining cleanup, recursive cleanup, device-boundary rejection, append-failure
-  poisoning, late-callback arbitration, semantic window validation, and deterministic
-  two-second quiet-window reset after a one-second-late callback.
-- `python3 scripts/test-fileprovider-fixture-registration.py`: 9 parser/physical-path election
-  and exact-path removal tests pass.
+  poisoning, poison/event-storage injection across recorder recreation, recorder/event lock
+  contention, deterministic final-rmdir recovery, late-callback arbitration, semantic window
+  validation, and deterministic two-second quiet-window reset after a one-second-late callback.
+- `python3 scripts/test-fileprovider-fixture-registration.py`: 12 parser/physical-path election,
+  strict-UTF-8, malformed exact-bundle text, and exact-path removal tests pass.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
   compiled successfully with signing disabled.
-- The resolved-only complete Swift gate passed 62 tests on the integrated tree. Canonical binary
+- The resolved-only complete Swift gate passed 67 tests on the integrated tree. Canonical binary
   generation and the Swift/Rust cross-language process tests also passed.
 - `scripts/test-macos-capabilities.sh`: 29 `DiskplanMacOS` tests and the live self-test passed;
   the signed fixture and real-host APFS fixture remained explicitly unavailable without their

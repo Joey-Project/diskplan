@@ -4,6 +4,12 @@ public enum OracleRecorderError: Error, Equatable, Sendable {
   case unavailable
   case poisoned
   case sealed
+  case lockTimedOut
+}
+
+enum OracleAppendInjectedFailure: Error, Equatable {
+  case poisonStorage
+  case eventStorage
 }
 
 public enum OracleRecorderState: Equatable, Sendable {

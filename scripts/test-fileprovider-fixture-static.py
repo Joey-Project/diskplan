@@ -24,7 +24,15 @@ def main() -> int:
     require("domain.isHidden = true" in swift, "fixture domain must be hidden")
     require("Data(contentsOf:" not in swift, "control files must not use pathname-following reads")
     require("O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW" in swift, "oracle append flags changed")
-    require("flock(lock, LOCK_EX)" in swift, "oracle events must be session-lock serialized")
+    require(
+        "try acquireBoundedLock(" in swift,
+        "oracle session and event locks must use bounded acquisition",
+    )
+    require(
+        "while flock(descriptor, LOCK_EX | LOCK_NB)" in swift,
+        "oracle locks must retry only within their deadline",
+    )
+    require("flock(descriptor, LOCK_EX)" not in swift, "oracle event lock must not block")
     require("O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK" in swift, "secure control read flags changed")
     require("renameatx_np" in swift and "RENAME_EXCL" in swift, "cleanup must isolate the exact run atomically")
     require("FixtureContract.sentinelContents().write" in swift, "fetchContents must write real bytes")

@@ -73,6 +73,18 @@ public enum SecureFixtureStorage {
     manifestURL: URL,
     expectedRunDirectory: URL
   ) throws {
+    try cleanupRun(
+      manifestURL: manifestURL,
+      expectedRunDirectory: expectedRunDirectory,
+      injectFinalDirectoryRemovalFailure: false
+    )
+  }
+
+  static func cleanupRun(
+    manifestURL: URL,
+    expectedRunDirectory: URL,
+    injectFinalDirectoryRemovalFailure: Bool
+  ) throws {
     let expectedManifest = expectedRunDirectory.appendingPathComponent("manifest.json")
     guard manifestURL.standardizedFileURL == expectedManifest.standardizedFileURL else {
       throw FixtureCleanupError.unsafeTarget
@@ -126,6 +138,9 @@ public enum SecureFixtureStorage {
       try createManifestRecoveryCopy(manifestData, in: root)
       try delete(entries: tree, from: root)
       try unlink(parent: root, name: ".manifest-recovery", flags: 0)
+      if injectFinalDirectoryRemovalFailure {
+        throw FixtureCleanupError.operationFailed("injected-final-directory-removal", errno: EBUSY)
+      }
       try unlink(parent: parent, name: stagingName, flags: AT_REMOVEDIR)
     } catch {
       let operationError = error
@@ -647,12 +662,12 @@ private func recreateManifest(_ data: Data, in directory: BoundDescriptor) throw
   }
   defer { close(descriptor) }
   try writeAll(data, descriptor: descriptor)
-  let copy = try readBoundControlFile(
+  let restored = try readBoundControlFile(
     directory: directory,
-    name: ".manifest-recovery",
+    name: "manifest.json",
     record: .manifest
   )
-  guard copy == data else { throw FixtureCleanupError.treeMismatch("manifest-recovery-content") }
+  guard restored == data else { throw FixtureCleanupError.treeMismatch("manifest-content") }
 }
 
 private func createManifestRecoveryCopy(_ data: Data, in directory: BoundDescriptor) throws {

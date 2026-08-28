@@ -23,12 +23,16 @@ postflight extension-liveness signal run inside the open window. Closure require
 seconds without a new event within a 30-second total bound; assertion after closure reads only
 sealed control/oracle data.
 
-An append error writes immutable run-scoped poison evidence checked by recreated extension
-instances and fails later callbacks, so a write failure cannot masquerade as callback-zero.
+Every append first durably writes run-scoped poison evidence while holding the recorder lock,
+then durably appends its JSONL event, and clears the poison marker only after that success. An
+append or poison-storage error therefore remains fail-closed across recreated extension
+instances instead of masquerading as callback-zero.
 Teardown persistently seals the recorder before domain removal, and append never recreates a
 missing run directory. File Provider callbacks and `pluginkit` mutation/query steps have bounded
-monotonic deadlines and discard late completions. Exact-bundle registry records require one
-absolute path.
+monotonic deadlines and discard late completions. Recorder and JSONL locks use nonblocking
+acquisition under the same 30-second absolute deadline. Exact-bundle registry records require
+strict UTF-8, a recognized header, and one absolute path; malformed text that mentions the exact
+bundle fails closed.
 
 This is a probe-level fixture, not the eventual full scanner acceptance. A passing result proves
 the macOS File Provider evidence primitive against controlled placeholders and explicitly reports
@@ -41,4 +45,5 @@ rejects symlinks, special objects, identity replacement, or access-policy change
 the manifest recoverable on ordinary failures. It also rejects the run root or any descendant
 directory on a different device, and unregister cleanup proceeds only after the registry no
 longer references the exact embedded extension path. A validated recovery copy prevents
-manifest restoration failures from being silently discarded.
+manifest restoration failures from being silently discarded; even a final directory-removal
+failure recreates and directly validates `manifest.json` at the deterministic UUID recovery path.

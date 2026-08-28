@@ -107,6 +107,20 @@ class RegistrationParserTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "2 Path fields"):
                 MODULE.verify_removal("com.example.fixture", expected, output)
 
+    def test_rejects_unexpected_header_marker_for_exact_bundle(self) -> None:
+        output = "*    com.example.fixture(1.0)\n    Path = /current/Fixture.appex\n"
+        with self.assertRaisesRegex(ValueError, "malformed pluginkit text"):
+            MODULE.registered_paths(output, "com.example.fixture")
+
+    def test_rejects_malformed_text_that_mentions_exact_bundle(self) -> None:
+        output = "Identifier = com.example.fixture\nPath = /current/Fixture.appex\n"
+        with self.assertRaisesRegex(ValueError, "malformed pluginkit text"):
+            MODULE.registered_paths(output, "com.example.fixture")
+
+    def test_rejects_non_utf8_query_output(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not valid UTF-8"):
+            MODULE.decode_registration_output(b"+ com.example.fixture\xff")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,12 @@ def exact_bundle_records(output: str, bundle_id: str) -> list[tuple[str, str]]:
 
     for line in output.splitlines():
         header = HEADER.match(line)
+        exact_mention = re.search(
+            rf"(?<![A-Za-z0-9_.-]){re.escape(bundle_id)}(?![A-Za-z0-9_.-])",
+            line,
+        )
+        if exact_mention and (header is None or header.group(2) != bundle_id):
+            raise ValueError("malformed pluginkit text mentions exact bundle")
         if header:
             finish()
             if header.group(2) == bundle_id:
@@ -74,6 +80,13 @@ def verify_removal(bundle_id: str, expected_path: Path, output: str) -> None:
             raise ValueError("registry still references the embedded appex")
 
 
+def decode_registration_output(output: bytes) -> str:
+    try:
+        return output.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise ValueError("pluginkit query output is not valid UTF-8") from error
+
+
 def query_registration(bundle_id: str, timeout_seconds: float) -> str:
     result = subprocess.run(
         ["pluginkit", "-m", "-A", "-D", "-v", "-i", bundle_id],
@@ -87,7 +100,7 @@ def query_registration(bundle_id: str, timeout_seconds: float) -> str:
         raise ValueError("pluginkit query exceeded output limit")
     if result.returncode != 0:
         raise RuntimeError(f"pluginkit query exited {result.returncode}")
-    return result.stdout.decode("utf-8", errors="backslashreplace")
+    return decode_registration_output(result.stdout)
 
 
 def main() -> int:

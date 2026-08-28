@@ -311,6 +311,35 @@ func cleanupRejectsSymlinkAndRestoresManifestForRecovery() throws {
 }
 
 @Test
+func cleanupFinalRemovalFailureRestoresDeterministicRecoveryManifest() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  do {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: manifestURL,
+      expectedRunDirectory: fixture.runDirectory,
+      injectFinalDirectoryRemovalFailure: true
+    )
+    Issue.record("cleanup unexpectedly ignored the injected final removal failure")
+  } catch let error as FixtureCleanupError {
+    #expect(error == .operationFailed("injected-final-directory-removal", errno: EBUSY))
+  }
+  #expect(FileManager.default.fileExists(atPath: manifestURL.path))
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: fixture.runDirectory.deletingLastPathComponent()
+        .appendingPathComponent(".cleanup-\(fixture.runDirectory.lastPathComponent)").path
+    )
+  )
+  _ = try SecureFixtureStorage.readManifest(
+    at: manifestURL,
+    expectedRunDirectory: fixture.runDirectory
+  )
+}
+
+@Test
 func oracleCloseRequiresTwoSecondsAfterALateCallback() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
@@ -400,6 +429,44 @@ func recorderPoisonPersistsAcrossRecorderRecreation() throws {
 }
 
 @Test
+func writeAheadPoisonSurvivesInjectedPoisonStorageFailure() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  let event = fixture.oracleEvent(kind: .fetchContents)
+  let recorder = OracleRecorder(
+    append: { try log.append($0, injecting: .poisonStorage) },
+    state: { try log.recorderState() },
+    poison: { try log.poisonRecorder() }
+  )
+  #expect(throws: OracleAppendInjectedFailure.poisonStorage) { try recorder.record(event) }
+  #expect(try log.recorderState() == .poisoned)
+  #expect(throws: OracleRecorderError.poisoned) {
+    try OracleRecorder(log: log).record(event)
+  }
+}
+
+@Test
+func writeAheadPoisonSurvivesInjectedEventStorageFailure() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  let event = fixture.oracleEvent(kind: .fetchContents)
+  let recorder = OracleRecorder(
+    append: { try log.append($0, injecting: .eventStorage) },
+    state: { try log.recorderState() },
+    poison: { try log.poisonRecorder() }
+  )
+  #expect(throws: OracleAppendInjectedFailure.eventStorage) { try recorder.record(event) }
+  #expect(try log.recorderState() == .poisoned)
+  #expect(throws: OracleRecorderError.poisoned) {
+    try OracleRecorder(log: log).record(event)
+  }
+}
+
+@Test
 func appendDoesNotRecreateMissingRunDirectory() throws {
   let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: container) }
@@ -467,6 +534,55 @@ func oracleQuietStartsAfterInitialFingerprintRead() throws {
     clock: clock
   )
   #expect(try log.window().endNanoseconds == 3_000_000_000)
+}
+
+@Test
+func recorderLockContentionHonorsAbsoluteDeadline() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  let lockURL = fixture.runDirectory.appendingPathComponent("recorder.lock")
+  let descriptor = open(lockURL.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)
+  guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+  defer { close(descriptor) }
+  guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+  }
+  defer { flock(descriptor, LOCK_UN) }
+  let clock = DeterministicOracleClock()
+  #expect(throws: OracleRecorderError.lockTimedOut) {
+    try log.recorderState(deadlineNanoseconds: 100_000_000, clock: clock)
+  }
+  #expect(clock.nanoseconds == 100_000_000)
+}
+
+@Test
+func eventLockContentionUsesTheSameAbsoluteDeadlineAndPoisons() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  let eventsURL = fixture.runDirectory.appendingPathComponent("events.jsonl")
+  try fixture.writePrivate(Data(), to: eventsURL)
+  let descriptor = open(eventsURL.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)
+  guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+  defer { close(descriptor) }
+  guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+  }
+  defer { flock(descriptor, LOCK_UN) }
+  let clock = DeterministicOracleClock()
+  #expect(throws: OracleRecorderError.lockTimedOut) {
+    try log.append(
+      fixture.oracleEvent(kind: .fetchContents),
+      injecting: nil,
+      deadlineNanoseconds: 100_000_000,
+      clock: clock
+    )
+  }
+  #expect(clock.nanoseconds == 100_000_000)
+  #expect(try log.recorderState() == .poisoned)
 }
 
 @Test
@@ -572,6 +688,17 @@ private struct TemporaryFixtureRun {
   func writePrivate(_ data: Data, to url: URL) throws {
     try data.write(to: url, options: .withoutOverwriting)
     guard chmod(url.path, 0o600) == 0 else { throw POSIXError(.EIO) }
+  }
+
+  func oracleEvent(kind: OracleEventKind) -> OracleEvent {
+    OracleEvent(
+      runID: runID,
+      domainIdentifier: FixtureContract.domainIdentifier(runID: runID),
+      itemIdentifier: FixtureContract.sentinelIdentifier,
+      kind: kind,
+      processID: 1,
+      monotonicNanoseconds: 1
+    )
   }
 
   func remove() { try? FileManager.default.removeItem(at: container) }

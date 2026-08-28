@@ -62,12 +62,19 @@ timeout boundary. The persisted close record binds its end timestamp, quiet inte
 rechecks that fingerprint, and malformed or internally inconsistent close metadata fails as a
 typed semantic mismatch.
 
-Oracle writes fail closed. A run-scoped recorder lock serializes all extension instances. The
-first append failure creates immutable `recorder-poisoned` evidence checked by existing and
-recreated instances and by host health, closure, and assertion. The in-window oracle-health
+Oracle writes fail closed. A run-scoped recorder lock serializes all extension instances. Under
+that lock, every append first creates and `fsync`s immutable `recorder-poisoned` evidence, then
+appends and `fsync`s the JSONL event, and clears the marker only after the event is durable. An
+append failure or a failure while initially persisting poison leaves evidence checked by existing
+and recreated instances and by host health, closure, and assertion. The in-window oracle-health
 barrier therefore cannot succeed after a hidden recording failure. Callback APIs with an error
 result return the recording error; enumeration fails its observer, and callbacks without an
 error channel do not report completion.
+
+The recorder lock and the nested JSONL lock both use nonblocking `flock` acquisition and share
+the same absolute 30-second monotonic deadline for an append. Lock contention cannot turn a
+provider callback into an unbounded wait, and a timeout after write-ahead poison remains visible
+as poisoned state.
 
 Extension append opens only the already-existing owner-private run directory and pre-created
 recorder lock; it never prepares or recreates the run. Teardown writes an immutable
@@ -111,8 +118,9 @@ registry no longer references that physical extension path, and removes only the
 named by the validated manifest. Registry add/remove mutation and convergence checks are each
 bounded. A timeout or stale exact-path registration fails closed and retains the manifest and
 build artifacts for recovery.
-Every exact-bundle registry block must contain exactly one absolute `Path`; missing, duplicate,
-empty, relative, or otherwise malformed path records fail closed instead of being interpreted
+`pluginkit` output must be strict UTF-8. Every exact-bundle registry block must use a recognized
+header and contain exactly one absolute `Path`; missing, duplicate, empty, relative, or otherwise
+malformed records or text that mentions the exact bundle fail closed instead of being interpreted
 as successful removal.
 
 All File Provider add, list, remove, signal, and user-visible-URL callbacks share one monotonic
@@ -147,6 +155,9 @@ closed. Cleanup creates an owner-private recovery copy of the validated manifest
 deletion. The manifest is deleted last; on failure, the recovery copy is renamed back when
 needed, validated byte-for-byte, and the isolated directory is restored. Recovery-copy and
 manifest-restoration errors are explicit retained-state failures, never discarded with `try?`.
+If the final run-directory removal fails after the recovery copy was consumed, cleanup recreates
+`manifest.json`, validates that file directly, and restores the original UUID directory name so
+the printed recovery command remains deterministic.
 These are point-in-time replacement checks and do not claim
 to exclude a malicious same-UID process that races after the final identity check.
 
