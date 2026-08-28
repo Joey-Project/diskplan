@@ -184,10 +184,10 @@ enum FixtureHost {
 
   private static func assertAcceptance(manifest: FixtureManifest) throws {
     let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
-    let window = try log.window()
+    let snapshot = try log.sealedSnapshot()
+    let window = snapshot.window
     guard window.endNanoseconds != nil else { throw HostError.oracleWindowOpen }
-    let events = try log.events()
-    guard try log.recorderState() == .healthy else { throw HostError.oracleRecorderUnhealthy }
+    let events = snapshot.events
     guard window.eventCount == events.count,
       window.lastSequence == (events.last?.sequence ?? 0)
     else { throw HostError.oracleWindowMismatch }
@@ -471,7 +471,15 @@ private func boundedCallback<Value: Sendable>(
       }
     }
     start { result in
-      if gate.claimCompletion(from: .callback) { continuation.resume(with: result) }
+      guard
+        let source = gate.claimCallback(
+          isBeforeDeadline: ContinuousClock.now < deadline
+        )
+      else { return }
+      switch source {
+      case .callback: continuation.resume(with: result)
+      case .deadline: continuation.resume(throwing: HostError.callbackTimedOut)
+      }
     }
   }
 }

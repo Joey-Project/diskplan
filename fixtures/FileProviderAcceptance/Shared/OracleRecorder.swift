@@ -19,37 +19,68 @@ public enum OracleRecorderState: Equatable, Sendable {
 }
 
 public final class OracleRecorder: @unchecked Sendable {
-  public typealias Append = @Sendable (OracleEvent) throws -> Void
+  typealias Append = @Sendable (OracleEvent, UInt64) throws -> Void
+  typealias RecorderState = @Sendable (UInt64) throws -> OracleRecorderState
+  typealias Poison = @Sendable (UInt64) throws -> Void
 
   private let lock = NSLock()
+  private let clock: any OracleQuiescenceClock
+  private let timeoutNanoseconds: UInt64
   private let appendEvent: Append
-  private let recorderState: @Sendable () throws -> OracleRecorderState
-  private let poisonRecorder: @Sendable () throws -> Void
+  private let recorderState: RecorderState
+  private let poisonRecorder: Poison
   private var poisoned = false
 
-  public init(
+  init(
     append: @escaping Append,
-    state: @escaping @Sendable () throws -> OracleRecorderState = { .healthy },
-    poison: @escaping @Sendable () throws -> Void = {}
+    state: @escaping RecorderState = { _ in .healthy },
+    poison: @escaping Poison = { _ in },
+    clock: any OracleQuiescenceClock = SystemOracleQuiescenceClock(),
+    timeoutNanoseconds: UInt64 = 30_000_000_000
   ) {
     appendEvent = append
     recorderState = state
     poisonRecorder = poison
+    self.clock = clock
+    self.timeoutNanoseconds = timeoutNanoseconds
   }
 
   public convenience init(log: OracleLog) {
     self.init(
-      append: { event in try log.append(event) },
-      state: { try log.recorderState() },
-      poison: { try log.poisonRecorder() }
+      append: { event, deadline in
+        try log.append(
+          event,
+          injecting: nil,
+          deadlineNanoseconds: deadline,
+          clock: SystemOracleQuiescenceClock()
+        )
+      },
+      state: { deadline in
+        try log.recorderState(
+          deadlineNanoseconds: deadline,
+          clock: SystemOracleQuiescenceClock()
+        )
+      },
+      poison: { deadline in
+        try log.poisonRecorder(
+          deadlineNanoseconds: deadline,
+          clock: SystemOracleQuiescenceClock()
+        )
+      }
     )
   }
 
   public func record(_ event: OracleEvent) throws {
-    lock.lock()
+    let start = clock.nowNanoseconds()
+    let (deadline, overflow) = start.addingReportingOverflow(timeoutNanoseconds)
+    guard !overflow else { throw OracleRecorderError.lockTimedOut }
+    try acquireLocalLock(deadlineNanoseconds: deadline)
     defer { lock.unlock() }
     guard !poisoned else { throw OracleRecorderError.poisoned }
-    switch try recorderState() {
+    try requireBeforeDeadline(deadline)
+    let state = try recorderState(deadline)
+    try requireBeforeDeadline(deadline)
+    switch state {
     case .healthy:
       break
     case .poisoned:
@@ -59,11 +90,40 @@ public final class OracleRecorder: @unchecked Sendable {
       throw OracleRecorderError.sealed
     }
     do {
-      try appendEvent(event)
+      try requireBeforeDeadline(deadline)
+      try appendEvent(event, deadline)
+      try requireBeforeDeadline(deadline)
+    } catch let error as OracleRecorderError where error == .sealed || error == .poisoned {
+      if error == .poisoned { poisoned = true }
+      throw error
     } catch {
       poisoned = true
-      try poisonRecorder()
+      try requireBeforeDeadline(deadline)
+      try poisonRecorder(deadline)
+      try requireBeforeDeadline(deadline)
       throw error
+    }
+  }
+
+  private func acquireLocalLock(deadlineNanoseconds: UInt64) throws {
+    while true {
+      try requireBeforeDeadline(deadlineNanoseconds)
+      if lock.try() {
+        do {
+          try requireBeforeDeadline(deadlineNanoseconds)
+          return
+        } catch {
+          lock.unlock()
+          throw error
+        }
+      }
+      clock.sleepForPoll()
+    }
+  }
+
+  private func requireBeforeDeadline(_ deadlineNanoseconds: UInt64) throws {
+    guard clock.nowNanoseconds() < deadlineNanoseconds else {
+      throw OracleRecorderError.lockTimedOut
     }
   }
 }
@@ -86,6 +146,11 @@ public final class OneShotCallbackGate: @unchecked Sendable {
     guard source == nil else { return false }
     source = candidate
     return true
+  }
+
+  public func claimCallback(isBeforeDeadline: Bool) -> CallbackCompletionSource? {
+    let candidate: CallbackCompletionSource = isBeforeDeadline ? .callback : .deadline
+    return claimCompletion(from: candidate) ? candidate : nil
   }
 
   public var completionSource: CallbackCompletionSource? {

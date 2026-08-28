@@ -337,6 +337,52 @@ func cleanupFinalRemovalFailureRestoresDeterministicRecoveryManifest() throws {
     at: manifestURL,
     expectedRunDirectory: fixture.runDirectory
   )
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: SecureFixtureStorage.cleanupRecoveryManifestURL(
+        for: fixture.runDirectory
+      ).path
+    )
+  )
+}
+
+@Test
+func cleanupCrashBeforeFinalRemovalRetainsExternalRecoveryEvidence() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let manifestURL = fixture.runDirectory.appendingPathComponent("manifest.json")
+  try fixture.writePrivate(fixture.manifestData, to: manifestURL)
+  #expect(throws: Error.self) {
+    try SecureFixtureStorage.cleanupRun(
+      manifestURL: manifestURL,
+      expectedRunDirectory: fixture.runDirectory,
+      injectFinalDirectoryRemovalFailure: false,
+      injectCrashBeforeFinalDirectoryRemoval: true
+    )
+  }
+  let recoveryURL = SecureFixtureStorage.cleanupRecoveryManifestURL(
+    for: fixture.runDirectory
+  )
+  #expect(!FileManager.default.fileExists(atPath: fixture.runDirectory.path))
+  #expect(FileManager.default.fileExists(atPath: recoveryURL.path))
+  #expect(
+    try SecureFixtureStorage.readControlFile(
+      at: recoveryURL,
+      record: .manifest
+    ) == fixture.manifestData
+  )
+  #expect(
+    try SecureFixtureStorage.readCleanupRecoveryManifest(
+      at: recoveryURL,
+      expectedRunDirectory: fixture.runDirectory
+    ).runID == fixture.runID
+  )
+  #expect(
+    FileManager.default.fileExists(
+      atPath: fixture.runDirectory.deletingLastPathComponent()
+        .appendingPathComponent(".cleanup-\(fixture.runDirectory.lastPathComponent)").path
+    )
+  )
 }
 
 @Test
@@ -386,7 +432,7 @@ func oracleRecorderPoisonsAfterInjectedAppendFailure() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
   let attempts = LockedCounter()
-  let recorder = OracleRecorder { _ in
+  let recorder = OracleRecorder { _, _ in
     attempts.increment()
     throw POSIXError(.EIO)
   }
@@ -436,9 +482,26 @@ func writeAheadPoisonSurvivesInjectedPoisonStorageFailure() throws {
   try log.prepare()
   let event = fixture.oracleEvent(kind: .fetchContents)
   let recorder = OracleRecorder(
-    append: { try log.append($0, injecting: .poisonStorage) },
-    state: { try log.recorderState() },
-    poison: { try log.poisonRecorder() }
+    append: { event, deadline in
+      try log.append(
+        event,
+        injecting: .poisonStorage,
+        deadlineNanoseconds: deadline,
+        clock: SystemOracleQuiescenceClock()
+      )
+    },
+    state: { deadline in
+      try log.recorderState(
+        deadlineNanoseconds: deadline,
+        clock: SystemOracleQuiescenceClock()
+      )
+    },
+    poison: { deadline in
+      try log.poisonRecorder(
+        deadlineNanoseconds: deadline,
+        clock: SystemOracleQuiescenceClock()
+      )
+    }
   )
   #expect(throws: OracleAppendInjectedFailure.poisonStorage) { try recorder.record(event) }
   #expect(try log.recorderState() == .poisoned)
@@ -455,9 +518,26 @@ func writeAheadPoisonSurvivesInjectedEventStorageFailure() throws {
   try log.prepare()
   let event = fixture.oracleEvent(kind: .fetchContents)
   let recorder = OracleRecorder(
-    append: { try log.append($0, injecting: .eventStorage) },
-    state: { try log.recorderState() },
-    poison: { try log.poisonRecorder() }
+    append: { event, deadline in
+      try log.append(
+        event,
+        injecting: .eventStorage,
+        deadlineNanoseconds: deadline,
+        clock: SystemOracleQuiescenceClock()
+      )
+    },
+    state: { deadline in
+      try log.recorderState(
+        deadlineNanoseconds: deadline,
+        clock: SystemOracleQuiescenceClock()
+      )
+    },
+    poison: { deadline in
+      try log.poisonRecorder(
+        deadlineNanoseconds: deadline,
+        clock: SystemOracleQuiescenceClock()
+      )
+    }
   )
   #expect(throws: OracleAppendInjectedFailure.eventStorage) { try recorder.record(event) }
   #expect(try log.recorderState() == .poisoned)
@@ -537,6 +617,122 @@ func oracleQuietStartsAfterInitialFingerprintRead() throws {
 }
 
 @Test
+func finalSnapshotAndSealExcludeARacingCallback() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let log = OracleLog(runDirectory: fixture.runDirectory)
+  try log.prepare()
+  try log.append(fixture.oracleEvent(kind: .itemMetadata))
+  try log.writeWindow(OracleWindow(beginNanoseconds: 0))
+  let started = DispatchSemaphore(value: 0)
+  let finished = DispatchSemaphore(value: 0)
+  let result = LockedRecorderResult()
+  let recorder = OracleRecorder(log: log)
+  _ = try log.closeWindowAfterQuiescence(
+    quietMilliseconds: 2_000,
+    timeoutMilliseconds: 30_000,
+    clock: DeterministicOracleClock(),
+    onFinalSnapshotLocked: {
+      DispatchQueue.global().async {
+        started.signal()
+        do {
+          try recorder.record(fixture.oracleEvent(kind: .fetchContents))
+        } catch {
+          result.store(error)
+        }
+        finished.signal()
+      }
+      started.wait()
+    }
+  )
+  #expect(finished.wait(timeout: .now() + 2) == .success)
+  #expect(result.recorderError == .sealed)
+  #expect(try log.recorderState() == .sealed)
+  #expect(try log.events().map(\.kind) == [.itemMetadata])
+  #expect(try log.window().eventCount == 1)
+}
+
+@Test
+func oracleRecorderUsesOneEntryDeadlineAcrossAllStages() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let clock = SteppingOracleClock(stepNanoseconds: 25)
+  let appendAttempts = LockedCounter()
+  let poisonAttempts = LockedCounter()
+  let recorder = OracleRecorder(
+    append: { _, _ in appendAttempts.increment() },
+    state: { _ in .healthy },
+    poison: { _ in poisonAttempts.increment() },
+    clock: clock,
+    timeoutNanoseconds: 100
+  )
+  #expect(throws: OracleRecorderError.lockTimedOut) {
+    try recorder.record(fixture.oracleEvent(kind: .fetchContents))
+  }
+  #expect(appendAttempts.value == 0)
+  #expect(poisonAttempts.value == 0)
+}
+
+@Test
+func oracleRecorderPassesTheSameDeadlineToStateAppendAndPoison() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let deadlines = LockedDeadlines()
+  let recorder = OracleRecorder(
+    append: { _, deadline in
+      deadlines.append(deadline)
+      throw POSIXError(.EIO)
+    },
+    state: { deadline in
+      deadlines.append(deadline)
+      return .healthy
+    },
+    poison: { deadline in deadlines.append(deadline) },
+    clock: DeterministicOracleClock(),
+    timeoutNanoseconds: 100
+  )
+  #expect(throws: POSIXError.self) {
+    try recorder.record(fixture.oracleEvent(kind: .fetchContents))
+  }
+  #expect(deadlines.values == [100, 100, 100])
+}
+
+@Test
+func oracleRecorderLocalLockContentionIsDeadlineBounded() throws {
+  let fixture = try TemporaryFixtureRun()
+  defer { fixture.remove() }
+  let clock = DeterministicOracleClock()
+  let entered = DispatchSemaphore(value: 0)
+  let release = DispatchSemaphore(value: 0)
+  let finished = DispatchSemaphore(value: 0)
+  let firstResult = LockedRecorderResult()
+  let recorder = OracleRecorder(
+    append: { _, _ in
+      entered.signal()
+      release.wait()
+    },
+    clock: clock,
+    timeoutNanoseconds: 100_000_000
+  )
+  DispatchQueue.global().async {
+    do {
+      try recorder.record(fixture.oracleEvent(kind: .itemMetadata))
+    } catch {
+      firstResult.store(error)
+    }
+    finished.signal()
+  }
+  #expect(entered.wait(timeout: .now() + 2) == .success)
+  #expect(throws: OracleRecorderError.lockTimedOut) {
+    try recorder.record(fixture.oracleEvent(kind: .fetchContents))
+  }
+  release.signal()
+  #expect(finished.wait(timeout: .now() + 2) == .success)
+  #expect(firstResult.recorderError == .lockTimedOut)
+  #expect(clock.nanoseconds == 100_000_000)
+}
+
+@Test
 func recorderLockContentionHonorsAbsoluteDeadline() throws {
   let fixture = try TemporaryFixtureRun()
   defer { fixture.remove() }
@@ -596,6 +792,11 @@ func callbackGateDeterministicallyRejectsLateAndNeverCallbacks() {
   #expect(neverCallback.claimCompletion(from: .deadline))
   #expect(!neverCallback.claimCompletion(from: .callback))
   #expect(neverCallback.completionSource == .deadline)
+
+  let delayedTimeoutTask = OneShotCallbackGate()
+  #expect(delayedTimeoutTask.claimCallback(isBeforeDeadline: false) == .deadline)
+  #expect(!delayedTimeoutTask.claimCompletion(from: .deadline))
+  #expect(delayedTimeoutTask.completionSource == .deadline)
 }
 
 @Test
@@ -624,7 +825,7 @@ func cleanupDeviceBoundaryRejectsDifferentDevices() {
   #expect(!isSameCleanupDevice(42, 43))
 }
 
-private final class DeterministicOracleClock: OracleQuiescenceClock {
+private final class DeterministicOracleClock: OracleQuiescenceClock, @unchecked Sendable {
   var nanoseconds: UInt64 = 0
   var onAdvance: ((UInt64) -> Void)?
 
@@ -636,15 +837,55 @@ private final class DeterministicOracleClock: OracleQuiescenceClock {
   }
 }
 
-private final class AdvancingOracleClock: OracleQuiescenceClock {
-  private var next: UInt64 = 0
+private final class AdvancingOracleClock: OracleQuiescenceClock, @unchecked Sendable {
+  private var value: UInt64 = 0
+
+  func nowNanoseconds() -> UInt64 { value }
+
+  func sleepForPoll() {}
+
+  func didReadFingerprint() { value += 1_000_000_000 }
+}
+
+private final class SteppingOracleClock: OracleQuiescenceClock, @unchecked Sendable {
+  private let lock = NSLock()
+  private let stepNanoseconds: UInt64
+  private var value: UInt64 = 0
+
+  init(stepNanoseconds: UInt64) { self.stepNanoseconds = stepNanoseconds }
 
   func nowNanoseconds() -> UInt64 {
-    defer { next += 1_000_000_000 }
-    return next
+    lock.withLock {
+      defer { value += stepNanoseconds }
+      return value
+    }
   }
 
   func sleepForPoll() {}
+}
+
+private final class LockedRecorderResult: @unchecked Sendable {
+  private let lock = NSLock()
+  private var error: Error?
+
+  var recorderError: OracleRecorderError? {
+    lock.withLock { error as? OracleRecorderError }
+  }
+
+  func store(_ error: Error) {
+    lock.withLock { self.error = error }
+  }
+}
+
+private final class LockedDeadlines: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: [UInt64] = []
+
+  var values: [UInt64] { lock.withLock { storage } }
+
+  func append(_ deadline: UInt64) {
+    lock.withLock { storage.append(deadline) }
+  }
 }
 
 private final class LockedCounter: @unchecked Sendable {

@@ -131,6 +131,17 @@ public struct OracleLog: Sendable {
     try withRecorderLock { try createRecorderMarker("recorder-poisoned", directory: $0) }
   }
 
+  func poisonRecorder(
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws {
+    try withRecorderLock(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .recorder
+    ) { try createRecorderMarker("recorder-poisoned", directory: $0) }
+  }
+
   public func sealRecorder() throws {
     try withRecorderLock { try createRecorderMarker("recorder-sealed", directory: $0) }
   }
@@ -153,6 +164,18 @@ public struct OracleLog: Sendable {
       }
     } catch {
       throw FixtureControlReadError.mismatch(.events, .malformed)
+    }
+  }
+
+  public func sealedSnapshot() throws -> OracleSealedSnapshot {
+    try withRecorderLock { directory in
+      guard try lockedRecorderState(directory: directory) == .sealed else {
+        throw try recorderError(directory: directory)
+      }
+      return try OracleSealedSnapshot(
+        window: window(),
+        events: lockedEvents(directory: directory)
+      )
     }
   }
 
@@ -184,7 +207,8 @@ public struct OracleLog: Sendable {
   func closeWindowAfterQuiescence(
     quietMilliseconds: Int,
     timeoutMilliseconds: Int,
-    clock: any OracleQuiescenceClock
+    clock: any OracleQuiescenceClock,
+    onFinalSnapshotLocked: @Sendable () -> Void = {}
   ) throws -> OracleQuiescence {
     guard quietMilliseconds >= 50, quietMilliseconds <= 5_000,
       timeoutMilliseconds >= quietMilliseconds, timeoutMilliseconds <= 30_000
@@ -214,29 +238,37 @@ public struct OracleLog: Sendable {
         quietStart = now
       }
       if now - quietStart >= UInt64(quietMilliseconds) * 1_000_000 {
-        try writeWindow(
-          OracleWindow(
-            beginNanoseconds: openedWindow.beginNanoseconds,
-            endNanoseconds: now,
-            quietMilliseconds: quietMilliseconds,
-            eventCount: current.count,
-            lastSequence: current.lastSequence
-          )
-        )
-        return OracleQuiescence(
-          eventCount: current.count,
-          lastSequence: current.lastSequence,
-          quietMilliseconds: quietMilliseconds
-        )
+        switch try sealWindowSnapshotIfQuiet(
+          openedWindow: openedWindow,
+          expectedFingerprint: current,
+          quietStartNanoseconds: quietStart,
+          quietMilliseconds: quietMilliseconds,
+          deadlineNanoseconds: deadline,
+          clock: clock,
+          onFinalSnapshotLocked: onFinalSnapshotLocked
+        ) {
+        case .changed(let changed, let changedAt):
+          fingerprint = changed
+          quietStart = changedAt
+        case .waiting:
+          break
+        case .sealed(let quiescence):
+          return quiescence
+        }
       }
       clock.sleepForPoll()
     }
   }
 
-  private func eventFingerprint(
+  private func sealWindowSnapshotIfQuiet(
+    openedWindow: OracleWindow,
+    expectedFingerprint: OracleEventFingerprint,
+    quietStartNanoseconds: UInt64,
+    quietMilliseconds: Int,
     deadlineNanoseconds: UInt64,
-    clock: any OracleQuiescenceClock
-  ) throws -> (count: Int, lastSequence: UInt64) {
+    clock: any OracleQuiescenceClock,
+    onFinalSnapshotLocked: @Sendable () -> Void
+  ) throws -> WindowSealAttempt {
     try withRecorderLock(
       deadlineNanoseconds: deadlineNanoseconds,
       clock: clock,
@@ -245,18 +277,109 @@ public struct OracleLog: Sendable {
       guard try lockedRecorderState(directory: directory) == .healthy else {
         throw try recorderError(directory: directory)
       }
-      let values = try events()
-      return (values.count, values.last?.sequence ?? 0)
+      let values = try lockedEvents(directory: directory)
+      let current = OracleEventFingerprint(
+        count: values.count,
+        lastSequence: values.last?.sequence ?? 0
+      )
+      let now = clock.nowNanoseconds()
+      guard now < deadlineNanoseconds else { throw OracleQuiescenceError.timedOut }
+      guard current == expectedFingerprint else { return .changed(current, now) }
+      guard now >= quietStartNanoseconds,
+        now - quietStartNanoseconds >= UInt64(quietMilliseconds) * 1_000_000
+      else { return .waiting }
+      onFinalSnapshotLocked()
+      try writeWindow(
+        OracleWindow(
+          beginNanoseconds: openedWindow.beginNanoseconds,
+          endNanoseconds: now,
+          quietMilliseconds: quietMilliseconds,
+          eventCount: current.count,
+          lastSequence: current.lastSequence
+        )
+      )
+      try createRecorderMarker("recorder-sealed", directory: directory)
+      return .sealed(
+        OracleQuiescence(
+          eventCount: current.count,
+          lastSequence: current.lastSequence,
+          quietMilliseconds: quietMilliseconds
+        )
+      )
+    }
+  }
+
+  private func eventFingerprint(
+    deadlineNanoseconds: UInt64,
+    clock: any OracleQuiescenceClock
+  ) throws -> OracleEventFingerprint {
+    try withRecorderLock(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: .quiescence
+    ) { directory in
+      guard try lockedRecorderState(directory: directory) == .healthy else {
+        throw try recorderError(directory: directory)
+      }
+      let values = try lockedEvents(directory: directory)
+      clock.didReadFingerprint()
+      return OracleEventFingerprint(
+        count: values.count,
+        lastSequence: values.last?.sequence ?? 0
+      )
+    }
+  }
+
+  private func lockedEvents(directory: Int32) throws -> [OracleEvent] {
+    let descriptor = openat(
+      directory,
+      "events.jsonl",
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+    )
+    if descriptor < 0 {
+      if errno == ENOENT { return [] }
+      throw makePOSIXError(code: errno)
+    }
+    defer { close(descriptor) }
+    try validateOwnerPrivateRegularFile(descriptor: descriptor)
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0 else { throw makePOSIXError(code: errno) }
+    guard metadata.st_size >= 0, metadata.st_size <= FixtureContract.maximumOracleBytes else {
+      throw FixtureContractError.oracleTooLarge
+    }
+    let data = try readAll(descriptor: descriptor, count: Int(metadata.st_size))
+    do {
+      return try data.split(separator: 0x0a).map {
+        try JSONDecoder().decode(OracleEvent.self, from: $0)
+      }
+    } catch {
+      throw FixtureControlReadError.mismatch(.events, .malformed)
     }
   }
 }
 
-protocol OracleQuiescenceClock {
-  func nowNanoseconds() -> UInt64
-  func sleepForPoll()
+private struct OracleEventFingerprint: Equatable {
+  let count: Int
+  let lastSequence: UInt64
 }
 
-private struct SystemOracleQuiescenceClock: OracleQuiescenceClock {
+private enum WindowSealAttempt {
+  case changed(OracleEventFingerprint, UInt64)
+  case waiting
+  case sealed(OracleQuiescence)
+}
+
+protocol OracleQuiescenceClock: Sendable {
+  func nowNanoseconds() -> UInt64
+  func sleepForPoll()
+  func didReadFingerprint()
+}
+
+extension OracleQuiescenceClock {
+  func didReadFingerprint() {}
+}
+
+struct SystemOracleQuiescenceClock: OracleQuiescenceClock {
   func nowNanoseconds() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) }
   func sleepForPoll() { usleep(50_000) }
 }
@@ -337,7 +460,13 @@ extension OracleLog {
       timeout: timeout
     )
     defer { flock(lock, LOCK_UN) }
-    return try body(directory)
+    let result = try body(directory)
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: timeout
+    )
+    return result
   }
 }
 
@@ -352,16 +481,41 @@ private func acquireBoundedLock(
   clock: any OracleQuiescenceClock,
   timeout: RecorderLockTimeout
 ) throws {
-  while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
-    let code = errno
-    guard code == EWOULDBLOCK || code == EAGAIN else { throw makePOSIXError(code: code) }
-    guard clock.nowNanoseconds() < deadlineNanoseconds else {
-      switch timeout {
-      case .recorder: throw OracleRecorderError.lockTimedOut
-      case .quiescence: throw OracleQuiescenceError.timedOut
+  while true {
+    try requireLockDeadline(
+      deadlineNanoseconds: deadlineNanoseconds,
+      clock: clock,
+      timeout: timeout
+    )
+    if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+      do {
+        try requireLockDeadline(
+          deadlineNanoseconds: deadlineNanoseconds,
+          clock: clock,
+          timeout: timeout
+        )
+        return
+      } catch {
+        flock(descriptor, LOCK_UN)
+        throw error
       }
     }
+    let code = errno
+    guard code == EWOULDBLOCK || code == EAGAIN else { throw makePOSIXError(code: code) }
     clock.sleepForPoll()
+  }
+}
+
+private func requireLockDeadline(
+  deadlineNanoseconds: UInt64,
+  clock: any OracleQuiescenceClock,
+  timeout: RecorderLockTimeout
+) throws {
+  guard clock.nowNanoseconds() < deadlineNanoseconds else {
+    switch timeout {
+    case .recorder: throw OracleRecorderError.lockTimedOut
+    case .quiescence: throw OracleQuiescenceError.timedOut
+    }
   }
 }
 

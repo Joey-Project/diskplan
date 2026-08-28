@@ -107,6 +107,16 @@ public struct OracleQuiescence: Equatable, Sendable {
   }
 }
 
+public struct OracleSealedSnapshot: Sendable {
+  public let window: OracleWindow
+  public let events: [OracleEvent]
+
+  public init(window: OracleWindow, events: [OracleEvent]) {
+    self.window = window
+    self.events = events
+  }
+}
+
 public struct FixtureManifest: Codable, Equatable, Sendable {
   public let version: Int
   public let runID: UUID

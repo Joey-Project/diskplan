@@ -53,14 +53,17 @@ Root and working-set enumeration plus item metadata callbacks are allowed. The s
 control can prove real materialization rather than passing because fetch is a stub.
 
 Both provider/path postflight probes and the oracle-health barrier run before the window closes.
-After closure, assertion reads only descriptor-bound control and oracle files; it never touches
-the provider path. The window closes only after the JSONL sequence/count fingerprint remains
+After closure, assertion reads only the immutable sealed snapshot; it never touches the provider
+path. The window closes only after the JSONL sequence/count fingerprint remains
 unchanged for a continuous two seconds, within a 30-second total bound. Each timestamp is taken
 after the fingerprint read and its locks complete, and the total deadline is checked before
 quiet success. Time spent reading is never credited as silence, and quiet cannot pass at the
-timeout boundary. The persisted close record binds its end timestamp, quiet interval, event count, and final sequence. Assertion
-rechecks that fingerprint, and malformed or internally inconsistent close metadata fails as a
-typed semantic mismatch.
+timeout boundary. At quiet success, one recorder-lock critical section checks healthy state,
+reads the final descriptor-bound event snapshot, writes the closed window, and persists the seal.
+No callback can append or poison the recorder between that snapshot and acceptance. The persisted
+close record binds its end timestamp, quiet interval, event count, and final sequence. Assertion
+requires sealed state and rechecks that immutable fingerprint; malformed or internally
+inconsistent close metadata fails as a typed semantic mismatch.
 
 Oracle writes fail closed. A run-scoped recorder lock serializes all extension instances. Under
 that lock, every append first creates and `fsync`s immutable `recorder-poisoned` evidence, then
@@ -74,7 +77,9 @@ error channel do not report completion.
 The recorder lock and the nested JSONL lock both use nonblocking `flock` acquisition and share
 the same absolute 30-second monotonic deadline for an append. Lock contention cannot turn a
 provider callback into an unbounded wait, and a timeout after write-ahead poison remains visible
-as poisoned state.
+as poisoned state. The in-process recorder lock is also acquired with bounded `tryLock` polling;
+one entry deadline is passed unchanged through local locking, state read, append, and poison.
+Every filesystem lock checks that deadline before each attempt and immediately after acquisition.
 
 Extension append opens only the already-existing owner-private run directory and pre-created
 recorder lock; it never prepares or recreates the run. Teardown writes an immutable
@@ -124,8 +129,9 @@ malformed records or text that mentions the exact bundle fail closed instead of 
 as successful removal.
 
 All File Provider add, list, remove, signal, and user-visible-URL callbacks share one monotonic
-20-second deadline per lifecycle phase. A one-shot atomic gate discards callbacks arriving after
-the deadline, so a daemon that never replies or replies late cannot hang the host or resume a
+20-second deadline per lifecycle phase. The callback thread checks the absolute deadline before
+claiming the one-shot gate. Therefore a late callback cannot win merely because the timeout task
+was delayed; a daemon that never replies or replies late cannot hang the host or resume a
 continuation twice.
 
 It never performs bulk domain removal and never deletes paths under the user-visible File
@@ -151,13 +157,14 @@ remain on that root device. A mount point or any directory whose device cannot b
 fails closed before inventory, so cleanup never traverses or deletes a mounted volume.
 The exact UUID directory is atomically renamed with exclusive semantics inside the held
 owner-private `runs` directory before recursive deletion; symlinks and special objects fail
-closed. Cleanup creates an owner-private recovery copy of the validated manifest before
-deletion. The manifest is deleted last; on failure, the recovery copy is renamed back when
-needed, validated byte-for-byte, and the isolated directory is restored. Recovery-copy and
-manifest-restoration errors are explicit retained-state failures, never discarded with `try?`.
-If the final run-directory removal fails after the recovery copy was consumed, cleanup recreates
-`manifest.json`, validates that file directly, and restores the original UUID directory name so
-the printed recovery command remains deterministic.
+closed. Before that rename, cleanup durably creates and validates the sibling recovery record
+`.manifest-recovery-<uuid>.json` outside the staging directory. It remains present while the
+staging tree, its manifest, and the staging directory itself are removed. Only after final
+`rmdir` succeeds does bounded cleanup validate and unlink the sibling evidence. A crash at any
+earlier point therefore leaves a deterministic owner-private manifest path outside the partially
+deleted tree. On an ordinary failure, cleanup recreates and directly validates `manifest.json`,
+restores the original UUID directory name, and then removes the sibling record. Any recovery or
+evidence-cleanup failure is an explicit retained-state error, never discarded with `try?`.
 These are point-in-time replacement checks and do not claim
 to exclude a malicious same-UID process that races after the final identity check.
 

@@ -20,8 +20,9 @@ The App Group oracle records metadata and dangerous callbacks as bounded JSONL. 
 window fails if it sees content fetch, upload/create, modify, delete,
 `materializedItemsDidChange`, or sealed-directory enumeration. Both provider probes and a
 postflight extension-liveness signal run inside the open window. Closure requires two continuous
-seconds without a new event within a 30-second total bound; assertion after closure reads only
-sealed control/oracle data.
+seconds without a new event within a 30-second total bound. Healthy state, the final event
+snapshot, closed-window publication, and seal happen under one recorder lock; assertion after
+closure reads only that immutable sealed snapshot.
 
 Every append first durably writes run-scoped poison evidence while holding the recorder lock,
 then durably appends its JSONL event, and clears the poison marker only after that success. An
@@ -29,8 +30,10 @@ append or poison-storage error therefore remains fail-closed across recreated ex
 instances instead of masquerading as callback-zero.
 Teardown persistently seals the recorder before domain removal, and append never recreates a
 missing run directory. File Provider callbacks and `pluginkit` mutation/query steps have bounded
-monotonic deadlines and discard late completions. Recorder and JSONL locks use nonblocking
-acquisition under the same 30-second absolute deadline. Exact-bundle registry records require
+monotonic deadlines and discard late completions. A callback checks the absolute deadline before
+claiming completion, so a delayed timeout task cannot admit a late reply. The bounded local,
+recorder, and JSONL locks plus state/append/poison stages use one 30-second entry deadline.
+Exact-bundle registry records require
 strict UTF-8, a recognized header, and one absolute path; malformed text that mentions the exact
 bundle fails closed.
 
@@ -45,5 +48,6 @@ rejects symlinks, special objects, identity replacement, or access-policy change
 the manifest recoverable on ordinary failures. It also rejects the run root or any descendant
 directory on a different device, and unregister cleanup proceeds only after the registry no
 longer references the exact embedded extension path. A validated recovery copy prevents
-manifest restoration failures from being silently discarded; even a final directory-removal
-failure recreates and directly validates `manifest.json` at the deterministic UUID recovery path.
+manifest restoration failures from being silently discarded. A durable deterministic sibling
+manifest remains outside the staging tree until final `rmdir` succeeds, so a crash during
+recursive deletion does not consume the only recovery evidence.

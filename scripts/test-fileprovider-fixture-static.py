@@ -29,8 +29,12 @@ def main() -> int:
         "oracle session and event locks must use bounded acquisition",
     )
     require(
-        "while flock(descriptor, LOCK_EX | LOCK_NB)" in swift,
-        "oracle locks must retry only within their deadline",
+        "if flock(descriptor, LOCK_EX | LOCK_NB) == 0" in swift,
+        "oracle locks must use nonblocking acquisition",
+    )
+    require(
+        swift.count("try requireLockDeadline(") >= 2,
+        "oracle locks must check the absolute deadline before and after acquisition",
     )
     require("flock(descriptor, LOCK_EX)" not in swift, "oracle event lock must not block")
     require("O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK" in swift, "secure control read flags changed")
@@ -69,8 +73,19 @@ def main() -> int:
     require("sleep 2" not in lifecycle, "fixed sleeps are not a quiescence oracle")
     require("closeWindowAfterQuiescence" in swift, "oracle close must use bounded event quiescence")
     require("sealRecorder" in swift, "teardown must persistently seal the recorder")
+    require(
+        'try createRecorderMarker("recorder-sealed", directory: directory)' in swift,
+        "oracle close must atomically seal its final snapshot",
+    )
+    require(
+        "let snapshot = try log.sealedSnapshot()" in swift,
+        "assertion must require the immutable sealed snapshot",
+    )
     require("try? recreateManifest" not in swift, "manifest recovery failures must not be discarded")
-    require(".manifest-recovery" in swift, "cleanup must retain a manifest recovery link")
+    require(
+        '".manifest-recovery-\\(runName).json"' in swift,
+        "cleanup must retain deterministic recovery evidence outside staging",
+    )
     require(
         '"$host" oracle-end --manifest "$manifest" --quiet-ms 2000 --timeout-ms 30000' in lifecycle,
         "acceptance must require a two-second quiet window within a 30-second bound",

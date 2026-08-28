@@ -76,14 +76,16 @@ public enum SecureFixtureStorage {
     try cleanupRun(
       manifestURL: manifestURL,
       expectedRunDirectory: expectedRunDirectory,
-      injectFinalDirectoryRemovalFailure: false
+      injectFinalDirectoryRemovalFailure: false,
+      injectCrashBeforeFinalDirectoryRemoval: false
     )
   }
 
   static func cleanupRun(
     manifestURL: URL,
     expectedRunDirectory: URL,
-    injectFinalDirectoryRemovalFailure: Bool
+    injectFinalDirectoryRemovalFailure: Bool,
+    injectCrashBeforeFinalDirectoryRemoval: Bool = false
   ) throws {
     let expectedManifest = expectedRunDirectory.appendingPathComponent("manifest.json")
     guard manifestURL.standardizedFileURL == expectedManifest.standardizedFileURL else {
@@ -117,13 +119,34 @@ public enum SecureFixtureStorage {
     }
 
     let stagingName = ".cleanup-\(runName)"
-    try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
-    try renameExclusive(
+    let recoveryName = ".manifest-recovery-\(runName).json"
+    let recoveryURL = parentURL.appendingPathComponent(recoveryName)
+    try createExternalManifestRecovery(
+      manifestData,
       parent: parent,
-      source: runName,
-      destination: stagingName,
-      operation: "stage-run-directory"
+      name: recoveryName
     )
+    try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
+    do {
+      try renameExclusive(
+        parent: parent,
+        source: runName,
+        destination: stagingName,
+        operation: "stage-run-directory"
+      )
+    } catch {
+      let operationError = error
+      do {
+        try removeExternalManifestRecovery(
+          manifestData,
+          parent: parent,
+          name: recoveryName
+        )
+      } catch {
+        throw FixtureCleanupError.retained(recoveryURL.path)
+      }
+      throw operationError
+    }
     do {
       try requirePathIdentity(parent: parent, name: stagingName, expected: root.metadata)
       try requireDirectoryPathIdentity(parentURL, descriptor: parent, cleanupPath: parentURL.path)
@@ -135,14 +158,16 @@ public enum SecureFixtureStorage {
         isRoot: true,
         remainingEntries: &remainingEntries
       )
-      try createManifestRecoveryCopy(manifestData, in: root)
       try delete(entries: tree, from: root)
-      try unlink(parent: root, name: ".manifest-recovery", flags: 0)
+      if injectCrashBeforeFinalDirectoryRemoval {
+        throw FixtureCleanupInjectedCrash.beforeFinalDirectoryRemoval
+      }
       if injectFinalDirectoryRemovalFailure {
         throw FixtureCleanupError.operationFailed("injected-final-directory-removal", errno: EBUSY)
       }
       try unlink(parent: parent, name: stagingName, flags: AT_REMOVEDIR)
     } catch {
+      if error is FixtureCleanupInjectedCrash { throw error }
       let operationError = error
       do {
         try restoreManifest(manifestData, in: root)
@@ -153,13 +178,54 @@ public enum SecureFixtureStorage {
           operation: "restore-run-directory"
         )
         _ = try readBoundControlFile(directory: root, name: "manifest.json", record: .manifest)
-      } catch {
-        throw FixtureCleanupError.retained(
-          parentURL.appendingPathComponent(stagingName).path
+        try removeExternalManifestRecovery(
+          manifestData,
+          parent: parent,
+          name: recoveryName
         )
+      } catch {
+        throw FixtureCleanupError.retained(recoveryURL.path)
       }
       throw operationError
     }
+    do {
+      try removeExternalManifestRecovery(
+        manifestData,
+        parent: parent,
+        name: recoveryName
+      )
+    } catch {
+      throw FixtureCleanupError.retained(recoveryURL.path)
+    }
+  }
+
+  static func cleanupRecoveryManifestURL(for expectedRunDirectory: URL) -> URL {
+    expectedRunDirectory.deletingLastPathComponent().appendingPathComponent(
+      ".manifest-recovery-\(expectedRunDirectory.lastPathComponent).json"
+    )
+  }
+
+  static func readCleanupRecoveryManifest(
+    at recoveryURL: URL,
+    expectedRunDirectory: URL
+  ) throws -> FixtureManifest {
+    guard
+      recoveryURL.standardizedFileURL
+        == cleanupRecoveryManifestURL(for: expectedRunDirectory).standardizedFileURL
+    else { throw FixtureControlReadError.mismatch(.manifest, .semantic) }
+    let data = try readControlFile(at: recoveryURL, record: .manifest)
+    let manifest: FixtureManifest
+    do {
+      manifest = try JSONDecoder().decode(FixtureManifest.self, from: data)
+      try manifest.validate(expectedTaskRoot: expectedRunDirectory)
+      guard
+        URL(fileURLWithPath: manifest.appGroupRunPath).standardizedFileURL
+          == expectedRunDirectory.standardizedFileURL
+      else { throw FixtureContractError.unsafePath }
+    } catch {
+      throw FixtureControlReadError.mismatch(.manifest, .semantic)
+    }
+    return manifest
   }
 
   public static func readControlFile(
@@ -670,13 +736,32 @@ private func recreateManifest(_ data: Data, in directory: BoundDescriptor) throw
   guard restored == data else { throw FixtureCleanupError.treeMismatch("manifest-content") }
 }
 
-private func createManifestRecoveryCopy(_ data: Data, in directory: BoundDescriptor) throws {
+private enum FixtureCleanupInjectedCrash: Error {
+  case beforeFinalDirectoryRemoval
+}
+
+private func createExternalManifestRecovery(
+  _ data: Data,
+  parent: BoundDescriptor,
+  name: String
+) throws {
   let descriptor = openat(
-    directory.rawValue,
-    ".manifest-recovery",
+    parent.rawValue,
+    name,
     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
     0o600
   )
+  if descriptor < 0, errno == EEXIST {
+    let existing = try readBoundControlFile(
+      directory: parent,
+      name: name,
+      record: .manifest
+    )
+    guard existing == data else {
+      throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
+    }
+    return
+  }
   guard descriptor >= 0 else {
     throw FixtureCleanupError.operationFailed("create-manifest-recovery-copy", errno: errno)
   }
@@ -686,6 +771,39 @@ private func createManifestRecoveryCopy(_ data: Data, in directory: BoundDescrip
     throw FixtureCleanupError.treeMismatch("manifest-recovery-copy")
   }
   try writeAll(data, descriptor: descriptor)
+  guard fsync(descriptor) == 0 else {
+    throw FixtureCleanupError.operationFailed("sync-manifest-recovery-copy", errno: errno)
+  }
+  guard fsync(parent.rawValue) == 0 else {
+    throw FixtureCleanupError.operationFailed("sync-manifest-recovery-parent", errno: errno)
+  }
+  let recovered = try readBoundControlFile(
+    directory: parent,
+    name: name,
+    record: .manifest
+  )
+  guard recovered == data else {
+    throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
+  }
+}
+
+private func removeExternalManifestRecovery(
+  _ data: Data,
+  parent: BoundDescriptor,
+  name: String
+) throws {
+  let recovered = try readBoundControlFile(
+    directory: parent,
+    name: name,
+    record: .manifest
+  )
+  guard recovered == data else {
+    throw FixtureCleanupError.treeMismatch("external-manifest-recovery-content")
+  }
+  try unlink(parent: parent, name: name, flags: 0)
+  guard fsync(parent.rawValue) == 0 else {
+    throw FixtureCleanupError.operationFailed("sync-manifest-recovery-removal", errno: errno)
+  }
 }
 
 private func restoreManifest(_ data: Data, in directory: BoundDescriptor) throws {
@@ -704,21 +822,6 @@ private func restoreManifest(_ data: Data, in directory: BoundDescriptor) throws
       record: .manifest
     )
     guard current == data else { throw FixtureCleanupError.treeMismatch("manifest-content") }
-    if pathExists(directory: directory, name: ".manifest-recovery") {
-      try unlink(parent: directory, name: ".manifest-recovery", flags: 0)
-    }
-  } else if manifestError == ENOENT,
-    pathExists(directory: directory, name: ".manifest-recovery")
-  {
-    guard
-      renameatx_np(
-        directory.rawValue,
-        ".manifest-recovery",
-        directory.rawValue,
-        "manifest.json",
-        UInt32(RENAME_EXCL)
-      ) == 0
-    else { throw FixtureCleanupError.operationFailed("restore-manifest-link", errno: errno) }
   } else if manifestError == ENOENT {
     try recreateManifest(data, in: directory)
   } else {
@@ -730,11 +833,6 @@ private func restoreManifest(_ data: Data, in directory: BoundDescriptor) throws
     record: .manifest
   )
   guard restored == data else { throw FixtureCleanupError.treeMismatch("manifest-content") }
-}
-
-private func pathExists(directory: BoundDescriptor, name: String) -> Bool {
-  var value = stat()
-  return fstatat(directory.rawValue, name, &value, AT_SYMLINK_NOFOLLOW) == 0
 }
 
 private func readAll(descriptor: Int32, count: Int) throws -> Data {
