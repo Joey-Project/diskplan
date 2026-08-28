@@ -51,12 +51,12 @@ validate_lock_schema() {
     fi
 }
 
-require_exact_line() {
+require_exact_trimmed_line() {
     local path="$1"
     local line="$2"
     local label="$3"
     local count
-    count="$(grep -Fxc "${line}" "${path}" || true)"
+    count="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' "${path}" | grep -Fxc "${line}" || true)"
     if [[ "${count}" != "1" ]]; then
         echo "${label} is not pinned exactly once in ${path#"${REPO_ROOT}/"}" >&2
         exit 1
@@ -127,9 +127,13 @@ readonly EXPECTED_PROST
 EXPECTED_PROST_BUILD="$(read_lock_value prost-build)"
 readonly EXPECTED_PROST_BUILD
 
-require_exact_line \
+require_exact_trimmed_line \
     "${REPO_ROOT}/Package.swift" \
-    "            exact: \"${EXPECTED_SWIFT_PROTOBUF}\"" \
+    'url: "https://github.com/apple/swift-protobuf.git",' \
+    "swift-protobuf manifest identity"
+require_exact_trimmed_line \
+    "${REPO_ROOT}/Package.swift" \
+    "exact: \"${EXPECTED_SWIFT_PROTOBUF}\"" \
     "swift-protobuf manifest version"
 RESOLVED_SWIFT_PROTOBUF="$(resolved_swift_protobuf_version)" || {
     echo "Package.resolved must contain exactly one swift-protobuf pin" >&2
@@ -140,11 +144,11 @@ if [[ "${RESOLVED_SWIFT_PROTOBUF}" != "${EXPECTED_SWIFT_PROTOBUF}" ]]; then
     echo "swift-protobuf lock mismatch; expected ${EXPECTED_SWIFT_PROTOBUF}, resolved ${RESOLVED_SWIFT_PROTOBUF}" >&2
     exit 1
 fi
-require_exact_line \
+require_exact_trimmed_line \
     "${REPO_ROOT}/Cargo.toml" \
     "prost = \"=${EXPECTED_PROST}\"" \
     "prost workspace version"
-require_exact_line \
+require_exact_trimmed_line \
     "${REPO_ROOT}/Cargo.toml" \
     "prost-build = \"=${EXPECTED_PROST_BUILD}\"" \
     "prost-build workspace version"
