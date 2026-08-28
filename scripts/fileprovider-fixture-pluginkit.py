@@ -17,52 +17,56 @@ from fileprovider_fixture_subprocess import (
 MAXIMUM_OUTPUT_BYTES = 64 * 1024
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--action", choices=("add", "remove"), required=True)
-    parser.add_argument("--path", type=Path, required=True)
-    arguments = parser.parse_args()
-    if arguments.path.is_symlink() or not arguments.path.is_dir():
+def run_mutation(action: str, path: Path) -> int:
+    if path.is_symlink() or not path.is_dir():
         print('{"status":"failed","reason":"pluginkit-path"}', file=sys.stderr)
         return 1
-    option = "-a" if arguments.action == "add" else "-r"
+    option = "-a" if action == "add" else "-r"
     try:
         run_bounded_text(
-            ["pluginkit", option, str(arguments.path.resolve(strict=True))],
+            ["pluginkit", option, str(path.resolve(strict=True))],
             timeout_seconds=10,
             maximum_output_bytes=MAXIMUM_OUTPUT_BYTES,
         )
     except CommandTimedOut:
         print('{"status":"failed","reason":"pluginkit-command-timeout"}', file=sys.stderr)
-        return 1
+        return 75
     except CommandOutputLimitExceeded:
         print('{"status":"failed","reason":"pluginkit-command-output-limit"}', file=sys.stderr)
-        return 1
+        return 75
     except CommandOutputInvalidUTF8:
         print('{"status":"failed","reason":"pluginkit-command-invalid-utf8"}', file=sys.stderr)
-        return 1
+        return 75
     except CommandStartFailed:
         print('{"status":"failed","reason":"pluginkit-command-unavailable"}', file=sys.stderr)
-        return 1
+        return 65
     except CommandExited as error:
         print(
             json.dumps(
                 {
                     "status": "failed",
                     "reason": "pluginkit-command",
-                    "action": arguments.action,
+                    "action": action,
                     "exit": error.returncode,
                 },
                 sort_keys=True,
             ),
             file=sys.stderr,
         )
-        return 1
+        return 65
     except BoundedCommandFailure:
         print('{"status":"failed","reason":"pluginkit-command-internal"}', file=sys.stderr)
-        return 1
-    print(json.dumps({"status": "completed", "action": arguments.action}, sort_keys=True))
+        return 75
+    print(json.dumps({"status": "completed", "action": action}, sort_keys=True))
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--action", choices=("add", "remove"), required=True)
+    parser.add_argument("--path", type=Path, required=True)
+    arguments = parser.parse_args()
+    return run_mutation(arguments.action, arguments.path)
 
 
 if __name__ == "__main__":

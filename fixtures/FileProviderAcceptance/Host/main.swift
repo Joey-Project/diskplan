@@ -13,6 +13,15 @@ enum FixtureHost {
     }
     do {
       try await run(arguments: Array(CommandLine.arguments.dropFirst()), policy: policy)
+    } catch let error as ExternalMutationJournalError {
+      if case .unresolvedExternalMutation(let kind, let bootGeneration) = error {
+        fail(
+          "unresolved_external_mutation",
+          detail: "kind=\(kind.rawValue),boot_generation=\(bootGeneration)",
+          exitCode: 75
+        )
+      }
+      fail("external_mutation_journal", detail: String(describing: error))
     } catch {
       fail("fixture_host", detail: String(describing: error))
     }
@@ -83,8 +92,37 @@ enum FixtureHost {
         allowCleanupRecovery: true
       )
       let kind = try options.requiredMutationKind("kind")
-      try mutationJournal(loaded.manifest).begin(kind)
+      let journal = try mutationJournal(loaded.manifest)
+      if kind.isAdd {
+        try journal.begin(kind)
+      } else {
+        try journal.beginRemovalAttempt(kind)
+      }
       printJSON(["status": "mutation-in-flight", "kind": kind.rawValue])
+    case "mutation-dispatched":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      try mutationJournal(loaded.manifest).markDispatched(kind)
+      printJSON(["status": "mutation-dispatched", "kind": kind.rawValue])
+    case "mutation-complete":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      let completion = try options.requiredMutationCompletion("outcome")
+      try mutationJournal(loaded.manifest).recordOriginalCompletion(
+        kind,
+        completion: completion
+      )
+      printJSON([
+        "status": "mutation-completed",
+        "kind": kind.rawValue,
+        "outcome": completion.rawValue,
+      ])
     case "mutation-confirm":
       let loaded = try loadManifest(
         try options.requiredURL("manifest"),
@@ -94,6 +132,21 @@ enum FixtureHost {
       let presence = try options.requiredMutationPresence("state")
       try mutationJournal(loaded.manifest).confirmFinished(kind, observed: presence)
       printJSON(["status": "mutation-confirmed", "kind": kind.rawValue])
+    case "mutation-resolve-after-boot":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      let presence = try options.requiredMutationPresence("state")
+      let resolved = try mutationJournal(loaded.manifest).resolveAfterBootIfTerminal(
+        kind,
+        observed: presence
+      )
+      printJSON([
+        "status": resolved ? "mutation-resolved" : "mutation-still-pending",
+        "kind": kind.rawValue,
+      ])
     case "extension-path":
       let loaded = try loadManifest(
         try options.requiredURL("manifest"),
@@ -146,9 +199,10 @@ enum FixtureHost {
     )
     domain.isHidden = true
     domain.testingModes = []
-    let journal = mutationJournal(manifest)
+    let journal = try mutationJournal(manifest)
     try journal.begin(.domainAdd)
-    try await addDomain(domain, deadline: deadline)
+    try journal.markDispatched(.domainAdd)
+    try await addDomain(domain, deadline: deadline, journal: journal)
     let identifiers = try await registeredDomainIdentifiers(deadline: deadline)
     guard identifiers.filter({ $0 == domainIdentifier }).count == 1 else {
       throw HostError.domainAdditionNotConfirmed
@@ -319,58 +373,51 @@ enum FixtureHost {
     deadline: ContinuousClock.Instant
   ) async throws {
     let manifest = loaded.manifest
-    let journal = mutationJournal(manifest)
-    try journal.begin(.domainRemove)
+    let journal = try mutationJournal(manifest)
     let domain = NSFileProviderDomain(
       identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
       displayName: FixtureContract.displayName
     )
-    var removalAttempts = 0
-    var recorderSealed = false
+    var matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
+      $0 == manifest.domainIdentifier
+    }
+    guard matches.count <= 1 else { throw HostError.duplicateExactDomain }
+
+    if matches.isEmpty {
+      if try journal.state(.domainRemove)?.phase == .originalSucceeded {
+        try journal.confirmFinished(.domainRemove, observed: .absent)
+      }
+      _ = try journal.resolveAfterBootIfTerminal(.domainAdd, observed: .absent)
+      _ = try journal.resolveAfterBootIfTerminal(.domainRemove, observed: .absent)
+      try journal.requireNoSameBootAmbiguousAdd()
+      if let removal = try journal.state(.domainRemove) {
+        throw ExternalMutationJournalError.unresolvedExternalMutation(
+          .domainRemove,
+          bootGeneration: removal.bootGeneration
+        )
+      }
+      return
+    }
+
+    switch loaded.location {
+    case .canonical(let runDirectory):
+      try OracleLog(runDirectory: runDirectory).sealRecorder()
+    case .cleanupRecovery(let stagingDirectory):
+      try OracleLog(runDirectory: stagingDirectory).sealRecorder()
+    }
+    try journal.beginRemovalAttempt(.domainRemove)
+    try journal.markDispatched(.domainRemove)
+    try await removeExactDomain(domain, deadline: deadline, journal: journal)
+
     while ContinuousClock.now < deadline {
-      let matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
+      matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
         $0 == manifest.domainIdentifier
       }
       guard matches.count <= 1 else { throw HostError.duplicateExactDomain }
       if matches.isEmpty {
-        let result = try journal.observe(
-          .domainRemove,
-          presence: .absent,
-          nowNanoseconds: monotonicNow()
-        )
-        if result == .stableTerminal { return }
-      } else {
-        if !recorderSealed {
-          switch loaded.location {
-          case .canonical(let runDirectory):
-            try OracleLog(runDirectory: runDirectory).sealRecorder()
-          case .cleanupRecovery(let stagingDirectory):
-            try OracleLog(runDirectory: stagingDirectory).sealRecorder()
-          }
-          recorderSealed = true
-        }
-        _ = try journal.observe(
-          .domainRemove,
-          presence: .present,
-          nowNanoseconds: monotonicNow()
-        )
-        if removalAttempts < 3 {
-          removalAttempts += 1
-          do {
-            try await removeExactDomain(domain, deadline: deadline)
-          } catch {
-            // A timed-out callback is ambiguous. Preserve the journal and continue bounded
-            // observation so a delayed success can still be reconciled in this recovery run.
-          }
-          let remaining = try await registeredDomainIdentifiers(deadline: deadline).filter {
-            $0 == manifest.domainIdentifier
-          }
-          guard remaining.count <= 1 else { throw HostError.duplicateExactDomain }
-          if remaining.isEmpty {
-            try journal.confirmFinished(.domainRemove, observed: .absent)
-            return
-          }
-        }
+        try journal.confirmFinished(.domainRemove, observed: .absent)
+        try journal.requireNoSameBootAmbiguousAdd()
+        return
       }
       try await sleepForPolling(.milliseconds(200), until: deadline)
     }
@@ -438,8 +485,12 @@ enum FixtureHost {
   }
 }
 
-private func mutationJournal(_ manifest: FixtureManifest) -> ExternalMutationJournal {
-  ExternalMutationJournal(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
+private func mutationJournal(_ manifest: FixtureManifest) throws -> ExternalMutationJournal {
+  try ExternalMutationJournal(
+    runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath),
+    binding: ExternalMutationRunBinding(manifest: manifest),
+    currentBootGeneration: ExternalMutationBootSession.currentGeneration()
+  )
 }
 
 private struct Options {
@@ -493,6 +544,13 @@ private struct Options {
     return value
   }
 
+  func requiredMutationCompletion(_ key: String) throws -> ExternalMutationCompletion {
+    guard let value = ExternalMutationCompletion(rawValue: try required(key)) else {
+      throw HostError.usage
+    }
+    return value
+  }
+
   func optionalInt(_ key: String, default defaultValue: Int) throws -> Int {
     guard let value = values[key] else { return defaultValue }
     guard let parsed = Int(value) else { throw HostError.usage }
@@ -531,11 +589,21 @@ private enum FixtureManifestLocation {
 
 private func addDomain(
   _ domain: NSFileProviderDomain,
-  deadline: ContinuousClock.Instant
+  deadline: ContinuousClock.Instant,
+  journal: ExternalMutationJournal
 ) async throws {
   try await boundedCallback(deadline: deadline) { completion in
     NSFileProviderManager.add(domain) { error in
-      completion(error.map(Result.failure) ?? .success(()))
+      let result: Result<Void, Error> = error.map(Result.failure) ?? .success(())
+      do {
+        try journal.recordOriginalCompletion(
+          .domainAdd,
+          completion: error == nil ? .succeeded : .failed
+        )
+        completion(result)
+      } catch {
+        completion(.failure(error))
+      }
     }
   }
 }
@@ -556,11 +624,21 @@ private func registeredDomainIdentifiers(
 
 private func removeExactDomain(
   _ domain: NSFileProviderDomain,
-  deadline: ContinuousClock.Instant
+  deadline: ContinuousClock.Instant,
+  journal: ExternalMutationJournal
 ) async throws {
   try await boundedCallback(deadline: deadline) { completion in
     NSFileProviderManager.remove(domain, mode: .removeAll) { _, error in
-      completion(error.map(Result.failure) ?? .success(()))
+      let result: Result<Void, Error> = error.map(Result.failure) ?? .success(())
+      do {
+        try journal.recordOriginalCompletion(
+          .domainRemove,
+          completion: error == nil ? .succeeded : .failed
+        )
+        completion(result)
+      } catch {
+        completion(.failure(error))
+      }
     }
   }
 }
@@ -655,13 +733,13 @@ private func printJSON(_ values: [String: String]) {
   print(String(decoding: data, as: UTF8.self))
 }
 
-private func fail(_ reason: String, detail: String) -> Never {
+private func fail(_ reason: String, detail: String, exitCode: Int32 = 1) -> Never {
   let data = try! JSONSerialization.data(
     withJSONObject: ["status": "failed", "reason": reason, "detail": detail],
     options: [.sortedKeys]
   )
   FileHandle.standardError.write(data + Data([0x0a]))
-  exit(1)
+  exit(exitCode)
 }
 
 private func makePOSIXError(code: Int32) -> POSIXError {

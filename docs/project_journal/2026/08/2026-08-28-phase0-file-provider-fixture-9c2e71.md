@@ -30,9 +30,9 @@ superseded_by:
 - Lifecycle teardown is exact-domain and exact-extension only; cleanup is limited to validated
   App Group run paths.
 - The complete lifecycle and recovery path share one host-global single-flight lock. Every domain
-  or extension registry mutation has durable ambiguity evidence outside the run tree; recovery
-  requires repeated stable terminal observations after timeout, and cleanup rejects pending
-  mutation evidence.
+  or extension registry mutation has durable exact-operation and host-global ambiguity evidence
+  outside the run tree. Same-boot unknown add completion remains unresolved until an original
+  completion record or reboot ordering barrier exists, and cleanup rejects pending evidence.
 - Control records use bounded descriptor-bound reads with distinct missing, unreadable, and
   mismatch results. Cleanup atomically isolates the exact run directory and validates object
   identity/access policy without treating directory child churn as replacement.
@@ -130,6 +130,9 @@ superseded_by:
   and strict event-key parsing gaps from final frozen review.
 - [x] Close lifecycle capability propagation and deep-JSON stack exhaustion gaps from final
   rereview.
+- [x] Replace same-boot absence heuristics with durable prepared/dispatched/original-completion
+  states, an exact host-global pending-run gate, and a boot-session ordering barrier for late
+  File Provider and PlugInKit add success.
 - [ ] Connect the controlled oracle to the real scanner `scan -> plan` acceptance entrypoint.
 - [ ] Run the signed acceptance lifecycle on `India-mac-mini-m4-hoteng`.
 - [ ] Resolve host/extension App Group provisioning if Xcode reports the expected blocker.
@@ -147,8 +150,12 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --filter DiskplanFileProviderFixtureSupportTests`: 68 targeted support tests pass
-  and cover
+- `swift test --no-parallel`: all 120 Swift tests pass. Sixteen external-mutation
+  tests cover same-boot late success, authoritative failure and success-plus-remove, injected boot
+  changes, reboot-absent and reboot-present reconciliation, independent recovery instances,
+  cross-run gate exclusion, extension-add parity, prepared-state nondispatch recovery, successful
+  compensation re-confirmation, and interrupted gate/state/fsync ordering. The
+  wider support coverage includes
   concurrent JSONL writers, manifest/ready validation, typed secure-read failures,
   symlink-retaining cleanup, recursive cleanup, device-boundary rejection, append-failure
   poisoning, poison/event-storage injection across recorder recreation, recorder/event lock
@@ -162,13 +169,18 @@ superseded_by:
   semantic window validation, deterministic two-second quiet-window reset after a one-second-late
   callback, idempotent teardown sealing, strict event-key decoding, and staging-rename crash
   recovery before any deletion.
-- `python3 scripts/test-fileprovider-fixture-registration.py`: 12 parser/physical-path election,
+- `python3 scripts/test-fileprovider-fixture-registration.py`: 13 parser/physical-path election,
   strict-UTF-8, malformed exact-bundle text, and exact-path removal tests pass.
+- `python3 scripts/test-fileprovider-fixture-pending-preflight.py`: 7 descriptor-pinned root,
+  cross-run, interrupted-publication, cleanup-recovery, access-policy, and symlink tests pass.
+- `python3 scripts/test-fileprovider-fixture-pluginkit.py`: 5 process-completion classification
+  tests pass; timeout and output uncertainty remain unresolved while normal/nonzero terminal exit
+  are recorded as authoritative completion.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
   compiled successfully with signing disabled.
-- The resolved-only complete single-worker Swift gate passed all 83 tests on the integrated tree.
-  During the sixth-review gate, the unrelated subsecond macOS probe deadline test timed out in
-  two standard concurrent runs but passed its focused rerun and complete single-worker runs.
+- The resolved-only complete serial Swift gate passed all 120 tests on the integrated tree. The
+  unrelated subsecond macOS probe deadline test timed out in one concurrent run but immediately
+  passed its focused rerun and the complete serial run.
   Canonical binary generation and the Swift/Rust cross-language process tests passed.
 - `scripts/test-macos-capabilities.sh`: 29 `DiskplanMacOS` tests and the live self-test passed;
   the signed fixture and real-host APFS fixture remained explicitly unavailable without their

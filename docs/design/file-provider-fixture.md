@@ -191,11 +191,34 @@ recording capability so extension instance teardown cannot create a silent callb
 
 Before `NSFileProviderManager.add`, domain removal, or either non-cancellable `pluginkit`
 mutation begins, the Host durably publishes a UUID-and-operation-scoped ambiguity journal beside
-the run directory. A normal callback/process completion plus a matching registry observation is
-terminal evidence. After timeout or crash, recovery performs bounded repeated reconciliation;
-one absence observation never clears the journal, and any late contradictory presence resets the
-absence proof. A completed compensating removal clears both its own journal and the earlier add
-journal. Cleanup refuses to remove the manifest while any external-mutation journal remains.
+the run directory and advances the host-global pending-run gate to `dispatched`. Both records bind
+the exact run, domain, host and extension bundle identities and physical paths, operation UUID,
+mutation kind, lifecycle provenance, and boot-session generation. The original callback or
+`pluginkit` process then durably records `original-succeeded` or `original-failed`; a timeout,
+forced process-group cleanup, output-capture uncertainty, or process death leaves `dispatched`.
+The journal and global gate use file and parent-directory durability barriers. Their update order
+is intentionally fail closed: dispatch reaches the gate first, completion reaches the operation
+record first, and resolution first publishes a gate without the resolved entry while retaining
+the operation record until the next durable step.
+
+Same-boot absence polling is never terminal evidence for an unresolved add. Even an
+authoritatively completed compensating removal cannot clear an earlier add whose original
+completion is still unknown, because the non-cancellable add may succeed later. Recovery reports
+`unresolved_external_mutation`, retains the manifest and gate, and every later acceptance remains
+blocked for that boot. An original failure clears the add; an original success followed by an
+authoritative exact-state observation can proceed normally. A changed
+`kern.bootsessionuuid` is the platform-backed ordering barrier for a lost original completion.
+After reboot, recovery re-observes the exact domain or embedded extension path: absence clears the
+old add directly, while presence requires a newly dispatched, authoritatively completed remove
+and a final exact absence observation. No fixed grace period substitutes for this ordering.
+
+Before signed build or allocation of a new run UUID, while the shell lifecycle lock is still held,
+a separate descriptor-pinned preflight enumerates the owner-private App Group `runs` root. Any
+remaining child blocks new acceptance: successful cleanup leaves this fixture-owned directory
+empty, so this conservative rule also catches malformed run names and interrupted publication
+temporaries. Endpoint identity, owner-only access policy, and absence of extended ACLs are
+revalidated across enumeration. Cleanup refuses to remove the manifest while any mutation or
+pending-run evidence for that run remains.
 The shell lifecycle is additionally serialized by an owner-private global lock. Only the
 inherited descriptor for the open-file description that actually holds that exact lock is
 accepted as the helper capability; a caller-provided boolean environment variable cannot bypass

@@ -17,6 +17,7 @@ def main() -> int:
     swift = "\n".join(path.read_text() for path in FIXTURE.rglob("*.swift"))
     lifecycle = (ROOT / "scripts" / "fileprovider-fixture.sh").read_text()
     lifecycle_lock = (ROOT / "scripts" / "fileprovider-fixture-lifecycle-lock.py").read_text()
+    pending_preflight = (ROOT / "scripts" / "fileprovider-fixture-pending-preflight.py").read_text()
     registration = (ROOT / "scripts" / "fileprovider-fixture-registration.py").read_text()
     pluginkit = (ROOT / "scripts" / "fileprovider-fixture-pluginkit.py").read_text()
     all_fixture_text = swift + "\n" + lifecycle
@@ -63,12 +64,13 @@ def main() -> int:
     )
     require("verify_elected_extension" in lifecycle, "registration must verify the elected physical appex")
     require("unregister_extension" in lifecycle, "recovery must unregister the exact manifest appex")
-    require(lifecycle.count("verify_removed_extension") == 3, "both teardown paths must verify exact-path removal")
+    require(lifecycle.count("verify_removed_extension") >= 3, "both teardown paths must verify exact-path removal")
     require("--state absent" in lifecycle, "registry removal verification must inspect all exact-bundle entries")
     recover = lifecycle[lifecycle.index("recover()") : lifecycle.index("accept()")]
+    recover_unregister = recover.index("unregister_extension")
     require(
-        recover.index("unregister_extension")
-        < recover.index("verify_removed_extension")
+        recover_unregister
+        < recover.index("verify_removed_extension", recover_unregister)
         < recover.index('"$host" cleanup'),
         "recovery cleanup must follow verified registry removal",
     )
@@ -89,6 +91,19 @@ def main() -> int:
         and "--verify-lock-busy" in lifecycle
         and "pass_fds=(LOCK_CAPABILITY_FD,)" in lifecycle_lock,
         "lifecycle single-flight must require the inherited locked descriptor capability",
+    )
+    require(
+        'python3 "$repo_root/scripts/fileprovider-fixture-pending-preflight.py"' in lifecycle
+        and "os.scandir(descriptor)" in pending_preflight
+        and "evidence.append(os.fsencode(entry.name))" in pending_preflight,
+        "acceptance must descriptor-scan every prior pending-run mutation before build",
+    )
+    require(
+        "mutation-dispatched" in lifecycle
+        and "mutation-complete" in lifecycle
+        and "unresolved_external_mutation" in lifecycle
+        and "currentBootGeneration" in swift,
+        "external adds must retain explicit dispatch/completion and boot-generation evidence",
     )
     require("closeWindowAfterQuiescence" in swift, "oracle close must use bounded event quiescence")
     require("sealRecorder" in swift, "teardown must persistently seal the recorder")

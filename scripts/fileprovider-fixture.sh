@@ -92,12 +92,36 @@ verify_removed_extension() {
 
 register_extension() {
   "$host" mutation-begin --manifest "$manifest" --kind extension-add
+  "$host" mutation-dispatched --manifest "$manifest" --kind extension-add
+  set +e
   python3 "$repo_root/scripts/fileprovider-fixture-pluginkit.py" --action add --path "$appex"
+  mutation_status=$?
+  set -e
+  if ((mutation_status == 0)); then
+    "$host" mutation-complete --manifest "$manifest" --kind extension-add --outcome succeeded
+  elif ((mutation_status == 65)); then
+    "$host" mutation-complete --manifest "$manifest" --kind extension-add --outcome failed
+    return "$mutation_status"
+  else
+    return "$mutation_status"
+  fi
 }
 
 unregister_extension() {
   "$host" mutation-begin --manifest "$manifest" --kind extension-remove
+  "$host" mutation-dispatched --manifest "$manifest" --kind extension-remove
+  set +e
   python3 "$repo_root/scripts/fileprovider-fixture-pluginkit.py" --action remove --path "$appex"
+  mutation_status=$?
+  set -e
+  if ((mutation_status == 0)); then
+    "$host" mutation-complete --manifest "$manifest" --kind extension-remove --outcome succeeded
+  elif ((mutation_status == 65)); then
+    "$host" mutation-complete --manifest "$manifest" --kind extension-remove --outcome failed
+    return "$mutation_status"
+  else
+    return "$mutation_status"
+  fi
 }
 
 confirm_registered_extension() {
@@ -175,14 +199,58 @@ recover() {
     verify_elected_extension
   fi
   echo "$domain_status"
+  recovery_unresolved=0
+  set +e
   "$host" teardown --manifest "$manifest"
+  teardown_status=$?
+  set -e
+  if ((teardown_status == 75)); then
+    recovery_unresolved=1
+  elif ((teardown_status != 0)); then
+    return "$teardown_status"
+  fi
+
+  set +e
+  verify_removed_extension >/dev/null 2>&1
+  extension_absent_status=$?
+  set -e
+  if ((extension_absent_status == 0)); then
+    "$host" mutation-resolve-after-boot \
+      --manifest "$manifest" \
+      --kind extension-add \
+      --state absent
+  fi
+
+  set +e
   unregister_extension
-  verify_removed_extension
-  confirm_removed_extension
+  unregister_status=$?
+  set -e
+  if ((unregister_status == 0)); then
+    verify_removed_extension
+    confirm_removed_extension
+  elif ((unregister_status == 75)); then
+    recovery_unresolved=1
+  else
+    return "$unregister_status"
+  fi
+
+  set +e
   "$host" cleanup --manifest "$manifest"
+  cleanup_status=$?
+  set -e
+  if ((cleanup_status == 75)); then
+    recovery_unresolved=1
+  elif ((cleanup_status != 0)); then
+    return "$cleanup_status"
+  fi
+  if ((recovery_unresolved != 0)); then
+    echo '{"status":"blocked","reason":"unresolved_external_mutation"}' >&2
+    return 75
+  fi
 }
 
 accept() {
+  python3 "$repo_root/scripts/fileprovider-fixture-pending-preflight.py"
   build_signed
   run_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
   manifest=$($host manifest-path --run-id "$run_id")
