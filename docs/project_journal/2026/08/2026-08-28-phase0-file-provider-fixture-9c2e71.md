@@ -141,6 +141,9 @@ superseded_by:
 - [x] Carry prepared/failed removal leaves with active predecessors as merge tombstones until the
   gate and leaf durably share the successor operation ID, including repeated successor-gate
   crashes before leaf overwrite.
+- [x] Add a reachable same-successor recovery regression for a completion-state crash that leaves
+  the leaf with a durably pruned inactive tombstone while the gate retains the older cohort,
+  verified by the focused, fixture-support, and full serial Swift gates.
 - [x] Add manifestless prepare rollback, pre-prepare shell recovery, and durable empty-event creation.
 - [x] Seal exact event bytes and held events/window identities, enforce strict JSONL framing, and bind the oracle to one boot session.
 - [x] Treat ctime/mtime as control-byte revalidation triggers and keep content, identity, and access-policy failures distinct.
@@ -167,7 +170,7 @@ superseded_by:
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Fixture contract and recovery procedure: `docs/design/file-provider-fixture.md`.
-- `swift test --no-parallel`: all 145 Swift tests pass. External-mutation
+- `swift test --no-parallel`: all 146 Swift tests pass. External-mutation
   tests cover same-boot late success, authoritative failure and success-plus-remove, injected boot
   changes, reboot-absent and reboot-present reconciliation, independent recovery instances,
   cross-run gate exclusion, extension-add parity, prepared-state nondispatch recovery, successful
@@ -189,6 +192,7 @@ superseded_by:
   predecessor-to-successor mutation recovery, durable domain/extension removal predecessor cohorts,
   operation-ID-attributed late predecessor completion, recursive legacy-chain recovery,
   prepared/failed leaf merge tombstones across two consecutive successor gate-before-leaf crashes,
+  same-operation cohort recovery after a leaf durably prunes an inactive gate tombstone,
   timestamp-only mutation-journal revalidation, true initial/final-window byte drift, final-window
   ACL drift, post-preliminary-lookup identity replacement caught by the final name seal, typed
   final-name missing/unavailable results, bounded unstable-window failure, manifestless prepare
@@ -204,7 +208,7 @@ superseded_by:
   are recorded as authoritative completion.
 - `scripts/fileprovider-fixture.sh build-unsigned`: Release host app and embedded extension
   compiled successfully with signing disabled.
-- The resolved-only complete serial Swift gate passed all 145 tests on the integrated tree. The
+- The resolved-only complete serial Swift gate passed all 146 tests on the integrated tree. The
   unrelated subsecond macOS probe deadline test timed out in one concurrent run but immediately
   passed its focused rerun and the complete serial run.
   Canonical binary generation and the Swift/Rust cross-language process tests passed.
