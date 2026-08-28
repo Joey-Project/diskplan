@@ -44,8 +44,12 @@ directory close. Close evidence carries identity and access policy as independen
 observations: an access-policy mismatch cannot erase a stable identity, and its
 `EAGAIN` remains attached to the access-policy field. Child-entry churn alone does
 not constitute root identity mutation. Close-time access policy is bracketed by
-parent-slot and descriptor identity observations on both sides; a known policy is
-discarded if that identity bracket does not remain stable.
+parent-slot and descriptor identity observations on both sides. The policy read
+itself first opens the parent slot descriptor-relative with no-follow semantics,
+then reads real identity and policy from that same bound descriptor. A replacement
+policy is therefore rejected even if the original slot is restored before the
+outer postflight; a known policy is discarded whenever its bound identity is not
+the expected directory.
 The production backend never constructs descendant paths; only the configured root's
 parent path is path-opened to establish the descriptor-relative root slot. A root
 with unproved provider ownership is retained in provenance and root failures but is

@@ -55,6 +55,8 @@ superseded_by:
   discard exact byte credit at rejected provider boundaries.
 - [x] Bracket close-time access-policy observation with parent-slot identity before
   and after the policy read.
+- [x] Bind close-time access policy and real identity to the same no-follow slot
+  descriptor so replace-policy-restore cannot cross-associate evidence.
 - [x] Preserve active-frame provider, mount, and frontier coverage on cancellation.
 - [ ] Complete independent frozen-range review and PR delivery.
 - [ ] Integrate scanner evidence into the versioned IPC workstream.
@@ -68,7 +70,7 @@ superseded_by:
 
 ## Handoff
 
-- Phase: Phase 1 fourth frozen-review repair complete and validated.
+- Phase: Phase 1 fifth frozen-review repair complete and validated.
 - Next step: repeat independent frozen-range review, then prepare PR delivery.
 - Blocker: none for the scanner slice. The authoritative directory packed-attribute
   parser fix is integrated from foundation head
@@ -148,3 +150,17 @@ superseded_by:
 - Strict Swift format lint on all changed Swift files, `git diff --check`, CI
   journal tests (6 tests), the repository journal validator, and the bundled
   project-journal validator pass for the fourth repair range.
+- The fifth frozen review identified that a path-based policy read could observe a
+  temporary replacement while the outer identity bracket observed the original on
+  both sides. The repair binds real identity and policy to one descriptor-relative,
+  no-follow slot open and rejects an identity mismatch before accepting policy. A
+  controlled temporary-root regression performs the exact replace, policy read,
+  and restore sequence.
+- Focused scanner tests pass all 37 tests. The complete Swift suite passes all 85
+  tests, the explicit Swift build with automatic dependency resolution disabled
+  succeeds, and the macOS capability gate passes 32 focused tests plus the CLI
+  self-test. Controlled File Provider and APFS volume-group fixtures remain
+  explicitly unavailable on this local host.
+- Strict Swift format lint on both changed Swift files, `git diff --check`, CI
+  journal tests (6 tests), the repository journal validator, and the bundled
+  project-journal validator pass for the fifth repair range.

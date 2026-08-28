@@ -276,6 +276,36 @@ private final class CapturingSink: ScanNodeSink, @unchecked Sendable {
 
 private func component(_ string: String) -> RawPathComponent { RawPathComponent(Data(string.utf8)) }
 private func rawComponent(_ bytes: [UInt8]) -> RawPathComponent { RawPathComponent(Data(bytes)) }
+private func renameSlot(
+  parentFD: Int32,
+  from: Data,
+  to: Data
+) -> Int32 {
+  var fromBytes = Array(from) + [0]
+  var toBytes = Array(to) + [0]
+  return fromBytes.withUnsafeMutableBytes { fromRaw in
+    toBytes.withUnsafeMutableBytes { toRaw in
+      renameat(
+        parentFD,
+        fromRaw.bindMemory(to: CChar.self).baseAddress!,
+        parentFD,
+        toRaw.bindMemory(to: CChar.self).baseAddress!
+      )
+    }
+  }
+}
+
+private func openDirectorySlot(parentFD: Int32, name: Data) -> Int32 {
+  var bytes = Array(name) + [0]
+  return bytes.withUnsafeMutableBytes { raw in
+    openat(
+      parentFD,
+      raw.bindMemory(to: CChar.self).baseAddress!,
+      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    )
+  }
+}
+
 private let fakeAccessPolicy = AccessPolicyEvidence(
   ownerUserID: 501,
   ownerGroupID: 20,
@@ -1648,6 +1678,105 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
     Issue.record("replacement access policy was accepted as identity-bound")
     return
   }
+}
+
+@Test func closeRejectsReplacePolicyRestoreFromIdentityBoundObservation() throws {
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let rootURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent(
+      "diskplan-close-replace-policy-restore-test-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: rootURL) }
+  let childName = Data("child".utf8)
+  let replacementName = Data("replacement".utf8)
+  let parkedName = Data("parked-original".utf8)
+  try FileManager.default.createDirectory(
+    at: rootURL.appendingPathComponent("child"),
+    withIntermediateDirectories: false
+  )
+  try FileManager.default.setAttributes(
+    [.posixPermissions: 0o700],
+    ofItemAtPath: rootURL.appendingPathComponent("child").path
+  )
+  let replacementURL = rootURL.appendingPathComponent("replacement")
+  try FileManager.default.createDirectory(
+    at: replacementURL,
+    withIntermediateDirectories: false
+  )
+  try FileManager.default.setAttributes(
+    [.posixPermissions: 0o500],
+    ofItemAtPath: replacementURL.path
+  )
+  let rootFD = rootURL.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  }
+  let fd = try #require(rootFD >= 0 ? rootFD : nil)
+  defer { close(fd) }
+  let parent = DirectoryHandle(rawValue: fd)
+  let name = RawPathComponent(childName)
+  let normal = DarwinScanFilesystem(policy: policy)
+  let inspected = try #require(
+    normal.inspect(
+      parent: parent,
+      name: name,
+      inheritedProviderBoundary: false,
+      requiresAuthoritativeProviderEvidence: false
+    ).value
+  )
+  let accessPolicy = try #require(inspected.accessPolicy.value)
+  #expect(accessPolicy.mode & 0o777 == 0o700)
+  let directory = try #require(
+    normal.openDirectory(
+      parent: parent,
+      name: name,
+      expectedIdentity: inspected.identity,
+      expectedAccessPolicy: accessPolicy
+    ).value
+  )
+  let replacingFilesystem = DarwinScanFilesystem(
+    policy: policy,
+    pathAccessValidator: { .known(policy) },
+    boundAccessPolicyOpener: { parentFD, observedName in
+      guard observedName == childName else {
+        errno = EINVAL
+        return -1
+      }
+      guard renameSlot(parentFD: parentFD, from: childName, to: parkedName) == 0 else {
+        return -1
+      }
+      guard renameSlot(parentFD: parentFD, from: replacementName, to: childName) == 0 else {
+        let code = errno
+        _ = renameSlot(parentFD: parentFD, from: parkedName, to: childName)
+        errno = code
+        return -1
+      }
+      let replacementFD = openDirectorySlot(parentFD: parentFD, name: childName)
+      let openCode = errno
+      #expect(renameSlot(parentFD: parentFD, from: childName, to: replacementName) == 0)
+      #expect(renameSlot(parentFD: parentFD, from: parkedName, to: childName) == 0)
+      errno = openCode
+      return replacementFD
+    }
+  )
+
+  let closeEvidence = replacingFilesystem.close(directory)
+  guard case .failed(_, let identityCode) = closeEvidence.identity else {
+    Issue.record("replace-policy-restore was not attributed to identity instability")
+    return
+  }
+  #expect(identityCode == ESTALE)
+  guard case .unknown = closeEvidence.accessPolicy else {
+    Issue.record("replacement policy was accepted after the original slot was restored")
+    return
+  }
+  let restoredItem = try #require(
+    ItemProbe().probe(
+      parentFileDescriptor: fd,
+      rawName: childName,
+      policy: policy
+    ).value
+  )
+  #expect(restoredItem.fileID.value == inspected.identity.fileID)
 }
 
 @Test func configuredDarwinRootFailsClosedWithoutAuthoritativeProviderOwnership() throws {
