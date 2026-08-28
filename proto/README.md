@@ -69,3 +69,46 @@ scripts/canonical-fixture.sh check
 scripts/canonical-fixture.sh generate
 scripts/test-cross-language.sh
 ```
+
+## `scan-control-v1`
+
+Protocol minor `1.2` adds a typed Phase 0 scan-control stream. The client sends
+`StartScanRequest` once and then `ScanControlRequest` values for pause, resume,
+pause-and-build-provisional-plan, or cancel. Every request has a non-zero,
+strictly increasing `request_id`; its envelope sequence must equal that request
+ID. The Swift engine keeps only a high-water mark: malformed embedded requests,
+replays, duplicates, and out-of-order IDs pass through the same bounded
+duplicate-aware path.
+
+The engine responds only with `EngineEvent`. Every event repeats its originating
+`request_id`, has an `event_sequence` that starts at one and increases by exactly
+one, and is framed in an envelope whose sequence equals the event sequence. The
+Rust session rejects gaps, replay, reordering, and envelope/event sequence
+disagreement before the TUI consumes an event.
+
+After that validation, the frontend bridge keeps semantic events in a bounded,
+lossless queue and coalesces only contiguous `ScanProgress` runs to their latest
+value. The reducer receives the exact number of omitted progress events and
+accepts only the corresponding strictly increasing sequence gap. It still
+rejects duplicate, out-of-order, unproven-gap, or malformed semantic events and
+stops the engine driver on such a protocol invariant failure.
+
+The reducer also keeps one finite active-request lifecycle. Every non-ack event
+must carry that known non-zero request ID and be valid for its accepted control
+phase. Accepted control/resulting-state combinations are exhaustive; plan
+invalidation must name the exact currently displayed plan. Unknown provenance,
+impossible transitions, and stale invalidations fail closed.
+
+Control state does not change speculatively in the frontend. A
+`ControlAccepted` acknowledges the request and supplies the resulting engine
+state; `ControlRejected` leaves the prior state intact. State, progress,
+provisional-plan projection, invalidation, cancellation, completion, and engine
+failure are separate event variants.
+
+`ScanProgress` carries only engine facts: elapsed time, entry/directory/candidate
+counts, observed allocation, the current reclaim estimate, root coverage, rate,
+current root, profile, and structural budget. It deliberately has no completion
+percentage. `ProvisionalPlanReady` similarly carries engine-authored plan groups
+and reclaim projections. Rust may format these values for display but must not
+reclassify candidates, calculate reclaim, regroup plans, or construct paths or
+commands.
