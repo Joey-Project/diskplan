@@ -165,3 +165,16 @@ superseded_by:
   journal validators, and `git diff --check` pass; no compilation or test binary
   ran during this static-only refinement, and dynamic validation remains owned by
   integration.
+- Final integration validation exercised the default system temporary directory:
+  all nine focused launch-boundary tests, the warning-free C helper and white-box
+  harness, the complete Rust workspace, 340 Swift tests, all cross-language
+  protocol cases, Protobuf code generation, canonical and protocol 1.3 fixtures,
+  33 macOS capability tests, and the arm64 macOS 14 deployment check passed. Two
+  independent clean builds of signed merge `934448e` produced byte-identical
+  archives and checksum sidecars with SHA-256
+  `1f12935718ced0813b2a359b0984504f0097cbfa0254870f6248f693c8aefb83`.
+  The lifecycle gate then exposed one integration-only fixture defect: synthetic
+  1.2 component identities were paired with copied 1.3 metadata. Fixture
+  identities now derive their minor version from the exact copied metadata, and
+  the component-skew negative case varies only product version; the complete
+  install, upgrade, rollback, mixed-major, and uninstall lifecycle passes.
