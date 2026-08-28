@@ -120,6 +120,12 @@ copy inside an owner-private launch directory. It retains and revalidates the
 complete root-to-launch-directory descriptor chain, every parent/child slot,
 mount/access signals, the snapshot descriptor, and the snapshot slot at the
 actual internal spawn boundary. No caller can retain a naked `Command` pathname.
+Restrictive ancestor flags such as `SF_NOUNLINK` are sealed into that identity
+proof and must remain stable, but do not by themselves make traversal unsafe.
+The separate operational-mutability check rejects restrictive flags only on the
+temporary parent, private launch directory, and snapshot objects that Diskplan
+must create, quarantine, rename, or remove. Benign `UF_HIDDEN` and `UF_NODUMP`
+remain outside the security-relevant flag mask.
 Native macOS Mach-O execution through `/dev/fd/<fd>` is rejected with `EACCES`,
 so the private snapshot pathname remains an internal implementation detail and
 is revalidated immediately before and after the single operational `spawn()`.

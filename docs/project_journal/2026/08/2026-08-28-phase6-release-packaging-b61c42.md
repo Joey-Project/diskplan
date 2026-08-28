@@ -70,6 +70,11 @@ superseded_by:
   rejects Mach-O `/dev/fd/<fd>` execution, the owner-private snapshot path stays
   internal and the final pre-spawn/post-spawn checks cover every ancestor,
   access-policy, slot, filesystem/mount, and snapshot signal.
+  Access safety and operational mutability are distinct: restrictive ancestor
+  flags such as `SF_NOUNLINK` are accepted for traversal while sealed into the
+  identity proof, whereas the temporary parent, private launch directory, and
+  snapshot nodes that Diskplan mutates must have no restrictive flags. Benign
+  hidden/nodump flags remain outside the sealed security mask.
   Digest reads are expected-size/512-MiB bounded with distinct oversize and
   mismatch errors. Launch-directory creation and cleanup avoid recursive
   `TempDir` pathname removal; last-owner cleanup removes only the exact
@@ -135,3 +140,11 @@ superseded_by:
   actionlint 1.7.12, both project-journal validators, and `git diff --check`
   pass. No C/Rust compilation, test executable, archive build, or lifecycle
   command was run while the integration workstream owned the dynamic slot.
+- Integration's pre-commit macOS probe showed stable `SF_NOUNLINK` on `/` and
+  `/Users`; the former access-safety predicate therefore rejected every absolute
+  engine path before launch. The follow-up splits traversal safety from flag
+  sealing and operational mutability, with static regressions for accepted stable
+  `SF_NOUNLINK`, rejected security-flag drift, restrictive mutable-node rejection,
+  and ignored hidden/nodump flags. Cargo formatting and locked offline metadata,
+  both journal validators, and diff checks pass; dynamic validation remains with
+  the paused integration checkpoint.
