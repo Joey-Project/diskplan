@@ -1,12 +1,13 @@
 use std::fmt;
+use std::sync::Arc;
 
 macro_rules! string_id {
     ($name:ident) => {
         #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        pub struct $name(pub String);
+        pub struct $name(pub Arc<str>);
 
         impl $name {
-            pub fn new(value: impl Into<String>) -> Self {
+            pub fn new(value: impl Into<Arc<str>>) -> Self {
                 Self(value.into())
             }
 

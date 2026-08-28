@@ -6,7 +6,7 @@ use std::fmt;
 use super::types::{
     ActionId, ActionKindId, ActionKindProjection, ActionProjection, ByteValue, ForceRequirement,
     PlanDisposition, PlanId, PlanProjection, ReleaseSetId, ReleaseSetProjection, Stageability,
-    TargetProjection, WaiverId,
+    TargetId, TargetKind, TargetProjection, WaiverId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -31,6 +31,72 @@ pub struct ViewRow {
     pub key: RowKey,
     pub level: RowLevel,
     pub label: String,
+    pub expanded: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlanColumn {
+    Decision,
+    PlanAction,
+    ImmediateReclaim,
+    SharedUnlock,
+    Activity,
+    Recoverability,
+    StatusBlocker,
+}
+
+impl PlanColumn {
+    pub const DEFAULT_ORDER: [Self; 7] = [
+        Self::Decision,
+        Self::PlanAction,
+        Self::ImmediateReclaim,
+        Self::SharedUnlock,
+        Self::Activity,
+        Self::Recoverability,
+        Self::StatusBlocker,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Decision => "Decision",
+            Self::PlanAction => "Plan/action",
+            Self::ImmediateReclaim => "Immediate reclaim",
+            Self::SharedUnlock => "Shared unlock",
+            Self::Activity => "Activity",
+            Self::Recoverability => "Recoverability",
+            Self::StatusBlocker => "Status/blocker",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanSearchField {
+    PlanAction,
+    ActionKind,
+    Disposition,
+    StatusBlocker,
+}
+
+/// Main-tree filtering is stable across column configuration and never searches target paths.
+pub const PLAN_SEARCH_FIELDS: [PlanSearchField; 4] = [
+    PlanSearchField::PlanAction,
+    PlanSearchField::ActionKind,
+    PlanSearchField::Disposition,
+    PlanSearchField::StatusBlocker,
+];
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TargetRowKey {
+    pub action_id: ActionId,
+    pub target_id: TargetId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetViewRow {
+    pub key: TargetRowKey,
+    pub depth: usize,
+    pub display_path: String,
+    pub kind: TargetKind,
     pub expanded: Option<bool>,
 }
 
@@ -163,9 +229,27 @@ struct ActionGroup {
     sort_mode: SortMode,
 }
 
+#[derive(Clone, Debug)]
+struct TargetNode {
+    key: TargetRowKey,
+    parent: Option<usize>,
+    depth: usize,
+    display_path: String,
+    kind: TargetKind,
+    has_children: bool,
+    search_text: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TargetTree {
+    nodes: Vec<TargetNode>,
+    positions: HashMap<TargetRowKey, usize>,
+}
+
 struct ProjectionIndexes {
     action_positions: HashMap<ActionId, usize>,
     release_set_positions: HashMap<ReleaseSetId, usize>,
+    target_trees: HashMap<ActionId, TargetTree>,
 }
 
 #[derive(Clone, Debug)]
@@ -175,12 +259,14 @@ struct LoadedPlan {
     group_positions: HashMap<GroupKey, usize>,
     action_positions: HashMap<ActionId, usize>,
     release_set_positions: HashMap<ReleaseSetId, usize>,
+    action_search_texts: Vec<String>,
+    target_trees: HashMap<ActionId, TargetTree>,
 }
 
 #[derive(Clone, Debug)]
 enum PlanState {
     Empty,
-    Loaded(LoadedPlan),
+    Loaded(Box<LoadedPlan>),
     Invalidated(InvalidatedPlan),
 }
 
@@ -189,6 +275,8 @@ enum PlanState {
 pub(super) struct CacheMetrics {
     pub row_cache_rebuilds: usize,
     pub group_sorts: usize,
+    pub search_index_builds: usize,
+    pub target_row_cache_rebuilds: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +291,19 @@ pub struct PlanModel {
     cursor_index_hint: usize,
     viewport_top: usize,
     viewport_height: usize,
+    column_order: Vec<PlanColumn>,
+    hidden_columns: HashSet<PlanColumn>,
+    target_action: Option<ActionId>,
+    expanded_targets: HashSet<TargetRowKey>,
+    target_filter: String,
+    target_visible_indices: Vec<usize>,
+    target_row_positions: HashMap<TargetRowKey, usize>,
+    target_match_or_ancestor: Vec<bool>,
+    target_visible_flags: Vec<bool>,
+    target_cursor: Option<TargetRowKey>,
+    target_cursor_index_hint: usize,
+    target_viewport_top: usize,
+    target_viewport_height: usize,
     #[cfg(test)]
     cache_metrics: CacheMetrics,
 }
@@ -220,6 +321,19 @@ impl Default for PlanModel {
             cursor_index_hint: 0,
             viewport_top: 0,
             viewport_height: 0,
+            column_order: PlanColumn::DEFAULT_ORDER.to_vec(),
+            hidden_columns: HashSet::new(),
+            target_action: None,
+            expanded_targets: HashSet::new(),
+            target_filter: String::new(),
+            target_visible_indices: Vec::new(),
+            target_row_positions: HashMap::new(),
+            target_match_or_ancestor: Vec::new(),
+            target_visible_flags: Vec::new(),
+            target_cursor: None,
+            target_cursor_index_hint: 0,
+            target_viewport_top: 0,
+            target_viewport_height: 0,
             #[cfg(test)]
             cache_metrics: CacheMetrics::default(),
         }
@@ -228,27 +342,42 @@ impl Default for PlanModel {
 
 impl PlanModel {
     pub fn load(&mut self, projection: PlanProjection) -> Result<(), PlanModelError> {
-        let indexes = validate_projection(&projection)?;
+        let indexes = match validate_projection(&projection) {
+            Ok(indexes) => indexes,
+            Err(error) => {
+                // A rejected replacement must not leave the previous plan actionable.
+                self.reset();
+                return Err(error);
+            }
+        };
         let groups = build_groups(&projection);
         let group_positions = groups
             .iter()
             .enumerate()
             .map(|(index, group)| (group.key.clone(), index))
             .collect();
+        let action_search_texts = build_action_search_index(&projection);
         self.expanded_dispositions = groups.iter().map(|group| group.key.disposition).collect();
         self.expanded_groups = groups.iter().map(|group| group.key.clone()).collect();
         self.filter.clear();
-        self.state = PlanState::Loaded(LoadedPlan {
+        self.state = PlanState::Loaded(Box::new(LoadedPlan {
             projection,
             groups,
             group_positions,
             action_positions: indexes.action_positions,
             release_set_positions: indexes.release_set_positions,
-        });
+            action_search_texts,
+            target_trees: indexes.target_trees,
+        }));
+        #[cfg(test)]
+        {
+            self.cache_metrics.search_index_builds += 1;
+        }
         self.rebuild_visible_keys();
         self.cursor = self.visible_keys.first().cloned();
         self.cursor_index_hint = 0;
         self.viewport_top = 0;
+        self.clear_target_view_state();
         self.ensure_cursor_visible();
         Ok(())
     }
@@ -310,6 +439,51 @@ impl PlanModel {
         self.visible_keys.len()
     }
 
+    pub fn column_order(&self) -> &[PlanColumn] {
+        &self.column_order
+    }
+
+    pub fn visible_columns(&self) -> Vec<PlanColumn> {
+        self.column_order
+            .iter()
+            .copied()
+            .filter(|column| !self.hidden_columns.contains(column))
+            .collect()
+    }
+
+    /// `Plan/action` is the stable hierarchy anchor and cannot be hidden.
+    pub fn set_column_visible(&mut self, column: PlanColumn, visible: bool) -> bool {
+        if column == PlanColumn::PlanAction && !visible {
+            return false;
+        }
+        if visible {
+            self.hidden_columns.remove(&column)
+        } else {
+            self.hidden_columns.insert(column)
+        }
+    }
+
+    pub fn move_column(&mut self, column: PlanColumn, new_index: usize) -> bool {
+        let Some(old_index) = self
+            .column_order
+            .iter()
+            .position(|candidate| *candidate == column)
+        else {
+            return false;
+        };
+        let bounded_index = new_index.min(self.column_order.len().saturating_sub(1));
+        if old_index == bounded_index {
+            return false;
+        }
+        self.column_order.remove(old_index);
+        self.column_order.insert(bounded_index, column);
+        true
+    }
+
+    pub fn search_fields(&self) -> &'static [PlanSearchField] {
+        &PLAN_SEARCH_FIELDS
+    }
+
     /// Materializes only the current viewport, even when the plan is large.
     pub fn visible_rows(&self) -> Vec<ViewRow> {
         if self.viewport_height == 0 {
@@ -333,6 +507,140 @@ impl PlanModel {
     pub fn resize(&mut self, viewport_height: usize) {
         self.viewport_height = viewport_height;
         self.ensure_cursor_visible();
+    }
+
+    pub fn open_targets(&mut self, action_id: &ActionId) -> bool {
+        let Some(tree) = self
+            .loaded()
+            .and_then(|loaded| loaded.target_trees.get(action_id))
+        else {
+            return false;
+        };
+        let action_id = action_id.clone();
+        let expanded = tree
+            .nodes
+            .iter()
+            .filter(|node| node.has_children)
+            .map(|node| node.key.clone())
+            .collect();
+        self.clear_target_view_state();
+        self.target_action = Some(action_id);
+        self.expanded_targets = expanded;
+        self.rebuild_target_visible_indices();
+        self.target_cursor = self.target_key_at(0);
+        self.ensure_target_cursor_visible();
+        true
+    }
+
+    pub fn close_targets(&mut self) {
+        self.clear_target_view_state();
+    }
+
+    pub fn target_action_id(&self) -> Option<&ActionId> {
+        self.target_action.as_ref()
+    }
+
+    pub fn target_cursor(&self) -> Option<&TargetRowKey> {
+        self.target_cursor.as_ref()
+    }
+
+    pub fn target_row_count(&self) -> usize {
+        self.target_visible_indices.len()
+    }
+
+    pub fn target_viewport_top(&self) -> usize {
+        self.target_viewport_top
+    }
+
+    pub fn target_viewport_height(&self) -> usize {
+        self.target_viewport_height
+    }
+
+    pub fn visible_target_rows(&self) -> Vec<TargetViewRow> {
+        if self.target_viewport_height == 0 {
+            return Vec::new();
+        }
+        let end = self
+            .target_viewport_top
+            .saturating_add(self.target_viewport_height)
+            .min(self.target_visible_indices.len());
+        let available = end.saturating_sub(self.target_viewport_top);
+        let mut rows = Vec::with_capacity(self.target_viewport_height.min(available));
+        rows.extend(
+            self.target_visible_indices[self.target_viewport_top.min(end)..end]
+                .iter()
+                .filter_map(|node_index| self.materialize_target_row(*node_index)),
+        );
+        rows
+    }
+
+    pub fn resize_targets(&mut self, viewport_height: usize) {
+        self.target_viewport_height = viewport_height;
+        self.ensure_target_cursor_visible();
+    }
+
+    pub fn move_target_cursor(&mut self, delta: isize) {
+        let count = self.target_row_count();
+        if count == 0 {
+            self.target_cursor = None;
+            self.target_cursor_index_hint = 0;
+            self.target_viewport_top = 0;
+            return;
+        }
+        let current = self
+            .target_cursor_index()
+            .unwrap_or(self.target_cursor_index_hint.min(count - 1));
+        let next = current.saturating_add_signed(delta).min(count - 1);
+        self.target_cursor = self.target_key_at(next);
+        self.target_cursor_index_hint = next;
+        self.ensure_target_cursor_visible();
+    }
+
+    pub fn select_target(&mut self, key: &TargetRowKey) -> bool {
+        let Some(index) = self.target_index_of(key) else {
+            return false;
+        };
+        self.target_cursor = Some(key.clone());
+        self.target_cursor_index_hint = index;
+        self.ensure_target_cursor_visible();
+        true
+    }
+
+    pub fn toggle_target_expanded(&mut self, key: &TargetRowKey) -> bool {
+        if self.target_filter_is_active() {
+            return false;
+        }
+        let Some(node) = self.target_node(key) else {
+            return false;
+        };
+        if !node.has_children {
+            return false;
+        }
+        let old_index = self
+            .target_cursor_index()
+            .unwrap_or(self.target_cursor_index_hint);
+        toggle_set(&mut self.expanded_targets, key.clone());
+        self.rebuild_target_visible_indices();
+        self.reconcile_target_cursor(old_index);
+        true
+    }
+
+    /// Target filtering searches display paths only within the selected action.
+    pub fn set_target_filter(&mut self, query: impl Into<String>) {
+        let old_index = self
+            .target_cursor_index()
+            .unwrap_or(self.target_cursor_index_hint);
+        let filter = query.into().trim().to_lowercase();
+        if self.target_filter == filter {
+            return;
+        }
+        self.target_filter = filter;
+        self.rebuild_target_visible_indices();
+        self.reconcile_target_cursor(old_index);
+    }
+
+    pub fn target_filter(&self) -> &str {
+        &self.target_filter
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -469,9 +777,23 @@ impl PlanModel {
         self.cache_metrics
     }
 
+    #[cfg(test)]
+    pub(super) fn row_cache_capacities(&self) -> (usize, usize) {
+        (self.visible_keys.capacity(), self.row_positions.capacity())
+    }
+
+    #[cfg(test)]
+    pub(super) fn target_cache_capacities(&self) -> (usize, usize, usize) {
+        (
+            self.target_visible_indices.capacity(),
+            self.target_row_positions.capacity(),
+            self.target_match_or_ancestor.capacity(),
+        )
+    }
+
     fn loaded(&self) -> Option<&LoadedPlan> {
         match &self.state {
-            PlanState::Loaded(loaded) => Some(loaded),
+            PlanState::Loaded(loaded) => Some(loaded.as_ref()),
             PlanState::Empty | PlanState::Invalidated(_) => None,
         }
     }
@@ -485,6 +807,7 @@ impl PlanModel {
         self.cursor = None;
         self.cursor_index_hint = 0;
         self.viewport_top = 0;
+        self.clear_target_view_state();
     }
 
     fn filter_is_active(&self) -> bool {
@@ -500,22 +823,24 @@ impl PlanModel {
     }
 
     fn rebuild_visible_keys(&mut self) {
-        self.visible_keys = match &self.state {
-            PlanState::Loaded(loaded) => build_visible_keys(
+        self.visible_keys.clear();
+        if let PlanState::Loaded(loaded) = &self.state {
+            append_visible_keys(
                 loaded,
                 &self.expanded_dispositions,
                 &self.expanded_groups,
                 &self.filter,
-            ),
-            PlanState::Empty | PlanState::Invalidated(_) => Vec::new(),
-        };
-        self.row_positions = self
-            .visible_keys
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, key)| (key, index))
-            .collect();
+                &mut self.visible_keys,
+            );
+        }
+        self.row_positions.clear();
+        self.row_positions.extend(
+            self.visible_keys
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, key)| (key, index)),
+        );
         #[cfg(test)]
         {
             self.cache_metrics.row_cache_rebuilds += 1;
@@ -621,6 +946,173 @@ impl PlanModel {
             },
         }
     }
+
+    fn clear_target_view_state(&mut self) {
+        self.target_action = None;
+        self.expanded_targets.clear();
+        self.target_filter.clear();
+        self.target_visible_indices.clear();
+        self.target_row_positions.clear();
+        self.target_match_or_ancestor.clear();
+        self.target_visible_flags.clear();
+        self.target_cursor = None;
+        self.target_cursor_index_hint = 0;
+        self.target_viewport_top = 0;
+    }
+
+    fn target_tree(&self) -> Option<&TargetTree> {
+        let action_id = self.target_action.as_ref()?;
+        self.loaded()?.target_trees.get(action_id)
+    }
+
+    fn target_node(&self, key: &TargetRowKey) -> Option<&TargetNode> {
+        let tree = self.target_tree()?;
+        tree.positions
+            .get(key)
+            .and_then(|position| tree.nodes.get(*position))
+    }
+
+    fn target_filter_is_active(&self) -> bool {
+        !self.target_filter.is_empty()
+    }
+
+    fn rebuild_target_visible_indices(&mut self) {
+        self.target_visible_indices.clear();
+        self.target_row_positions.clear();
+        let filter_active = !self.target_filter.is_empty();
+        let Some(action_id) = self.target_action.as_ref() else {
+            self.target_match_or_ancestor.clear();
+            self.target_visible_flags.clear();
+            return;
+        };
+        let PlanState::Loaded(loaded) = &self.state else {
+            self.target_match_or_ancestor.clear();
+            self.target_visible_flags.clear();
+            return;
+        };
+        let Some(tree) = loaded.target_trees.get(action_id) else {
+            self.target_match_or_ancestor.clear();
+            self.target_visible_flags.clear();
+            return;
+        };
+
+        let nodes = &tree.nodes;
+        self.target_match_or_ancestor.clear();
+        self.target_match_or_ancestor.resize(nodes.len(), false);
+        if filter_active {
+            for (index, node) in nodes.iter().enumerate() {
+                self.target_match_or_ancestor[index] =
+                    node.search_text.contains(&self.target_filter);
+            }
+            for index in (0..nodes.len()).rev() {
+                if self.target_match_or_ancestor[index]
+                    && let Some(parent) = nodes[index].parent
+                {
+                    self.target_match_or_ancestor[parent] = true;
+                }
+            }
+        }
+
+        self.target_visible_flags.clear();
+        self.target_visible_flags.resize(nodes.len(), false);
+        for (index, node) in nodes.iter().enumerate() {
+            let visible = if filter_active {
+                self.target_match_or_ancestor[index]
+            } else if let Some(parent) = node.parent {
+                self.target_visible_flags[parent]
+                    && self.expanded_targets.contains(&nodes[parent].key)
+            } else {
+                true
+            };
+            self.target_visible_flags[index] = visible;
+            if visible {
+                self.target_row_positions
+                    .insert(node.key.clone(), self.target_visible_indices.len());
+                self.target_visible_indices.push(index);
+            }
+        }
+        #[cfg(test)]
+        {
+            self.cache_metrics.target_row_cache_rebuilds += 1;
+        }
+    }
+
+    fn target_key_at(&self, wanted: usize) -> Option<TargetRowKey> {
+        let node_index = *self.target_visible_indices.get(wanted)?;
+        self.target_tree()?
+            .nodes
+            .get(node_index)
+            .map(|node| node.key.clone())
+    }
+
+    fn target_index_of(&self, wanted: &TargetRowKey) -> Option<usize> {
+        self.target_row_positions.get(wanted).copied()
+    }
+
+    fn target_cursor_index(&self) -> Option<usize> {
+        self.target_cursor
+            .as_ref()
+            .and_then(|key| self.target_index_of(key))
+    }
+
+    fn reconcile_target_cursor(&mut self, old_index: usize) {
+        if let Some(cursor) = &self.target_cursor
+            && let Some(index) = self.target_index_of(cursor)
+        {
+            self.target_cursor_index_hint = index;
+            self.ensure_target_cursor_visible();
+            return;
+        }
+        let count = self.target_row_count();
+        if count == 0 {
+            self.target_cursor = None;
+            self.target_cursor_index_hint = 0;
+            self.target_viewport_top = 0;
+            return;
+        }
+        let index = old_index.min(count - 1);
+        self.target_cursor = self.target_key_at(index);
+        self.target_cursor_index_hint = index;
+        self.ensure_target_cursor_visible();
+    }
+
+    fn ensure_target_cursor_visible(&mut self) {
+        let Some(index) = self.target_cursor_index() else {
+            self.target_viewport_top = 0;
+            return;
+        };
+        self.target_cursor_index_hint = index;
+        if self.target_viewport_height == 0 {
+            self.target_viewport_top = index;
+            return;
+        }
+        if index < self.target_viewport_top {
+            self.target_viewport_top = index;
+        } else if index
+            >= self
+                .target_viewport_top
+                .saturating_add(self.target_viewport_height)
+        {
+            self.target_viewport_top = index + 1 - self.target_viewport_height;
+        }
+        let max_top = self
+            .target_row_count()
+            .saturating_sub(self.target_viewport_height);
+        self.target_viewport_top = self.target_viewport_top.min(max_top);
+    }
+
+    fn materialize_target_row(&self, node_index: usize) -> Option<TargetViewRow> {
+        let node = self.target_tree()?.nodes.get(node_index)?;
+        Some(TargetViewRow {
+            key: node.key.clone(),
+            depth: node.depth,
+            display_path: node.display_path.clone(),
+            kind: node.kind,
+            expanded: node.has_children.then(|| {
+                self.target_filter_is_active() || self.expanded_targets.contains(&node.key)
+            }),
+        })
+    }
 }
 
 fn toggle_set<T: Eq + std::hash::Hash + Clone>(set: &mut HashSet<T>, value: T) -> bool {
@@ -631,21 +1123,14 @@ fn toggle_set<T: Eq + std::hash::Hash + Clone>(set: &mut HashSet<T>, value: T) -
     }
 }
 
-fn build_visible_keys(
+fn append_visible_keys(
     loaded: &LoadedPlan,
     expanded_dispositions: &HashSet<PlanDisposition>,
     expanded_groups: &HashSet<GroupKey>,
     filter: &str,
-) -> Vec<RowKey> {
+    keys: &mut Vec<RowKey>,
+) {
     let filter_active = !filter.is_empty();
-    let mut keys = Vec::with_capacity(
-        loaded
-            .projection
-            .actions
-            .len()
-            .saturating_add(loaded.groups.len())
-            .saturating_add(PlanDisposition::ORDERED.len()),
-    );
     for disposition in PlanDisposition::ORDERED {
         let disposition_expanded = filter_active || expanded_dispositions.contains(&disposition);
         let mut emitted_disposition = false;
@@ -654,11 +1139,13 @@ fn build_visible_keys(
             .iter()
             .filter(|group| group.key.disposition == disposition)
         {
-            let has_match = group
+            let mut matching_actions = group
                 .action_indices
                 .iter()
-                .any(|index| action_matches_filter(&loaded.projection.actions[*index], filter));
-            if !has_match {
+                .copied()
+                .filter(|index| action_matches_filter(loaded, *index, filter))
+                .peekable();
+            if matching_actions.peek().is_none() {
                 continue;
             }
             if !emitted_disposition {
@@ -673,26 +1160,56 @@ fn build_visible_keys(
                 kind_id: group.kind.id.clone(),
             });
             if filter_active || expanded_groups.contains(&group.key) {
-                keys.extend(group.action_indices.iter().filter_map(|index| {
-                    let action = &loaded.projection.actions[*index];
-                    action_matches_filter(action, filter).then(|| RowKey::Action(action.id.clone()))
-                }));
+                keys.extend(
+                    matching_actions
+                        .map(|index| RowKey::Action(loaded.projection.actions[index].id.clone())),
+                );
             }
         }
     }
-    keys
 }
 
-fn action_matches_filter(action: &ActionProjection, filter: &str) -> bool {
-    filter.is_empty()
-        || action.label.to_lowercase().contains(filter)
-        || action.kind.label.to_lowercase().contains(filter)
-        || action.kind.id.as_str().to_lowercase().contains(filter)
-        || action.disposition.label().to_lowercase().contains(filter)
-        || action
-            .blockers
-            .iter()
-            .any(|blocker| blocker.summary.to_lowercase().contains(filter))
+fn action_matches_filter(loaded: &LoadedPlan, action_index: usize, filter: &str) -> bool {
+    filter.is_empty() || loaded.action_search_texts[action_index].contains(filter)
+}
+
+fn build_action_search_index(projection: &PlanProjection) -> Vec<String> {
+    projection
+        .actions
+        .iter()
+        .map(|action| {
+            let blocker_bytes = action
+                .blockers
+                .iter()
+                .map(|blocker| blocker.summary.len())
+                .sum::<usize>();
+            let mut text = String::with_capacity(
+                action.label.len()
+                    + action.id.as_str().len()
+                    + action.kind.label.len()
+                    + action.kind.id.as_str().len()
+                    + action.disposition.label().len()
+                    + blocker_bytes
+                    + action.blockers.len()
+                    + 4,
+            );
+            for field in [
+                action.label.as_str(),
+                action.id.as_str(),
+                action.kind.label.as_str(),
+                action.kind.id.as_str(),
+                action.disposition.label(),
+            ] {
+                text.push_str(field);
+                text.push('\0');
+            }
+            for blocker in &action.blockers {
+                text.push_str(&blocker.summary);
+                text.push('\0');
+            }
+            text.to_lowercase()
+        })
+        .collect()
 }
 
 fn build_groups(projection: &PlanProjection) -> Vec<ActionGroup> {
@@ -766,6 +1283,7 @@ fn validate_projection(projection: &PlanProjection) -> Result<ProjectionIndexes,
     }
     let mut action_positions = HashMap::with_capacity(projection.actions.len());
     let mut kinds = HashMap::<ActionKindId, ActionKindProjection>::new();
+    let mut target_trees = HashMap::with_capacity(projection.actions.len());
     for (action_position, action) in projection.actions.iter().enumerate() {
         if action.id.as_str().trim().is_empty() {
             return Err(PlanModelError::EmptyActionId);
@@ -834,7 +1352,10 @@ fn validate_projection(projection: &PlanProjection) -> Result<ProjectionIndexes,
         {
             return Err(PlanModelError::EmptyForceReason(action.id.clone()));
         }
-        validate_targets(&action.id, &action.targets)?;
+        target_trees.insert(
+            action.id.clone(),
+            validate_and_index_targets(&action.id, &action.targets)?,
+        );
     }
 
     let mut release_set_positions = HashMap::with_capacity(projection.release_sets.len());
@@ -936,38 +1457,53 @@ fn validate_projection(projection: &PlanProjection) -> Result<ProjectionIndexes,
     Ok(ProjectionIndexes {
         action_positions,
         release_set_positions,
+        target_trees,
     })
 }
 
-fn validate_targets(
+fn validate_and_index_targets(
     action_id: &ActionId,
     targets: &[TargetProjection],
-) -> Result<(), PlanModelError> {
-    fn walk(
-        action_id: &ActionId,
-        targets: &[TargetProjection],
-        ids: &mut HashSet<super::types::TargetId>,
-    ) -> Result<(), PlanModelError> {
-        for target in targets {
-            if target.id.as_str().trim().is_empty() {
-                return Err(PlanModelError::EmptyTargetId(action_id.clone()));
-            }
-            if !ids.insert(target.id.clone()) {
-                return Err(PlanModelError::DuplicateTargetId {
-                    action_id: action_id.clone(),
-                    target_id: target.id.clone(),
-                });
-            }
-            if target.display_path.as_str().is_empty() {
-                return Err(PlanModelError::EmptyTargetDisplayPath {
-                    action_id: action_id.clone(),
-                    target_id: target.id.clone(),
-                });
-            }
-            walk(action_id, &target.children, ids)?;
-        }
-        Ok(())
+) -> Result<TargetTree, PlanModelError> {
+    let mut tree = TargetTree::default();
+    let mut stack = Vec::with_capacity(targets.len());
+    for target in targets.iter().rev() {
+        stack.push((target, None, 0usize));
     }
-
-    walk(action_id, targets, &mut HashSet::new())
+    while let Some((target, parent, depth)) = stack.pop() {
+        if target.id.as_str().trim().is_empty() {
+            return Err(PlanModelError::EmptyTargetId(action_id.clone()));
+        }
+        let key = TargetRowKey {
+            action_id: action_id.clone(),
+            target_id: target.id.clone(),
+        };
+        if tree.positions.contains_key(&key) {
+            return Err(PlanModelError::DuplicateTargetId {
+                action_id: action_id.clone(),
+                target_id: target.id.clone(),
+            });
+        }
+        if target.display_path.as_str().is_empty() {
+            return Err(PlanModelError::EmptyTargetDisplayPath {
+                action_id: action_id.clone(),
+                target_id: target.id.clone(),
+            });
+        }
+        let node_index = tree.nodes.len();
+        tree.positions.insert(key.clone(), node_index);
+        tree.nodes.push(TargetNode {
+            key,
+            parent,
+            depth,
+            display_path: target.display_path.as_str().to_owned(),
+            kind: target.kind,
+            has_children: !target.children.is_empty(),
+            search_text: target.display_path.as_str().to_lowercase(),
+        });
+        for child in target.children.iter().rev() {
+            stack.push((child, Some(node_index), depth.saturating_add(1)));
+        }
+    }
+    Ok(tree)
 }

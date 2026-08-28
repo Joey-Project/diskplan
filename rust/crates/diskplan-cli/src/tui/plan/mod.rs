@@ -11,8 +11,8 @@ mod types;
 mod tests;
 
 pub use model::{
-    InvalidatedPlan, InvalidationError, PlanModel, PlanModelError, RowKey, RowLevel, SortMode,
-    ViewRow,
+    InvalidatedPlan, InvalidationError, PLAN_SEARCH_FIELDS, PlanColumn, PlanModel, PlanModelError,
+    PlanSearchField, RowKey, RowLevel, SortMode, TargetRowKey, TargetViewRow, ViewRow,
 };
 pub use types::{
     ActionId, ActionKindId, ActionKindProjection, ActionProjection, Activity, BlockerId,

@@ -53,6 +53,13 @@ fn projection(actions: Vec<ActionProjection>) -> PlanProjection {
     }
 }
 
+#[test]
+fn stable_id_clones_share_immutable_storage() {
+    let action_id = ActionId::new("shared-action-id");
+    let clone = action_id.clone();
+    assert!(std::sync::Arc::ptr_eq(&action_id.0, &clone.0));
+}
+
 fn representative_projection() -> PlanProjection {
     projection(vec![
         action(
@@ -373,6 +380,40 @@ fn duplicate_and_invalid_ids_fail_closed() {
 }
 
 #[test]
+fn invalid_replacement_clears_the_previous_actionable_plan() {
+    let mut model = PlanModel::default();
+    model.load(representative_projection()).unwrap();
+    model.set_filter("ready-cache");
+    assert!(model.open_targets(&ActionId::new("ready-cache-a")));
+    model.resize_targets(1);
+
+    let duplicate = action(
+        "same",
+        PlanDisposition::Ready,
+        "cache",
+        "Caches",
+        1,
+        1,
+        ByteValue::Known(1),
+        "/private/replacement",
+    );
+    assert_eq!(
+        model.load(projection(vec![duplicate.clone(), duplicate])),
+        Err(PlanModelError::DuplicateActionId(ActionId::new("same")))
+    );
+
+    assert!(model.current_plan_id().is_none());
+    assert!(model.invalidated().is_none());
+    assert!(model.action(&ActionId::new("ready-cache-a")).is_none());
+    assert_eq!(model.row_count(), 0);
+    assert!(model.cursor().is_none());
+    assert!(model.filter().is_empty());
+    assert!(model.target_action_id().is_none());
+    assert_eq!(model.target_row_count(), 0);
+    assert!(model.target_cursor().is_none());
+}
+
+#[test]
 fn duplicate_target_and_release_set_ids_fail_closed() {
     let mut first = action(
         "first",
@@ -571,6 +612,183 @@ fn render_queries_reuse_flattened_and_sorted_caches() {
         let _ = model.visible_rows();
     }
     assert_eq!(model.cache_metrics(), sorted);
+}
+
+#[test]
+fn large_plan_filter_reuses_search_and_row_allocations() {
+    const COUNT: usize = 20_000;
+    let actions = (0..COUNT)
+        .map(|index| {
+            action(
+                &format!("action-{index:05}"),
+                PlanDisposition::Ready,
+                "cache",
+                "Caches",
+                1,
+                index as u64,
+                ByteValue::Known(index as u64),
+                &format!("/private/large/{index}"),
+            )
+        })
+        .collect();
+    let mut model = PlanModel::default();
+    model.load(projection(actions)).unwrap();
+    let loaded_metrics = model.cache_metrics();
+    let loaded_capacities = model.row_cache_capacities();
+    assert_eq!(loaded_metrics.search_index_builds, 1);
+
+    model.set_filter("action-12345");
+    assert_eq!(model.row_count(), 3);
+    assert_eq!(model.cache_metrics().search_index_builds, 1);
+    assert_eq!(model.row_cache_capacities(), loaded_capacities);
+
+    model.set_filter("no-match-in-large-plan");
+    assert_eq!(model.row_count(), 0);
+    assert_eq!(model.cache_metrics().search_index_builds, 1);
+    assert_eq!(model.row_cache_capacities(), loaded_capacities);
+}
+
+#[test]
+fn columns_keep_plan_action_visible_and_do_not_change_search_scope() {
+    let mut model = PlanModel::default();
+    model.load(representative_projection()).unwrap();
+    assert_eq!(model.column_order(), &PlanColumn::DEFAULT_ORDER);
+    assert_eq!(model.search_fields(), &PLAN_SEARCH_FIELDS);
+
+    assert!(model.set_column_visible(PlanColumn::StatusBlocker, false));
+    assert!(!model.set_column_visible(PlanColumn::PlanAction, false));
+    assert!(!model.visible_columns().contains(&PlanColumn::StatusBlocker));
+    assert!(model.visible_columns().contains(&PlanColumn::PlanAction));
+    assert!(model.move_column(PlanColumn::StatusBlocker, 0));
+    assert_eq!(model.column_order()[0], PlanColumn::StatusBlocker);
+
+    let mut blocked = representative_projection();
+    blocked.actions[0].blockers = vec![BlockerProjection {
+        id: BlockerId::new("open-handle"),
+        summary: "Open handle observed".into(),
+    }];
+    model.load(blocked).unwrap();
+    model.set_column_visible(PlanColumn::StatusBlocker, false);
+    model.set_filter("open handle");
+    assert_eq!(model.row_count(), 3, "hidden columns do not change search");
+    model.set_filter("/private/blocked-cache");
+    assert_eq!(model.row_count(), 0, "target paths remain target-scoped");
+}
+
+#[test]
+fn nested_target_expansion_preserves_stable_cursor_and_viewport() {
+    let mut projected = action(
+        "nested",
+        PlanDisposition::Ready,
+        "cache",
+        "Caches",
+        1,
+        1,
+        ByteValue::Known(10),
+        "/private/root",
+    );
+    projected.targets[0].children = vec![TargetProjection {
+        id: TargetId::new("nested-directory"),
+        display_path: DisplayPath::new("/private/root/nested"),
+        kind: TargetKind::Directory,
+        children: vec![TargetProjection {
+            id: TargetId::new("nested-leaf"),
+            display_path: DisplayPath::new("/private/root/nested/leaf"),
+            kind: TargetKind::File,
+            children: Vec::new(),
+        }],
+    }];
+    let mut model = PlanModel::default();
+    model.load(projection(vec![projected])).unwrap();
+    assert!(model.open_targets(&ActionId::new("nested")));
+    model.resize_targets(2);
+    assert_eq!(model.target_row_count(), 3);
+
+    let leaf = TargetRowKey {
+        action_id: ActionId::new("nested"),
+        target_id: TargetId::new("nested-leaf"),
+    };
+    assert!(model.select_target(&leaf));
+    assert_eq!(model.visible_target_rows().last().unwrap().key, leaf);
+    model.resize_targets(1);
+    assert_eq!(model.target_cursor(), Some(&leaf));
+    assert_eq!(model.visible_target_rows()[0].key, leaf);
+
+    let nested = TargetRowKey {
+        action_id: ActionId::new("nested"),
+        target_id: TargetId::new("nested-directory"),
+    };
+    assert!(model.toggle_target_expanded(&nested));
+    assert_eq!(model.target_row_count(), 2);
+    assert_ne!(model.target_cursor(), Some(&leaf));
+    assert!(model.target_viewport_top() < model.target_row_count());
+
+    model.set_target_filter("nested/leaf");
+    assert_eq!(
+        model.target_row_count(),
+        3,
+        "filter exposes matching ancestors"
+    );
+    assert_eq!(model.target_cursor(), Some(&nested));
+    assert!(!model.toggle_target_expanded(&nested));
+    model.set_target_filter("no-target-match");
+    assert_eq!(model.target_row_count(), 0);
+    assert_eq!(
+        model.row_count(),
+        3,
+        "target filtering cannot alter the plan tree"
+    );
+}
+
+#[test]
+fn large_target_tree_is_virtualized_and_reuses_filter_buffers() {
+    const COUNT: usize = 20_000;
+    let mut projected = action(
+        "large-targets",
+        PlanDisposition::Ready,
+        "cache",
+        "Caches",
+        1,
+        1,
+        ByteValue::Known(10),
+        "/private/large-targets",
+    );
+    projected.targets[0].children = (0..COUNT)
+        .map(|index| TargetProjection {
+            id: TargetId::new(format!("leaf-{index:05}")),
+            display_path: DisplayPath::new(format!("/private/large-targets/{index:05}")),
+            kind: TargetKind::File,
+            children: Vec::new(),
+        })
+        .collect();
+    let mut model = PlanModel::default();
+    model.load(projection(vec![projected])).unwrap();
+    assert!(model.open_targets(&ActionId::new("large-targets")));
+    let loaded_metrics = model.cache_metrics();
+    let loaded_capacities = model.target_cache_capacities();
+    assert_eq!(loaded_metrics.target_row_cache_rebuilds, 1);
+    assert_eq!(model.target_row_count(), COUNT + 1);
+    model.resize_targets(6);
+    model.move_target_cursor(COUNT as isize);
+    assert_eq!(model.visible_target_rows().len(), 6);
+    assert_eq!(
+        model.target_cursor(),
+        Some(&TargetRowKey {
+            action_id: ActionId::new("large-targets"),
+            target_id: TargetId::new("leaf-19999"),
+        })
+    );
+
+    model.set_target_filter("/19999");
+    assert_eq!(model.target_row_count(), 2);
+    assert_eq!(
+        model.cache_metrics().target_row_cache_rebuilds,
+        loaded_metrics.target_row_cache_rebuilds + 1
+    );
+    assert_eq!(model.target_cache_capacities(), loaded_capacities);
+    model.set_target_filter("no-match");
+    assert_eq!(model.target_row_count(), 0);
+    assert_eq!(model.target_cache_capacities(), loaded_capacities);
 }
 
 #[test]
