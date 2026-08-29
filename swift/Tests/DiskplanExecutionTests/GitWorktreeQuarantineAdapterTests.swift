@@ -604,7 +604,7 @@ func targetACLDriftIsReportedAsAccessPolicyRatherThanContent() async throws {
 }
 
 @Test
-func postQuarantineTargetModeDriftRestoresTheSource() async throws {
+func postQuarantineTargetModeDriftRetainsTypedRecoveryLocator() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
   var hooks = GitWorktreeQuarantineAdapter.Hooks()
@@ -620,11 +620,19 @@ func postQuarantineTargetModeDriftRestoresTheSource() async throws {
     Issue.record("post-quarantine access drift must reject")
     return
   }
-  #expect(failure.code == "quarantine-verification-failed-restored")
-  #expect(slotExists(fixture.worktree))
-  #expect(
-    await adapter.disposition(for: fixture.action.id)
-      == .restoredAfterVerificationFailure(code: "source-seal-mismatch-after-quarantine"))
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantinedURL))
+  guard
+    case .some(.quarantineRetained(let locator, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("access-policy drift must retain a typed recovery locator")
+    return
+  }
+  #expect(locator.rawRoot == fixture.action.prototype.namespaceBinding.rawRoot)
+  #expect(locator.identity == fixture.action.prototype.targetIdentity)
+  #expect(failureCode == "source-seal-mismatch-after-quarantine")
 }
 
 @Test

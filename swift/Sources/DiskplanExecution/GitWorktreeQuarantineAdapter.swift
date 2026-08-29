@@ -466,6 +466,25 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     quarantine: QuarantineBinding,
     failure: ExecutionAdapterFailure
   ) async -> AdapterOperationOutcome {
+    if Self.requiresManualRecovery(failure.code) {
+      let recovery = verifiedRecoveryDisposition(
+        target: target,
+        source: source,
+        quarantine: quarantine,
+        failureCode: failure.code
+      )
+      await results.set(recovery, for: target.actionID)
+      let code =
+        switch recovery {
+        case .quarantineRetained:
+          "quarantine-verification-failed-retained"
+        case .quarantineBindingUnverified:
+          "quarantine-verification-failed-unverified"
+        default:
+          "invalid-quarantine-recovery-state"
+        }
+      return .failed(ExecutionAdapterFailure(code: code))
+    }
     hooks.beforeRestore()
     do {
       try requireRecoveryNamespaceBinding(
@@ -585,6 +604,18 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       destinationDescriptor: payload,
       expected: target.expectedIdentity
     )
+  }
+
+  private static func requiresManualRecovery(_ failureCode: String) -> Bool {
+    switch failureCode {
+    case "namespace-not-owner-private",
+      "source-seal-mismatch-after-quarantine",
+      "source-seal-mismatch-before-delete",
+      "worktree-access-policy-mismatch":
+      true
+    default:
+      false
+    }
   }
 
   private func requireRecoveryNamespaceBinding(

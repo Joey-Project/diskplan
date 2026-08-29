@@ -101,6 +101,11 @@ superseded_by:
 - Dependency: the final live production route must consume the separately owned concrete
   revalidation collector and typed survivor/terminal-namespace invariant proofs. This slice does
   not fabricate or weaken those inputs and does not depend on their two pending hookup decisions.
+- Integration dependency: the production `RuntimeSessionController` still exposes only
+  plan/overlay behavior and intentionally rejects dry-run, apply, confirm, and cancel. The later
+  Phase 5/controller integration owns the positive preview/confirm/cancel dispatcher, an
+  intent-bound receipt, and midstream cancellation; this failure-fix checkpoint does not invent a
+  success path around that typed fail-closed boundary.
 
 ## Evidence
 
@@ -130,8 +135,14 @@ superseded_by:
   untouched.
 - India focused validation of `5c5a28b` stopped at five compile errors after 9.937 seconds; the
   bounded process group was quiescent and the serial full gate was not started. The follow-up
-  keeps the authorization closure single-use while avoiding Swift 6 shadowing, reads the
-  already-policy-validated dirty change-set observation without crossing an internal API
-  boundary, makes raw administrative path splitting type-explicit, and uses the macOS 26 ACL C
-  import signatures for entry enumeration and release. Local static format, parse, and diff
-  checks pass; the corrected exact head still requires the same India focused/full rerun.
+  keeps the authorization closure single-use while avoiding Swift 6 shadowing, removes the
+  obsolete dirty-Git consent-discharge path now that policy/overlay/router all enforce report-only,
+  makes raw administrative path splitting type-explicit, and uses the macOS 26 ACL C import
+  signatures for entry enumeration and release.
+- India focused validation of `f9caa48` compiled and ran 86 tests, then reported two failed tests
+  with four issues after 13.748 seconds; the bounded process group was quiescent and the serial
+  full gate was not started. One test still expected the superseded dirty-Git consent flow and now
+  asserts the three-layer report-only boundary. The other expected automatic restore after the
+  quarantined target's access mode changed; access policy is a separately protected property, so
+  the adapter now deliberately retains the identity- and namespace-verified quarantine and emits
+  its typed recovery locator for manual handling instead of restoring altered access state.

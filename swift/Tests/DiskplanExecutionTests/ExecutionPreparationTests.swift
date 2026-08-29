@@ -709,7 +709,7 @@ func selectedGitPrerequisitesAreRevalidatedAsTypedEvidence() async throws {
 }
 
 @Test
-func dirtyDiscardRemovePreparationUsesThePrePrerequisiteBaseline() async throws {
+func dirtyDiscardRemovePreparationRemainsReportOnly() throws {
   let dirtyContent = ContentProtectionBaseline.requiredDigest(digest(92))
   let git = gitEvidence(
     worktreeObject: 1,
@@ -732,18 +732,8 @@ func dirtyDiscardRemovePreparationUsesThePrePrerequisiteBaseline() async throws 
     prerequisites: [discard],
     request: .gitWorktreeRemove
   )
-  guard case .requiresConsents(let predicates) = discard.evaluation.stageability else {
-    Issue.record("dirty discard must retain its explicit local-work consent")
-    return
-  }
-  let consents = predicates.map {
-    WaiverConsentCore.create(
-      action: discard,
-      predicate: $0,
-      reason: "discard fully observed local changes",
-      consentEventID: "dirty-discard-consent"
-    )
-  }
+  #expect(discard.evaluation.stageability == .blocked)
+  #expect(remove.evaluation.stageability == .blocked)
   let plan = try ImmutablePlan(
     policyVersion: "policy-1",
     schemaVersion: "schema-1",
@@ -755,84 +745,12 @@ func dirtyDiscardRemovePreparationUsesThePrePrerequisiteBaseline() async throws 
   let overlay = DecisionOverlay.create(
     plan: plan,
     selectedActionIDs: [discard.id, remove.id],
-    waiverConsents: consents,
+    waiverConsents: [],
     userNotes: []
   )
-  let snapshot = CurrentRevalidationSnapshot(
-    captureID: digest(90),
-    actions: [
-      currentEvidence(discard, content: .known(dirtyContent)),
-      currentEvidence(remove, content: .known(dirtyContent)),
-    ],
-    releaseTopologies: [],
-    invariants: passingInvariants
-  )
-  let result = try await ExecutionPreparationEngine(
-    evidenceSource: SequenceSource([snapshot]),
-    randomBytes: deterministicEntropy
-  ).prepare(
-    plan: plan,
-    overlay: overlay,
-    mode: .dryRun,
-    issuedAtSeconds: 200,
-    lifetimeSeconds: 30
-  )
-
-  guard case .dryRun(let report) = result else {
-    Issue.record("the dirty pre-prerequisite baseline must remain current")
-    return
+  #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
+    try DecisionOverlayValidator.validate(overlay, against: plan)
   }
-  #expect(report.revalidation.isCurrent)
-  let manifest = try #require(report.revalidation.manifest)
-  guard case .gitWorktreeRemove(let removeContract) = remove.prototype.adapterContract else {
-    Issue.record("expected the typed remove contract")
-    return
-  }
-  let cleanGit = postDiscardGitEvidence(removeContract)
-  let cleanCaptureID = digest(91)
-  let cleanContent = removeContract.executionBaseline.contentProtection
-  let cleanEvidence = currentEvidence(
-    remove,
-    content: .known(cleanContent),
-    freshCaptureID: cleanCaptureID,
-    freshPolicyEvidence: .known(
-      retimedPolicyEvidence(
-        remove,
-        referenceTimeSeconds: 200,
-        contentProtection: .known(cleanContent),
-        gitWorktree: cleanGit,
-        captureID: cleanCaptureID
-      )
-    ),
-    gitWorktree: .known(cleanGit)
-  )
-  let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
-  let nonce = Data(repeating: 0xa5, count: 32)
-  let request = JITRevalidationRequest(
-    plan: plan,
-    validatedOverlay: validated,
-    manifest: manifest,
-    actionIDs: [remove.id],
-    releaseGroupIDs: [],
-    preparationGeneration: 1,
-    oneShotNonce: nonce
-  )
-  let jitReport = Revalidator.evaluateJIT(
-    request: request,
-    collected: JITRevalidationSnapshot(
-      oneShotNonce: nonce,
-      authorizationCurrentBindingHash: manifest.currentBindingHash,
-      preparationGeneration: 1,
-      epochID: manifest.epoch.epochID,
-      snapshot: CurrentRevalidationSnapshot(
-        captureID: cleanCaptureID,
-        actions: [cleanEvidence],
-        releaseTopologies: [],
-        invariants: passingInvariants
-      )
-    )
-  )
-  #expect(jitReport.isCurrent)
 }
 
 @Test

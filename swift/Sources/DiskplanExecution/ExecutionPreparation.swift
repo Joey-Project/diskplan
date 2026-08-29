@@ -1034,7 +1034,7 @@ enum Revalidator {
       let evaluation = try OneVotePolicy.evaluate(
         OneVotePolicyInputs.build(evidence: evidence, globalFacts: facts)
       )
-      var currentPredicates: [WaiverPredicate]
+      let currentPredicates: [WaiverPredicate]
       switch evaluation.stageability {
       case .stageable:
         currentPredicates = []
@@ -1043,11 +1043,6 @@ enum Revalidator {
       case .blocked:
         return unavailable(.policyThresholdCrossed, nil, nil)
       }
-      currentPredicates = dischargeSatisfiedGitDiscardPredicate(
-        currentPredicates,
-        action: action,
-        stage: stage
-      )
       let plannedPredicates: [WaiverPredicate]
       switch action.evaluation.stageability {
       case .stageable:
@@ -1140,22 +1135,6 @@ enum Revalidator {
       && current.namespaceBinding == action.prototype.namespaceBinding
       && current.protectedProperties == action.prototype.protectedProperties
       && current.postcondition == action.prototype.postcondition
-  }
-
-  private static func dischargeSatisfiedGitDiscardPredicate(
-    _ predicates: [WaiverPredicate],
-    action: ActionDefinition,
-    stage: Stage
-  ) -> [WaiverPredicate] {
-    guard stage == .beforePrerequisites,
-      case .gitWorktreeRemove(let contract) = action.prototype.adapterContract,
-      contract.requiresDiscardLocalChanges,
-      case .known(.present(let changeSetDigest)) = contract.verifiedEvidence.localChanges
-    else { return predicates }
-    return predicates.filter {
-      !($0.kind == .fullyObservedLocalGitWorkDiscard
-        && $0.semanticEvidenceHash == changeSetDigest)
-    }
   }
 
   private static func adapterRequest(
