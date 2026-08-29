@@ -121,7 +121,7 @@ fn render_footer(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             Screen::Scan,
             ScanState::Finished | ScanState::FinalizedPartial | ScanState::Cancelled,
         ) => "waiting for finalized evidence  ? or / help",
-        (Screen::Scan, _) => "q cancel  Space pause/resume  p provisional evidence  ? or / help",
+        (Screen::Scan, _) => "q cancel  Space pause/resume  p finalize partial + plan  ? or / help",
         (Screen::ProvisionalPlan, _) if state.plan.model().current_plan_id().is_none() => {
             "q cancel  r resume + invalidate  ? help"
         }
@@ -129,7 +129,7 @@ fn render_footer(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             "filter: type  Backspace edit  Enter accept  Esc close"
         }
         (Screen::ProvisionalPlan, _) => {
-            "j/k move  Enter/l expand  h collapse  Space stage  p plan  / filter  ? help"
+            "j/k move  Enter/l expand  h collapse  Space stage  p plan  f filter  ? or / help"
         }
     };
     let banner = state
@@ -665,6 +665,7 @@ fn recovery(value: Recoverability) -> &'static str {
         Recoverability::Rebuildable => "rebuildable",
         Recoverability::Restorable => "restorable",
         Recoverability::Irrecoverable => "irrecoverable",
+        Recoverability::ReviewRequired => "review required",
         Recoverability::Unknown => "unknown",
     }
 }
@@ -1094,7 +1095,7 @@ fn render_help(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
         (Screen::Scan, _) => vec![
             Line::from("q      cancel; press q again after finalized evidence"),
             Line::from("Space  pause/resume after engine acknowledgement"),
-            Line::from("p      pause and checkpoint provisional evidence"),
+            Line::from("p      finalize scanned evidence and build an immutable partial plan"),
             Line::from("? /    close this contextual help"),
         ],
         (Screen::ProvisionalPlan, _) => vec![
@@ -1105,8 +1106,8 @@ fn render_help(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             Line::from("e/t/g  Evidence / Targets / Dependencies"),
             Line::from("v      Coverage       p Plan summary"),
             Line::from("c      columns        s group-local sort"),
-            Line::from("/      filter         D dry-run     A apply review"),
-            Line::from("?      close this contextual help"),
+            Line::from("f      filter         D dry-run     A apply review"),
+            Line::from("? /    close this contextual help"),
         ],
     };
     frame.render_widget(Clear, popup);

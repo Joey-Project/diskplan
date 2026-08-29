@@ -734,7 +734,11 @@ def validate_batch(
         )
     start = started[0]
     finish = completed[0]
-    if start.get("schema") != 1 or start.get("profile") != expected_profile:
+    if (
+        start.get("schema") != 1
+        or start.get("profile") != expected_profile
+        or start.get("agent_mode") != "ask"
+    ):
         raise AcceptanceError("batch start does not match the requested profile")
     if start.get("dry_run") is not True:
         raise AcceptanceError("batch start is not dry-run-only")

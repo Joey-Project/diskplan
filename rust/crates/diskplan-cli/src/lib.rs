@@ -2,8 +2,10 @@
 
 pub mod batch;
 pub mod cli;
+pub mod runtime_client;
 pub mod tui;
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
@@ -18,13 +20,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use diskplan_core::framing::{FrameError, read_frame, write_frame};
-use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello, validate_accepted};
+use diskplan_core::handshake::{
+    AcceptedHandshakeError, rust_client_hello_with_runtime_capabilities, validate_accepted,
+};
 use diskplan_proto::decode_canonical_envelope;
 use diskplan_proto::diskplan::v1::{
-    BusinessEnvelope, EngineEvent, Envelope, HelloAccepted, ScanCheckpointChunk,
+    BuildPlanRequest, BusinessEnvelope, CancelExecutionRequest, ConfirmApplyRequest,
+    DecisionOverlayEditRequest, EngineEvent, Envelope, HelloAccepted, PrepareApplyReviewRequest,
+    PrepareDryRunRequest, RuntimeEvent, RuntimeRejectCode, ScanCheckpointChunk,
     ScanCheckpointChunkDescriptor, ScanCheckpointEvidence, ScanCheckpointManifest, ScanControlKind,
     ScanControlRequest, ScanRootRequest, ScannedNodeEvidence, StartScanRequest, engine_event,
-    envelope,
+    envelope, execution_stream_event, runtime_event,
 };
 use prost::Message;
 use rustix::fs::{
@@ -1297,8 +1303,8 @@ pub enum ClientError {
     UnexpectedResponse { phase: &'static str },
     #[error("request_id must be non-zero")]
     InvalidRequestId,
-    #[error("scan request_id {actual} must be greater than the previous request_id {previous}")]
-    ScanRequestIdNotIncreasing { previous: u64, actual: u64 },
+    #[error("request_id {actual} must be greater than the previous request_id {previous}")]
+    RequestIdNotIncreasing { previous: u64, actual: u64 },
     #[error("engine response sequence {actual} does not match request sequence {expected}")]
     ResponseSequenceMismatch { expected: u64, actual: u64 },
     #[error("engine event sequence {actual} does not immediately follow {previous}")]
@@ -1325,6 +1331,8 @@ pub enum ClientError {
     InvalidEventProvenance(String),
     #[error("engine checkpoint stream is invalid: {0}")]
     InvalidCheckpointStream(String),
+    #[error("engine runtime stream is invalid: {0}")]
+    InvalidRuntimeStream(String),
     #[error("engine emitted an extra framed message while shutting down")]
     ExtraFrameAfterShutdown,
     #[error("engine stdout decoder disconnected without reporting clean EOF")]
@@ -1349,6 +1357,22 @@ pub enum ClientError {
     },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionEvent {
+    Scan(EngineEvent),
+    Runtime(RuntimeEvent),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeRequestKind {
+    BuildPlan,
+    EditOverlay,
+    PrepareDryRun,
+    PrepareApplyReview,
+    ConfirmApply,
+    CancelExecution,
+}
+
 #[derive(Debug)]
 struct CheckpointAccumulator {
     checkpoint_id: String,
@@ -1366,7 +1390,9 @@ pub struct EngineSession {
     accepted: HelloAccepted,
     last_event_sequence: u64,
     scan_session_id: Option<String>,
-    last_scan_request_id: u64,
+    last_request_id: u64,
+    runtime_session_id: Option<Vec<u8>>,
+    runtime_requests: BTreeMap<u64, RuntimeRequestKind>,
     checkpoint_accumulator: Option<CheckpointAccumulator>,
     finalized_machine_state: Option<i32>,
     scan_cancelled_seen: bool,
@@ -1399,7 +1425,22 @@ impl EngineSession {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit());
         })?;
-        Self::connect_spawned(child, timeout)
+        Self::connect_spawned(child, timeout, &[])
+    }
+
+    pub fn connect_bound_with_runtime_capabilities(
+        engine: &BoundEngine,
+        timeout: Duration,
+        capabilities: &[&str],
+    ) -> Result<Self, ClientError> {
+        let child = engine.spawn_child(|command| {
+            command
+                .process_group(0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+        })?;
+        Self::connect_spawned(child, timeout, capabilities)
     }
 
     pub fn spawn_command(command: &mut Command, timeout: Duration) -> Result<Self, ClientError> {
@@ -1409,10 +1450,14 @@ impl EngineSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()?;
-        Self::connect_spawned(child, timeout)
+        Self::connect_spawned(child, timeout, &[])
     }
 
-    fn connect_spawned(mut child: Child, timeout: Duration) -> Result<Self, ClientError> {
+    fn connect_spawned(
+        mut child: Child,
+        timeout: Duration,
+        runtime_capabilities: &[&str],
+    ) -> Result<Self, ClientError> {
         let reaper = spawn_reaper()?;
         let stdin = child
             .stdin
@@ -1442,14 +1487,16 @@ impl EngineSession {
             accepted: HelloAccepted::default(),
             last_event_sequence: 0,
             scan_session_id: None,
-            last_scan_request_id: 0,
+            last_request_id: 0,
+            runtime_session_id: None,
+            runtime_requests: BTreeMap::new(),
             checkpoint_accumulator: None,
             finalized_machine_state: None,
             scan_cancelled_seen: false,
             process_group_id,
             reaper,
         };
-        session.perform_handshake()?;
+        session.perform_handshake(runtime_capabilities)?;
         Ok(session)
     }
 
@@ -1503,7 +1550,7 @@ impl EngineSession {
         &mut self,
         request: StartScanRequest,
     ) -> Result<(), ClientError> {
-        self.reserve_scan_request_id(request.request_id)?;
+        self.reserve_request_id(request.request_id)?;
         self.write_envelope(&Envelope {
             sequence: request.request_id,
             body: Some(envelope::Body::StartScanRequest(request)),
@@ -1523,7 +1570,7 @@ impl EngineSession {
         request_id: u64,
         control: ScanControlKind,
     ) -> Result<(), ClientError> {
-        self.reserve_scan_request_id(request_id)?;
+        self.reserve_request_id(request_id)?;
         self.write_envelope(&Envelope {
             sequence: request_id,
             body: Some(envelope::Body::ScanControlRequest(ScanControlRequest {
@@ -1531,6 +1578,90 @@ impl EngineSession {
                 control: control as i32,
             })),
         })
+    }
+
+    pub fn send_build_plan_request(
+        &mut self,
+        request: BuildPlanRequest,
+    ) -> Result<(), ClientError> {
+        self.send_runtime_request(
+            request.request_id,
+            RuntimeRequestKind::BuildPlan,
+            envelope::Body::BuildPlanRequest(request),
+        )
+    }
+
+    pub fn send_decision_overlay_edit_request(
+        &mut self,
+        request: DecisionOverlayEditRequest,
+    ) -> Result<(), ClientError> {
+        self.send_runtime_request(
+            request.request_id,
+            RuntimeRequestKind::EditOverlay,
+            envelope::Body::DecisionOverlayEditRequest(request),
+        )
+    }
+
+    pub fn send_prepare_dry_run_request(
+        &mut self,
+        request: PrepareDryRunRequest,
+    ) -> Result<(), ClientError> {
+        self.send_runtime_request(
+            request.request_id,
+            RuntimeRequestKind::PrepareDryRun,
+            envelope::Body::PrepareDryRunRequest(request),
+        )
+    }
+
+    pub fn send_prepare_apply_review_request(
+        &mut self,
+        request: PrepareApplyReviewRequest,
+    ) -> Result<(), ClientError> {
+        self.send_runtime_request(
+            request.request_id,
+            RuntimeRequestKind::PrepareApplyReview,
+            envelope::Body::PrepareApplyReviewRequest(request),
+        )
+    }
+
+    pub fn send_confirm_apply_request(
+        &mut self,
+        request: ConfirmApplyRequest,
+    ) -> Result<(), ClientError> {
+        self.send_runtime_request(
+            request.request_id,
+            RuntimeRequestKind::ConfirmApply,
+            envelope::Body::ConfirmApplyRequest(request),
+        )
+    }
+
+    pub fn send_cancel_execution_request(
+        &mut self,
+        request: CancelExecutionRequest,
+    ) -> Result<(), ClientError> {
+        self.send_runtime_request(
+            request.request_id,
+            RuntimeRequestKind::CancelExecution,
+            envelope::Body::CancelExecutionRequest(request),
+        )
+    }
+
+    fn send_runtime_request(
+        &mut self,
+        request_id: u64,
+        kind: RuntimeRequestKind,
+        body: envelope::Body,
+    ) -> Result<(), ClientError> {
+        self.reserve_request_id(request_id)?;
+        self.runtime_requests.insert(request_id, kind);
+        let result = self.write_envelope(&Envelope {
+            sequence: request_id,
+            body: Some(body),
+        });
+        if result.is_err() {
+            self.runtime_requests.remove(&request_id);
+        }
+        result
     }
 
     pub fn read_engine_event(&mut self) -> Result<EngineEvent, ClientError> {
@@ -1541,8 +1672,131 @@ impl EngineSession {
         &mut self,
         timeout: Duration,
     ) -> Result<EngineEvent, ClientError> {
-        let envelope = self.read_envelope_with_timeout("engine event", timeout)?;
-        self.accept_engine_event_envelope(envelope)
+        match self.read_session_event_with_timeout_and_phase(timeout, "engine event")? {
+            SessionEvent::Scan(event) => Ok(event),
+            SessionEvent::Runtime(_) => Err(ClientError::UnexpectedResponse {
+                phase: "engine event",
+            }),
+        }
+    }
+
+    pub fn read_session_event(&mut self) -> Result<SessionEvent, ClientError> {
+        self.read_session_event_with_timeout(self.response_timeout)
+    }
+
+    pub fn read_session_event_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<SessionEvent, ClientError> {
+        self.read_session_event_with_timeout_and_phase(timeout, "session event")
+    }
+
+    fn read_session_event_with_timeout_and_phase(
+        &mut self,
+        timeout: Duration,
+        phase: &'static str,
+    ) -> Result<SessionEvent, ClientError> {
+        let envelope = self.read_envelope_with_timeout(phase, timeout)?;
+        match envelope.body.as_ref() {
+            Some(envelope::Body::EngineEvent(_)) => self
+                .accept_engine_event_envelope(envelope)
+                .map(SessionEvent::Scan),
+            Some(envelope::Body::RuntimeEvent(_)) => self
+                .accept_runtime_event_envelope(envelope)
+                .map(SessionEvent::Runtime),
+            _ => Err(ClientError::UnexpectedResponse { phase }),
+        }
+    }
+
+    fn accept_runtime_event_envelope(
+        &mut self,
+        envelope: Envelope,
+    ) -> Result<RuntimeEvent, ClientError> {
+        let Some(envelope::Body::RuntimeEvent(event)) = envelope.body else {
+            return Err(ClientError::UnexpectedResponse {
+                phase: "runtime event",
+            });
+        };
+        if envelope.sequence != event.event_sequence {
+            return Err(ClientError::EventEnvelopeSequenceMismatch {
+                envelope: envelope.sequence,
+                event: event.event_sequence,
+            });
+        }
+        let expected =
+            self.last_event_sequence
+                .checked_add(1)
+                .ok_or(ClientError::EventSequenceExhausted {
+                    previous: self.last_event_sequence,
+                })?;
+        if event.event_sequence != expected {
+            return Err(ClientError::EventSequenceMismatch {
+                previous: self.last_event_sequence,
+                actual: event.event_sequence,
+            });
+        }
+        if event.request_id == 0 {
+            return Err(ClientError::InvalidRuntimeStream(
+                "runtime event request_id is zero".into(),
+            ));
+        }
+        let session_id = event
+            .runtime_session_id
+            .as_ref()
+            .map(|identifier| identifier.value.as_slice())
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .ok_or_else(|| {
+                ClientError::InvalidRuntimeStream("runtime_session_id is invalid".into())
+            })?;
+        if let Some(expected_session_id) = self.runtime_session_id.as_deref() {
+            if expected_session_id != session_id {
+                return Err(ClientError::InvalidRuntimeStream(
+                    "runtime_session_id changed".into(),
+                ));
+            }
+        } else {
+            self.runtime_session_id = Some(session_id.to_vec());
+        }
+        let kind = self
+            .runtime_requests
+            .get(&event.request_id)
+            .copied()
+            .ok_or_else(|| {
+                ClientError::InvalidRuntimeStream(
+                    "runtime event has no matching pending request".into(),
+                )
+            })?;
+        let body = event
+            .body
+            .as_ref()
+            .ok_or_else(|| ClientError::InvalidRuntimeStream("runtime event has no body".into()))?;
+        if !runtime_body_matches_request(kind, body) {
+            return Err(ClientError::InvalidRuntimeStream(
+                "runtime event body does not match its request kind".into(),
+            ));
+        }
+        if let runtime_event::Body::RuntimeRejected(rejected) = body {
+            let code = RuntimeRejectCode::try_from(rejected.code).map_err(|_| {
+                ClientError::InvalidRuntimeStream("runtime rejection code is unknown".into())
+            })?;
+            if code == RuntimeRejectCode::Unspecified || rejected.summary.is_empty() {
+                return Err(ClientError::InvalidRuntimeStream(
+                    "runtime rejection is incomplete".into(),
+                ));
+            }
+            if code == RuntimeRejectCode::ConfirmationMismatch
+                && kind != RuntimeRequestKind::ConfirmApply
+            {
+                return Err(ClientError::InvalidRuntimeStream(
+                    "reserved confirmation-mismatch rejection used for another request".into(),
+                ));
+            }
+        }
+        if runtime_body_is_terminal(body) {
+            self.runtime_requests.remove(&event.request_id);
+        }
+        self.last_event_sequence = event.event_sequence;
+        Ok(event)
     }
 
     fn accept_engine_event_envelope(
@@ -1846,19 +2100,19 @@ impl EngineSession {
         Ok(())
     }
 
-    fn reserve_scan_request_id(&mut self, request_id: u64) -> Result<(), ClientError> {
+    fn reserve_request_id(&mut self, request_id: u64) -> Result<(), ClientError> {
         if request_id == 0 {
             return Err(ClientError::InvalidRequestId);
         }
-        if request_id <= self.last_scan_request_id {
-            return Err(ClientError::ScanRequestIdNotIncreasing {
-                previous: self.last_scan_request_id,
+        if request_id <= self.last_request_id {
+            return Err(ClientError::RequestIdNotIncreasing {
+                previous: self.last_request_id,
                 actual: request_id,
             });
         }
         // Reserve before writing: a failed or ambiguous write must not make an
         // already-used identifier locally retryable.
-        self.last_scan_request_id = request_id;
+        self.last_request_id = request_id;
         Ok(())
     }
 
@@ -1881,8 +2135,8 @@ impl EngineSession {
         }
     }
 
-    fn perform_handshake(&mut self) -> Result<(), ClientError> {
-        let hello = rust_client_hello();
+    fn perform_handshake(&mut self, runtime_capabilities: &[&str]) -> Result<(), ClientError> {
+        let hello = rust_client_hello_with_runtime_capabilities(runtime_capabilities);
         let request = Envelope {
             sequence: HANDSHAKE_SEQUENCE,
             body: Some(envelope::Body::Hello(hello.clone())),
@@ -2202,6 +2456,57 @@ fn decode_engine_envelope(payload: &[u8]) -> Result<Envelope, ClientError> {
         .map_err(|error| ClientError::InvalidEventProvenance(error.to_string()))
 }
 
+fn runtime_body_matches_request(kind: RuntimeRequestKind, body: &runtime_event::Body) -> bool {
+    match (kind, body) {
+        (
+            RuntimeRequestKind::BuildPlan,
+            runtime_event::Body::BuildPlanAccepted(_)
+            | runtime_event::Body::PlanProjectionChunk(_)
+            | runtime_event::Body::PlanProjection(_)
+            | runtime_event::Body::PlanProjectionInvalidated(_)
+            | runtime_event::Body::RuntimeRejected(_),
+        )
+        | (
+            RuntimeRequestKind::EditOverlay,
+            runtime_event::Body::DecisionOverlayAcknowledged(_)
+            | runtime_event::Body::DecisionOverlayRejected(_)
+            | runtime_event::Body::RuntimeRejected(_),
+        )
+        | (
+            RuntimeRequestKind::PrepareDryRun,
+            runtime_event::Body::DryRunProjection(_) | runtime_event::Body::RuntimeRejected(_),
+        )
+        | (
+            RuntimeRequestKind::PrepareApplyReview,
+            runtime_event::Body::ApplyReviewProjection(_) | runtime_event::Body::RuntimeRejected(_),
+        )
+        | (
+            RuntimeRequestKind::ConfirmApply | RuntimeRequestKind::CancelExecution,
+            runtime_event::Body::ExecutionStreamEvent(_) | runtime_event::Body::RuntimeRejected(_),
+        ) => true,
+        _ => false,
+    }
+}
+
+fn runtime_body_is_terminal(body: &runtime_event::Body) -> bool {
+    matches!(
+        body,
+        runtime_event::Body::PlanProjectionInvalidated(_)
+            | runtime_event::Body::DecisionOverlayAcknowledged(_)
+            | runtime_event::Body::DecisionOverlayRejected(_)
+            | runtime_event::Body::DryRunProjection(_)
+            | runtime_event::Body::ApplyReviewProjection(_)
+            | runtime_event::Body::RuntimeRejected(_)
+    ) || matches!(
+        body,
+        runtime_event::Body::ExecutionStreamEvent(event)
+            if matches!(
+                event.body.as_ref(),
+                Some(execution_stream_event::Body::ApplyFinished(_))
+            )
+    )
+}
+
 fn invalid_checkpoint(detail: impl Into<String>) -> ClientError {
     ClientError::InvalidCheckpointStream(detail.into())
 }
@@ -2417,22 +2722,22 @@ mod event_sequence_tests {
     use std::path::PathBuf;
 
     use diskplan_proto::diskplan::v1::{
-        ControlAccepted, CoverageEvidence, RawPath, ScanCheckpointReady, ScanMachineState,
-        ScanProgress, ScanState,
+        ApplyFinishedProjection, BuildPlanAccepted, ControlAccepted, CoverageEvidence,
+        ExecutionStreamEvent, OpaqueIdentifier, RawPath, RuntimeRejected, ScanCheckpointReady,
+        ScanMachineState, ScanProgress, ScanState,
     };
 
     fn session_with_events(events: impl IntoIterator<Item = EngineEvent>) -> EngineSession {
+        session_with_envelopes(events.into_iter().map(|event| Envelope {
+            sequence: event.event_sequence,
+            body: Some(envelope::Body::EngineEvent(event)),
+        }))
+    }
+
+    fn session_with_envelopes(events: impl IntoIterator<Item = Envelope>) -> EngineSession {
         let (frame_sender, frames) = mpsc::sync_channel(16);
         for event in events {
-            frame_sender
-                .send(Ok(Some(
-                    Envelope {
-                        sequence: event.event_sequence,
-                        body: Some(envelope::Body::EngineEvent(event)),
-                    }
-                    .encode_to_vec(),
-                )))
-                .unwrap();
+            frame_sender.send(Ok(Some(event.encode_to_vec()))).unwrap();
         }
         let (reaper, _reaper_receiver) = mpsc::sync_channel(1);
         EngineSession {
@@ -2443,12 +2748,32 @@ mod event_sequence_tests {
             accepted: HelloAccepted::default(),
             last_event_sequence: 0,
             scan_session_id: None,
-            last_scan_request_id: 0,
+            last_request_id: 0,
+            runtime_session_id: None,
+            runtime_requests: BTreeMap::new(),
             checkpoint_accumulator: None,
             finalized_machine_state: None,
             scan_cancelled_seen: false,
             process_group_id: 0,
             reaper,
+        }
+    }
+
+    fn runtime_envelope(
+        event_sequence: u64,
+        request_id: u64,
+        body: runtime_event::Body,
+    ) -> Envelope {
+        Envelope {
+            sequence: event_sequence,
+            body: Some(envelope::Body::RuntimeEvent(RuntimeEvent {
+                event_sequence,
+                request_id,
+                runtime_session_id: Some(OpaqueIdentifier {
+                    value: b"runtime-session".to_vec(),
+                }),
+                body: Some(body),
+            })),
         }
     }
 
@@ -2870,7 +3195,9 @@ mod event_sequence_tests {
             accepted: HelloAccepted::default(),
             last_event_sequence: u64::MAX,
             scan_session_id: None,
-            last_scan_request_id: 0,
+            last_request_id: 0,
+            runtime_session_id: None,
+            runtime_requests: BTreeMap::new(),
             checkpoint_accumulator: None,
             finalized_machine_state: None,
             scan_cancelled_seen: false,
@@ -2987,6 +3314,175 @@ mod event_sequence_tests {
     }
 
     #[test]
+    fn mixed_scan_and_runtime_events_share_one_contiguous_sequence() {
+        let scan_start = Envelope {
+            sequence: 1,
+            body: Some(envelope::Body::EngineEvent(accepted_start(1))),
+        };
+        let runtime = runtime_envelope(
+            2,
+            7,
+            runtime_event::Body::RuntimeRejected(RuntimeRejected {
+                code: RuntimeRejectCode::BusinessUnsupported as i32,
+                summary: "runtime operation is not available".into(),
+            }),
+        );
+        let scan_progress = Envelope {
+            sequence: 3,
+            body: Some(envelope::Body::EngineEvent(natural_event(
+                3,
+                engine_event::Body::ScanProgress(Default::default()),
+            ))),
+        };
+        let mut session = session_with_envelopes([scan_start, runtime, scan_progress]);
+        session
+            .runtime_requests
+            .insert(7, RuntimeRequestKind::BuildPlan);
+
+        assert!(matches!(
+            session.read_session_event().unwrap(),
+            SessionEvent::Scan(_)
+        ));
+        assert!(matches!(
+            session.read_session_event().unwrap(),
+            SessionEvent::Runtime(RuntimeEvent {
+                request_id: 7,
+                body: Some(runtime_event::Body::RuntimeRejected(_)),
+                ..
+            })
+        ));
+        assert!(
+            !session.runtime_requests.contains_key(&7),
+            "terminal runtime rejection must retire its request"
+        );
+        assert!(matches!(
+            session.read_session_event().unwrap(),
+            SessionEvent::Scan(_)
+        ));
+        assert_eq!(session.last_event_sequence, 3);
+        assert_eq!(
+            session.runtime_session_id.as_deref(),
+            Some(b"runtime-session".as_slice())
+        );
+    }
+
+    #[test]
+    fn mixed_stream_rejects_a_runtime_gap_without_advancing_authority() {
+        let scan_start = Envelope {
+            sequence: 1,
+            body: Some(envelope::Body::EngineEvent(accepted_start(1))),
+        };
+        let runtime = runtime_envelope(
+            3,
+            7,
+            runtime_event::Body::BuildPlanAccepted(BuildPlanAccepted::default()),
+        );
+        let mut session = session_with_envelopes([scan_start, runtime]);
+        session
+            .runtime_requests
+            .insert(7, RuntimeRequestKind::BuildPlan);
+
+        session.read_session_event().unwrap();
+        assert!(matches!(
+            session.read_session_event(),
+            Err(ClientError::EventSequenceMismatch {
+                previous: 1,
+                actual: 3
+            })
+        ));
+        assert_eq!(session.last_event_sequence, 1);
+        assert!(session.runtime_session_id.is_none());
+        assert_eq!(
+            session.runtime_requests.get(&7),
+            Some(&RuntimeRequestKind::BuildPlan)
+        );
+    }
+
+    #[test]
+    fn confirmation_mismatch_is_reserved_for_confirm_apply() {
+        let rejection = || {
+            runtime_envelope(
+                1,
+                7,
+                runtime_event::Body::RuntimeRejected(RuntimeRejected {
+                    code: RuntimeRejectCode::ConfirmationMismatch as i32,
+                    summary: "confirmation binding mismatch".into(),
+                }),
+            )
+        };
+
+        let mut wrong_kind = session_with_envelopes([rejection()]);
+        wrong_kind
+            .runtime_requests
+            .insert(7, RuntimeRequestKind::PrepareDryRun);
+        assert!(matches!(
+            wrong_kind.read_session_event(),
+            Err(ClientError::InvalidRuntimeStream(_))
+        ));
+        assert_eq!(wrong_kind.last_event_sequence, 0);
+        assert!(wrong_kind.runtime_requests.contains_key(&7));
+
+        let mut confirm = session_with_envelopes([rejection()]);
+        confirm
+            .runtime_requests
+            .insert(7, RuntimeRequestKind::ConfirmApply);
+        assert!(matches!(
+            confirm.read_session_event().unwrap(),
+            SessionEvent::Runtime(_)
+        ));
+        assert_eq!(confirm.last_event_sequence, 1);
+        assert!(!confirm.runtime_requests.contains_key(&7));
+    }
+
+    #[test]
+    fn apply_finished_retires_confirm_and_cancel_requests() {
+        for kind in [
+            RuntimeRequestKind::ConfirmApply,
+            RuntimeRequestKind::CancelExecution,
+        ] {
+            let event = runtime_envelope(
+                1,
+                7,
+                runtime_event::Body::ExecutionStreamEvent(ExecutionStreamEvent {
+                    body: Some(execution_stream_event::Body::ApplyFinished(
+                        ApplyFinishedProjection::default(),
+                    )),
+                    ..Default::default()
+                }),
+            );
+            let mut session = session_with_envelopes([event]);
+            session.runtime_requests.insert(7, kind);
+
+            session.read_session_event().unwrap();
+            assert!(
+                !session.runtime_requests.contains_key(&7),
+                "ApplyFinished must retire {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_request_id_is_reserved_across_scan_and_runtime_writers() {
+        let mut session = session_with_events([]);
+
+        assert!(matches!(
+            session.send_build_plan_request(BuildPlanRequest {
+                request_id: 7,
+                ..Default::default()
+            }),
+            Err(ClientError::Io(_))
+        ));
+        assert!(session.runtime_requests.is_empty());
+        assert!(matches!(
+            session.send_scan_control(7, ScanControlKind::PauseScan),
+            Err(ClientError::RequestIdNotIncreasing {
+                previous: 7,
+                actual: 7
+            })
+        ));
+    }
+
+    #[test]
     fn scan_request_id_is_reserved_before_an_ambiguous_write() {
         let mut session = session_with_events([]);
 
@@ -2996,7 +3492,7 @@ mod event_sequence_tests {
         ));
         assert!(matches!(
             session.send_scan_control(7, ScanControlKind::PauseScan),
-            Err(ClientError::ScanRequestIdNotIncreasing {
+            Err(ClientError::RequestIdNotIncreasing {
                 previous: 7,
                 actual: 7
             })
@@ -3193,7 +3689,9 @@ mod cleanup_tests {
             accepted: HelloAccepted::default(),
             last_event_sequence: 0,
             scan_session_id: None,
-            last_scan_request_id: 0,
+            last_request_id: 0,
+            runtime_session_id: None,
+            runtime_requests: BTreeMap::new(),
             checkpoint_accumulator: None,
             finalized_machine_state: None,
             scan_cancelled_seen: false,

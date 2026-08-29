@@ -50,10 +50,7 @@ async fn main() {
             }
         }
         CommandLine::Batch(options) => {
-            // Protocol 1.4 replaces this fail-closed adapter with the authoritative
-            // scan -> plan -> dry-run client. Protocol 1.3 must never pass India by
-            // presenting scan finalization as an empty plan.
-            let mut client = ProtocolBatchEngineClient;
+            let mut client = ProtocolBatchEngineClient::new(&bound_engine);
             if let Err(error) = batch::run(&mut client, &options, &mut std::io::stdout().lock()) {
                 eprintln!("diskplan: {error}");
                 std::process::exit(error.exit_code());

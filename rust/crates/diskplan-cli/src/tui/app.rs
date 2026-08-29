@@ -4,12 +4,13 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 
 use super::event::EventSource;
-use super::model::{AppState, ControlCommand, Effect, TerminalState, UiEvent};
+use super::model::{AppState, ControlCommand, Effect, PlanCommand, TerminalState, UiEvent};
 use super::reducer::reduce;
 use super::render::render;
 
 pub trait ControlSink {
     fn send(&mut self, command: ControlCommand) -> io::Result<()>;
+    fn send_plan(&mut self, command: PlanCommand) -> io::Result<()>;
     fn stop(&mut self) -> io::Result<()>;
 }
 
@@ -42,6 +43,9 @@ where
                 Effect::SendControl(command) => controls
                     .send(command)
                     .map_err(|error| format!("failed to send engine control: {error}")),
+                Effect::SendPlan(command) => controls
+                    .send_plan(command)
+                    .map_err(|error| format!("failed to send plan command: {error}")),
                 Effect::StopDriver => controls
                     .stop()
                     .map_err(|error| format!("failed to stop engine driver: {error}")),
@@ -206,6 +210,10 @@ mod tests {
     impl ControlSink for RecordingSink {
         fn send(&mut self, command: ControlCommand) -> io::Result<()> {
             self.controls.push(command);
+            Ok(())
+        }
+
+        fn send_plan(&mut self, _command: PlanCommand) -> io::Result<()> {
             Ok(())
         }
 

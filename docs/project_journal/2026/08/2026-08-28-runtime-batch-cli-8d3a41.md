@@ -3,7 +3,7 @@ id: 20260828-8d3a41
 title: Runtime Batch CLI
 status: active
 created: 2026-08-28
-updated: 2026-08-28
+updated: 2026-08-29
 branch: wip/runtime-batch-cli
 pr:
 supersedes: []
@@ -46,7 +46,17 @@ superseded_by:
   typed setup failures before selecting batch exit status.
 - [x] Align the protocol 1.4 seam so plan, overlay, and dry-run references each
   repeat the complete scan-evidence four-tuple.
-- [ ] Connect the protocol 1.4 Swift-authoritative batch adapter.
+- [x] Add one mixed scan/runtime transport with global request and event
+  sequence validation plus request-kind correlation.
+- [x] Connect batch scan finalization to verified plan, acknowledged overlay
+  preset, and sealed dry-run receipts without local policy reconstruction.
+- [x] Connect the TUI driver to the same transport and replace product-path
+  local staging with pending edits committed only after an engine overlay ack.
+- [x] Make `p` finalize the scanned prefix before building an immutable partial
+  plan, and keep unsupported apply review typed and fail-closed.
+- [ ] Merge the protocol 1.5 preview extension and require its raw working
+  directory/path-race binding before enabling mutation review.
+- [ ] Pass the focused Rust, Python, and mixed-transport dynamic gates.
 - [x] Run focused Rust and release-runner tests after the integration workstream
   releases the shared dynamic test slot.
 - [x] Re-run focused and full gates for the advisory follow-up after the shared
@@ -57,9 +67,14 @@ superseded_by:
 ## Current State
 
 - Batch mode never initializes the TUI or decodes the raw root as UTF-8.
-- The protocol 1.3 adapter returns unavailable status 69. It cannot reinterpret
-  finalized scan evidence, including a zero-candidate scan, as dry-run success.
-- `BatchEngineClient` is the narrow seam for the protocol 1.4 adapter. A
+- The frontend now carries scan and runtime events over one framed session with
+  one request-ID high-water mark and one contiguous event sequence. Runtime
+  bodies must match the exact pending request kind and stable runtime session.
+- Batch finalization now requests the engine-authored plan, applies the
+  `SAFE_STAGEABLE_WITHOUT_WAIVER` edit, verifies the complete predecessor chain,
+  and only then accepts a dry-run projection. Missing capabilities and typed
+  unsupported responses retain unavailable status 69.
+- `BatchEngineClient` is the narrow seam for the version-aware mixed transport. A
   successful result must carry bounded scan/plan/dry-run identifiers, a nonzero
   SHA-256 plan hash, a separate engine-acknowledged overlay ID/hash, exact
   selected-action coverage, and zero mutation attempts.
@@ -84,8 +99,24 @@ superseded_by:
   final evidence SHA-256, and India independently rechecks the same relation.
 - Overlay and dry-run references repeat the complete scan-evidence four-tuple;
   exact plan-reference comparison therefore closes every later authority edge.
+- Opaque runtime identifiers are retained as bytes and hex-encoded only at the
+  NDJSON boundary. Agent modes `off`, `ask`, and `auto` are accepted explicitly,
+  with `ask` as the CLI default.
+- The TUI maps only a strictly verified wire plan into its plan-first model.
+  Stage/unstage keys enqueue engine edits; selection and revision change only
+  after a sealed overlay acknowledgement. Dry-run is real. Apply review remains
+  a typed unavailable operation on protocol minor 1.4 and also fails closed on
+  1.5 until the raw working-directory/path-race preview receipt is present.
 
 ## Evidence
+
+- Static validation on 2026-08-29 passed `rustfmt --edition 2024 --check`, Python AST parsing
+  for the changed India validators, and `git diff --check`.
+- `cargo check -p diskplan --all-targets` passed for the connected adapter. The
+  focused `event_sequence_tests` module then passed 20/20, including mixed
+  scan/runtime sequencing, reserved confirmation rejection, terminal request
+  retirement, and the shared request-ID high-water mark. No Swift build/test has
+  run for this connected adapter.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including
@@ -114,7 +145,8 @@ superseded_by:
 
 ## Handoff
 
-- Protocol owner: implement `BatchEngineClient` over protocol 1.4 without
-  changing parser or terminal-report semantics.
-- Integration owner: run the focused tests and replace `status: active` with
-  completed only after the authoritative adapter and exact India-shape gate pass.
+- Protocol owner: land the protocol 1.5 preview receipts without changing 1.4
+  canonical fixtures or enabling mutation on a downgraded session.
+- Integration owner: merge that boundary, run the focused tests, and replace
+  `status: active` with completed only after the authoritative adapter and exact
+  India-shape gate pass.

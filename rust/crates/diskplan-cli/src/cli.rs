@@ -2,9 +2,9 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::batch::{BatchOptions, BatchProfile};
+use crate::batch::{BatchOptions, BatchProfile, PlanningAgentMode};
 
-pub const USAGE: &str = "usage: diskplan [--handshake] [diskplan-engine]\n       diskplan --batch --profile full-audit --dry-run --no-history --no-audit-file --root <absolute-path>";
+pub const USAGE: &str = "usage: diskplan [--handshake] [diskplan-engine]\n       diskplan --batch --profile full-audit --dry-run --no-history --no-audit-file [--agent-mode off|ask|auto] --root <absolute-path>";
 const MAXIMUM_ROOT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +52,7 @@ fn parse_batch(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
     let mut dry_run = false;
     let mut no_history = false;
     let mut no_audit_file = false;
+    let mut agent_mode = None;
     let mut root = None;
     let mut index = 0;
 
@@ -78,6 +79,21 @@ fn parse_batch(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
                 }
                 profile = Some(BatchProfile::FullAudit);
             }
+            value if value == "--agent-mode" => {
+                if agent_mode.is_some() {
+                    return Err(usage_error("duplicate --agent-mode"));
+                }
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| usage_error("--agent-mode needs a value"))?;
+                agent_mode = Some(match value.as_os_str() {
+                    value if value == "off" => PlanningAgentMode::Off,
+                    value if value == "ask" => PlanningAgentMode::Ask,
+                    value if value == "auto" => PlanningAgentMode::Auto,
+                    _ => return Err(usage_error("--agent-mode must be off, ask, or auto")),
+                });
+            }
             value if value == "--root" => {
                 if root.is_some() {
                     return Err(usage_error("duplicate --root"));
@@ -102,7 +118,11 @@ fn parse_batch(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
     let profile = profile.ok_or_else(|| usage_error("batch requires --profile full-audit"))?;
     let root = root.ok_or_else(|| usage_error("batch requires exactly one --root"))?;
 
-    Ok(CommandLine::Batch(BatchOptions { profile, root }))
+    Ok(CommandLine::Batch(BatchOptions {
+        profile,
+        root,
+        agent_mode: agent_mode.unwrap_or_default(),
+    }))
 }
 
 fn set_once(value: &mut bool, duplicate: &'static str) -> Result<(), UsageError> {
@@ -160,6 +180,7 @@ mod tests {
             CommandLine::Batch(BatchOptions {
                 profile: BatchProfile::FullAudit,
                 root,
+                agent_mode: PlanningAgentMode::Ask,
             })
         );
     }
@@ -184,6 +205,28 @@ mod tests {
             parse(duplicate).unwrap_err().detail(),
             "duplicate --dry-run"
         );
+    }
+
+    #[test]
+    fn batch_agent_mode_supports_all_three_modes_and_defaults_to_ask() {
+        for (name, expected) in [
+            ("off", PlanningAgentMode::Off),
+            ("ask", PlanningAgentMode::Ask),
+            ("auto", PlanningAgentMode::Auto),
+        ] {
+            let mut arguments = exact_batch(OsString::from("/"));
+            arguments.extend([OsString::from("--agent-mode"), OsString::from(name)]);
+            let CommandLine::Batch(options) = parse(arguments).expect("valid agent mode") else {
+                panic!("expected batch command");
+            };
+            assert_eq!(options.agent_mode, expected);
+        }
+        let CommandLine::Batch(options) =
+            parse(exact_batch(OsString::from("/"))).expect("default agent mode")
+        else {
+            panic!("expected batch command");
+        };
+        assert_eq!(options.agent_mode, PlanningAgentMode::Ask);
     }
 
     #[test]

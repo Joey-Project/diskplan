@@ -189,6 +189,32 @@ pub enum OverlayStageResult {
     RevisionExhausted,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlayStageEdit {
+    action_id: ActionId,
+    stage: bool,
+    base_revision: u64,
+    force_warning: Option<String>,
+}
+
+impl OverlayStageEdit {
+    pub fn action_id(&self) -> &ActionId {
+        &self.action_id
+    }
+
+    pub fn stage(&self) -> bool {
+        self.stage
+    }
+
+    pub fn base_revision(&self) -> u64 {
+        self.base_revision
+    }
+
+    pub fn force_warning(&self) -> Option<&str> {
+        self.force_warning.as_deref()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlanIntentKind {
     DryRun,
@@ -254,6 +280,15 @@ pub struct ExecutionPreviewProjection {
     pub final_warnings: Vec<ExecutionWarningProjection>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineOverlaySnapshot {
+    pub plan_id: PlanId,
+    pub evidence_reference: String,
+    pub selected_action_ids: Vec<ActionId>,
+    pub revision: u64,
+    pub digest: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum PlanRuntimeEvent {
     Load(EnginePlanSnapshot),
@@ -272,6 +307,16 @@ pub enum PlanRuntimeEvent {
         reason: String,
     },
     ExecutionPreviewReady(ExecutionPreviewProjection),
+    OverlayAcknowledged(EngineOverlaySnapshot),
+    DryRunReady {
+        current: bool,
+        action_count: u64,
+        finding_count: u64,
+    },
+    OperationRejected {
+        operation: &'static str,
+        summary: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,6 +339,7 @@ pub enum PlanRuntimeError {
     NoActionSelected,
     RevisionExhausted,
     InvalidExecutionPreview,
+    InvalidOverlayAcknowledgement,
 }
 
 impl fmt::Display for PlanRuntimeError {
@@ -621,6 +667,44 @@ impl PlanRuntime {
         }
     }
 
+    /// Creates a user edit intent without changing the acknowledged overlay.
+    pub fn selected_stage_edit(&self) -> Result<OverlayStageEdit, OverlayStageResult> {
+        let Some(action_id) = self.selected_action_id().cloned() else {
+            return Err(OverlayStageResult::NoActionSelected);
+        };
+        let Some(action) = self.model.action(&action_id) else {
+            return Err(OverlayStageResult::NoActionSelected);
+        };
+        let Some(overlay) = self.overlay.as_ref() else {
+            return Err(OverlayStageResult::NoActionSelected);
+        };
+        if !overlay.can_advance() {
+            return Err(OverlayStageResult::RevisionExhausted);
+        }
+        let stage = !overlay.is_selected(&action_id);
+        if stage {
+            match &action.stageability {
+                Stageability::Stageable => {}
+                Stageability::RequiresWaivers(required) => {
+                    let acknowledged = overlay.allowed_waivers.get(&action_id);
+                    if !required
+                        .iter()
+                        .all(|waiver| acknowledged.is_some_and(|allowed| allowed.contains(waiver)))
+                    {
+                        return Err(OverlayStageResult::RequiresWaivers(required.clone()));
+                    }
+                }
+                Stageability::NotStageable => return Err(OverlayStageResult::NotStageable),
+            }
+        }
+        Ok(OverlayStageEdit {
+            action_id,
+            stage,
+            base_revision: overlay.revision,
+            force_warning: stage.then(|| force_reason(action.force.clone())).flatten(),
+        })
+    }
+
     pub fn set_selected_user_note(&mut self, note: String) -> Result<(), PlanRuntimeError> {
         let Some(action_id) = self.selected_action_id().cloned() else {
             return Err(PlanRuntimeError::NoActionSelected);
@@ -792,6 +876,47 @@ impl PlanRuntime {
                 self.execution_preview = Some(preview);
                 self.view = PlanView::ExecutionPreview;
                 self.detail_viewport_top = 0;
+                Ok(())
+            }
+            PlanRuntimeEvent::OverlayAcknowledged(snapshot) => {
+                let Some(current) = self.overlay.as_ref() else {
+                    return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
+                };
+                if current.plan_id != snapshot.plan_id
+                    || current.evidence_reference != snapshot.evidence_reference
+                    || snapshot.revision <= current.revision
+                    || snapshot.digest.is_empty()
+                {
+                    return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
+                }
+                let selected = snapshot
+                    .selected_action_ids
+                    .iter()
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                if selected.len() != snapshot.selected_action_ids.len()
+                    || selected
+                        .iter()
+                        .any(|action_id| self.model.action(action_id).is_none())
+                {
+                    return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
+                }
+                let overlay = self
+                    .overlay
+                    .as_mut()
+                    .expect("the acknowledged overlay predecessor exists");
+                overlay.selected_actions = selected;
+                overlay.selected_action_order = snapshot.selected_action_ids;
+                overlay.allowed_waivers.clear();
+                overlay.waiver_reasons.clear();
+                overlay.user_notes.clear();
+                overlay.revision = snapshot.revision;
+                overlay.digest = snapshot.digest;
+                self.pending_intents.clear();
+                self.execution_preview = None;
+                Ok(())
+            }
+            PlanRuntimeEvent::DryRunReady { .. } | PlanRuntimeEvent::OperationRejected { .. } => {
                 Ok(())
             }
         }

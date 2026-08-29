@@ -97,6 +97,7 @@ pub enum Recoverability {
     Rebuildable,
     Restorable,
     Irrecoverable,
+    ReviewRequired,
     Unknown,
 }
 

@@ -181,6 +181,7 @@ def validate_started(event: dict[str, object], root: str) -> None:
         "event": "batch_started",
         "profile": "full-audit",
         "selection_preset": "safe-stageable-without-waiver",
+        "agent_mode": "ask",
         "root_hex": os.fsencode(root).hex(),
         "dry_run": True,
         "history": False,
@@ -201,6 +202,18 @@ def bounded_identifier(event: dict[str, object], key: str) -> None:
         or "\\" in value
     ):
         fail(f"terminal batch report has an invalid {key}")
+
+
+def bounded_opaque_identifier_hex(event: dict[str, object], key: str) -> None:
+    value = event.get(key)
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 512
+        or len(value) % 2 != 0
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        fail(f"terminal batch report has an invalid encoded {key}")
 
 
 def nonnegative_integer(event: dict[str, object], key: str) -> int:
@@ -225,11 +238,10 @@ def validate_terminal(event: dict[str, object]) -> None:
     for key in (
         "scan_session_id",
         "scan_checkpoint_id",
-        "projection_id",
-        "overlay_id",
-        "execution_epoch_id",
     ):
         bounded_identifier(event, key)
+    for key in ("projection_id", "overlay_id", "execution_epoch_id"):
+        bounded_opaque_identifier_hex(event, key)
     for key in (
         "checkpoint_evidence_hash",
         "evidence_id",
