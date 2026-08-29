@@ -7,6 +7,8 @@ use diskplan_proto::diskplan::v1::{
     RuntimeRejected, decision_overlay_edit, runtime_event,
 };
 use diskplan_proto::runtime::{
+    MAXIMUM_PLAN_PROJECTION_MANIFEST_BYTES, MAXIMUM_PLAN_PROJECTION_RAW_BYTES,
+    MAXIMUM_PLAN_PROJECTION_RAW_CHUNK_BYTES, MAXIMUM_PLAN_PROJECTION_RECORD_COUNT,
     RuntimeProjectionError, VerifiedPlanProjection, decode_and_verify_plan_projection,
 };
 use diskplan_proto::sealed::{RuntimeChainVerifier, VerifiedDryRunProjection};
@@ -27,6 +29,8 @@ pub enum RuntimeClientError {
     Projection(#[from] RuntimeProjectionError),
     #[error("runtime authority binding is invalid: {0}")]
     Binding(&'static str),
+    #[error("runtime projection exceeded its negotiated limit: {0}")]
+    Limit(&'static str),
     #[error("runtime stream violated the expected {0} response sequence")]
     Unexpected(&'static str),
 }
@@ -77,6 +81,7 @@ pub fn receive_plan(
 ) -> Result<RuntimePlanReceipt, RuntimeClientError> {
     let mut accepted = false;
     let mut chunks = Vec::new();
+    let mut admitted_chunk_bytes = 0_u64;
     loop {
         let event = runtime_event_for_request(session, request_id, "plan")?;
         match event.body {
@@ -84,7 +89,11 @@ pub fn receive_plan(
                 accepted = true;
             }
             Some(runtime_event::Body::PlanProjectionChunk(chunk)) if accepted => {
-                chunks.push(chunk.encode_to_vec());
+                admit_plan_chunk(
+                    &mut chunks,
+                    &mut admitted_chunk_bytes,
+                    chunk.encode_to_vec(),
+                )?;
             }
             Some(runtime_event::Body::PlanProjection(projection)) if accepted => {
                 let manifest = projection
@@ -107,6 +116,33 @@ pub fn receive_plan(
             _ => return Err(RuntimeClientError::Unexpected("plan")),
         }
     }
+}
+
+fn admit_plan_chunk(
+    chunks: &mut Vec<Vec<u8>>,
+    admitted_bytes: &mut u64,
+    encoded: Vec<u8>,
+) -> Result<(), RuntimeClientError> {
+    if chunks.len() >= MAXIMUM_PLAN_PROJECTION_RECORD_COUNT {
+        return Err(RuntimeClientError::Limit("plan projection chunk count"));
+    }
+    if encoded.len() > MAXIMUM_PLAN_PROJECTION_RAW_CHUNK_BYTES {
+        return Err(RuntimeClientError::Limit("plan projection chunk bytes"));
+    }
+    let encoded_bytes = u64::try_from(encoded.len())
+        .map_err(|_| RuntimeClientError::Limit("plan projection chunk bytes"))?;
+    let maximum_chunk_bytes = MAXIMUM_PLAN_PROJECTION_RAW_BYTES
+        .checked_sub(MAXIMUM_PLAN_PROJECTION_MANIFEST_BYTES as u64)
+        .ok_or(RuntimeClientError::Limit("plan projection byte budget"))?;
+    let next = admitted_bytes
+        .checked_add(encoded_bytes)
+        .ok_or(RuntimeClientError::Limit("plan projection byte budget"))?;
+    if next > maximum_chunk_bytes {
+        return Err(RuntimeClientError::Limit("plan projection byte budget"));
+    }
+    chunks.push(encoded);
+    *admitted_bytes = next;
+    Ok(())
 }
 
 pub fn edit_overlay(
@@ -379,6 +415,43 @@ mod tests {
         Digest256 {
             value: value.as_ref().to_vec(),
         }
+    }
+
+    #[test]
+    fn plan_chunk_admission_is_incrementally_bounded() {
+        let mut chunks = Vec::new();
+        let mut admitted = 0_u64;
+        admit_plan_chunk(&mut chunks, &mut admitted, vec![0x41; 16]).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(admitted, 16);
+
+        let mut count_limited = vec![Vec::new(); MAXIMUM_PLAN_PROJECTION_RECORD_COUNT];
+        let mut count_bytes = 0;
+        assert!(matches!(
+            admit_plan_chunk(&mut count_limited, &mut count_bytes, Vec::new()),
+            Err(RuntimeClientError::Limit("plan projection chunk count"))
+        ));
+
+        let mut byte_limited = Vec::new();
+        let mut byte_count = 0;
+        assert!(matches!(
+            admit_plan_chunk(
+                &mut byte_limited,
+                &mut byte_count,
+                vec![0; MAXIMUM_PLAN_PROJECTION_RAW_CHUNK_BYTES + 1]
+            ),
+            Err(RuntimeClientError::Limit("plan projection chunk bytes"))
+        ));
+        assert!(byte_limited.is_empty());
+
+        let mut aggregate_limited = Vec::new();
+        let mut aggregate_bytes =
+            MAXIMUM_PLAN_PROJECTION_RAW_BYTES - MAXIMUM_PLAN_PROJECTION_MANIFEST_BYTES as u64;
+        assert!(matches!(
+            admit_plan_chunk(&mut aggregate_limited, &mut aggregate_bytes, vec![0]),
+            Err(RuntimeClientError::Limit("plan projection byte budget"))
+        ));
+        assert!(aggregate_limited.is_empty());
     }
 
     #[test]

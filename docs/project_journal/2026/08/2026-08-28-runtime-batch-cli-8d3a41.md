@@ -130,6 +130,11 @@ superseded_by:
   recursive target assembly, and duplicate pending overlay edits. The static
   follow-up closes all four and adds focused regression coverage; its dynamic
   checks must run on `India-mac-mini-m4-hoteng` under the current host policy.
+- The whole-range follow-up review of `76a2ebb..f612f77` confirmed those four
+  findings closed and found two further boundedness gaps. Batch now requires
+  scan-control, scan-stream, and raw-path capabilities before request 1, and
+  plan chunks are admitted incrementally against the exported count, per-chunk,
+  and aggregate raw-byte limits before being retained.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including

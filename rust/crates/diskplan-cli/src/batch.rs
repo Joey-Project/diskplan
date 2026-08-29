@@ -22,6 +22,9 @@ const MAXIMUM_IDENTIFIER_BYTES: usize = 256;
 const MAXIMUM_ROOT_BYTES: usize = 16 * 1024;
 const PLAN_HASH_BYTES: usize = 32;
 const BATCH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const SCAN_CONTROL_CAPABILITY: &str = "scan-control-v1";
+const SCAN_STREAM_CAPABILITY: &str = "scan-stream-v1";
+const RAW_PATH_CAPABILITY: &str = "raw-path-bytes-v1";
 const PLAN_CAPABILITY: &str = "plan-projection-v1";
 const OVERLAY_CAPABILITY: &str = "decision-overlay-v1";
 const DRY_RUN_CAPABILITY: &str = "dry-run-projection-v1";
@@ -561,6 +564,9 @@ fn execute_protocol_batch(
     session: &mut EngineSession,
     request: &BatchRequest,
 ) -> Result<BatchCompletion, BatchClientError> {
+    require_capability(session, SCAN_CONTROL_CAPABILITY)?;
+    require_capability(session, SCAN_STREAM_CAPABILITY)?;
+    require_capability(session, RAW_PATH_CAPABILITY)?;
     require_capability(session, PLAN_CAPABILITY)?;
     require_capability(session, OVERLAY_CAPABILITY)?;
 
