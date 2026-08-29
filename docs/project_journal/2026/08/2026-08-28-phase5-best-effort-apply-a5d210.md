@@ -55,9 +55,11 @@ superseded_by:
   and both production routing and the quarantine adapter reject them without a Git executable in
   the mutation implementation. Clean quarantine removal remains executable.
 - Quarantine uses a per-execution exclusive directory sealed for identity and access policy,
-  including ACL/flags/`fstatfs` mount, and rechecks the held source parent at rename/restore.
-  Administrative cleanup binds the planned metadata digest and canonical root slot. Coverage
-  timestamps trigger only a bounded reread, while content and access digests remain separate.
+  including ACL/flags/`fstatfs` mount. Restore and recovery-locator publication reopen the raw
+  root without following links, rebind every parent identity and access seal, and prove the
+  quarantine directory name still resolves to the held object. Administrative cleanup binds the
+  planned metadata digest and canonical root slot. Coverage timestamps trigger only a bounded
+  reread, while content and access digests remain separate.
 - Shell/TUI events require no persistence. Optional audit failures, including `ENOSPC`, are
   reported but cannot stop cleanup.
 
@@ -120,5 +122,9 @@ superseded_by:
   coverage in its typed token and binds the restore leaf to the still-held original descriptor.
   A changed leaf or unsafe quarantine namespace now reports an unverified recovery binding rather
   than restoring a replacement or publishing a false recovery locator.
-- Follow-up head: exact-head review accepted findings 1-8 and 10 at the static contract level;
-  finding 9 remains blocked on the Git configuration execution-boundary decision above.
+- Fresh full-range rereview through `dc55593` found that the held descriptors did not prove the
+  recovery path was still reachable through the original raw-root and parent name slots. The
+  follow-up captures root/parent access seals, reopens the complete no-follow parent chain, and
+  verifies the quarantine directory slot before either restore or locator publication. A moved
+  raw root now produces an unverified typed recovery state and leaves the quarantined payload
+  untouched.

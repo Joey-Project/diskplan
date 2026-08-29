@@ -67,7 +67,9 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
   private struct DescriptorBinding {
     let descriptors: [Int32]
     let rootDescriptor: Int32
+    let rootSeal: QuarantineNamespaceSeal
     let parentDescriptors: [Int32]
+    let parentNamespaceSeals: [QuarantineNamespaceSeal]
     let parentDescriptor: Int32
     let sourceDescriptor: Int32
     let leaf: Data
@@ -466,11 +468,10 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
   ) async -> AdapterOperationOutcome {
     hooks.beforeRestore()
     do {
-      try requireQuarantineSeal(quarantine)
-      try requireDirectorySeal(
-        source.parentDescriptor,
-        expected: source.parentSeal,
-        code: "source-parent-seal-mismatch-before-restore"
+      try requireRecoveryNamespaceBinding(
+        target: target,
+        source: source,
+        quarantine: quarantine
       )
       try requireQuarantinePayloadIdentity(
         target: target,
@@ -524,11 +525,10 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
   ) async -> AdapterOperationOutcome {
     hooks.beforeRestore()
     do {
-      try requireQuarantineSeal(quarantine)
-      try requireDirectorySeal(
-        source.parentDescriptor,
-        expected: source.parentSeal,
-        code: "source-parent-seal-mismatch-before-restore"
+      try requireRecoveryNamespaceBinding(
+        target: target,
+        source: source,
+        quarantine: quarantine
       )
       try requireQuarantinePayloadIdentity(
         target: target,
@@ -587,6 +587,89 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     )
   }
 
+  private func requireRecoveryNamespaceBinding(
+    target: BoundMutationTarget,
+    source: DescriptorBinding,
+    quarantine: QuarantineBinding
+  ) throws {
+    let expectedParentComponents = Array(target.targetPath.components.dropLast())
+    guard quarantine.locator.rawRoot == target.rawRoot,
+      quarantine.locator.sourceParentComponents == expectedParentComponents,
+      expectedParentComponents.count == source.parentDescriptors.count,
+      source.parentDescriptors.count == source.parentNamespaceSeals.count
+    else { throw failure("recovery-namespace-binding-invalid") }
+
+    var reboundDescriptors: [Int32] = []
+    defer { Self.close(reboundDescriptors) }
+    let root = try Self.withRawCString(target.rawRoot.absoluteBytes) { path -> Int32 in
+      let descriptor = Darwin.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+      guard descriptor >= 0 else { throw failure("reopen-recovery-root", errno) }
+      return descriptor
+    }
+    reboundDescriptors.append(root)
+    try requireSameIdentity(
+      sourceDescriptor: source.rootDescriptor,
+      destinationDescriptor: root,
+      expected: target.expectedRootIdentity
+    )
+    try requireDirectorySeal(
+      root,
+      expected: source.rootSeal,
+      code: "recovery-root-seal-mismatch"
+    )
+
+    var parent = root
+    for index in expectedParentComponents.indices {
+      let descriptor = try openDirectory(
+        at: parent,
+        name: expectedParentComponents[index],
+        code: "reopen-recovery-parent"
+      )
+      reboundDescriptors.append(descriptor)
+      try requireSameIdentity(
+        sourceDescriptor: source.parentDescriptors[index],
+        destinationDescriptor: descriptor,
+        expected: target.expectedParentIdentities[index]
+      )
+      try requireDirectorySeal(
+        descriptor,
+        expected: source.parentNamespaceSeals[index],
+        code: "recovery-parent-seal-mismatch"
+      )
+      parent = descriptor
+    }
+
+    let expectedParentIdentity =
+      target.expectedParentIdentities.last ?? target.expectedRootIdentity
+    try requireSameIdentity(
+      sourceDescriptor: source.parentDescriptor,
+      destinationDescriptor: parent,
+      expected: expectedParentIdentity
+    )
+    try requireDirectorySeal(
+      parent,
+      expected: source.parentSeal,
+      code: "source-parent-seal-mismatch-before-restore"
+    )
+
+    let reboundQuarantine = try openDirectory(
+      at: parent,
+      name: quarantine.locator.quarantineDirectoryName,
+      code: "reopen-quarantine-directory"
+    )
+    reboundDescriptors.append(reboundQuarantine)
+    try requireSameIdentity(
+      sourceDescriptor: quarantine.descriptor,
+      destinationDescriptor: reboundQuarantine,
+      expected: quarantine.seal.identity
+    )
+    try requireDirectorySeal(
+      reboundQuarantine,
+      expected: quarantine.seal,
+      code: "rebound-quarantine-seal-mismatch"
+    )
+  }
+
   private func verifiedRecoveryDisposition(
     target: BoundMutationTarget,
     source: DescriptorBinding,
@@ -594,7 +677,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     failureCode: String
   ) -> GitWorktreeMutationDisposition {
     do {
-      try requireQuarantineSeal(quarantine)
+      try requireRecoveryNamespaceBinding(
+        target: target,
+        source: source,
+        quarantine: quarantine
+      )
       try requireQuarantinePayloadIdentity(
         target: target,
         source: source,
@@ -666,8 +753,10 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         root, expected: target.expectedRootIdentity, code: "root-identity-mismatch")
       try requireOwnerPrivateDirectory(root, expectedDevice: target.expectedRootIdentity.device)
       try requireSeal(target.expectedRootSeal, access: target.expectedTargetAccessPolicy)
+      let rootSeal = try directorySeal(root)
 
       var parent = root
+      var parentNamespaceSeals: [QuarantineNamespaceSeal] = []
       let parentComponents = target.targetPath.components.dropLast()
       guard parentComponents.count == target.expectedParentIdentities.count,
         target.expectedParentIdentities.count == target.expectedParentSeals.count
@@ -690,6 +779,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         )
         try requireSeal(
           target.expectedParentSeals[index], access: target.expectedTargetAccessPolicy)
+        parentNamespaceSeals.append(try directorySeal(descriptor))
         parent = descriptor
       }
 
@@ -706,7 +796,9 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       return DescriptorBinding(
         descriptors: descriptors,
         rootDescriptor: root,
+        rootSeal: rootSeal,
         parentDescriptors: Array(descriptors.dropFirst().dropLast()),
+        parentNamespaceSeals: parentNamespaceSeals,
         parentDescriptor: parent,
         sourceDescriptor: source,
         leaf: leaf,

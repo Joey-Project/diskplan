@@ -221,6 +221,46 @@ func gitWorktreeRestoreRejectsReplacedQuarantinePayloadWithoutPublishingLocator(
 }
 
 @Test
+func gitWorktreeRestoreRejectsMovedRawRootWithoutPublishingLocator() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let displacedRoot = fixture.container.appendingPathComponent("displaced-scan-root")
+  let displacedQuarantine =
+    displacedRoot
+    .appendingPathComponent(fixture.quarantineDirectory.lastPathComponent)
+    .appendingPathComponent("payload")
+  let adapter = testAdapter(
+    hooks: .init(
+      beforePostQuarantineVerification: {
+        try? Data("unexpected".utf8).write(
+          to: fixture.quarantinedURL.appendingPathComponent("new-local-data")
+        )
+      },
+      beforeRestore: {
+        try? FileManager.default.moveItem(at: fixture.root, to: displacedRoot)
+        try? createPrivateDirectory(fixture.root)
+      }
+    ))
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation,
+      context: gitTestContext()
+    )
+  else {
+    Issue.record("a moved raw root must not receive a restore or publish a stale locator")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-unverified")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(displacedQuarantine))
+  #expect(
+    await adapter.disposition(for: fixture.action.id)
+      == .quarantineBindingUnverified(failureCode: "worktree-content-mismatch")
+  )
+}
+
+@Test
 func gitAdministrativeMetadataDriftIsTypedResidualAfterRootDeletion() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
