@@ -178,22 +178,30 @@ def kill_and_reap_target():
     global target_pid
     if target_pid is None or target_pid <= 0:
         return
-    kill_target_best_effort()
-    deadline = time.monotonic() + TARGET_REAP_SECONDS
-    while True:
-        try:
-            waited_pid, _ = os.waitpid(target_pid, os.WNOHANG)
-        except InterruptedError:
-            continue
-        except ChildProcessError:
-            target_pid = None
-            return
-        if waited_pid == target_pid:
-            target_pid = None
-            return
-        if time.monotonic() >= deadline:
-            raise TimeoutError("target reap timed out")
-        time.sleep(0.01)
+    blocked = {signal.SIGTERM, signal.SIGINT}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    reaped_target_pid = target_pid
+    try:
+        kill_target_best_effort()
+        deadline = time.monotonic() + TARGET_REAP_SECONDS
+        while True:
+            try:
+                waited_pid, _ = os.waitpid(reaped_target_pid, os.WNOHANG)
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                target_pid = None
+                return
+            if waited_pid == reaped_target_pid:
+                target_pid = None
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError("target reap timed out")
+            time.sleep(0.01)
+    finally:
+        # A pending cleanup signal may run as the mask is restored, but it can
+        # no longer act on a successfully reaped and invalidated PID identity.
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def process_group_members():
