@@ -178,22 +178,28 @@ superseded_by:
   `writer-ready` before either drain started; it never reached the post-fork
   delay its composite expectation claimed to test. This was neither capture-
   writer inheritance nor an orphaned target. The harness now records an exact
-  startup milestone trace and uses a bidirectional `R/G/A/P/F/C/L/S` handshake:
+  startup milestone trace and uses a bidirectional `R/G/A/P/F/C/S/L` handshake:
   `A` proves the wrapper accepted the grant before fork, while `F` proves the
-  target is forked but remains gated in the supervisor process group. Test-only
-  deadline exhaustion holds the supervisor only after the selected
-  acknowledgement until the original absolute deadline expires; the next
-  deadline-bound `P` or `C` permission send then returns the ordinary typed
-  `target-launch` failure, so test scheduling cannot silently select an earlier
-  stage or authorize a target after the bound. The production absolute 15-second
-  startup deadline remains unchanged. Startup-failure cleanup retains
+  target is forked but remains gated in the supervisor process group. Swift
+  passes that same absolute monotonic deadline to the Python supervisor, which
+  checks it at the actual fork and launch-gate boundaries; `L` is emitted only
+  after the `S` gate release has completed, and Swift rejects an acknowledgement
+  read after the deadline. A test-only logical-clock hook advances the observed
+  supervisor clock to the original deadline immediately before the selected
+  action, exercising the same action-side comparator without a wall-clock wait.
+  The resulting `D` frame preserves the ordinary typed `target-launch` failure,
+  so test scheduling cannot silently select an earlier stage or authorize a
+  target after the bound. The production absolute 15-second startup deadline
+  remains unchanged. Startup-failure cleanup retains
   the control channel until bounded TERM/KILL and reap complete, preventing EOF
   from changing the injected failure taxonomy. The exact focused gate passes
   1/1 with the target test completing in 7.562 seconds. The unchanged CI-shaped
   default max-parallel suite passes 533/533 in 9.682 seconds, including the target
   test in 7.140 seconds. Both commands ran under a bounded supervisor with verified
   process-group quiescence; the generated 630 MiB `.build` and task logs were
-  removed immediately after evidence extraction.
+  removed immediately after evidence extraction. Those timings describe the
+  pre-action-boundary revision; fresh India-host evidence is required for the
+  final follow-up head.
 
 ## Next Steps
 

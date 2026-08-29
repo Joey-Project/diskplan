@@ -156,27 +156,10 @@ private enum CompileStartupFailure: Error, CustomStringConvertible {
   }
 }
 
-private enum CompileStartupDeadlineInjection: Sendable {
+private enum CompileStartupDeadlineInjection: String, Sendable {
   case none
-  case afterGrantAccepted
-  case afterTargetForkedGated
-}
-
-private func exhaustStartupDeadlineIfRequested(
-  _ injection: CompileStartupDeadlineInjection,
-  after milestone: CompileStartupMilestone,
-  until deadline: DispatchTime
-) {
-  let shouldExhaust =
-    switch (injection, milestone) {
-    case (.afterGrantAccepted, .grantAccepted),
-      (.afterTargetForkedGated, .targetForkedGated):
-      true
-    default:
-      false
-    }
-  guard shouldExhaust else { return }
-  _ = DispatchSemaphore(value: 0).wait(timeout: deadline)
+  case beforeTargetFork = "before-target-fork"
+  case beforeTargetLaunch = "before-target-launch"
 }
 
 private enum CompileDrainCompletion: Equatable, Sendable {
@@ -440,8 +423,14 @@ private final class CompileCaptureControl: @unchecked Sendable {
       }
       var ready: UInt8 = 0
       let count = Darwin.read(descriptor, &ready, 1)
+      if count == 1, ready == 0x44 {
+        throw CompileStartupFailure.notReady(stage: stage)
+      }
       guard count == 1, ready == expected else {
         throw compileProcessFailure("capture-control-ready-frame", EPROTO)
+      }
+      guard DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds else {
+        throw CompileStartupFailure.notReady(stage: stage)
       }
       return
     }
@@ -828,7 +817,9 @@ private func spawnIsolatedProcess(
   controlSource: Int32,
   stdoutFIFO: String,
   stderrFIFO: String,
-  startupDelayMilliseconds: Int
+  startupDelayMilliseconds: Int,
+  startupDeadline: DispatchTime,
+  startupDeadlineInjection: CompileStartupDeadlineInjection
 ) throws -> pid_t {
   let command =
     [
@@ -837,6 +828,8 @@ private func spawnIsolatedProcess(
       "--stdout-fifo", stdoutFIFO,
       "--stderr-fifo", stderrFIFO,
       "--startup-delay-milliseconds", String(startupDelayMilliseconds),
+      "--startup-deadline-uptime-nanoseconds", String(startupDeadline.uptimeNanoseconds),
+      "--startup-deadline-test-stage", startupDeadlineInjection.rawValue,
       "--", executable,
     ] + arguments
   var allocations: [UnsafeMutablePointer<CChar>] = []
@@ -1075,7 +1068,9 @@ private func runIsolatedProcess(
       controlSource: captureControl.childSource,
       stdoutFIFO: stdoutChannel.fifoPath,
       stderrFIFO: stderrChannel.fifoPath,
-      startupDelayMilliseconds: startupDelayMilliseconds
+      startupDelayMilliseconds: startupDelayMilliseconds,
+      startupDeadline: startupDeadline,
+      startupDeadlineInjection: deadlineInjection
     )
     startupMilestones.append(.spawned)
   } catch {
@@ -1119,20 +1114,10 @@ private func runIsolatedProcess(
     startupMilestones.append(.grantSent)
     try captureControl.waitForGrantAccepted(until: startupDeadline)
     startupMilestones.append(.grantAccepted)
-    exhaustStartupDeadlineIfRequested(
-      deadlineInjection,
-      after: .grantAccepted,
-      until: startupDeadline
-    )
     try captureControl.permitTargetFork(until: startupDeadline)
     startupMilestones.append(.targetForkPermitted)
     try captureControl.waitForTargetForkedGated(until: startupDeadline)
     startupMilestones.append(.targetForkedGated)
-    exhaustStartupDeadlineIfRequested(
-      deadlineInjection,
-      after: .targetForkedGated,
-      until: startupDeadline
-    )
     try captureControl.permitTargetLaunch(until: startupDeadline)
     startupMilestones.append(.targetLaunchPermitted)
     try captureControl.waitForTargetLaunch(until: startupDeadline)
@@ -1489,7 +1474,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverReadyResult.terminationReason == .unavailable
       && !neverReadyResult.stdoutDrainStarted && !neverReadyResult.stderrDrainStarted
       && neverReadyResult.captureOwnership == "notRequested"
-      && neverReadyResult.processGroupCleanup != .notRequired,
+      && neverReadyResult.setupError?.contains("reaped") == true,
     "A wrapper that never became ready was not bounded and typed: \(neverReadyResult.report)"
   )
 
@@ -1497,7 +1482,7 @@ private final class CompileProcessResults: @unchecked Sendable {
     isolatedExec: isolatedExec,
     executable: "/usr/bin/true",
     arguments: [],
-    deadlineInjection: .afterGrantAccepted,
+    deadlineInjection: .beforeTargetFork,
     leaderTimeout: .seconds(2)
   )
   #expect(
@@ -1505,6 +1490,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverLaunchedResult.setupError?.contains("startup-not-ready(stage=target-launch)") == true
       && neverLaunchedResult.startupMilestones == [
         .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
+        .targetForkPermitted,
       ]
       && !neverLaunchedResult.timedOut
       && neverLaunchedResult.terminationReason == .unavailable
@@ -1512,7 +1498,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverLaunchedResult.stdoutDrain == .eof
       && neverLaunchedResult.stderrDrain == .eof
       && neverLaunchedResult.captureOwnership == "notRequested"
-      && neverLaunchedResult.processGroupCleanup != .notRequired,
+      && neverLaunchedResult.setupError?.contains("reaped") == true,
     "A granted wrapper that never launched its target was not bounded and typed: \(neverLaunchedResult.report)"
   )
 
@@ -1524,7 +1510,7 @@ private final class CompileProcessResults: @unchecked Sendable {
     isolatedExec: isolatedExec,
     executable: "/usr/bin/touch",
     arguments: [postForkMarker.path],
-    deadlineInjection: .afterTargetForkedGated,
+    deadlineInjection: .beforeTargetLaunch,
     leaderTimeout: .seconds(2)
   )
   #expect(
@@ -1533,7 +1519,7 @@ private final class CompileProcessResults: @unchecked Sendable {
         == true
       && neverAcknowledgedResult.startupMilestones == [
         .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
-        .targetForkPermitted, .targetForkedGated,
+        .targetForkPermitted, .targetForkedGated, .targetLaunchPermitted,
       ]
       && !neverAcknowledgedResult.timedOut
       && neverAcknowledgedResult.terminationReason == .unavailable
@@ -1542,7 +1528,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverAcknowledgedResult.stdoutDrain == .eof
       && neverAcknowledgedResult.stderrDrain == .eof
       && neverAcknowledgedResult.captureOwnership == "notRequested"
-      && neverAcknowledgedResult.processGroupCleanup != .notRequired
+      && neverAcknowledgedResult.setupError?.contains("reaped") == true
       && !FileManager.default.fileExists(atPath: postForkMarker.path),
     "A forked gated target survived before launch acknowledgement: \(neverAcknowledgedResult.report)"
   )

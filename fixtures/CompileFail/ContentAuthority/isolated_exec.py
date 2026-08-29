@@ -19,6 +19,11 @@ MAXIMUM_SYSTEM_PROCESSES = 65_536
 P_PID = 1
 WEXITED = 0x00000004
 WNOWAIT = 0x00000020
+STARTUP_DEADLINE_STAGES = {
+    "none",
+    "before-target-fork",
+    "before-target-launch",
+}
 
 target_pid = None
 command_argv = None
@@ -85,12 +90,14 @@ def close_capture_writers():
 def install_capture_writers():
     global command_argv
     if (
-        len(sys.argv) < 11
+        len(sys.argv) < 15
         or sys.argv[1] != "--capture-control-fd"
         or sys.argv[3] != "--stdout-fifo"
         or sys.argv[5] != "--stderr-fifo"
         or sys.argv[7] != "--startup-delay-milliseconds"
-        or sys.argv[9] != "--"
+        or sys.argv[9] != "--startup-deadline-uptime-nanoseconds"
+        or sys.argv[11] != "--startup-deadline-test-stage"
+        or sys.argv[13] != "--"
     ):
         raise RuntimeError("invalid capture supervisor arguments")
     control_descriptor = int(sys.argv[2])
@@ -99,6 +106,12 @@ def install_capture_writers():
     startup_delay_milliseconds = int(sys.argv[8])
     if not 0 <= startup_delay_milliseconds <= 60_000:
         raise RuntimeError("invalid startup delay")
+    startup_deadline_uptime_nanoseconds = int(sys.argv[10])
+    if startup_deadline_uptime_nanoseconds <= 0:
+        raise RuntimeError("invalid startup deadline")
+    startup_deadline_test_stage = sys.argv[12]
+    if startup_deadline_test_stage not in STARTUP_DEADLINE_STAGES:
+        raise RuntimeError("invalid startup deadline test stage")
     if startup_delay_milliseconds:
         time.sleep(startup_delay_milliseconds / 1_000)
     stdout_descriptor = -1
@@ -113,7 +126,7 @@ def install_capture_writers():
             os.close(stdout_descriptor)
         if stderr_descriptor >= 0:
             os.close(stderr_descriptor)
-    command_argv = sys.argv[10:]
+    command_argv = sys.argv[14:]
     if os.write(control_descriptor, b"R") != 1:
         raise RuntimeError("capture-ready write failed")
     if os.read(control_descriptor, 1) != b"G":
@@ -122,7 +135,30 @@ def install_capture_writers():
         raise RuntimeError("capture-grant acknowledgement failed")
     if os.read(control_descriptor, 1) != b"P":
         raise RuntimeError("target-fork permission was not received")
-    return control_descriptor
+    return (
+        control_descriptor,
+        startup_deadline_uptime_nanoseconds,
+        startup_deadline_test_stage,
+    )
+
+
+def enforce_startup_deadline(
+    control_descriptor,
+    deadline_uptime_nanoseconds,
+    test_stage,
+    current_stage,
+):
+    observed_uptime_nanoseconds = time.monotonic_ns()
+    if test_stage == current_stage:
+        observed_uptime_nanoseconds = max(
+            observed_uptime_nanoseconds,
+            deadline_uptime_nanoseconds,
+        )
+    if observed_uptime_nanoseconds < deadline_uptime_nanoseconds:
+        return
+    if os.write(control_descriptor, b"D") != 1:
+        raise RuntimeError("startup-deadline write failed")
+    raise TimeoutError("startup deadline expired")
 
 
 def process_group_members():
@@ -204,7 +240,11 @@ def mirror_wait_status(wait_status):
 
 def main():
     global target_pid
-    control_descriptor = install_capture_writers()
+    (
+        control_descriptor,
+        startup_deadline_uptime_nanoseconds,
+        startup_deadline_test_stage,
+    ) = install_capture_writers()
 
     try:
         os.setsid()
@@ -217,6 +257,12 @@ def main():
     blocked = {signal.SIGTERM, signal.SIGINT}
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
     launch_gate_read, launch_gate_write = os.pipe()
+    enforce_startup_deadline(
+        control_descriptor,
+        startup_deadline_uptime_nanoseconds,
+        startup_deadline_test_stage,
+        "before-target-fork",
+    )
     target_pid = os.fork()
     if target_pid == 0:
         os.close(control_descriptor)
@@ -242,13 +288,25 @@ def main():
         raise RuntimeError("target-fork acknowledgement failed")
     if os.read(control_descriptor, 1) != b"C":
         raise RuntimeError("target-launch permission was not received")
-    if os.write(control_descriptor, b"L") != 1:
-        raise RuntimeError("target-launch write failed")
-    os.close(control_descriptor)
     signal.pthread_sigmask(signal.SIG_UNBLOCK, blocked)
+    enforce_startup_deadline(
+        control_descriptor,
+        startup_deadline_uptime_nanoseconds,
+        startup_deadline_test_stage,
+        "before-target-launch",
+    )
     if os.write(launch_gate_write, b"S") != 1:
         raise RuntimeError("target-launch gate failed")
     os.close(launch_gate_write)
+    enforce_startup_deadline(
+        control_descriptor,
+        startup_deadline_uptime_nanoseconds,
+        "none",
+        "after-target-launch",
+    )
+    if os.write(control_descriptor, b"L") != 1:
+        raise RuntimeError("target-launch write failed")
+    os.close(control_descriptor)
 
     wait_for_target_without_reaping()
     # Keeping the exited leader waitable prevents its PID/process-group ID from
