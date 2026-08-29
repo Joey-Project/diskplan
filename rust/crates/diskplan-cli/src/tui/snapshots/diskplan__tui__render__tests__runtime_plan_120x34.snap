@@ -1,0 +1,38 @@
+---
+source: rust/crates/diskplan-cli/src/tui/render.rs
+expression: "snapshot(&state, 120, 34)"
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ diskplan Immutable plan  •  Paused                                                                                   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Plan-first • Summary ────────────────────────────────────────────────────────────────────────────────────────────────┐
+│Plan plan-runtime-0001 • 1 staged                                                                                     │
+│Decision Plan/action                         Immediate      Shared Activity Recovery      Status                      │
+│▾ Ready                                                                                                               │
+│▾ Generic remove                                                                                                      │
+│>[x]           Remove rebuildable cache        1.0 GiB     unknown inactive rebuildable   staged • path race residual…│
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+j/k move  Enter/l expand  h collapse  Space stage  p plan  / filter  ? help
+immutable engine plan ready

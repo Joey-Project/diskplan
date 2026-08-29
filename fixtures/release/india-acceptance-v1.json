@@ -1,0 +1,143 @@
+{
+  "schema": 1,
+  "target": {
+    "architecture": "arm64",
+    "host": "India-mac-mini-m4-hoteng",
+    "macos_major": 26
+  },
+  "lanes": [
+    {
+      "capability": "source.release-revision-integrity",
+      "depends_on": [],
+      "executor": "source-integrity",
+      "id": "source_integrity",
+      "max_output_bytes": 65536,
+      "requirement": "required",
+      "timeout_seconds": 120
+    },
+    {
+      "capability": "release.install",
+      "depends_on": ["source_integrity"],
+      "executor": "install",
+      "id": "install",
+      "max_output_bytes": 262144,
+      "requirement": "required",
+      "timeout_seconds": 300
+    },
+    {
+      "capability": "ipc.handshake",
+      "depends_on": ["install"],
+      "executor": "handshake",
+      "id": "handshake",
+      "max_output_bytes": 65536,
+      "requirement": "required",
+      "timeout_seconds": 30
+    },
+    {
+      "capability": "scan.standard.dry-run",
+      "depends_on": ["handshake"],
+      "executor": "standard-scan",
+      "id": "standard_scan",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "timeout_seconds": 7200
+    },
+    {
+      "capability": "scan.full-audit.dry-run",
+      "depends_on": ["handshake"],
+      "executor": "full-audit",
+      "id": "bounded_full_audit",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "timeout_seconds": 21600
+    },
+    {
+      "capability": "file-provider.scanner-non-materialization",
+      "depends_on": ["handshake"],
+      "executor": "file-provider",
+      "id": "file_provider_no_materialization",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "timeout_seconds": 1800
+    },
+    {
+      "capability": "apfs.clone-hardlink-owner-graph",
+      "depends_on": ["handshake"],
+      "executor": "swift-test",
+      "expected_test_count": 4,
+      "id": "apfs_owner_graph",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "swift_filter": "DiskplanMacOSTests.liveTempRootProbeAndCloneEvidenceWhenAvailable|DiskplanEngineCoreTests.releaseOwnerIndexRetainsAllCloneOwnersAcrossRoots|DiskplanEngineCoreTests.hardlinkOwnersFormAReleaseGroupOnlyWithExplicitNonCloneEvidence|DiskplanEngineCoreTests.cloneRefcountCountsDistinctObjectsAfterHardlinkOwnerValidation",
+      "timeout_seconds": 1800
+    },
+    {
+      "capability": "activity.open-fd-cwd-mmap-process-snapshot",
+      "depends_on": ["handshake"],
+      "executor": "swift-test",
+      "expected_test_count": 1,
+      "id": "activity_snapshot",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "swift_filter": "DiskplanMacOSTests.liveActivityCollectorCapturesOpenFileCwdAndMappedObjects",
+      "timeout_seconds": 1800
+    },
+    {
+      "capability": "streaming.synthetic-million-entry",
+      "depends_on": ["handshake"],
+      "executor": "million-entry",
+      "expected_test_count": 1,
+      "id": "million_entry_performance",
+      "max_output_bytes": 1048576,
+      "max_resident_bytes": 805306368,
+      "requirement": "required",
+      "swift_filter": "DiskplanEngineCoreTests.syntheticMillionEntryStreamingRetentionCheckpoint",
+      "timeout_seconds": 3600
+    },
+    {
+      "capability": "frontend.batch.authoritative-dry-run",
+      "depends_on": ["handshake"],
+      "executor": "batch-dry-run",
+      "id": "batch_dry_run",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "timeout_seconds": 1800
+    },
+    {
+      "capability": "frontend.tui.pause-provisional-finalize-cancel",
+      "depends_on": ["handshake"],
+      "executor": "tui-controls",
+      "id": "tui_controls",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "timeout_seconds": 300
+    },
+    {
+      "capability": "artifact.disabled-zero-write",
+      "depends_on": ["handshake"],
+      "executor": "artifact-disabled",
+      "id": "optional_artifact_disabled",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "timeout_seconds": 1800
+    },
+    {
+      "capability": "artifact.enabled-safe-writer",
+      "depends_on": ["handshake"],
+      "executor": "artifact-enabled",
+      "id": "optional_artifact_enabled",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "timeout_seconds": 1800
+    },
+    {
+      "capability": "source.final-release-revision-integrity",
+      "depends_on": ["source_integrity"],
+      "executor": "source-integrity",
+      "id": "source_integrity_final",
+      "max_output_bytes": 65536,
+      "requirement": "required",
+      "timeout_seconds": 120
+    }
+  ]
+}

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use diskplan_core::framing::{FrameError, read_frame, write_frame};
 use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello, validate_accepted};
+use diskplan_proto::decode_canonical_envelope;
 use diskplan_proto::diskplan::v1::{
     BusinessEnvelope, EngineEvent, Envelope, HelloAccepted, ScanCheckpointChunk,
     ScanCheckpointChunkDescriptor, ScanCheckpointEvidence, ScanCheckpointManifest, ScanControlKind,
@@ -1934,7 +1935,7 @@ impl EngineSession {
         timeout: Duration,
     ) -> Result<Envelope, ClientError> {
         match self.frames.recv_timeout(timeout) {
-            Ok(Ok(Some(payload))) => Ok(Envelope::decode(payload.as_slice())?),
+            Ok(Ok(Some(payload))) => decode_engine_envelope(&payload),
             Ok(Ok(None)) | Err(RecvTimeoutError::Disconnected) => {
                 if let Some(status) = self.observe_exit()? {
                     return Err(ClientError::EngineFailure {
@@ -2172,7 +2173,7 @@ impl EngineSession {
 
     fn accept_shutdown_tail_payload(&mut self, payload: &[u8]) -> Result<(), ClientError> {
         let cancelled_was_seen = self.scan_cancelled_seen;
-        let envelope = Envelope::decode(payload)?;
+        let envelope = decode_engine_envelope(payload)?;
         if !matches!(envelope.body, Some(envelope::Body::EngineEvent(_))) {
             return Err(ClientError::ExtraFrameAfterShutdown);
         }
@@ -2187,6 +2188,16 @@ impl EngineSession {
             Err(ClientError::ExtraFrameAfterShutdown)
         }
     }
+}
+
+fn decode_engine_envelope(payload: &[u8]) -> Result<Envelope, ClientError> {
+    // Preserve the transport taxonomy for bytes that are not protobuf at all.
+    // Canonicality and nested unknown-field rejection remain semantic
+    // provenance failures after a syntactically valid envelope decode.
+    Envelope::decode(payload)?;
+    decode_canonical_envelope(payload)
+        .map(|receipt| receipt.envelope().clone())
+        .map_err(|error| ClientError::InvalidEventProvenance(error.to_string()))
 }
 
 fn invalid_checkpoint(detail: impl Into<String>) -> ClientError {

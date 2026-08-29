@@ -9,6 +9,15 @@ Use `scripts/fileprovider-fixture.sh build-unsigned` for compile-only validation
 `accept` lifecycle is reserved for the controlled India host and is documented in
 `docs/design/file-provider-fixture.md`.
 
+The India release harness may override DerivedData, package-cache, and build-log
+locations with the absolute task-scoped environment variables documented there.
+The lifecycle lock, domain, App Group oracle, and recovery manifests remain in
+their contract-defined locations.
+The signed `accept` command publishes a canonical completion receipt after all
+global mutation is removed, or a canonical recovery receipt from its exit trap.
+Callers must keep the signed build named by recovery state and reapply the receipt's
+DerivedData override until recovery finishes.
+
 The fixture is not sample user storage. It exposes exactly two root items:
 
 - a 64 KiB dataless `sentinel.txt` whose `fetchContents` implementation writes real fixed

@@ -4,6 +4,8 @@ use diskplan_proto::diskplan::v1::{
     ScanState,
 };
 
+use super::plan::{PlanRuntime, PlanRuntimeEvent};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Scan,
@@ -43,12 +45,13 @@ pub enum TerminalState {
     Failed(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct AppState {
     pub screen: Screen,
     pub scan_state: ScanState,
     pub progress: Option<ScanProgress>,
     pub provisional_plan: Option<ProvisionalPlanReady>,
+    pub plan: PlanRuntime,
     pub latest_checkpoint: Option<ScanCheckpointEvidence>,
     pub scan_finalized: bool,
     pub pending_controls: Vec<PendingControl>,
@@ -69,6 +72,7 @@ impl Default for AppState {
             scan_state: ScanState::Idle,
             progress: None,
             provisional_plan: None,
+            plan: PlanRuntime::default(),
             latest_checkpoint: None,
             scan_finalized: false,
             pending_controls: vec![PendingControl {
@@ -116,6 +120,10 @@ impl AppState {
     pub fn should_exit(&self) -> bool {
         self.terminal.is_some() && self.driver_exited
     }
+
+    pub fn resize_plan_layout(&mut self, width: u16, height: u16) {
+        self.plan.resize_layout(width, height);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +143,7 @@ pub enum UiEvent {
     Key(KeyEvent),
     Resize,
     Engine(EngineDelivery),
+    Plan(PlanRuntimeEvent),
     DriverExited(Result<(), String>),
 }
 

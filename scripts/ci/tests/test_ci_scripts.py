@@ -202,6 +202,7 @@ class CiScriptTests(unittest.TestCase):
         expected_counts = {
             "scripts/canonical-fixture.sh": 1,
             "scripts/protocol13-fixtures.sh": 1,
+            "scripts/protocol14-fixtures.sh": 1,
             "scripts/test-cross-language.sh": 2,
         }
         pattern = re.compile(r"\bswift\s+(?:build|run)\b")
@@ -253,13 +254,14 @@ class CiScriptTests(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             invocations = log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(4, len(invocations), invocations)
+            self.assertEqual(5, len(invocations), invocations)
             for invocation in invocations:
                 self.assertIn("--disable-automatic-resolution", invocation)
 
-    def test_cross_language_runs_protocol13_authority_check(self) -> None:
+    def test_cross_language_runs_protocol_authority_checks(self) -> None:
         source = (REPO_ROOT / "scripts/test-cross-language.sh").read_text(encoding="utf-8")
         self.assertEqual(1, source.count("scripts/protocol13-fixtures.sh check"))
+        self.assertEqual(1, source.count("scripts/protocol14-fixtures.sh check"))
 
 
 if __name__ == "__main__":

@@ -31,6 +31,8 @@ string_id!(TargetId);
 string_id!(ReleaseSetId);
 string_id!(WaiverId);
 string_id!(BlockerId);
+string_id!(ExecutionUnitId);
+string_id!(ExecutionWarningId);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PlanDisposition {

@@ -7,11 +7,14 @@ use diskplan_proto::diskplan::v1::{
 use super::model::{
     ActiveRequest, AppState, Effect, EngineDelivery, RequestPhase, Screen, TerminalState, UiEvent,
 };
+use super::plan::{OverlayStageResult, PlanIntentKind, PlanRuntimeEvent, PlanView};
 
 pub fn reduce(state: &mut AppState, event: UiEvent) -> Vec<Effect> {
     match event {
         UiEvent::Key(key) => reduce_key(state, key.code, key.kind),
         UiEvent::Resize => Vec::new(),
+        UiEvent::Plan(event) if state.terminal.is_none() => reduce_plan_event(state, event),
+        UiEvent::Plan(_) => Vec::new(),
         UiEvent::Engine(delivery) if state.terminal.is_none() => {
             reduce_engine_event(state, delivery)
         }
@@ -38,11 +41,21 @@ fn reduce_key(state: &mut AppState, code: KeyCode, kind: KeyEventKind) -> Vec<Ef
         return Vec::new();
     }
 
-    match code {
-        KeyCode::Char('?') => {
-            state.help_visible = !state.help_visible;
-            Vec::new()
+    if code == KeyCode::Char('?') {
+        state.help_visible = !state.help_visible;
+        return Vec::new();
+    }
+    if state.help_visible {
+        if state.screen == Screen::Scan && code == KeyCode::Char('/') {
+            state.help_visible = false;
         }
+        return Vec::new();
+    }
+    if state.screen == Screen::ProvisionalPlan && state.plan.filter_editing() {
+        return reduce_filter_key(state, code);
+    }
+
+    match code {
         KeyCode::Char('/') if state.screen == Screen::Scan => {
             state.help_visible = !state.help_visible;
             Vec::new()
@@ -90,7 +103,177 @@ fn reduce_key(state: &mut AppState, code: KeyCode, kind: KeyEventKind) -> Vec<Ef
         {
             request_once(state, ScanControlKind::ResumeScan)
         }
+        KeyCode::Char('j') | KeyCode::Down if state.screen == Screen::ProvisionalPlan => {
+            state.plan.move_navigation(1);
+            Vec::new()
+        }
+        KeyCode::Char('k') | KeyCode::Up if state.screen == Screen::ProvisionalPlan => {
+            state.plan.move_navigation(-1);
+            Vec::new()
+        }
+        KeyCode::Enter | KeyCode::Char('l') if state.screen == Screen::ProvisionalPlan => {
+            state.plan.expand_navigation();
+            Vec::new()
+        }
+        KeyCode::Char('h') | KeyCode::Left if state.screen == Screen::ProvisionalPlan => {
+            state.plan.collapse_navigation();
+            Vec::new()
+        }
+        KeyCode::Char(' ') if state.screen == Screen::ProvisionalPlan => {
+            state.banner = Some(match state.plan.toggle_selected_stage() {
+                OverlayStageResult::Staged {
+                    force_warning: Some(reason),
+                } => format!("Staged; apply requires explicit force: {reason}"),
+                OverlayStageResult::Staged {
+                    force_warning: None,
+                } => "Action staged in the decision overlay".into(),
+                OverlayStageResult::Unstaged => "Action removed from the decision overlay".into(),
+                OverlayStageResult::RequiresWaivers(waivers) => format!(
+                    "Engine waiver acknowledgement required: {}",
+                    waivers
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                OverlayStageResult::NotStageable => {
+                    "Engine marks this action report-only; it cannot be staged".into()
+                }
+                OverlayStageResult::NoActionSelected => {
+                    "Select an action row before staging".into()
+                }
+                OverlayStageResult::RevisionExhausted => {
+                    "Decision overlay revision space exhausted; reload the plan".into()
+                }
+            });
+            Vec::new()
+        }
+        KeyCode::Char('e') if state.screen == Screen::ProvisionalPlan => {
+            select_action_view(state, PlanView::Evidence);
+            Vec::new()
+        }
+        KeyCode::Char('t') if state.screen == Screen::ProvisionalPlan => {
+            select_action_view(state, PlanView::Targets);
+            Vec::new()
+        }
+        KeyCode::Char('g') if state.screen == Screen::ProvisionalPlan => {
+            select_action_view(state, PlanView::Dependencies);
+            Vec::new()
+        }
+        KeyCode::Char('v') if state.screen == Screen::ProvisionalPlan => {
+            select_action_view(state, PlanView::Coverage);
+            Vec::new()
+        }
+        KeyCode::Char('p') if state.screen == Screen::ProvisionalPlan => {
+            state.plan.set_view(PlanView::Summary);
+            Vec::new()
+        }
+        KeyCode::Char('c') if state.screen == Screen::ProvisionalPlan => {
+            state.plan.toggle_column_profile();
+            state.banner = Some(if state.plan.compact_columns() {
+                "Compact column profile".into()
+            } else {
+                "Full column profile".into()
+            });
+            Vec::new()
+        }
+        KeyCode::Char('s') if state.screen == Screen::ProvisionalPlan => {
+            state.banner = Some(if state.plan.cycle_group_sort() {
+                format!(
+                    "Current action group sorted by {:?}",
+                    state.plan.sort_mode()
+                )
+            } else {
+                "Select an action type or action row before sorting".into()
+            });
+            Vec::new()
+        }
+        KeyCode::Char('/') if state.screen == Screen::ProvisionalPlan => {
+            state.plan.begin_filter();
+            Vec::new()
+        }
+        KeyCode::Char('D') if state.screen == Screen::ProvisionalPlan => {
+            queue_plan_intent(state, PlanIntentKind::DryRun);
+            Vec::new()
+        }
+        KeyCode::Char('A') if state.screen == Screen::ProvisionalPlan => {
+            queue_plan_intent(state, PlanIntentKind::ApplyReview);
+            Vec::new()
+        }
         _ => Vec::new(),
+    }
+}
+
+fn reduce_filter_key(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
+    match code {
+        KeyCode::Esc => state.plan.cancel_filter(),
+        KeyCode::Enter => state.plan.finish_filter(),
+        KeyCode::Backspace => state.plan.pop_filter_char(),
+        KeyCode::Char(character) => state.plan.push_filter_char(character),
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn select_action_view(state: &mut AppState, view: PlanView) {
+    if state.plan.selected_action_id().is_none() {
+        state.banner = Some("Select an action row first".into());
+        return;
+    }
+    if state.plan.set_view(view) {
+        state.banner = Some(format!("{} view", view.label()));
+    } else {
+        state.banner = Some("Select an action row first".into());
+    }
+}
+
+fn queue_plan_intent(state: &mut AppState, intent: PlanIntentKind) {
+    let view = match intent {
+        PlanIntentKind::DryRun => PlanView::Revalidation,
+        PlanIntentKind::ApplyReview => PlanView::SelectedActions,
+    };
+    match state.plan.queue_intent(intent) {
+        Ok(()) => {
+            state.plan.set_view(view);
+            state.banner = Some(match intent {
+                PlanIntentKind::DryRun => "Dry-run queued for the engine adapter".into(),
+                PlanIntentKind::ApplyReview => {
+                    "Apply review requested; this local selection is not execution authorization"
+                        .into()
+                }
+            });
+        }
+        Err(reason) => state.banner = Some(reason.into()),
+    }
+}
+
+fn reduce_plan_event(state: &mut AppState, event: PlanRuntimeEvent) -> Vec<Effect> {
+    let had_plan = state.plan.model().current_plan_id().is_some();
+    match state.plan.apply_event(event) {
+        Ok(()) => {
+            let invalidation = had_plan && state.plan.model().current_plan_id().is_none();
+            state.help_visible = false;
+            if invalidation {
+                state.screen = Screen::Scan;
+                state.banner = Some("Plan invalidated because scan evidence changed".into());
+                if let Some(origin) = state.active_request.clone()
+                    && origin.kind == ScanControlKind::ResumeScan
+                    && origin.phase == RequestPhase::AwaitingInvalidation
+                {
+                    set_active_phase(state, &origin, RequestPhase::AwaitingResumeState);
+                }
+            } else if state.plan.model().current_plan_id().is_some() {
+                state.screen = Screen::ProvisionalPlan;
+                state.provisional_plan = None;
+                state.banner = Some(if state.plan.provisional() {
+                    "Provisional engine plan ready; continuing the scan will invalidate it".into()
+                } else {
+                    "Immutable engine plan ready".into()
+                });
+            }
+            Vec::new()
+        }
+        Err(error) => protocol_failure(state, error.to_string()),
     }
 }
 
@@ -177,7 +360,10 @@ fn reduce_engine_event(state: &mut AppState, delivery: EngineDelivery) -> Vec<Ef
                 );
             }
             let phase = match pending.kind {
-                ScanControlKind::ResumeScan if state.provisional_plan.is_some() => {
+                ScanControlKind::ResumeScan
+                    if state.provisional_plan.is_some()
+                        || state.plan.model().current_plan_id().is_some() =>
+                {
                     RequestPhase::AwaitingInvalidation
                 }
                 ScanControlKind::ResumeScan => RequestPhase::AwaitingResumeState,
@@ -643,20 +829,39 @@ fn reduce_origin_event(
             set_active_phase(state, &origin, RequestPhase::Steady);
         }
         engine_event::Body::ProvisionalPlanInvalidated(invalidated) => {
-            let Some(current_plan) = state.provisional_plan.as_ref() else {
+            let current_plan_id = state
+                .provisional_plan
+                .as_ref()
+                .map(|plan| plan.plan_id.clone())
+                .or_else(|| {
+                    state
+                        .plan
+                        .model()
+                        .current_plan_id()
+                        .map(ToString::to_string)
+                });
+            let Some(current_plan_id) = current_plan_id else {
                 return protocol_failure(state, "engine invalidated an unknown plan".into());
             };
             if origin.kind != ScanControlKind::ResumeScan
                 || origin.phase != RequestPhase::AwaitingInvalidation
-                || invalidated.previous_plan_id != current_plan.plan_id
+                || invalidated.previous_plan_id != current_plan_id
             {
                 return protocol_failure(
                     state,
                     format!(
                         "plan invalidation {:?} does not match active plan {:?}",
-                        invalidated.previous_plan_id, current_plan.plan_id
+                        invalidated.previous_plan_id, current_plan_id
                     ),
                 );
+            }
+            if state.plan.model().current_plan_id().is_some()
+                && let Err(error) = state.plan.apply_event(PlanRuntimeEvent::Invalidate {
+                    plan_id: super::plan::PlanId::new(invalidated.previous_plan_id.clone()),
+                    reason: "scan resumed".into(),
+                })
+            {
+                return protocol_failure(state, error.to_string());
             }
             state.provisional_plan = None;
             state.screen = Screen::Scan;
@@ -1511,6 +1716,156 @@ mod tests {
         assert!(matches!(state.terminal, Some(TerminalState::Failed(_))));
     }
 
+    #[test]
+    fn plan_hotkeys_edit_only_the_overlay_and_action_scoped_view() {
+        use crate::tui::plan::{
+            ActionId, ActionKindId, ActionKindProjection, ActionProjection, Activity, ByteValue,
+            DisplayPath, EnginePlanSnapshot, ForceRequirement, PathRace, PlanDisposition, PlanId,
+            PlanProjection, Recoverability, Stageability, TargetId, TargetKind, TargetProjection,
+        };
+
+        let mut state = AppState::default();
+        assert!(
+            reduce(
+                &mut state,
+                UiEvent::Plan(PlanRuntimeEvent::Load(EnginePlanSnapshot {
+                    projection: PlanProjection {
+                        id: PlanId::new("plan-1"),
+                        actions: vec![ActionProjection {
+                            id: ActionId::new("action-1"),
+                            disposition: PlanDisposition::Ready,
+                            kind: ActionKindProjection {
+                                id: ActionKindId::new("generic-remove"),
+                                label: "Generic remove".into(),
+                                order: 1,
+                            },
+                            label: "Remove candidate".into(),
+                            order: 1,
+                            stageability: Stageability::Stageable,
+                            immediate_reclaim: ByteValue::Known(4096),
+                            shared_unlock: ByteValue::Unknown,
+                            activity: Activity::Inactive,
+                            recoverability: Recoverability::Rebuildable,
+                            blockers: Vec::new(),
+                            prerequisites: Vec::new(),
+                            release_set_ids: Vec::new(),
+                            force: ForceRequirement::Required {
+                                reason: "engine requires force".into(),
+                            },
+                            path_race: PathRace::Residual,
+                            targets: vec![TargetProjection {
+                                id: TargetId::new("target-1"),
+                                display_path: DisplayPath::new("/display/only"),
+                                kind: TargetKind::Directory,
+                                children: Vec::new(),
+                            }],
+                        }],
+                        release_sets: Vec::new(),
+                    },
+                    evidence_reference: "evidence-1".into(),
+                    provisional: false,
+                })),
+            )
+            .is_empty()
+        );
+        state.resize_plan_layout(80, 28);
+        assert_eq!(state.screen, Screen::ProvisionalPlan);
+
+        reduce(&mut state, key('j', KeyEventKind::Press));
+        reduce(&mut state, key('j', KeyEventKind::Press));
+        assert_eq!(
+            state.plan.selected_action_id(),
+            Some(&ActionId::new("action-1"))
+        );
+
+        reduce(&mut state, key(' ', KeyEventKind::Press));
+        assert!(
+            state
+                .plan
+                .overlay()
+                .unwrap()
+                .is_selected(&ActionId::new("action-1"))
+        );
+        assert!(state.banner.as_deref().unwrap().contains("force"));
+
+        reduce(&mut state, key('t', KeyEventKind::Press));
+        assert_eq!(state.plan.view(), PlanView::Targets);
+        reduce(&mut state, key('/', KeyEventKind::Press));
+        reduce(&mut state, key('d', KeyEventKind::Press));
+        assert_eq!(state.plan.model().target_filter(), "d");
+        reduce(&mut state, key_code(KeyCode::Enter));
+        assert!(!state.plan.filter_editing());
+
+        reduce(&mut state, key('p', KeyEventKind::Press));
+        assert_eq!(state.plan.view(), PlanView::Summary);
+        reduce(&mut state, key('D', KeyEventKind::Press));
+        assert_eq!(
+            state.plan.pending_intents()[0].kind(),
+            PlanIntentKind::DryRun
+        );
+        assert_eq!(state.plan.view(), PlanView::Revalidation);
+
+        let overlay = state.plan.overlay().unwrap();
+        let expected_revision = overlay.revision();
+        let expected_digest = overlay.digest().to_owned();
+        reduce(&mut state, key('A', KeyEventKind::Press));
+        assert_eq!(state.plan.view(), PlanView::SelectedActions);
+        assert!(
+            state
+                .banner
+                .as_deref()
+                .unwrap()
+                .contains("not execution authorization")
+        );
+        let apply_intent = state
+            .plan
+            .pending_intents()
+            .iter()
+            .find(|intent| intent.kind() == PlanIntentKind::ApplyReview)
+            .unwrap();
+        assert_eq!(apply_intent.overlay_revision(), expected_revision);
+        assert_eq!(apply_intent.overlay_digest(), expected_digest);
+        assert_eq!(apply_intent.plan_id(), &PlanId::new("plan-1"));
+        assert_eq!(apply_intent.evidence_reference(), "evidence-1");
+        assert_eq!(
+            apply_intent.selected_action_ids(),
+            &[ActionId::new("action-1")]
+        );
+    }
+
+    #[test]
+    fn continuing_scan_invalidates_runtime_overlay_by_exact_plan_id() {
+        use crate::tui::plan::{EnginePlanSnapshot, PlanId, PlanProjection};
+
+        let mut state = AppState::default();
+        reduce(
+            &mut state,
+            UiEvent::Plan(PlanRuntimeEvent::Load(EnginePlanSnapshot {
+                projection: PlanProjection {
+                    id: PlanId::new("plan-1"),
+                    actions: Vec::new(),
+                    release_sets: Vec::new(),
+                },
+                evidence_reference: "evidence-1".into(),
+                provisional: true,
+            })),
+        );
+        reduce(
+            &mut state,
+            UiEvent::Plan(PlanRuntimeEvent::Invalidate {
+                plan_id: PlanId::new("plan-1"),
+                reason: "scan resumed".into(),
+            }),
+        );
+
+        assert_eq!(state.screen, Screen::Scan);
+        assert!(state.plan.overlay().is_none());
+        assert_eq!(
+            state.plan.model().invalidated().unwrap().reason,
+            "scan resumed"
+        );
+    }
+
     fn running_state() -> AppState {
         let mut state = AppState {
             scan_state: ScanState::Running,
@@ -1539,6 +1894,15 @@ mod tests {
             code: KeyCode::Char(value),
             modifiers: KeyModifiers::NONE,
             kind,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    fn key_code(code: KeyCode) -> UiEvent {
+        UiEvent::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         })
     }

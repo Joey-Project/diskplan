@@ -11,6 +11,8 @@ let package = Package(
     .library(name: "DiskplanScan", targets: ["DiskplanScan"]),
     .library(name: "DiskplanEngineCore", targets: ["DiskplanEngineCore"]),
     .library(name: "DiskplanPolicy", targets: ["DiskplanPolicy"]),
+    .library(name: "DiskplanRules", targets: ["DiskplanRules"]),
+    .library(name: "DiskplanDoctor", targets: ["DiskplanDoctor"]),
     .library(name: "DiskplanExecution", targets: ["DiskplanExecution"]),
     .library(
       name: "DiskplanFileProviderFixtureSupport",
@@ -66,8 +68,18 @@ let package = Package(
       path: "swift/Sources/DiskplanPolicy"
     ),
     .target(
-      name: "DiskplanExecution",
+      name: "DiskplanRules",
       dependencies: ["DiskplanPolicy"],
+      path: "swift/Sources/DiskplanRules"
+    ),
+    .target(
+      name: "DiskplanDoctor",
+      dependencies: ["DiskplanMacOS"],
+      path: "swift/Sources/DiskplanDoctor"
+    ),
+    .target(
+      name: "DiskplanExecution",
+      dependencies: ["DiskplanMacOS", "DiskplanPolicy"],
       path: "swift/Sources/DiskplanExecution"
     ),
     .target(
@@ -127,8 +139,18 @@ let package = Package(
       path: "swift/Tests/DiskplanPolicyTests"
     ),
     .testTarget(
+      name: "DiskplanRulesTests",
+      dependencies: ["DiskplanRules"],
+      path: "swift/Tests/DiskplanRulesTests"
+    ),
+    .testTarget(
+      name: "DiskplanDoctorTests",
+      dependencies: ["DiskplanDoctor", "DiskplanMacOS"],
+      path: "swift/Tests/DiskplanDoctorTests"
+    ),
+    .testTarget(
       name: "DiskplanExecutionTests",
-      dependencies: ["DiskplanExecution", "DiskplanPolicy"],
+      dependencies: ["DiskplanExecution", "DiskplanMacOS", "DiskplanPolicy"],
       path: "swift/Tests/DiskplanExecutionTests"
     ),
     .testTarget(

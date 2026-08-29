@@ -143,7 +143,14 @@ struct BoundedWorkerCommandQueue: Sendable {
 }
 
 final class ScanCoordinator: @unchecked Sendable {
-  typealias AuthoritySessionFactory = @Sendable (ResolvedScanScope) -> RuntimePolicyAuthoritySession
+  typealias AuthoritySessionFactory =
+    @Sendable (
+      ResolvedScanScope, String
+    ) -> RuntimePolicyAuthoritySession
+  typealias FinalizedReceiptSink =
+    @Sendable (
+      RuntimeFinalizedScanReceipt
+    ) -> Void
 
   private static let maximumCheckpointRootBindingBytes = 1 * 1_024 * 1_024
   static let commandCapacity = 256
@@ -151,6 +158,7 @@ final class ScanCoordinator: @unchecked Sendable {
   private let condition = NSCondition()
   private let broker: SerialEventBroker
   private let authoritySessionFactory: AuthoritySessionFactory?
+  private let finalizedReceiptSink: FinalizedReceiptSink?
   private var commands = BoundedWorkerCommandQueue(capacity: commandCapacity)
   private var state: Diskplan_V1_ScanState = .idle
   private var workerStarted = false
@@ -161,12 +169,14 @@ final class ScanCoordinator: @unchecked Sendable {
   init(
     broker: SerialEventBroker,
     authoritySessionFactory: AuthoritySessionFactory? = nil,
-    authoritySession: RuntimePolicyAuthoritySession? = nil
+    authoritySession: RuntimePolicyAuthoritySession? = nil,
+    finalizedReceiptSink: FinalizedReceiptSink? = nil
   ) {
     precondition(authoritySessionFactory == nil || authoritySession == nil)
     self.broker = broker
     self.authoritySessionFactory = authoritySessionFactory
     self.authoritySession = authoritySession
+    self.finalizedReceiptSink = finalizedReceiptSink
   }
 
   func start(_ request: Diskplan_V1_StartScanRequest) throws {
@@ -417,7 +427,7 @@ final class ScanCoordinator: @unchecked Sendable {
         )
         return
       case .cancelled:
-        guard finishOrFail(result, state: .cancelled, reason: "scan cancelled") else {
+        guard finishOrFail(result, state: .cancelled, reason: "scan cancelled") != nil else {
           markWorkerFinished(state: .failed)
           return
         }
@@ -484,7 +494,7 @@ final class ScanCoordinator: @unchecked Sendable {
           try accepted(requestID: requestID, control: kind, resultingState: .cancelling)
           try stateChanged(.cancelling, reason: "cancel acknowledged")
           let result = scanner.cancel()
-          try finish(result, state: .cancelled, reason: "cancelled by user")
+          _ = try finish(result, state: .cancelled, reason: "cancelled by user")
           var cancelled = Diskplan_V1_ScanCancelled()
           cancelled.reason = "cancelled by user"
           try broker.sendSemantic(
@@ -567,7 +577,7 @@ final class ScanCoordinator: @unchecked Sendable {
     _ result: ScanResult,
     state: Diskplan_V1_ScanState,
     reason: String
-  ) throws {
+  ) throws -> Diskplan_V1_ScanCheckpointManifest {
     let encoded = try CheckpointWireEncoder.encode(
       ScanIPCProjection.checkpoint(
         result,
@@ -587,22 +597,22 @@ final class ScanCoordinator: @unchecked Sendable {
       scanSessionID: sessionID,
       body: .scanFinalized(finalized)
     )
+    return encoded.manifest
   }
 
   private func finishOrFail(
     _ result: ScanResult,
     state: Diskplan_V1_ScanState,
     reason: String
-  ) -> Bool {
+  ) -> Diskplan_V1_ScanCheckpointManifest? {
     do {
-      try finish(result, state: state, reason: reason)
-      return true
+      return try finish(result, state: state, reason: reason)
     } catch {
       let code =
         error is CheckpointWireEncodingError
         ? "checkpoint_encoding_failed" : "event_broker_failed"
       emitFailure(code: code, detail: String(describing: error))
-      return false
+      return nil
     }
   }
 
@@ -623,10 +633,21 @@ final class ScanCoordinator: @unchecked Sendable {
       markWorkerFinished(state: .failed)
       return
     }
-    guard finishOrFail(result, state: terminalState, reason: reason) else {
+    guard let manifest = finishOrFail(result, state: terminalState, reason: reason) else {
       rejectQueuedControls(currentState: .failed)
       markWorkerFinished(state: .failed)
       return
+    }
+    if let finalizedReceiptSink, let authoritySession {
+      finalizedReceiptSink(
+        RuntimeFinalizedScanReceipt(
+          scanSessionID: Data(sessionID.utf8),
+          checkpointID: Data(manifest.checkpointID.utf8),
+          finalEvidenceSHA256: manifest.finalEvidenceSha256,
+          checkpointEvidenceSHA256: manifest.checkpointEvidenceSha256,
+          isPartial: terminalState == .finalizedPartial,
+          authoritySession: authoritySession
+        ))
     }
     rejectQueuedControls(currentState: terminalState)
     markWorkerFinished(state: terminalState)
@@ -844,7 +865,7 @@ final class ScanCoordinator: @unchecked Sendable {
       scanSessionID: scanSessionID,
       roots: scope.roots
     )
-    let authoritySession = authoritySessionFactory?(scope)
+    let authoritySession = authoritySessionFactory?(scope, scanSessionID)
     let nodeSink: any ScanNodeSink =
       if let authoritySession {
         AuthorityTeeNodeSink(authority: authoritySession, streaming: sink)

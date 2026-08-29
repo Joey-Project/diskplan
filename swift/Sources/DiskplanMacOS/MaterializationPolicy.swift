@@ -84,3 +84,20 @@ public struct MaterializationPolicyInstaller: Sendable {
     )
   }
 }
+
+/// Reads the current process policy without installing or changing it.
+public struct MaterializationPolicyReader: Sendable {
+  public init() {}
+
+  public func read() -> Capability<Bool> {
+    let result = dp_get_materialization_policy()
+    guard result >= 0 else {
+      return POSIXFailure.capability(
+        errno,
+        operation: "read process dataless materialization policy"
+      )
+    }
+    let off = Int32(IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+    return .known(result & Int32(IOPOL_MATERIALIZE_DATALESS_FILES_BASIC_MASK) == off)
+  }
+}

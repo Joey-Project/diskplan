@@ -136,6 +136,20 @@ Run the complete signed lifecycle only on `India-mac-mini-m4-hoteng`:
 DISKPLAN_RUN_FILE_PROVIDER_FIXTURE=1 scripts/test-macos-capabilities.sh
 ```
 
+The India release harness sets `DISKPLAN_FILEPROVIDER_DERIVED_DIR`,
+`DISKPLAN_FILEPROVIDER_PACKAGES_DIR`, and `DISKPLAN_FILEPROVIDER_BUILD_LOG` to
+absolute owner-private task-scoped paths. These overrides isolate reproducible
+build scratch and logs only; they do not relocate the host-global lifecycle lock,
+File Provider domain, App Group oracle, or recovery manifests.
+
+`accept` emits one canonical `file_provider_acceptance` receipt only after domain
+teardown, extension unregister, and fixture cleanup complete. Its exit trap emits
+a canonical `file_provider_recovery` receipt with the retained manifest or run ID
+and exact DerivedData root when completion is not proven. The India harness must
+retain its task-scoped signed build until the former receipt exists and must
+reapply `DISKPLAN_FILEPROVIDER_DERIVED_DIR` for recovery; otherwise `recover`
+could not verify the app/extension paths sealed into the manifest.
+
 The lifecycle writes the immutable UUID recovery manifest first, registers one exact embedded
 `.appex`, and verifies that `pluginkit` elects that exact bundle ID from the physical path of the
 current embedded extension. It then adds one exact hidden UUID domain, writes the ready overlay,

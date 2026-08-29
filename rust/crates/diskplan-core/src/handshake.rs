@@ -6,7 +6,13 @@ use diskplan_proto::diskplan::v1::{
 use thiserror::Error;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 3;
+pub const PROTOCOL_MINOR: u32 = 4;
+pub const PROTOCOL14_RUNTIME_CAPABILITIES: [&str; 4] = [
+    "decision-overlay-v1",
+    "dry-run-projection-v1",
+    "execution-stream-v1",
+    "plan-projection-v1",
+];
 
 #[derive(Debug, PartialEq)]
 pub enum HandshakeResult {
@@ -33,19 +39,36 @@ pub enum AcceptedHandshakeError {
 }
 
 pub fn rust_client_hello() -> Hello {
+    rust_client_hello_with_runtime_capabilities(&[])
+}
+
+pub fn rust_client_hello_with_runtime_capabilities(runtime_capabilities: &[&str]) -> Hello {
+    let requested_runtime_capabilities: BTreeSet<_> = runtime_capabilities
+        .iter()
+        .copied()
+        .filter(|capability| PROTOCOL14_RUNTIME_CAPABILITIES.contains(capability))
+        .collect();
+    let mut optional_capabilities = vec![
+        "canonical-binary-v1".into(),
+        "plan-bootstrap".into(),
+        "raw-path-bytes-v1".into(),
+        "scan-control-v1".into(),
+        "scan-stream-v1".into(),
+    ];
+    optional_capabilities.extend(
+        requested_runtime_capabilities
+            .into_iter()
+            .map(str::to_owned),
+    );
+    optional_capabilities.sort();
+
     Hello {
         version: Some(ProtocolVersion {
             major: PROTOCOL_MAJOR,
             minor: PROTOCOL_MINOR,
         }),
         required_capabilities: vec!["framing-v1".into()],
-        optional_capabilities: vec![
-            "canonical-binary-v1".into(),
-            "plan-bootstrap".into(),
-            "raw-path-bytes-v1".into(),
-            "scan-control-v1".into(),
-            "scan-stream-v1".into(),
-        ],
+        optional_capabilities,
         implementation: "diskplan-rust".into(),
     }
 }
@@ -222,6 +245,32 @@ mod tests {
         };
         assert_eq!(accepted.selected_version.unwrap().minor, 2);
         assert_eq!(accepted.negotiated_capabilities, ["alpha", "base", "zeta"]);
+    }
+
+    #[test]
+    fn client_hello_advertises_only_installed_runtime_capabilities() {
+        let scan_only = rust_client_hello();
+        assert!(PROTOCOL14_RUNTIME_CAPABILITIES.iter().all(|capability| {
+            !scan_only
+                .optional_capabilities
+                .iter()
+                .any(|offered| offered == capability)
+        }));
+
+        let with_runtime = rust_client_hello_with_runtime_capabilities(&[
+            "plan-projection-v1",
+            "unknown-runtime-v1",
+        ]);
+        assert!(
+            with_runtime
+                .optional_capabilities
+                .contains(&"plan-projection-v1".into())
+        );
+        assert!(
+            !with_runtime
+                .optional_capabilities
+                .contains(&"unknown-runtime-v1".into())
+        );
     }
 
     #[test]
