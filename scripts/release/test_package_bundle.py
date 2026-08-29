@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import importlib.util
@@ -43,7 +44,7 @@ protocol_contract_fixture = load_module(
 )
 
 
-def make_test_bundle(parent: Path, reverse: bool = False) -> Path:
+def make_test_bundle(parent: Path, reverse: bool = False, width: int = 0) -> Path:
     bundle = parent / "diskplan-test"
     bundle.mkdir(parents=True)
     specs = [
@@ -64,11 +65,28 @@ def make_test_bundle(parent: Path, reverse: bool = False) -> Path:
             source="rules/builtin-v1.json",
         ),
     ]
+    for index in range(width):
+        specs.append(
+            packager.BundleArtifactSpec(
+                bundle_path=f"wide/item-{index:04d}",
+                compatibility_version="wide-fixture-v1",
+                maximum_bytes=1024,
+                mode=0o644,
+                role="compatibility-fixture",
+                source=f"wide/item-{index:04d}",
+            )
+        )
     packager.make_bundle_directories(bundle, [item.bundle_path for item in specs])
     payloads = {
         "VERSION": b"0.1.0\n",
         "rules/builtin-v1.json": b'{"rules":[],"schema_version":"diskplan.rules.v1"}\n',
     }
+    payloads.update(
+        {
+            f"wide/item-{index:04d}": f"item-{index}\n".encode("ascii")
+            for index in range(width)
+        }
+    )
     artifacts = []
     sequence = list(reversed(specs)) if reverse else specs
     for spec in sequence:
@@ -188,7 +206,7 @@ class VersionMetadataTests(unittest.TestCase):
             protocol_contract_fixture.rewrite_contract(
                 source,
                 output,
-                "1.4",
+                "1.5",
                 "2.4",
             )
             self.assertEqual(output.read_bytes(), expected_bytes)
@@ -213,7 +231,7 @@ class VersionMetadataTests(unittest.TestCase):
             )
             by_path = {item["bundle_path"]: item for item in contract["artifacts"]}
             by_path["protocol.json"]["compatibility_version"] = "local-install-v1"
-            by_path["release-common.sh"]["compatibility_version"] = "protocol-1.4"
+            by_path["release-common.sh"]["compatibility_version"] = "protocol-1.5"
             source.write_bytes(packager.canonical_compact_json(contract))
             with self.assertRaisesRegex(
                 ValueError,
@@ -222,7 +240,7 @@ class VersionMetadataTests(unittest.TestCase):
                 protocol_contract_fixture.rewrite_contract(
                     source,
                     output,
-                    "1.4",
+                    "1.5",
                     "2.4",
                 )
             self.assertFalse(output.exists())
@@ -250,7 +268,7 @@ class VersionMetadataTests(unittest.TestCase):
                 protocol_contract_fixture.rewrite_contract(
                     source,
                     output,
-                    "1.4",
+                    "1.5",
                     "2.4",
                 )
             self.assertFalse(output.exists())
@@ -1002,7 +1020,7 @@ class DeterministicGzipTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ACL-free"):
                 packager.open_output_directory(output)
 
-    def test_archive_rejects_ancestor_replacement_after_descriptor_binding(self) -> None:
+    def test_archive_rejects_ancestor_replacement_after_identity_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "output"
@@ -1026,7 +1044,10 @@ class DeterministicGzipTests(unittest.TestCase):
                     "bind_verified_bundle",
                     side_effect=bind_then_replace,
                 ):
-                    with self.assertRaisesRegex(ValueError, "source ancestor was replaced"):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "source ancestor access policy changed",
+                    ):
                         packager.build_archive(bundle, directory_fd, "release.tar.gz")
                 self.assertEqual(list(output.iterdir()), [])
             finally:
@@ -1076,6 +1097,46 @@ class DeterministicGzipTests(unittest.TestCase):
 
 
 class BundleManifestTests(unittest.TestCase):
+    def test_verification_bounds_descriptors_for_a_wide_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = make_test_bundle(Path(temporary), width=64)
+            real_open = os.open
+            real_dup = os.dup
+            real_close = os.close
+            owned: set[int] = set()
+            peak = 0
+            budget = 24
+
+            def track(descriptor: int) -> int:
+                nonlocal peak
+                owned.add(descriptor)
+                peak = max(peak, len(owned))
+                return descriptor
+
+            def bounded_open(*args, **kwargs) -> int:
+                if len(owned) >= budget:
+                    raise OSError(errno.EMFILE, "synthetic descriptor budget exhausted")
+                return track(real_open(*args, **kwargs))
+
+            def bounded_dup(descriptor: int) -> int:
+                if len(owned) >= budget:
+                    raise OSError(errno.EMFILE, "synthetic descriptor budget exhausted")
+                return track(real_dup(descriptor))
+
+            def tracked_close(descriptor: int) -> None:
+                owned.discard(descriptor)
+                real_close(descriptor)
+
+            with (
+                mock.patch.object(packager.os, "open", side_effect=bounded_open),
+                mock.patch.object(packager.os, "dup", side_effect=bounded_dup),
+                mock.patch.object(packager.os, "close", side_effect=tracked_close),
+            ):
+                packager.verify_bundle_tree(bundle)
+
+            self.assertFalse(owned)
+            self.assertLess(peak, budget)
+
     def test_missing_artifact_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bundle = make_test_bundle(Path(temporary))

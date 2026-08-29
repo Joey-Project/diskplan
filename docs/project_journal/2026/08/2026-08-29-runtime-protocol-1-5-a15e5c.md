@@ -37,6 +37,10 @@ superseded_by:
   and execution predecessor bindings.
 - [x] Update release metadata, exact bundle contracts, protocol documentation, and
   CI-script authority checks.
+- [x] Bound release-bundle traversal and per-file verification descriptor lifetimes
+  independently of artifact count.
+- [x] Synchronize protocol-contract fixture rewrite expectations with the canonical
+  Protocol 1.5 package assets.
 - [ ] Run the remaining focused fixture, runtime-golden, and release checks on
   `India-mac-mini-m4-hoteng`.
 - [ ] Complete frozen-head local review, sign the landing commit, and hand the
@@ -61,6 +65,10 @@ superseded_by:
 - Protocol 1.5 provides five Swift-authored runtime vectors matching the Protocol
   1.4 case matrix. Release bundles retain both fixture versions and advertise
   protocol compatibility 1.5 for the schema and version metadata.
+- Bundle tree traversal now retains descriptors only for the currently visited
+  directory ancestry. File verification records initial object identities and then
+  rebinds, hashes, and closes one file at a time; a later replacement, content
+  change, mode change, or path-access failure still fails closed.
 
 ## Handoff
 
@@ -88,6 +96,15 @@ superseded_by:
   `E0596`: the new force-warning tamper test borrowed `warning.1.body` mutably but
   bound the `(bytes, event)` tuple as immutable. The focused fix changes only that
   binding to `let mut warning`; no test result is claimed from the failed run.
-- Static parsing and syntax checks passed for the touched Swift sources and shell
-  scripts. Rust formatting and `git diff --check` passed before the final tamper and
-  release-doc edits and must be repeated on the frozen head.
+- India reran signed head `987393b`: Rust `runtime_golden` and the CI script checks
+  passed. The 57-test release package suite reported two failures and two errors.
+  The positive package test exhausted the default 256-descriptor limit while
+  retaining every traversed directory and verified file, and three protocol
+  contract fixture cases still supplied Protocol 1.4 as the canonical source
+  version after the package contract advanced to 1.5.
+- The follow-up adds a synthetic 24-descriptor regression budget over a 64-artifact
+  bundle without changing the process limit. This head has received static-only
+  local validation; the corrected 57-test release suite remains assigned to India.
+- The follow-up head passes Python AST parsing, Ruff static lint,
+  `git diff --check`, and project-journal validation. No local dynamic command was
+  run after the India-only host policy took effect.
