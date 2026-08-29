@@ -269,9 +269,24 @@ fn queue_plan_intent(state: &mut AppState, intent: PlanIntentKind) -> Vec<Effect
 }
 
 fn reduce_plan_event(state: &mut AppState, event: PlanRuntimeEvent) -> Vec<Effect> {
+    let overlay_acknowledgement = matches!(&event, PlanRuntimeEvent::OverlayAcknowledged(_))
+        .then(|| {
+            state.plan.pending_overlay_edit().map(|edit| {
+                match (edit.stage(), edit.force_warning()) {
+                    (true, Some(reason)) => {
+                        format!("Action staged; apply will require explicit force: {reason}")
+                    }
+                    (true, None) => "Action staged by the engine".into(),
+                    (false, _) => "Action unstaged by the engine".into(),
+                }
+            })
+        })
+        .flatten();
     let status_only = matches!(
         &event,
-        PlanRuntimeEvent::DryRunReady { .. } | PlanRuntimeEvent::OperationRejected { .. }
+        PlanRuntimeEvent::DryRunReady { .. }
+            | PlanRuntimeEvent::OperationRejected { .. }
+            | PlanRuntimeEvent::OverlayAcknowledged(_)
     );
     match &event {
         PlanRuntimeEvent::DryRunReady {
@@ -306,6 +321,9 @@ fn reduce_plan_event(state: &mut AppState, event: PlanRuntimeEvent) -> Vec<Effec
                 {
                     set_active_phase(state, &origin, RequestPhase::AwaitingResumeState);
                 }
+            } else if let Some(banner) = overlay_acknowledgement {
+                state.screen = Screen::ProvisionalPlan;
+                state.banner = Some(banner);
             } else if state.plan.model().current_plan_id().is_some() && !status_only {
                 state.screen = Screen::ProvisionalPlan;
                 state.provisional_plan = None;
@@ -1831,7 +1849,10 @@ mod tests {
                 .unwrap()
                 .is_selected(&ActionId::new("action-1"))
         );
-        assert!(state.banner.as_deref().unwrap().contains("force"));
+        assert_eq!(
+            state.banner.as_deref(),
+            Some("Action staged; apply will require explicit force: engine requires force")
+        );
 
         reduce(&mut state, key('t', KeyEventKind::Press));
         assert_eq!(state.plan.view(), PlanView::Targets);

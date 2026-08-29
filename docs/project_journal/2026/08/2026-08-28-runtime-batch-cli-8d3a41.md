@@ -135,6 +135,14 @@ superseded_by:
   scan-control, scan-stream, and raw-path capabilities before request 1, and
   plan chunks are admitted incrementally against the exported count, per-chunk,
   and aggregate raw-byte limits before being retained.
+- The exact `ff8af05` India gate passed package checking plus the focused
+  runtime-client, event-sequence, and plan-wire tests. The focused reducer test
+  then exposed a presentation regression: a valid overlay acknowledgement
+  replaced the selected action's force warning with the generic immutable-plan
+  banner. The static follow-up gives a successful acknowledgement its own typed
+  staged or unstaged result and retains the complete engine-authored force
+  reason; the focused reducer and remaining batch/CLI tests require an India
+  rerun at the follow-up head.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including
