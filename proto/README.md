@@ -450,3 +450,27 @@ terminal, or a final digest mismatch fails the stream without changing an
 already reported best-effort mutation outcome.
 The v1 execution-record limits are 1,000,000 events and 768 MiB of canonical
 length-prefixed event bytes.
+
+## Protocol 1.5 execution preview provenance
+
+Protocol minor `1.5` preserves the Protocol 1.4 tag assignments and adds two
+closed fields to `ActionExecutionPreviewProjection`: optional
+`raw_working_directory` at tag 7 and `path_race` at tag 8. A preview authored
+for negotiated minor 1.5 must carry both fields. A mutation preview carries an
+absolute, NUL-free raw working-directory byte string; a non-mutating preview
+carries a present empty byte string. `path_race` must be a recognized,
+non-`UNSPECIFIED` value and must equal the owning action projection.
+
+When a 1.5 endpoint negotiates minor 1.4, the Swift engine omits tags 7 and 8.
+The Rust frontend rejects mutation-enabled 1.4 previews because the exact
+working-directory bytes are unavailable. This keeps the committed Protocol
+1.4 fixtures byte-identical while preventing a downgraded session from
+acquiring mutation authority.
+
+Rust treats the working directory as uninterpreted bytes: it may validate the
+closed wire rules and escape bytes for display, but it must never join,
+normalize, resolve, canonicalize, or open the value. The exact preview
+protobuf bytes participate in the canonical plan record, dry-run payload,
+apply-review projection, force-warning event, execution record, and terminal
+hash chain. Changing either new field therefore invalidates the applicable
+digest or predecessor binding instead of silently changing execution context.

@@ -136,7 +136,10 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
     }
 
     let result = try receipt.authoritySession.makePlan()
-    let records = try RuntimePlanDomainProjector.project(result)
+    let records = try RuntimePlanDomainProjector.project(
+      result,
+      negotiatedProtocolMinor: responder.negotiatedProtocolMinor
+    )
     let metadata = PlanProjectionWireMetadata(
       scanSessionID: receipt.scanSessionID,
       scanCheckpointID: receipt.checkpointID,
@@ -147,7 +150,11 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
       policyVersion: result.plan.policyVersion,
       schemaVersion: result.plan.schemaVersion
     )
-    let wire = try PlanProjectionWireEncoder.encode(records: records, metadata: metadata)
+    let wire = try PlanProjectionWireEncoder.encode(
+      records: records,
+      metadata: metadata,
+      negotiatedProtocolMinor: responder.negotiatedProtocolMinor
+    )
     let planBuildID = runtimeDigest(
       domain: "diskplan/plan-build/v1\0",
       fields: [receipt.scanSessionID, receipt.checkpointID, result.plan.planHash.bytes]
@@ -156,7 +163,8 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
       try .plan(
         planBuildID: planBuildID,
         records: records,
-        metadata: metadata
+        metadata: metadata,
+        negotiatedProtocolMinor: responder.negotiatedProtocolMinor
       ))
 
     lock.lock()

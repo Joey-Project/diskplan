@@ -1,3 +1,4 @@
+import DiskplanCore
 import DiskplanPolicy
 import DiskplanProto
 import Foundation
@@ -12,8 +13,10 @@ enum RuntimePlanDomainProjectionError: Error, Equatable {
 /// upgrades policy evidence.
 enum RuntimePlanDomainProjector {
   static func project(
-    _ authority: RuntimePolicyAuthorityResult
+    _ authority: RuntimePolicyAuthorityResult,
+    negotiatedProtocolMinor: UInt32 = protocolMinor
   ) throws -> [Diskplan_V1_PlanProjectionRecord] {
+    try SealedRuntimeWire.requireSupportedProtocolMinor(negotiatedProtocolMinor)
     let plan = authority.plan
     let releaseIDs = Dictionary(
       uniqueKeysWithValues: plan.releaseSets.map { release in
@@ -34,7 +37,8 @@ enum RuntimePlanDomainProjector {
           order: UInt64(order),
           targetID: target.targetID.value,
           releaseSetIDs: releaseSetIDs,
-          releaseSets: plan.releaseSets
+          releaseSets: plan.releaseSets,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
         ))
       records.append(actionRecord)
 
@@ -58,7 +62,8 @@ enum RuntimePlanDomainProjector {
     order: UInt64,
     targetID: Data,
     releaseSetIDs: [Data],
-    releaseSets: [PlanReleaseSet]
+    releaseSets: [PlanReleaseSet],
+    negotiatedProtocolMinor: UInt32
   ) throws -> Diskplan_V1_PlanActionProjection {
     let kind = try actionKind(action.prototype.adapterContract)
     var projection = Diskplan_V1_PlanActionProjection()
@@ -97,6 +102,10 @@ enum RuntimePlanDomainProjector {
     projection.executionPreview.adapter = kind
     projection.executionPreview.mutationSupported = false
     projection.executionPreview.postcondition = "Mutation is not implemented in this runtime slice."
+    if negotiatedProtocolMinor >= protocol15Minor {
+      projection.executionPreview.rawWorkingDirectory = Data()
+      projection.executionPreview.pathRace = projection.pathRace
+    }
     projection.recommendation = recommendation(action.evaluation.recommendation)
     projection.safetyEvidence = try safetyEvidence(action)
     return projection

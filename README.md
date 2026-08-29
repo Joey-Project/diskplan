@@ -75,6 +75,8 @@ scripts/proto-codegen.sh check
 scripts/proto-codegen.sh generate
 scripts/canonical-fixture.sh check
 scripts/canonical-fixture.sh generate
+scripts/protocol14-fixtures.sh check
+scripts/protocol15-fixtures.sh check
 ```
 
 IPC 与 canonical binary contract 见 [proto/README.md](proto/README.md)。

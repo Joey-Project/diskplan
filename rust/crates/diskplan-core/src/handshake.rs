@@ -6,7 +6,9 @@ use diskplan_proto::diskplan::v1::{
 use thiserror::Error;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 4;
+pub const PROTOCOL14_MINOR: u32 = 4;
+pub const PROTOCOL15_MINOR: u32 = 5;
+pub const PROTOCOL_MINOR: u32 = PROTOCOL15_MINOR;
 pub const PROTOCOL14_RUNTIME_CAPABILITIES: [&str; 4] = [
     "decision-overlay-v1",
     "dry-run-projection-v1",
@@ -245,6 +247,20 @@ mod tests {
         };
         assert_eq!(accepted.selected_version.unwrap().minor, 2);
         assert_eq!(accepted.negotiated_capabilities, ["alpha", "base", "zeta"]);
+    }
+
+    #[test]
+    fn protocol15_client_accepts_a_protocol14_selection() {
+        assert_eq!(PROTOCOL_MINOR, PROTOCOL15_MINOR);
+        let offered = rust_client_hello_with_runtime_capabilities(&PROTOCOL14_RUNTIME_CAPABILITIES);
+        let accepted = HelloAccepted {
+            selected_version: Some(ProtocolVersion {
+                major: PROTOCOL_MAJOR,
+                minor: PROTOCOL14_MINOR,
+            }),
+            negotiated_capabilities: offered.required_capabilities.clone(),
+        };
+        assert_eq!(validate_accepted(&offered, 1, 1, &accepted), Ok(()));
     }
 
     #[test]

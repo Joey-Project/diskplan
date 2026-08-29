@@ -36,6 +36,8 @@ pub const MAXIMUM_NAMESPACE_ANCESTOR_COUNT: u32 = 1_024;
 pub const MAXIMUM_GIT_STATUS_RECORD_COUNT: u64 = 50_000;
 pub const MAXIMUM_VERSIONED_ARTIFACT_COUNT: u64 = 4_096;
 pub const MAXIMUM_RAW_SELECTOR_TARGET_BYTES: usize = 4_096;
+pub const PROTOCOL14_MINOR: u32 = 4;
+pub const PROTOCOL15_MINOR: u32 = 5;
 
 const CHUNK_ID_DOMAIN: &[u8] = b"diskplan/plan-projection-chunk-id/v1\0";
 const FINAL_DIGEST_DOMAIN: &[u8] = b"diskplan/plan-projection-final/v1\0";
@@ -44,6 +46,7 @@ const FINAL_DIGEST_DOMAIN: &[u8] = b"diskplan/plan-projection-final/v1\0";
 pub struct VerifiedPlanProjection {
     pub(crate) records: Vec<PlanProjectionRecord>,
     pub(crate) manifest: PlanProjectionManifest,
+    pub(crate) negotiated_protocol_minor: u32,
 }
 
 impl VerifiedPlanProjection {
@@ -53,6 +56,10 @@ impl VerifiedPlanProjection {
 
     pub fn manifest(&self) -> &PlanProjectionManifest {
         &self.manifest
+    }
+
+    pub fn negotiated_protocol_minor(&self) -> u32 {
+        self.negotiated_protocol_minor
     }
 }
 
@@ -106,9 +113,11 @@ struct ProjectionIndexes {
 /// The verifier validates transport structure and cross-record identity only.
 /// It never derives policy, stageability, adapter kinds, paths, or argv.
 pub(crate) fn verify_plan_projection(
+    negotiated_protocol_minor: u32,
     chunks: &[PlanProjectionChunk],
     manifest: &PlanProjectionManifest,
 ) -> Result<VerifiedPlanProjection, RuntimeProjectionError> {
+    validate_runtime_protocol_minor(negotiated_protocol_minor)?;
     validate_manifest_limits(manifest)?;
     if manifest.chunk_count as usize != chunks.len() || manifest.chunks.len() != chunks.len() {
         return Err(RuntimeProjectionError::InvalidManifest(
@@ -160,7 +169,7 @@ pub(crate) fn verify_plan_projection(
         ));
     }
 
-    let indexes = validate_records(&records)?;
+    let indexes = validate_records(&records, negotiated_protocol_minor)?;
     validate_manifest_summary(manifest, &indexes)?;
     if final_digest(manifest)? != projection_digest {
         return Err(RuntimeProjectionError::InvalidManifest(
@@ -170,6 +179,7 @@ pub(crate) fn verify_plan_projection(
     Ok(VerifiedPlanProjection {
         records,
         manifest: manifest.clone(),
+        negotiated_protocol_minor,
     })
 }
 
@@ -177,9 +187,11 @@ pub(crate) fn verify_plan_projection(
 /// bytes. Callers cannot bypass canonical protobuf or unknown-field admission
 /// by supplying already-decoded structs.
 pub fn decode_and_verify_plan_projection(
+    negotiated_protocol_minor: u32,
     canonical_chunks: &[Vec<u8>],
     canonical_manifest: &[u8],
 ) -> Result<VerifiedPlanProjection, RuntimeProjectionError> {
+    validate_runtime_protocol_minor(negotiated_protocol_minor)?;
     preflight_plan_projection_raw_lengths(
         &canonical_chunks.iter().map(Vec::len).collect::<Vec<_>>(),
         canonical_manifest.len(),
@@ -204,7 +216,7 @@ pub fn decode_and_verify_plan_projection(
             "plan manifest is not canonical protobuf",
         ));
     }
-    verify_plan_projection(&chunks, &manifest)
+    verify_plan_projection(negotiated_protocol_minor, &chunks, &manifest)
 }
 
 fn preflight_plan_projection_raw_lengths(
@@ -407,6 +419,7 @@ fn decode_canonical_records(
 
 fn validate_records(
     records: &[PlanProjectionRecord],
+    negotiated_protocol_minor: u32,
 ) -> Result<ProjectionIndexes, RuntimeProjectionError> {
     let mut indexes = ProjectionIndexes::default();
     for (index, record) in records.iter().enumerate() {
@@ -418,7 +431,7 @@ fn validate_records(
         }
         match record.body.as_ref() {
             Some(plan_projection_record::Body::Action(action)) => {
-                validate_action(record.record_index, action)?;
+                validate_action(record.record_index, action, negotiated_protocol_minor)?;
                 insert_unique(
                     &mut indexes.actions,
                     opaque_value(action.action_id.as_ref(), "action_id")?,
@@ -470,6 +483,7 @@ fn validate_records(
 fn validate_action(
     index: u64,
     action: &PlanActionProjection,
+    negotiated_protocol_minor: u32,
 ) -> Result<(), RuntimeProjectionError> {
     let action_id = opaque_digest_value(action.action_id.as_ref(), "action_id")?;
     opaque_digest_value(action.action_lineage_id.as_ref(), "action_lineage_id")?;
@@ -594,6 +608,40 @@ fn validate_action(
                 reason: "missing execution preview",
             })?;
     if preview.adapter != action.kind
+        || validate_execution_preview(negotiated_protocol_minor, preview).is_err()
+        || (negotiated_protocol_minor >= PROTOCOL15_MINOR && preview.path_race != action.path_race)
+    {
+        return Err(RuntimeProjectionError::InvalidRecord {
+            index,
+            reason: "invalid execution preview",
+        });
+    }
+    validate_safety_evidence(index, action.kind, action.safety_evidence.as_ref())?;
+    Ok(())
+}
+
+pub(crate) fn validate_runtime_protocol_minor(
+    negotiated_protocol_minor: u32,
+) -> Result<(), RuntimeProjectionError> {
+    if matches!(
+        negotiated_protocol_minor,
+        PROTOCOL14_MINOR | PROTOCOL15_MINOR
+    ) {
+        Ok(())
+    } else {
+        Err(RuntimeProjectionError::InvalidManifest(
+            "unsupported negotiated protocol minor",
+        ))
+    }
+}
+
+pub(crate) fn validate_execution_preview(
+    negotiated_protocol_minor: u32,
+    preview: &crate::diskplan::v1::ActionExecutionPreviewProjection,
+) -> Result<(), RuntimeProjectionError> {
+    validate_runtime_protocol_minor(negotiated_protocol_minor)?;
+    if PlanActionKind::try_from(preview.adapter).is_err()
+        || preview.adapter == PlanActionKind::Unspecified as i32
         || (preview.mutation_supported
             && (preview.raw_executable.is_empty()
                 || preview.raw_executable.contains(&0)
@@ -603,13 +651,59 @@ fn validate_action(
         || (!preview.mutation_supported
             && (!preview.raw_executable.is_empty() || !preview.raw_argv.is_empty()))
     {
-        return Err(RuntimeProjectionError::InvalidRecord {
-            index,
-            reason: "invalid execution preview",
-        });
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "execution preview is invalid",
+        ));
     }
-    validate_safety_evidence(index, action.kind, action.safety_evidence.as_ref())?;
+    match negotiated_protocol_minor {
+        PROTOCOL14_MINOR => {
+            if preview.raw_working_directory.is_some()
+                || preview.path_race != PathRaceProjection::Unspecified as i32
+                || preview.mutation_supported
+            {
+                return Err(RuntimeProjectionError::InvalidManifest(
+                    "protocol 1.4 mutation preview is not safely executable",
+                ));
+            }
+        }
+        PROTOCOL15_MINOR => {
+            let working_directory = preview.raw_working_directory.as_deref().ok_or(
+                RuntimeProjectionError::InvalidManifest(
+                    "protocol 1.5 preview omits raw working directory",
+                ),
+            )?;
+            if PathRaceProjection::try_from(preview.path_race).is_err()
+                || preview.path_race == PathRaceProjection::Unspecified as i32
+                || (preview.mutation_supported
+                    && (working_directory.first() != Some(&b'/') || working_directory.contains(&0)))
+                || (!preview.mutation_supported && !working_directory.is_empty())
+            {
+                return Err(RuntimeProjectionError::InvalidManifest(
+                    "protocol 1.5 execution preview is incomplete",
+                ));
+            }
+        }
+        _ => unreachable!("the protocol minor was validated"),
+    }
     Ok(())
+}
+
+/// Renders raw working-directory evidence without filesystem or path-library
+/// interpretation. The frontend never joins, normalizes, resolves, or opens
+/// these bytes.
+pub fn escape_raw_working_directory(raw: &[u8]) -> String {
+    let mut escaped = String::with_capacity(raw.len());
+    for byte in raw {
+        match *byte {
+            b' '..=b'~' if *byte != b'\\' => escaped.push(char::from(*byte)),
+            b'\\' => escaped.push_str("\\\\"),
+            value => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\x{value:02x}");
+            }
+        }
+    }
+    escaped
 }
 
 fn validate_safety_evidence(

@@ -1206,14 +1206,14 @@ class PackagingAssetsTests(unittest.TestCase):
                     "component": component,
                     "product_version": "0.1.0",
                     "protocol_major": 1,
-                    "protocol_minor": 4,
+                    "protocol_minor": 5,
                 }
 
             helper = {
                 "component": "diskplan-fs-helper",
                 "product_version": "0.1.0",
                 "protocol_major": 1,
-                "protocol_minor": 4,
+                "protocol_minor": 5,
                 "helper_abi": 1,
             }
             with (
@@ -1250,14 +1250,33 @@ class PackagingAssetsTests(unittest.TestCase):
                 "proto/fixtures/runtime-v1.4/force-action-execution.frames.hex",
                 "proto/fixtures/runtime-v1.4/git-evidence-action.frames.hex",
                 "proto/fixtures/runtime-v1.4/version-survivor-action.frames.hex",
+                "proto/fixtures/runtime-v1.5/README.md",
+                "proto/fixtures/runtime-v1.5/codex-scope-action.frames.hex",
+                "proto/fixtures/runtime-v1.5/empty-batch-dry-run.frames.hex",
+                "proto/fixtures/runtime-v1.5/fixtures.json",
+                "proto/fixtures/runtime-v1.5/force-action-execution.frames.hex",
+                "proto/fixtures/runtime-v1.5/git-evidence-action.frames.hex",
+                "proto/fixtures/runtime-v1.5/version-survivor-action.frames.hex",
             }
             self.assertTrue(runtime_fixture_paths.issubset(artifact_paths))
             self.assertEqual(
-                {artifact_compatibility[path] for path in runtime_fixture_paths},
+                {
+                    artifact_compatibility[path]
+                    for path in runtime_fixture_paths
+                    if "/runtime-v1.4/" in path
+                },
                 {"runtime-v1.4"},
             )
+            self.assertEqual(
+                {
+                    artifact_compatibility[path]
+                    for path in runtime_fixture_paths
+                    if "/runtime-v1.5/" in path
+                },
+                {"runtime-v1.5"},
+            )
             self.assertIn("runtime-capabilities.json", artifact_paths)
-            self.assertEqual(manifest["protocol_minor"], 4)
+            self.assertEqual(manifest["protocol_minor"], 5)
             self.assertEqual(
                 manifest["optional_capabilities"],
                 [
