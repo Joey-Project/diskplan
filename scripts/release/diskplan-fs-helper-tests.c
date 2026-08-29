@@ -453,6 +453,7 @@ static void test_artifact_delete_replacement_is_retained(const char *root) {
     static const char owned[] = "owned\n";
     if (fixture < 0 ||
         write(fixture, owned, sizeof(owned) - 1) != (ssize_t)(sizeof(owned) - 1) ||
+        fchmod(fixture, k_artifacts[index].mode) != 0 ||
         close(fixture) != 0)
         test_fail("cannot create artifact-delete replacement fixture");
     int held = open_artifact(directory, index, O_RDONLY);
@@ -537,7 +538,8 @@ static void test_partial_cleanup_requires_creation_receipt(const char *root) {
     size_t index = (size_t)artifact_index("VERSION");
     int file = openat(directory, "VERSION",
                       O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
-    if (file < 0 || write(file, "owned\n", 6) != 6 || close(file) != 0)
+    if (file < 0 || write(file, "owned\n", 6) != 6 || fchmod(file, 0644) != 0 ||
+        close(file) != 0)
         test_fail("cannot create partial receipt artifact");
     initialize_cleanup_receipts();
     cleanup_artifact_receipts[index] = open_artifact(directory, index, O_RDONLY);
@@ -565,6 +567,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: diskplan-fs-helper-tests /absolute/test/root\n");
         return 64;
     }
+    (void)umask(077);
     test_ancestor_replacement(argv[1]);
     test_ancestor_access_policy_change(argv[1]);
     test_mount_boundary_change(argv[1]);
