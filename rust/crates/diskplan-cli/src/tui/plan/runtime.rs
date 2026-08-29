@@ -187,6 +187,7 @@ pub enum OverlayStageResult {
     NotStageable,
     NoActionSelected,
     RevisionExhausted,
+    AwaitingAcknowledgement,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,6 +360,7 @@ pub struct PlanRuntime {
     filter_editing: bool,
     filter_buffer: String,
     pending_intents: Vec<PlanIntent>,
+    pending_overlay_edit: Option<OverlayStageEdit>,
     sort_mode: SortMode,
     sort_modes: HashMap<(super::PlanDisposition, super::ActionKindId), SortMode>,
     compact_columns: bool,
@@ -705,6 +707,20 @@ impl PlanRuntime {
         })
     }
 
+    /// Reserves the acknowledged overlay revision until the engine seals a result.
+    pub fn queue_selected_stage_edit(&mut self) -> Result<OverlayStageEdit, OverlayStageResult> {
+        if self.pending_overlay_edit.is_some() {
+            return Err(OverlayStageResult::AwaitingAcknowledgement);
+        }
+        let edit = self.selected_stage_edit()?;
+        self.pending_overlay_edit = Some(edit.clone());
+        Ok(edit)
+    }
+
+    pub fn reject_pending_overlay_edit(&mut self) {
+        self.pending_overlay_edit = None;
+    }
+
     pub fn set_selected_user_note(&mut self, note: String) -> Result<(), PlanRuntimeError> {
         let Some(action_id) = self.selected_action_id().cloned() else {
             return Err(PlanRuntimeError::NoActionSelected);
@@ -771,6 +787,7 @@ impl PlanRuntime {
                 self.filter_editing = false;
                 self.filter_buffer.clear();
                 self.pending_intents.clear();
+                self.pending_overlay_edit = None;
                 self.sort_mode = SortMode::EngineOrder;
                 self.sort_modes.clear();
                 self.compact_columns = false;
@@ -882,9 +899,23 @@ impl PlanRuntime {
                 let Some(current) = self.overlay.as_ref() else {
                     return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
                 };
+                let Some(pending) = self.pending_overlay_edit.as_ref() else {
+                    return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
+                };
+                let expected_revision = pending
+                    .base_revision
+                    .checked_add(1)
+                    .ok_or(PlanRuntimeError::InvalidOverlayAcknowledgement)?;
+                let mut expected_selected = current.selected_actions.clone();
+                if pending.stage {
+                    expected_selected.insert(pending.action_id.clone());
+                } else {
+                    expected_selected.remove(&pending.action_id);
+                }
                 if current.plan_id != snapshot.plan_id
                     || current.evidence_reference != snapshot.evidence_reference
-                    || snapshot.revision <= current.revision
+                    || current.revision != pending.base_revision
+                    || snapshot.revision != expected_revision
                     || snapshot.digest.is_empty()
                 {
                     return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
@@ -895,6 +926,7 @@ impl PlanRuntime {
                     .cloned()
                     .collect::<HashSet<_>>();
                 if selected.len() != snapshot.selected_action_ids.len()
+                    || selected != expected_selected
                     || selected
                         .iter()
                         .any(|action_id| self.model.action(action_id).is_none())
@@ -913,10 +945,15 @@ impl PlanRuntime {
                 overlay.revision = snapshot.revision;
                 overlay.digest = snapshot.digest;
                 self.pending_intents.clear();
+                self.pending_overlay_edit = None;
                 self.execution_preview = None;
                 Ok(())
             }
-            PlanRuntimeEvent::DryRunReady { .. } | PlanRuntimeEvent::OperationRejected { .. } => {
+            PlanRuntimeEvent::DryRunReady { .. } => Ok(()),
+            PlanRuntimeEvent::OperationRejected { operation, .. } => {
+                if operation == "overlay edit" {
+                    self.pending_overlay_edit = None;
+                }
                 Ok(())
             }
         }
@@ -948,6 +985,7 @@ impl PlanRuntime {
         self.filter_editing = false;
         self.filter_buffer.clear();
         self.pending_intents.clear();
+        self.pending_overlay_edit = None;
         self.execution_preview = None;
         Ok(())
     }

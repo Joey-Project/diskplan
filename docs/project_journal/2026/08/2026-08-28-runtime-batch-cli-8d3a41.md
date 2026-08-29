@@ -107,6 +107,14 @@ superseded_by:
   after a sealed overlay acknowledgement. Dry-run is real. Apply review remains
   a typed unavailable operation on protocol minor 1.4 and also fails closed on
   1.5 until the raw working-directory/path-race preview receipt is present.
+- The Rust adapter additionally proves that every plan repeats the exact scan
+  session, checkpoint, checkpoint-evidence, and final-evidence binding from its
+  request. Interactive overlay acknowledgements must advance exactly one
+  revision and reproduce the requested edit delta; the engine-owned batch
+  preset remains a sealed policy transform rather than frontend reconstruction.
+- Target projection is indexed and assembled bottom-up instead of recursively
+  rescanning the full target set. The presentation boundary rejects depth above
+  512, and the UI permits only one unacknowledged overlay edit at a time.
 
 ## Evidence
 
@@ -117,6 +125,11 @@ superseded_by:
   scan/runtime sequencing, reserved confirmation rejection, terminal request
   retirement, and the shared request-ID high-water mark. No Swift build/test has
   run for this connected adapter.
+- A fresh-context read-only review of `76a2ebb..158edb8` found four authority or
+  boundedness gaps: request-to-plan scan binding, edit-to-overlay transition,
+  recursive target assembly, and duplicate pending overlay edits. The static
+  follow-up closes all four and adds focused regression coverage; its dynamic
+  checks must run on `India-mac-mini-m4-hoteng` under the current host policy.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including

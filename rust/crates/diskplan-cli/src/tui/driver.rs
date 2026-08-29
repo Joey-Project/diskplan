@@ -10,7 +10,9 @@ use diskplan_proto::diskplan::v1::{
 };
 use diskplan_proto::sealed::RuntimeChainVerifier;
 
-use crate::runtime_client::{RuntimeClientError, edit_overlay, prepare_dry_run, receive_plan};
+use crate::runtime_client::{
+    PlanScanBinding, RuntimeClientError, edit_overlay, prepare_dry_run, receive_plan,
+};
 use crate::{BoundEngine, ClientError, EngineSession, SessionEvent};
 
 use super::event::{EngineEventIngress, EngineEventStream, engine_event_channel};
@@ -284,7 +286,13 @@ impl DriverRuntime {
             allow_partial_evidence,
             agent_mode: AgentMode::Ask as i32,
         })?;
-        let receipt = match receive_plan(session, request_id) {
+        let plan_scan_binding = PlanScanBinding {
+            scan_session_id: scan_session_id.as_bytes().to_vec(),
+            scan_checkpoint_id: manifest.checkpoint_id.as_bytes().to_vec(),
+            scan_checkpoint_evidence_sha256: manifest.checkpoint_evidence_sha256.clone(),
+            final_evidence_sha256: manifest.final_evidence_sha256.clone(),
+        };
+        let receipt = match receive_plan(session, request_id, &plan_scan_binding) {
             Ok(receipt) => receipt,
             Err(error) if error.is_unavailable() => {
                 return events
@@ -359,12 +367,14 @@ impl DriverRuntime {
                         decision_overlay_edit::Edit::UnstageAction(edit_body)
                     }),
                 };
+                let predecessor = plan.overlay.clone();
                 let acknowledged = match edit_overlay(
                     session,
                     request_id,
                     plan.projection_id.clone(),
                     expected_revision,
                     vec![edit],
+                    predecessor.as_ref(),
                     &mut plan.chain,
                 ) {
                     Ok(value) => value,

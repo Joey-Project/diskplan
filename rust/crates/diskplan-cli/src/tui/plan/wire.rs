@@ -16,6 +16,8 @@ use super::{
     ReleaseSetProjection, Stageability, TargetId, TargetKind, TargetProjection, WaiverId,
 };
 
+const MAXIMUM_PRESENTABLE_TARGET_DEPTH: u32 = 512;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WirePlanError(&'static str);
 
@@ -90,7 +92,7 @@ pub(crate) fn snapshot_from_verified(
 
 fn map_action(
     action: &diskplan_proto::diskplan::v1::PlanActionProjection,
-    targets: &HashMap<Vec<u8>, diskplan_proto::diskplan::v1::PlanTargetProjection>,
+    targets: &HashMap<Vec<u8>, TargetProjection>,
 ) -> Result<ActionProjection, WirePlanError> {
     let action_id = ActionId::new(opaque_hex(action.action_id.as_ref(), "missing action_id")?);
     let stageability = match WireStageability::try_from(action.stageability)
@@ -151,13 +153,8 @@ fn map_action(
     let roots = action
         .target_ids
         .iter()
-        .filter_map(|target_id| {
-            targets
-                .get(&target_id.value)
-                .filter(|target| target.parent_target_id.is_none())
-                .map(|target| map_target(target, targets))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter_map(|target_id| targets.get(&target_id.value).cloned())
+        .collect();
 
     Ok(ActionProjection {
         id: action_id,
@@ -219,73 +216,101 @@ fn map_action(
 
 fn collect_targets(
     records: &[PlanProjectionRecord],
-) -> Result<HashMap<Vec<u8>, diskplan_proto::diskplan::v1::PlanTargetProjection>, WirePlanError> {
-    records
+) -> Result<HashMap<Vec<u8>, TargetProjection>, WirePlanError> {
+    let mut targets = records
         .iter()
         .filter_map(|record| match record.body.as_ref() {
             Some(plan_projection_record::Body::Target(target)) => Some(target),
             _ => None,
         })
         .map(|target| {
+            if target.depth > MAXIMUM_PRESENTABLE_TARGET_DEPTH {
+                return Err(WirePlanError("target tree exceeds the presentation depth"));
+            }
             let id = target
                 .target_id
                 .as_ref()
                 .ok_or(WirePlanError("missing target_id"))?
                 .value
                 .clone();
-            Ok((id, target.clone()))
+            Ok((id, target))
         })
-        .collect()
-}
-
-fn map_target(
-    target: &diskplan_proto::diskplan::v1::PlanTargetProjection,
-    all: &HashMap<Vec<u8>, diskplan_proto::diskplan::v1::PlanTargetProjection>,
-) -> Result<TargetProjection, WirePlanError> {
-    let target_id = target
-        .target_id
-        .as_ref()
-        .ok_or(WirePlanError("missing target_id"))?;
-    let mut children = all
-        .values()
-        .filter(|candidate| {
-            candidate
-                .parent_target_id
-                .as_ref()
-                .is_some_and(|parent| parent.value == target_id.value)
-        })
-        .collect::<Vec<_>>();
-    children.sort_by(|left, right| {
-        left.order.cmp(&right.order).then_with(|| {
-            left.target_id
-                .as_ref()
-                .map(|value| value.value.as_slice())
-                .cmp(&right.target_id.as_ref().map(|value| value.value.as_slice()))
-        })
+        .collect::<Result<Vec<_>, WirePlanError>>()?;
+    let by_id = targets
+        .iter()
+        .map(|(id, target)| (id.clone(), *target))
+        .collect::<HashMap<_, _>>();
+    let mut children_by_parent: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+    for (id, target) in &targets {
+        if let Some(parent) = target.parent_target_id.as_ref() {
+            children_by_parent
+                .entry(parent.value.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_by(|left, right| {
+            let left = by_id
+                .get(left)
+                .expect("verified target child exists in the target index");
+            let right = by_id
+                .get(right)
+                .expect("verified target child exists in the target index");
+            left.order.cmp(&right.order).then_with(|| {
+                left.target_id
+                    .as_ref()
+                    .map(|value| value.value.as_slice())
+                    .cmp(&right.target_id.as_ref().map(|value| value.value.as_slice()))
+            })
+        });
+    }
+    targets.sort_by(|(left_id, left), (right_id, right)| {
+        right
+            .depth
+            .cmp(&left.depth)
+            .then_with(|| left_id.cmp(right_id))
     });
-    let path = target
-        .path
-        .as_ref()
-        .ok_or(WirePlanError("missing target path"))?;
-    let kind = match WireTargetKind::try_from(target.kind)
-        .map_err(|_| WirePlanError("unknown target kind"))?
-    {
-        WireTargetKind::File => TargetKind::File,
-        WireTargetKind::Directory => TargetKind::Directory,
-        WireTargetKind::SymbolicLink => TargetKind::Symlink,
-        WireTargetKind::Other => TargetKind::Other,
-        WireTargetKind::Unknown => TargetKind::Unknown,
-        WireTargetKind::Unspecified => return Err(WirePlanError("unspecified target kind")),
-    };
-    Ok(TargetProjection {
-        id: TargetId::new(hex::encode(&target_id.value)),
-        display_path: DisplayPath::new(path.display_path.clone()),
-        kind,
-        children: children
+
+    let mut built = HashMap::with_capacity(targets.len());
+    for (id, target) in targets {
+        let path = target
+            .path
+            .as_ref()
+            .ok_or(WirePlanError("missing target path"))?;
+        let kind = match WireTargetKind::try_from(target.kind)
+            .map_err(|_| WirePlanError("unknown target kind"))?
+        {
+            WireTargetKind::File => TargetKind::File,
+            WireTargetKind::Directory => TargetKind::Directory,
+            WireTargetKind::SymbolicLink => TargetKind::Symlink,
+            WireTargetKind::Other => TargetKind::Other,
+            WireTargetKind::Unknown => TargetKind::Unknown,
+            WireTargetKind::Unspecified => {
+                return Err(WirePlanError("unspecified target kind"));
+            }
+        };
+        let children = children_by_parent
+            .remove(&id)
+            .unwrap_or_default()
             .into_iter()
-            .map(|child| map_target(child, all))
-            .collect::<Result<Vec<_>, _>>()?,
-    })
+            .map(|child_id| {
+                built
+                    .remove(&child_id)
+                    .ok_or(WirePlanError("target child was not built"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        built.insert(
+            id.clone(),
+            TargetProjection {
+                id: TargetId::new(hex::encode(id)),
+                display_path: DisplayPath::new(path.display_path.clone()),
+                kind,
+                children,
+            },
+        );
+    }
+    Ok(built)
 }
 
 fn byte_value(value: Option<&ByteEstimateProjection>) -> Result<ByteValue, WirePlanError> {
@@ -311,4 +336,69 @@ fn digest_hex(value: Option<&[u8]>, missing: &'static str) -> Result<String, Wir
         .filter(|value| value.len() == 32)
         .map(hex::encode)
         .ok_or(WirePlanError(missing))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diskplan_proto::diskplan::v1::{
+        PlanRawPathProjection, PlanTargetProjection as WireTarget, plan_projection_record,
+    };
+
+    fn target_record(
+        index: u64,
+        id: &[u8],
+        parent: Option<&[u8]>,
+        depth: u32,
+        order: u64,
+    ) -> PlanProjectionRecord {
+        PlanProjectionRecord {
+            record_index: index,
+            body: Some(plan_projection_record::Body::Target(WireTarget {
+                target_id: Some(OpaqueIdentifier { value: id.to_vec() }),
+                parent_target_id: parent.map(|value| OpaqueIdentifier {
+                    value: value.to_vec(),
+                }),
+                depth,
+                order,
+                path: Some(PlanRawPathProjection {
+                    display_path: format!("/{}", hex::encode(id)),
+                    ..Default::default()
+                }),
+                kind: WireTargetKind::Directory as i32,
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn target_forest_is_built_bottom_up_in_engine_order() {
+        let records = vec![
+            target_record(0, b"root", None, 0, 0),
+            target_record(1, b"later", Some(b"root"), 1, 2),
+            target_record(2, b"earlier", Some(b"root"), 1, 1),
+        ];
+
+        let roots = collect_targets(&records).unwrap();
+        let root = roots.get(b"root".as_slice()).unwrap();
+        assert_eq!(root.children.len(), 2);
+        assert_eq!(root.children[0].id, TargetId::new(hex::encode(b"earlier")));
+        assert_eq!(root.children[1].id, TargetId::new(hex::encode(b"later")));
+    }
+
+    #[test]
+    fn target_forest_rejects_unpresentable_depth_before_nesting() {
+        let records = vec![target_record(
+            0,
+            b"too-deep",
+            Some(b"parent"),
+            MAXIMUM_PRESENTABLE_TARGET_DEPTH + 1,
+            0,
+        )];
+
+        assert!(matches!(
+            collect_targets(&records),
+            Err(WirePlanError("target tree exceeds the presentation depth"))
+        ));
+    }
 }

@@ -12,7 +12,9 @@ use diskplan_proto::diskplan::v1::{
 };
 use thiserror::Error;
 
-use crate::runtime_client::{RuntimeClientError, edit_overlay, prepare_dry_run, receive_plan};
+use crate::runtime_client::{
+    PlanScanBinding, RuntimeClientError, edit_overlay, prepare_dry_run, receive_plan,
+};
 use crate::{BoundEngine, ClientError, EngineSession, SessionEvent};
 
 const REPORT_SCHEMA: u32 = 1;
@@ -575,6 +577,12 @@ fn execute_protocol_batch(
         })
         .map_err(map_client_error)?;
     let scan = receive_finalized_scan(session)?;
+    let plan_scan_binding = PlanScanBinding {
+        scan_session_id: scan.summary.evidence.scan_session_id.as_bytes().to_vec(),
+        scan_checkpoint_id: scan.summary.evidence.scan_checkpoint_id.as_bytes().to_vec(),
+        scan_checkpoint_evidence_sha256: scan.summary.evidence.checkpoint_evidence_sha256.to_vec(),
+        final_evidence_sha256: scan.summary.evidence.final_evidence_sha256.to_vec(),
+    };
 
     session
         .send_build_plan_request(BuildPlanRequest {
@@ -586,7 +594,7 @@ fn execute_protocol_batch(
             agent_mode: request.agent_mode.wire() as i32,
         })
         .map_err(map_client_error)?;
-    let plan_receipt = receive_plan(session, 2).map_err(map_runtime_error)?;
+    let plan_receipt = receive_plan(session, 2, &plan_scan_binding).map_err(map_runtime_error)?;
     let plan = summarize_plan(&scan.summary.evidence, plan_receipt.projection())?;
     let projection_id =
         required_opaque(plan_receipt.projection().manifest().projection_id.as_ref())?;
@@ -605,6 +613,7 @@ fn execute_protocol_batch(
                 },
             )),
         }],
+        None,
         &mut chain,
     )
     .map_err(map_runtime_error)?;

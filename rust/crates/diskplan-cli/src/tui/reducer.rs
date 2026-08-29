@@ -122,7 +122,7 @@ fn reduce_key(state: &mut AppState, code: KeyCode, kind: KeyEventKind) -> Vec<Ef
             Vec::new()
         }
         KeyCode::Char(' ') if state.screen == Screen::ProvisionalPlan => {
-            match state.plan.selected_stage_edit() {
+            match state.plan.queue_selected_stage_edit() {
                 Ok(edit) => {
                     state.banner = Some(match (edit.stage(), edit.force_warning()) {
                         (true, Some(reason)) => {
@@ -158,6 +158,9 @@ fn reduce_key(state: &mut AppState, code: KeyCode, kind: KeyEventKind) -> Vec<Ef
                         }
                         OverlayStageResult::RevisionExhausted => {
                             "Decision overlay revision space exhausted; reload the plan".into()
+                        }
+                        OverlayStageResult::AwaitingAcknowledgement => {
+                            "An overlay edit is already awaiting engine acknowledgement".into()
                         }
                     });
                 }
@@ -282,6 +285,9 @@ fn reduce_plan_event(state: &mut AppState, event: PlanRuntimeEvent) -> Vec<Effec
             ));
         }
         PlanRuntimeEvent::OperationRejected { operation, summary } => {
+            if *operation == "overlay edit" {
+                state.plan.reject_pending_overlay_edit();
+            }
             state.banner = Some(format!("{operation} unavailable: {summary}"));
         }
         _ => {}
@@ -1797,6 +1803,14 @@ mod tests {
                 .overlay()
                 .unwrap()
                 .is_selected(&ActionId::new("action-1"))
+        );
+        assert!(reduce(&mut state, key(' ', KeyEventKind::Press)).is_empty());
+        assert!(
+            state
+                .banner
+                .as_deref()
+                .unwrap()
+                .contains("already awaiting")
         );
         reduce(
             &mut state,
