@@ -180,10 +180,13 @@ superseded_by:
   writer inheritance nor an orphaned target. The harness now records an exact
   startup milestone trace and uses a bidirectional `R/G/A/P/F/C/L/S` handshake:
   `A` proves the wrapper accepted the grant before fork, while `F` proves the
-  target is forked but remains gated in the supervisor process group. Typed
-  deadline injection occurs only after the selected acknowledgement, so test
-  scheduling cannot silently select an earlier stage. The production absolute
-  15-second startup deadline remains unchanged. Startup-failure cleanup retains
+  target is forked but remains gated in the supervisor process group. Test-only
+  deadline exhaustion holds the supervisor only after the selected
+  acknowledgement until the original absolute deadline expires; the next
+  deadline-bound `P` or `C` permission send then returns the ordinary typed
+  `target-launch` failure, so test scheduling cannot silently select an earlier
+  stage or authorize a target after the bound. The production absolute 15-second
+  startup deadline remains unchanged. Startup-failure cleanup retains
   the control channel until bounded TERM/KILL and reap complete, preventing EOF
   from changing the injected failure taxonomy. The exact focused gate passes
   1/1 with the target test completing in 7.562 seconds. The unchanged CI-shaped

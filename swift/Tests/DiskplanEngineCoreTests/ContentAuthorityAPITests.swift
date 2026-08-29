@@ -148,13 +148,10 @@ private enum CompileStartupMilestone: String, CaseIterable, Sendable {
 
 private enum CompileStartupFailure: Error, CustomStringConvertible {
   case notReady(stage: String)
-  case injectedNotReady(stage: String, after: CompileStartupMilestone)
 
   var description: String {
     switch self {
     case .notReady(let stage): "startup-not-ready(stage=\(stage))"
-    case .injectedNotReady(let stage, let milestone):
-      "startup-not-ready(stage=\(stage),injected-after=\(milestone.rawValue))"
     }
   }
 }
@@ -163,6 +160,23 @@ private enum CompileStartupDeadlineInjection: Sendable {
   case none
   case afterGrantAccepted
   case afterTargetForkedGated
+}
+
+private func exhaustStartupDeadlineIfRequested(
+  _ injection: CompileStartupDeadlineInjection,
+  after milestone: CompileStartupMilestone,
+  until deadline: DispatchTime
+) {
+  let shouldExhaust =
+    switch (injection, milestone) {
+    case (.afterGrantAccepted, .grantAccepted),
+      (.afterTargetForkedGated, .targetForkedGated):
+      true
+    default:
+      false
+    }
+  guard shouldExhaust else { return }
+  _ = DispatchSemaphore(value: 0).wait(timeout: deadline)
 }
 
 private enum CompileDrainCompletion: Equatable, Sendable {
@@ -449,7 +463,12 @@ private final class CompileCaptureControl: @unchecked Sendable {
     try waitForFrame(0x4c, stage: "target-launch", until: deadline)
   }
 
-  private func sendFrame(_ frame: UInt8, operation: String) throws {
+  private func sendFrame(
+    _ frame: UInt8,
+    operation: String,
+    stage: String,
+    until deadline: DispatchTime
+  ) throws {
     let descriptor = try lock.withLock { () throws -> Int32 in
       guard let parentDescriptor else {
         throw compileProcessFailure("capture-control-closed", EBADF)
@@ -457,22 +476,41 @@ private final class CompileCaptureControl: @unchecked Sendable {
       return parentDescriptor
     }
     var frame = frame
-    while Darwin.write(descriptor, &frame, 1) == -1 {
+    while true {
+      guard DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds else {
+        throw CompileStartupFailure.notReady(stage: stage)
+      }
+      if Darwin.write(descriptor, &frame, 1) == 1 { return }
       if errno == EINTR { continue }
       throw compileProcessFailure(operation, errno)
     }
   }
 
-  func grantExecution() throws {
-    try sendFrame(0x47, operation: "capture-control-grant")
+  func grantExecution(until deadline: DispatchTime) throws {
+    try sendFrame(
+      0x47,
+      operation: "capture-control-grant",
+      stage: "execution-grant",
+      until: deadline
+    )
   }
 
-  func permitTargetFork() throws {
-    try sendFrame(0x50, operation: "capture-control-target-fork")
+  func permitTargetFork(until deadline: DispatchTime) throws {
+    try sendFrame(
+      0x50,
+      operation: "capture-control-target-fork",
+      stage: "target-launch",
+      until: deadline
+    )
   }
 
-  func permitTargetLaunch() throws {
-    try sendFrame(0x43, operation: "capture-control-target-launch")
+  func permitTargetLaunch(until deadline: DispatchTime) throws {
+    try sendFrame(
+      0x43,
+      operation: "capture-control-target-launch",
+      stage: "target-launch",
+      until: deadline
+    )
   }
 }
 
@@ -1077,30 +1115,25 @@ private func runIsolatedProcess(
       throw CompileStartupFailure.notReady(stage: "drain-start")
     }
     startupMilestones.append(.drainsStarted)
-    guard DispatchTime.now().uptimeNanoseconds < startupDeadline.uptimeNanoseconds else {
-      throw CompileStartupFailure.notReady(stage: "execution-grant")
-    }
-    try captureControl.grantExecution()
+    try captureControl.grantExecution(until: startupDeadline)
     startupMilestones.append(.grantSent)
     try captureControl.waitForGrantAccepted(until: startupDeadline)
     startupMilestones.append(.grantAccepted)
-    if case .afterGrantAccepted = deadlineInjection {
-      throw CompileStartupFailure.injectedNotReady(
-        stage: "target-launch",
-        after: .grantAccepted
-      )
-    }
-    try captureControl.permitTargetFork()
+    exhaustStartupDeadlineIfRequested(
+      deadlineInjection,
+      after: .grantAccepted,
+      until: startupDeadline
+    )
+    try captureControl.permitTargetFork(until: startupDeadline)
     startupMilestones.append(.targetForkPermitted)
     try captureControl.waitForTargetForkedGated(until: startupDeadline)
     startupMilestones.append(.targetForkedGated)
-    if case .afterTargetForkedGated = deadlineInjection {
-      throw CompileStartupFailure.injectedNotReady(
-        stage: "target-launch",
-        after: .targetForkedGated
-      )
-    }
-    try captureControl.permitTargetLaunch()
+    exhaustStartupDeadlineIfRequested(
+      deadlineInjection,
+      after: .targetForkedGated,
+      until: startupDeadline
+    )
+    try captureControl.permitTargetLaunch(until: startupDeadline)
     startupMilestones.append(.targetLaunchPermitted)
     try captureControl.waitForTargetLaunch(until: startupDeadline)
     startupMilestones.append(.targetLaunchAcknowledged)
@@ -1469,8 +1502,7 @@ private final class CompileProcessResults: @unchecked Sendable {
   )
   #expect(
     neverLaunchedResult.startupState == .startupNotReady
-      && neverLaunchedResult.setupError?.contains(
-        "startup-not-ready(stage=target-launch,injected-after=grantAccepted)") == true
+      && neverLaunchedResult.setupError?.contains("startup-not-ready(stage=target-launch)") == true
       && neverLaunchedResult.startupMilestones == [
         .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
       ]
@@ -1497,8 +1529,8 @@ private final class CompileProcessResults: @unchecked Sendable {
   )
   #expect(
     neverAcknowledgedResult.startupState == .startupNotReady
-      && neverAcknowledgedResult.setupError?.contains(
-        "startup-not-ready(stage=target-launch,injected-after=targetForkedGated)") == true
+      && neverAcknowledgedResult.setupError?.contains("startup-not-ready(stage=target-launch)")
+        == true
       && neverAcknowledgedResult.startupMilestones == [
         .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
         .targetForkPermitted, .targetForkedGated,
