@@ -1,7 +1,7 @@
 ---
 id: 20260829-a15e5c
 title: Runtime Protocol 1.5 Execution Preview
-status: active
+status: completed
 created: 2026-08-29
 updated: 2026-08-29
 branch: wip/runtime-protocol-1-5
@@ -41,9 +41,9 @@ superseded_by:
   independently of artifact count.
 - [x] Synchronize protocol-contract fixture rewrite expectations with the canonical
   Protocol 1.5 package assets.
-- [ ] Run the remaining focused fixture, runtime-golden, and release checks on
+- [x] Run the remaining focused fixture, runtime-golden, and release checks on
   `India-mac-mini-m4-hoteng`.
-- [ ] Complete frozen-head local review, sign the landing commit, and hand the
+- [x] Complete frozen-head local review, sign the landing commit, and hand the
   branch to the parent integration workstream.
 
 ## Current State
@@ -73,13 +73,11 @@ superseded_by:
 
 ## Handoff
 
-- Phase: static implementation, generated bindings, fixtures, release contract,
-  documentation, and local focused gates are complete; India-only final gates and
-  frozen-head review remain.
-- Next step: run the recorded focused commands on `India-mac-mini-m4-hoteng`, then
-  update this journal with exact evidence and sign the reviewed head.
-- Blocker: none; local dynamic execution is intentionally disabled after the global
-  host policy changed on 2026-08-29.
+- Phase: implementation, India validation, signed-head review, and integration-branch
+  PR handoff are complete.
+- Next step: let the integration workstream consume this completed slice after its
+  natural PR checks pass.
+- Blocker: none.
 
 ## Evidence
 
@@ -111,3 +109,12 @@ superseded_by:
 - The follow-up head passes Python AST parsing, Ruff static lint,
   `git diff --check`, and project-journal validation. No local dynamic command was
   run after the India-only host policy took effect.
+- India validated exact signed head `fbfe1597`: the release package suite passed
+  61/61, the bundle-contract check passed, and the full cross-language gate passed.
+  The gate supervisor also confirmed all process groups were quiescent at terminal
+  completion. These dynamic results apply to `fbfe1597`; the successor journal-only
+  commit was not locally built or tested.
+- Fresh review of `987393b..ecc24e67` reported four P2 findings in object-identity
+  hardening, descriptor cleanup, typed revalidation errors, and directory-width
+  coverage. Signed follow-up `fbfe1597` closed all four, and the same reviewer
+  returned `No findings.` on the closure pass.
