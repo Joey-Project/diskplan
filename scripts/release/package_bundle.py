@@ -1198,10 +1198,25 @@ def read_regular_file(path: Path, maximum: int) -> bytes:
 def make_bundle_directories(bundle: Path, paths: list[str]) -> None:
     for relative in bundle_directories(paths):
         path = bundle / relative
-        path.mkdir(mode=0o755)
-        metadata = path.lstat()
-        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o755:
-            raise ValueError(f"cannot create exact bundle directory: {relative}")
+        path.mkdir(mode=0o700)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            os.fchmod(descriptor, 0o755)
+            held_metadata = os.fstat(descriptor)
+            named_metadata = path.lstat()
+            held = FileState.from_stat(held_metadata)
+            named = FileState.from_stat(named_metadata)
+            if (
+                not stat.S_ISDIR(held_metadata.st_mode)
+                or stat.S_IMODE(held_metadata.st_mode) != 0o755
+                or not held.same_object(named)
+            ):
+                raise ValueError(f"cannot create exact bundle directory: {relative}")
+        finally:
+            os.close(descriptor)
 
 
 def validate_runtime_capabilities(data: bytes, display_path: Path) -> None:

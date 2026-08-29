@@ -1151,6 +1151,26 @@ class BundleManifestTests(unittest.TestCase):
 
 
 class PackagingAssetsTests(unittest.TestCase):
+    def test_bundle_directories_normalize_mode_under_private_umask(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            bundle.mkdir(mode=0o700)
+            previous_umask = os.umask(0o077)
+            try:
+                packager.make_bundle_directories(
+                    bundle,
+                    ["proto/fixtures/runtime-v1.4/fixtures.json"],
+                )
+            finally:
+                os.umask(previous_umask)
+            for relative in (
+                "proto",
+                "proto/fixtures",
+                "proto/fixtures/runtime-v1.4",
+            ):
+                self.assertEqual(stat.S_IMODE((bundle / relative).stat().st_mode), 0o755)
+
     def test_main_packages_the_exact_runtime_contract(self) -> None:
         repository_root = SCRIPT_DIR.parent.parent
         with tempfile.TemporaryDirectory() as temporary:
