@@ -1527,7 +1527,7 @@ public struct ActionDefinition: Equatable, Sendable {
   fileprivate static func actionAwareEvaluation(
     _ base: PolicyEvaluation,
     prototype: ActionPrototype,
-    prerequisites: [ActionDefinition]
+    prerequisites _: [ActionDefinition]
   ) throws -> PolicyEvaluation {
     switch prototype.adapterContract {
     case .gitWorktreeDiscardLocalChanges(let contract):
@@ -1535,18 +1535,7 @@ public struct ActionDefinition: Equatable, Sendable {
     case .gitWorktreeRemove(let contract) where contract.requiresDiscardLocalChanges:
       guard
         case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges(
-          targetIdentity: prototype.targetIdentity),
-        prerequisites.contains(where: { prerequisite in
-          guard
-            case .gitWorktreeDiscardLocalChanges(let discard) =
-              prerequisite.prototype.adapterContract
-          else { return false }
-          return discard.changeSetDigest == changeSetDigest
-            && discard.verifiedEvidence == contract.verifiedEvidence
-            && discard.successorBaseline == contract.executionBaseline
-            && prerequisite.prototype.namespaceBinding.bindingBytes
-              == prototype.namespaceBinding.bindingBytes
-        })
+          targetIdentity: prototype.targetIdentity)
       else { throw PolicyModelError.invalidActionContract }
       return try base.blockingUnsupportedGitDiscard(changeSetDigest)
     default:

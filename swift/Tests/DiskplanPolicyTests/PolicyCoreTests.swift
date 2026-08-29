@@ -874,11 +874,16 @@ func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
     evidence: mismatchedEvidence,
     request: .gitWorktreeDiscardLocalChanges
   )
+  let removeWithMismatchedPrerequisite = try makeAction(
+    evidence: evidence,
+    prerequisites: [mismatchedDiscard],
+    request: .gitWorktreeRemove
+  )
+  #expect(removeWithMismatchedPrerequisite.evaluation.stageability == .blocked)
   #expect(throws: PolicyModelError.invalidActionContract) {
-    try makeAction(
-      evidence: evidence,
-      prerequisites: [mismatchedDiscard],
-      request: .gitWorktreeRemove
+    try makePlan(
+      actions: [mismatchedDiscard, removeWithMismatchedPrerequisite],
+      evidence: [evidence, mismatchedEvidence]
     )
   }
   #expect(mismatchedDiscard.evaluation.stageability == .blocked)
