@@ -259,6 +259,10 @@ class VersionMetadataTests(unittest.TestCase):
 class SourceManifestTests(unittest.TestCase):
     def test_release_uses_unlinked_trusted_comparator_and_full_record_seal(self) -> None:
         script = (SCRIPT_DIR / "build-release.sh").read_text(encoding="ascii")
+        self.assertLess(
+            script.index("export PYTHONDONTWRITEBYTECODE=1"),
+            script.index('readonly SOURCE_ROOT="${WORK_ROOT}/source"'),
+        )
         self.assertIn('exec 8<"${TRUSTED_SOURCE_MANIFEST}"', script)
         self.assertIn('exec 9<"${TRUSTED_SOURCE_MANIFEST}"', script)
         self.assertIn(
