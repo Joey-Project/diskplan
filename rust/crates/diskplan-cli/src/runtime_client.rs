@@ -325,9 +325,11 @@ fn opaque_set(values: &[OpaqueIdentifier]) -> BTreeSet<Vec<u8>> {
     values.iter().map(|value| value.value.clone()).collect()
 }
 
+type AcknowledgedWaiverKey = (Vec<u8>, Vec<u8>);
+
 fn waiver_set(
     values: &[diskplan_proto::diskplan::v1::AcknowledgedWaiver],
-) -> Result<BTreeSet<(Vec<u8>, Vec<u8>)>, RuntimeClientError> {
+) -> Result<BTreeSet<AcknowledgedWaiverKey>, RuntimeClientError> {
     values
         .iter()
         .map(|value| {

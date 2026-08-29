@@ -1357,6 +1357,9 @@ pub enum ClientError {
     },
 }
 
+// This transport union carries every high-rate scan and runtime event. Keep the
+// payloads inline rather than adding one heap allocation per engine event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionEvent {
     Scan(EngineEvent),
@@ -2457,35 +2460,31 @@ fn decode_engine_envelope(payload: &[u8]) -> Result<Envelope, ClientError> {
 }
 
 fn runtime_body_matches_request(kind: RuntimeRequestKind, body: &runtime_event::Body) -> bool {
-    match (kind, body) {
+    matches!(
+        (kind, body),
         (
             RuntimeRequestKind::BuildPlan,
             runtime_event::Body::BuildPlanAccepted(_)
-            | runtime_event::Body::PlanProjectionChunk(_)
-            | runtime_event::Body::PlanProjection(_)
-            | runtime_event::Body::PlanProjectionInvalidated(_)
-            | runtime_event::Body::RuntimeRejected(_),
-        )
-        | (
+                | runtime_event::Body::PlanProjectionChunk(_)
+                | runtime_event::Body::PlanProjection(_)
+                | runtime_event::Body::PlanProjectionInvalidated(_)
+                | runtime_event::Body::RuntimeRejected(_),
+        ) | (
             RuntimeRequestKind::EditOverlay,
             runtime_event::Body::DecisionOverlayAcknowledged(_)
-            | runtime_event::Body::DecisionOverlayRejected(_)
-            | runtime_event::Body::RuntimeRejected(_),
-        )
-        | (
+                | runtime_event::Body::DecisionOverlayRejected(_)
+                | runtime_event::Body::RuntimeRejected(_),
+        ) | (
             RuntimeRequestKind::PrepareDryRun,
             runtime_event::Body::DryRunProjection(_) | runtime_event::Body::RuntimeRejected(_),
-        )
-        | (
+        ) | (
             RuntimeRequestKind::PrepareApplyReview,
             runtime_event::Body::ApplyReviewProjection(_) | runtime_event::Body::RuntimeRejected(_),
-        )
-        | (
+        ) | (
             RuntimeRequestKind::ConfirmApply | RuntimeRequestKind::CancelExecution,
             runtime_event::Body::ExecutionStreamEvent(_) | runtime_event::Body::RuntimeRejected(_),
-        ) => true,
-        _ => false,
-    }
+        )
+    )
 }
 
 fn runtime_body_is_terminal(body: &runtime_event::Body) -> bool {

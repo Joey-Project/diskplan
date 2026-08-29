@@ -163,6 +163,16 @@ superseded_by:
   tests in 23.92 test seconds and 23.969 bounded wall seconds, also quiescent.
   This evidence binds the snapshot implementation head; the following
   documentation-only commit awaits its naturally triggered current-head CI.
+- Natural CI for exact documentation head `d1335cb` passed Foundation's macOS
+  14 compatibility job and both required and best-effort Release CI jobs.
+  Foundation's required macOS 26 job passed its tests and doc tests, then
+  failed Rust 1.95 warning-free Clippy on three static lints introduced by the
+  runtime transport slice: waiver-set type complexity, the intentionally
+  inline high-rate session-event union, and a boolean match equivalent to
+  `matches!`. The follow-up adds a semantic waiver-key alias, documents and
+  narrowly permits the inline transport union, and adopts `matches!` without
+  changing runtime behavior. No CI rerun was requested; the code-changing head
+  requires naturally triggered current-head validation.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including
