@@ -151,8 +151,12 @@ public enum ExecutionAdapterOperation: Equatable, Sendable {
   }
 
   public var forceRequirement: ForceRequirement {
-    if case .genericRemove(_, let contract) = self { return contract.forceRequirement }
-    return .notRequired
+    switch self {
+    case .genericRemove(_, let contract): return contract.forceRequirement
+    case .codexCleanTemporary(_, let contract): return contract.forceRequirement
+    case .versionedArtifactRemove(_, let contract): return contract.forceRequirement
+    case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges: return .notRequired
+    }
   }
 }
 

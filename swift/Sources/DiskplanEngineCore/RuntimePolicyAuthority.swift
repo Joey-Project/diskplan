@@ -2141,8 +2141,14 @@ private func adapterScope(
   case .codexTemporary:
     return .genericRemove
   case .versionedArtifact:
-    let version = String(data: node.path.components.last!.bytes, encoding: .utf8) ?? "raw-version"
-    return .versionedArtifactRemove(artifactKind: "versioned-artifact", version: version)
+    guard node.path.components.count >= 2,
+      let artifactKind = String(
+        data: node.path.components[node.path.components.count - 2].bytes,
+        encoding: .utf8
+      ),
+      let version = String(data: node.path.components.last!.bytes, encoding: .utf8)
+    else { return .genericRemove }
+    return .versionedArtifactRemove(artifactKind: artifactKind, version: version)
   case .gitLinkedWorktree, .buildOutput, .cache, .temporary, .providerReportOnly:
     return .genericRemove
   }

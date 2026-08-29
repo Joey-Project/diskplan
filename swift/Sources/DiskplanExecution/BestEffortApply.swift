@@ -168,13 +168,11 @@ public actor BestEffortApplyCoordinator {
       await emit(
         .unitStarted(unit.id), index: &eventIndex, auditFailures: &auditFailures)
       for mutationStep in unit.mutationSteps {
-        let action = mutationStep.action
-        guard
-          case .genericRemove(let contract) = action.prototype.adapterContract,
-          contract.forceRequirement == .requiresForceWithWarning
-        else { continue }
+        guard mutationStep.operation.forceRequirement == .requiresForceWithWarning else {
+          continue
+        }
         await emit(
-          .forceRequiredWarning(action.id),
+          .forceRequiredWarning(mutationStep.action.id),
           index: &eventIndex,
           auditFailures: &auditFailures
         )

@@ -532,28 +532,34 @@ public struct RevalidationReport: Equatable, Sendable {
 public struct DryRunReport: Equatable, Sendable {
   public let revalidation: RevalidationReport
   public let forceWarningActionIDs: [ActionID]
+  public let commandPreviews: [AuthoritativeCommandPreview]
 
   public init(
     revalidation: RevalidationReport,
-    forceWarningActionIDs: [ActionID] = []
+    forceWarningActionIDs: [ActionID] = [],
+    commandPreviews: [AuthoritativeCommandPreview] = []
   ) {
     self.revalidation = revalidation
     self.forceWarningActionIDs = forceWarningActionIDs
+    self.commandPreviews = commandPreviews
   }
 }
 
 public struct ApplyReadyReport: Equatable, Sendable {
   public let revalidation: RevalidationReport
   public let forceWarningActionIDs: [ActionID]
+  public let commandPreviews: [AuthoritativeCommandPreview]
   public let reviewBindingHash: PolicyDigest
 
   public init(
     revalidation: RevalidationReport,
     forceWarningActionIDs: [ActionID] = [],
+    commandPreviews: [AuthoritativeCommandPreview] = [],
     reviewBindingHash: PolicyDigest? = nil
   ) {
     self.revalidation = revalidation
     self.forceWarningActionIDs = forceWarningActionIDs
+    self.commandPreviews = commandPreviews
     self.reviewBindingHash = reviewBindingHash ?? revalidation.overlayHash
   }
 }
@@ -635,6 +641,8 @@ public actor ApplyAuthorization {
 public enum PreparationResult: Sendable {
   case rejected(RevalidationReport)
   case dryRun(DryRunReport)
+  /// Revalidation succeeded, but at least one selected action has no safe mutation adapter.
+  case reportOnly(DryRunReport)
   case applyReady(ApplyReadyReport, ApplyCapability)
 }
 

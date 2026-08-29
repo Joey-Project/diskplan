@@ -151,6 +151,49 @@ func forceWarningPrecedesTheMutationAndAuditFailureIsNonfatal() async throws {
 }
 
 @Test
+func specializedForceWarningAlsoPrecedesMutation() async throws {
+  let facts = globalFacts()
+  let evidence = snapshot(
+    path: ".codex-tmp/stale",
+    content: .explicitlyNotApplicable(.metadataOnlyObject),
+    adapterScope: .codexCleanTemporary(cleanupScopeID: "stale"),
+    forceRequirement: .requiresForceWithWarning
+  )
+  let action = try makeAction(
+    evidence: evidence,
+    facts: facts,
+    request: .codexCleanTemporary(cleanupScopeID: "stale")
+  )
+  let plan = try ImmutablePlan(
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1",
+    globalFacts: facts,
+    evidenceSnapshots: [evidence],
+    actions: [action],
+    releaseGraphBundle: nil
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan, selectedActionIDs: [action.id], waiverConsents: [], userNotes: [])
+  let authorization = try await makeAuthorization(plan: plan, overlay: overlay)
+  let events = RecordingEventSink()
+  let adapter = RecordingMutationAdapter(eventSink: events)
+
+  _ = await BestEffortApplyCoordinator(
+    adapter: adapter,
+    eventSink: events,
+    auditSink: nil,
+    clock: { 202 }
+  ).apply(authorization: authorization, plan: plan, overlay: overlay)
+  let transcript = await events.events
+  let warningIndex = transcript.firstIndex(of: .forceRequiredWarning(action.id))
+  let mutationIndex = transcript.firstIndex(of: .adapterObservedMutation(action.id))
+
+  #expect(warningIndex != nil)
+  #expect(mutationIndex != nil)
+  if let warningIndex, let mutationIndex { #expect(warningIndex < mutationIndex) }
+}
+
+@Test
 func compoundReleaseExecutesEveryOwnerOnceAndReportsPartialFailure() async throws {
   let fixture = try ReleaseFixture(
     content: .explicitlyNotApplicable(.metadataOnlyObject)
@@ -766,6 +809,144 @@ func directoryRemovalArgumentsAreRecursiveAndForceIsNeverImplicit() throws {
   )
 }
 
+@Test
+func codexTemporaryAdapterRemovesOnlyItsBoundScope() async throws {
+  let root = try TemporaryRemovalRoot()
+  defer { root.cleanup() }
+  let scratch = root.url.appendingPathComponent(".codex-tmp")
+  let target = scratch.appendingPathComponent("worktrees/stale")
+  try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+  try Data("retained sibling".utf8).write(
+    to: scratch.appendingPathComponent("keep"))
+  let action = try scopedFilesystemAction(
+    root: root.url,
+    components: [".codex-tmp", "worktrees", "stale"],
+    candidateID: "codex-stale",
+    request: .codexCleanTemporary(cleanupScopeID: "worktrees/stale"),
+    adapterScope: .codexCleanTemporary(cleanupScopeID: "worktrees/stale")
+  )
+  guard case .codexCleanTemporary(let contract) = action.prototype.adapterContract else {
+    Issue.record("expected a typed Codex temporary contract")
+    return
+  }
+  let operation = ExecutionAdapterOperation.codexCleanTemporary(
+    BoundMutationTarget(action: action), contract)
+
+  #expect(
+    await PosixRemoveAdapter().apply(operation, context: testMutationContext())
+      == .succeeded(detailCode: "rm-completed")
+  )
+  #expect(!FileManager.default.fileExists(atPath: target.path))
+  #expect(FileManager.default.fileExists(atPath: scratch.appendingPathComponent("keep").path))
+  #expect(await PosixRemoveAdapter().postverify(operation) == .satisfied)
+}
+
+@Test
+func codexTemporaryAdapterRejectsAScopeThatDoesNotNameTheTarget() async throws {
+  let root = try TemporaryRemovalRoot()
+  defer { root.cleanup() }
+  let target = root.url.appendingPathComponent(".codex-tmp/stale")
+  try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try scopedFilesystemAction(
+      root: root.url,
+      components: [".codex-tmp", "stale"],
+      candidateID: "codex-mismatch",
+      request: .codexCleanTemporary(cleanupScopeID: "different"),
+      adapterScope: .codexCleanTemporary(cleanupScopeID: "different")
+    )
+  }
+  #expect(FileManager.default.fileExists(atPath: target.path))
+}
+
+@Test
+func codexAllScopeNamesOnlyTheScratchRoot() throws {
+  let root = try TemporaryRemovalRoot()
+  defer { root.cleanup() }
+  let target = root.url.appendingPathComponent(".codex-tmp/all")
+  try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try scopedFilesystemAction(
+      root: root.url,
+      components: [".codex-tmp", "all"],
+      candidateID: "codex-reserved-all",
+      request: .codexCleanTemporary(cleanupScopeID: "all"),
+      adapterScope: .codexCleanTemporary(cleanupScopeID: "all")
+    )
+  }
+  #expect(FileManager.default.fileExists(atPath: target.path))
+}
+
+@Test
+func codexScopeRejectsAnAmbiguousNestedScratchComponent() throws {
+  let root = try TemporaryRemovalRoot()
+  defer { root.cleanup() }
+  let target = root.url.appendingPathComponent(".codex-tmp/worktrees/.codex-tmp/stale")
+  try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try scopedFilesystemAction(
+      root: root.url,
+      components: [".codex-tmp", "worktrees", ".codex-tmp", "stale"],
+      candidateID: "codex-ambiguous-scratch",
+      request: .codexCleanTemporary(cleanupScopeID: "stale"),
+      adapterScope: .codexCleanTemporary(cleanupScopeID: "stale")
+    )
+  }
+  #expect(FileManager.default.fileExists(atPath: target.path))
+}
+
+@Test
+func pathnameBackedSpecializedAdaptersRejectContentStableContracts() throws {
+  let root = try TemporaryRemovalRoot()
+  defer { root.cleanup() }
+  let target = root.url.appendingPathComponent("diskplan/1.2.3")
+  try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try scopedFilesystemAction(
+      root: root.url,
+      components: ["diskplan", "1.2.3"],
+      candidateID: "content-stable-version",
+      request: .versionedArtifactRemove(artifactKind: "diskplan", version: "1.2.3"),
+      adapterScope: .versionedArtifactRemove(artifactKind: "diskplan", version: "1.2.3"),
+      content: .requiredDigest(digest(214))
+    )
+  }
+  #expect(FileManager.default.fileExists(atPath: target.path))
+}
+
+@Test
+func versionedArtifactAdapterBindsKindVersionAndForce() async throws {
+  let root = try TemporaryRemovalRoot()
+  defer { root.cleanup() }
+  let target = root.url.appendingPathComponent("diskplan/1.2.3")
+  try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+  try Data("artifact".utf8).write(to: target.appendingPathComponent("diskplan"))
+  let action = try scopedFilesystemAction(
+    root: root.url,
+    components: ["diskplan", "1.2.3"],
+    candidateID: "version-1.2.3",
+    request: .versionedArtifactRemove(artifactKind: "diskplan", version: "1.2.3"),
+    adapterScope: .versionedArtifactRemove(artifactKind: "diskplan", version: "1.2.3"),
+    force: .requiresForceWithWarning
+  )
+  guard case .versionedArtifactRemove(let contract) = action.prototype.adapterContract else {
+    Issue.record("expected a typed versioned artifact contract")
+    return
+  }
+  let operation = ExecutionAdapterOperation.versionedArtifactRemove(
+    BoundMutationTarget(action: action), contract)
+
+  #expect(operation.forceRequirement == .requiresForceWithWarning)
+  #expect(
+    await PosixRemoveAdapter().apply(operation, context: testMutationContext())
+      == .succeeded(detailCode: "rm-completed")
+  )
+  #expect(!FileManager.default.fileExists(atPath: target.path))
+}
+
 private actor PreparationSnapshotSource: RevalidationEvidenceSource {
   func collectCurrentEvidence(for request: RevalidationRequest) async throws
     -> CurrentRevalidationSnapshot
@@ -1208,6 +1389,90 @@ private func filesystemAction(
     schemaVersion: "schema-1"
   )
   return try makeAction(evidence: evidence, facts: facts)
+}
+
+private func scopedFilesystemAction(
+  root: URL,
+  components: [String],
+  candidateID: String,
+  request: ActionAdapterRequest,
+  adapterScope: AdapterScopeEvidence,
+  force: ForceRequirement = .notRequired,
+  content: ContentProtectionBaseline = .explicitlyNotApplicable(.metadataOnlyObject)
+) throws -> ActionDefinition {
+  let rawComponents = components.map { Data($0.utf8) }
+  let rawRoot = try RawRootPath(absoluteBytes: Data(root.path.utf8))
+  let facts = FrozenGlobalFacts(
+    captureID: digest(211),
+    profile: "standard",
+    configuration: Data("scoped-filesystem-test".utf8),
+    coverage: [GlobalCoverageFact(rawRoot: rawRoot, coverage: .complete, reasons: ["complete"])],
+    semanticReferenceTimeSeconds: 100,
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1"
+  )
+  let seal = NamespaceSealEvidence(
+    trustedNamespace: .ownerPrivate,
+    accessPolicy: .known("owner-private"),
+    aclDigest: .known(digest(212)),
+    providerBoundary: .known(.local),
+    mountIdentity: .known("test-mount")
+  )
+  let targetURL = components.reduce(root) { $0.appendingPathComponent($1) }
+  let targetIdentity = try filesystemIdentity(targetURL, kind: .directory)
+  var parentChain: [ParentNamespaceBinding] = []
+  if components.count > 1 {
+    for parentCount in 1..<components.count {
+      let parentComponents = Array(rawComponents.prefix(parentCount))
+      let parentURL = components.prefix(parentCount).reduce(root) {
+        $0.appendingPathComponent($1)
+      }
+      parentChain.append(
+        ParentNamespaceBinding(
+          relativePath: try RawTargetPath(components: parentComponents),
+          identity: try filesystemIdentity(parentURL, kind: .directory),
+          seal: seal
+        ))
+    }
+  }
+  let namespace = try ProtectedNamespaceBinding(
+    rawRoot: rawRoot,
+    rootIdentity: try filesystemIdentity(root, kind: .directory),
+    rootSeal: seal,
+    targetPath: try RawTargetPath(components: rawComponents),
+    targetIdentity: targetIdentity,
+    parentChain: parentChain
+  )
+  let evidence = try FrozenEvidenceSnapshot(
+    captureID: facts.captureID,
+    globalFactsHash: facts.globalFactsHash,
+    candidateID: candidateID,
+    namespaceBinding: namespace,
+    identity: .known(targetIdentity),
+    coverage: .complete,
+    collectorStatus: .known(.complete),
+    activity: .known(.inactive),
+    explicitProtection: .known(.notProtected),
+    providerState: .known(.local),
+    recoverability: .known(.recoverable),
+    recoverabilityReviewFacts: [],
+    dependencyState: .known(.complete),
+    semanticReviewFacts: [],
+    accessPolicy: .known("owner-private"),
+    contentProtection: .known(content),
+    aclDigest: .known(digest(213)),
+    targetMountIdentity: .known("test-mount"),
+    removalForceRequirement: .known(force),
+    quarantineCapability: .known(true),
+    gitWorktree: nil,
+    adapterScope: adapterScope,
+    additionalAdapterScopes: [],
+    classificationClaims: completeClassificationClaims(),
+    semanticReferenceTimeSeconds: 100,
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1"
+  )
+  return try makeAction(evidence: evidence, facts: facts, request: request)
 }
 
 private func filesystemIdentity(

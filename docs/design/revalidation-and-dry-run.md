@@ -77,6 +77,19 @@ Dry-run returns `DryRunReport`, which structurally has no capability field and h
 on an execution adapter. The dry-run preparation path never constructs or invokes an adapter,
 final-descriptor verifier, authorization, or mutation context.
 
+Both dry-run and apply review carry the same engine-issued `AuthoritativeCommandPreview` list.
+For command-backed actions it contains the exact raw executable, argv, descriptor-derived working
+directory, force-warning bit, and path-race residual that the Swift adapter will use. Native Git
+and compound release operations remain typed native previews rather than invented shell commands.
+The frontend renders these values verbatim; an edited preview cannot authorize apply because the
+engine registry binds and rechecks the complete preview set.
+
+An action whose selected protected properties cannot be preserved by an installed mutation
+adapter receives a `reportOnly` preview with no executable, argv, or working directory. Dry-run
+still returns that evidence and any force warning. An apply preparation containing any such action
+returns a capability-free `reportOnly` result rather than advertising a command or minting an
+authorization that Phase 5 cannot execute.
+
 Apply preparation returns a separate `ApplyReadyReport` plus `ApplyCapability`. The public engine
 API obtains issue and authorization times from its private wall clock; the frontend cannot extend
 a lifetime by supplying timestamps. Capability bytes come from `SystemRandomNumberGenerator`,

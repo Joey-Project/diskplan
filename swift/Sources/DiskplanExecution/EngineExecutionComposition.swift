@@ -44,27 +44,19 @@ private final class ProductionExecutionAdapter: ExecutionMutationAdapter, @unche
     context: MutationExecutionContext
   ) async -> AdapterOperationOutcome {
     switch operation {
-    case .genericRemove:
+    case .genericRemove, .codexCleanTemporary, .versionedArtifactRemove:
       return await genericRemove.apply(operation, context: context)
     case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges:
       return await gitWorktree.apply(operation, context: context)
-    case .codexCleanTemporary:
-      return .failed(
-        ExecutionAdapterFailure(code: "codex-temporary-adapter-not-configured"))
-    case .versionedArtifactRemove:
-      return .failed(
-        ExecutionAdapterFailure(code: "versioned-artifact-adapter-not-configured"))
     }
   }
 
   func postverify(_ operation: ExecutionAdapterOperation) async -> PostVerificationOutcome {
     switch operation {
-    case .genericRemove:
+    case .genericRemove, .codexCleanTemporary, .versionedArtifactRemove:
       return await genericRemove.postverify(operation)
     case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges:
       return await gitWorktree.postverify(operation)
-    case .codexCleanTemporary, .versionedArtifactRemove:
-      return .unknown(.unsupported)
     }
   }
 }

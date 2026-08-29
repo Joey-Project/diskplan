@@ -10,6 +10,7 @@ public actor ExecutionPreparationEngine {
     let deadlineSeconds: Int64
     let generation: UInt64
     let forceWarningActionIDs: [ActionID]
+    let commandPreviews: [AuthoritativeCommandPreview]
     let reviewBindingHash: PolicyDigest
     let manifest: ExecutionManifest
   }
@@ -135,27 +136,32 @@ public actor ExecutionPreparationEngine {
     guard generationIsCurrent(generation) else {
       throw ExecutionPreparationError.preparationSuperseded
     }
-    let forceWarningActionIDs = Set<ActionID>(
-      validated.executionSteps.flatMap(\.jitRevalidationActions).compactMap { action in
-        guard
-          case .genericRemove(let contract) = action.prototype.adapterContract,
-          contract.forceRequirement == .requiresForceWithWarning
-        else { return nil }
-        return action.id
-      }
-    ).sorted()
+    let commandPreviews = AuthoritativeCommandPreviewBuilder.previews(for: validated)
+    let forceWarningActionIDs = commandPreviews.compactMap { preview in
+      preview.requiresForceWarning ? preview.actionID : nil
+    }
     let reviewBindingHash = applyReviewBindingHash(
       manifest: manifest,
-      forceWarningActionIDs: forceWarningActionIDs
+      forceWarningActionIDs: forceWarningActionIDs,
+      commandPreviews: commandPreviews
     )
     switch mode {
     case .dryRun:
       return .dryRun(
         DryRunReport(
           revalidation: report,
-          forceWarningActionIDs: forceWarningActionIDs
+          forceWarningActionIDs: forceWarningActionIDs,
+          commandPreviews: commandPreviews
         ))
     case .apply:
+      guard !commandPreviews.contains(where: { $0.kind == .reportOnly }) else {
+        return .reportOnly(
+          DryRunReport(
+            revalidation: report,
+            forceWarningActionIDs: forceWarningActionIDs,
+            commandPreviews: commandPreviews
+          ))
+      }
       guard generationIsCurrent(generation) else {
         throw ExecutionPreparationError.preparationSuperseded
       }
@@ -178,6 +184,7 @@ public actor ExecutionPreparationEngine {
         deadlineSeconds: epoch.deadlineSeconds,
         generation: generation,
         forceWarningActionIDs: forceWarningActionIDs,
+        commandPreviews: commandPreviews,
         reviewBindingHash: reviewBindingHash,
         manifest: manifest
       )
@@ -185,6 +192,7 @@ public actor ExecutionPreparationEngine {
         ApplyReadyReport(
           revalidation: report,
           forceWarningActionIDs: forceWarningActionIDs,
+          commandPreviews: commandPreviews,
           reviewBindingHash: reviewBindingHash
         ),
         ApplyCapability(opaqueBytes: token)
@@ -234,6 +242,7 @@ public actor ExecutionPreparationEngine {
       record.epochID == ready.revalidation.epoch.epochID,
       record.manifest == readyManifest,
       record.forceWarningActionIDs == ready.forceWarningActionIDs,
+      record.commandPreviews == ready.commandPreviews,
       record.reviewBindingHash == ready.reviewBindingHash
     else { throw ExecutionPreparationError.capabilityBindingMismatch }
     if !record.forceWarningActionIDs.isEmpty, confirmation == nil {
@@ -264,15 +273,54 @@ public actor ExecutionPreparationEngine {
 
   private func applyReviewBindingHash(
     manifest: ExecutionManifest,
-    forceWarningActionIDs: [ActionID]
+    forceWarningActionIDs: [ActionID],
+    commandPreviews: [AuthoritativeCommandPreview]
   ) -> PolicyDigest {
-    var bytes = Data("diskplan/apply-review/v1\0".utf8)
+    var bytes = Data("diskplan/apply-review/v2\0".utf8)
     bytes.append(manifest.currentBindingHash.bytes)
     bytes.append(manifest.planHash.bytes)
     bytes.append(manifest.overlayHash.bytes)
     bytes.append(Data(manifest.epoch.epochID.utf8))
+    appendCount(forceWarningActionIDs.count, to: &bytes)
     for actionID in forceWarningActionIDs { bytes.append(actionID.digest.bytes) }
+    appendCount(commandPreviews.count, to: &bytes)
+    for preview in commandPreviews {
+      bytes.append(preview.actionID.digest.bytes)
+      appendBounded(Data(preview.kind.rawValue.utf8), to: &bytes)
+      appendBounded(Data(preview.adapter.rawValue.utf8), to: &bytes)
+      appendOptional(preview.executableRawPath, to: &bytes)
+      appendOptional(preview.workingDirectoryRawPath, to: &bytes)
+      bytes.append(preview.requiresForceWarning ? 1 : 0)
+      bytes.append(preview.pathRaceResidual ? 1 : 0)
+      appendCount(preview.compoundReleaseGroupIDs.count, to: &bytes)
+      for groupID in preview.compoundReleaseGroupIDs {
+        appendBounded(Data(groupID.utf8), to: &bytes)
+      }
+      appendCount(preview.compoundOwnerActionIDs.count, to: &bytes)
+      for actionID in preview.compoundOwnerActionIDs {
+        bytes.append(actionID.digest.bytes)
+      }
+      appendBounded(Data(preview.detailCode.utf8), to: &bytes)
+      appendCount(preview.arguments.count, to: &bytes)
+      for argument in preview.arguments { appendBounded(argument, to: &bytes) }
+    }
     return try! PolicyDigest(bytes: Data(SHA256.hash(data: bytes)))
+  }
+
+  private func appendOptional(_ value: Data?, to bytes: inout Data) {
+    bytes.append(value == nil ? 0 : 1)
+    if let value { appendBounded(value, to: &bytes) }
+  }
+
+  private func appendBounded(_ value: Data, to bytes: inout Data) {
+    var count = UInt64(value.count).bigEndian
+    withUnsafeBytes(of: &count) { bytes.append(contentsOf: $0) }
+    bytes.append(value)
+  }
+
+  private func appendCount(_ value: Int, to bytes: inout Data) {
+    var count = UInt64(value).bigEndian
+    withUnsafeBytes(of: &count) { bytes.append(contentsOf: $0) }
   }
 
   private func invalidateAllCapabilities() { capabilities.removeAll(keepingCapacity: true) }
