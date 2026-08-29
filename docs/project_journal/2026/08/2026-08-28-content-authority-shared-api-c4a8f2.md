@@ -183,18 +183,23 @@ superseded_by:
   target is forked but remains gated in the supervisor process group. Swift
   passes that same absolute monotonic deadline to the Python supervisor, which
   checks it before fork and again in the gated child immediately before `execv`.
-  A non-inheritable child-status pipe closes only when `execv` commits, so the
-  supervisor emits `L` only after that boundary rather than merely after writing
-  the `S` release byte; Swift also rejects an acknowledgement read after the
-  deadline. A test-only logical-clock hook advances the child's observed clock
-  to the original deadline at the real exec boundary, exercising the same
-  action-side comparator without a wall-clock wait. On that path the supervisor
-  kills and `waitpid`-reaps the gated target before returning the distinct `X`
-  frame, which Swift preserves as a typed `target-launch,target-reaped=true`
-  failure. A pre-fork expiry still returns `D`, when no target exists. Test
-  scheduling therefore cannot silently select an earlier stage or authorize a
-  target after the bound. The production absolute 15-second startup deadline
-  remains unchanged. Startup-failure cleanup retains
+  These are user-space admission and classification checks at the closest
+  available action boundaries, not a kernel-enforced hard real-time cutoff
+  atomic with `execv`; any boundary that observes expiry fails closed, and Swift
+  never accepts a late acknowledgement as ready. In the controlled startup path,
+  a non-inheritable child-status pipe closes when `execv` commits; all catchable
+  pre-exec setup failures and TERM/INT delivery instead write `E`, so the
+  supervisor emits `L` only after the exec boundary rather than merely after
+  writing the `S` release byte. A test-only logical-clock hook advances the
+  child's observed clock to the original deadline at that boundary, exercising
+  the same comparator without a wall-clock wait. On that path the supervisor
+  kills and `waitpid`-reaps the gated target, clears its stale PID identity, and
+  only then returns the distinct `X` frame, which Swift preserves as a typed
+  `target-launch,target-reaped=true` failure. A pre-fork expiry returns `D` as
+  `target-forked-gated`, when no target exists. Test scheduling therefore cannot
+  silently select an earlier stage, and an observed expired bound cannot advance
+  startup. The production absolute 15-second startup deadline remains unchanged.
+  Startup-failure cleanup retains
   the control channel until bounded TERM/KILL and reap complete, preventing EOF
   from changing the injected failure taxonomy. The exact focused gate passes
   1/1 with the target test completing in 7.562 seconds. The unchanged CI-shaped

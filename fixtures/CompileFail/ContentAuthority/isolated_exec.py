@@ -175,6 +175,7 @@ def enforce_startup_deadline(
 
 
 def kill_and_reap_target():
+    global target_pid
     if target_pid is None or target_pid <= 0:
         return
     kill_target_best_effort()
@@ -185,8 +186,10 @@ def kill_and_reap_target():
         except InterruptedError:
             continue
         except ChildProcessError:
+            target_pid = None
             return
         if waited_pid == target_pid:
+            target_pid = None
             return
         if time.monotonic() >= deadline:
             raise TimeoutError("target reap timed out")
@@ -301,13 +304,22 @@ def main():
     )
     target_pid = os.fork()
     if target_pid == 0:
-        os.close(control_descriptor)
-        os.close(launch_gate_write)
-        os.close(launch_status_read)
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         try:
+            os.close(control_descriptor)
+            os.close(launch_gate_write)
+            os.close(launch_status_read)
+
+            def report_gated_target_termination(_signum, _frame):
+                try:
+                    os.write(launch_status_write, b"E")
+                finally:
+                    os._exit(SUPERVISOR_SETUP_FAILURE)
+
+            # Caught handlers reset to default on successful exec. Until then,
+            # any TERM/INT must report E rather than masquerading as CLOEXEC EOF.
+            signal.signal(signal.SIGTERM, report_gated_target_termination)
+            signal.signal(signal.SIGINT, report_gated_target_termination)
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
             if os.read(launch_gate_read, 1) != b"S":
                 raise RuntimeError("target-launch gate was not received")
             os.close(launch_gate_read)

@@ -227,6 +227,7 @@ private struct CompileProcessResult: Sendable {
   let stderrDrainStarted: Bool
   let captureOwnership: String
   let processGroupCleanup: CompileProcessGroupCleanup
+  let startupCleanupReaped: Bool
   let processGroupQuiescence: CompileProcessGroupQuiescence
 
   var report: String {
@@ -240,6 +241,7 @@ private struct CompileProcessResult: Sendable {
       + "stdoutDrainStarted=\(stdoutDrainStarted) stderrDrainStarted=\(stderrDrainStarted) "
       + "captureOwnership=\(String(reflecting: captureOwnership)) "
       + "processGroupCleanup=\(processGroupCleanup.rawValue) "
+      + "startupCleanupReaped=\(startupCleanupReaped) "
       + "processGroupQuiescence=\(processGroupQuiescence.rawValue) "
       + "stdout=\(String(reflecting: stdout.text)) stderr=\(String(reflecting: stderr.text))"
   }
@@ -732,6 +734,7 @@ private func emptyCompileProcessResult(
     stderrDrainStarted: false,
     captureOwnership: "notRequested",
     processGroupCleanup: .notRequired,
+    startupCleanupReaped: false,
     processGroupQuiescence: .notStarted
   )
 }
@@ -1163,6 +1166,7 @@ private func runIsolatedProcess(
       stderrDrainStarted: stderrDrainRecorder.didStart,
       captureOwnership: "notRequested",
       processGroupCleanup: forcedCleanup.cleanup,
+      startupCleanupReaped: forcedCleanup.waitStatus != nil,
       processGroupQuiescence: .notStarted
     )
   }
@@ -1257,6 +1261,7 @@ private func runIsolatedProcess(
     stderrDrainStarted: stderrDrainRecorder.didStart,
     captureOwnership: captureOwnership,
     processGroupCleanup: cleanup,
+    startupCleanupReaped: false,
     processGroupQuiescence: quiescence
   )
 }
@@ -1355,6 +1360,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       stderrDrainStarted: stderrDrainStarted,
       captureOwnership: "notRequested",
       processGroupCleanup: .notRequired,
+      startupCleanupReaped: false,
       processGroupQuiescence: processGroupQuiescence
     )
   }
@@ -1488,7 +1494,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverReadyResult.terminationReason == .unavailable
       && !neverReadyResult.stdoutDrainStarted && !neverReadyResult.stderrDrainStarted
       && neverReadyResult.captureOwnership == "notRequested"
-      && neverReadyResult.setupError?.contains("reaped") == true,
+      && neverReadyResult.startupCleanupReaped,
     "A wrapper that never became ready was not bounded and typed: \(neverReadyResult.report)"
   )
 
@@ -1501,7 +1507,8 @@ private final class CompileProcessResults: @unchecked Sendable {
   )
   #expect(
     neverLaunchedResult.startupState == .startupNotReady
-      && neverLaunchedResult.setupError?.contains("startup-not-ready(stage=target-launch)") == true
+      && neverLaunchedResult.setupError?.contains(
+        "startup-not-ready(stage=target-forked-gated)") == true
       && neverLaunchedResult.startupMilestones == [
         .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
         .targetForkPermitted,
@@ -1512,7 +1519,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverLaunchedResult.stdoutDrain == .eof
       && neverLaunchedResult.stderrDrain == .eof
       && neverLaunchedResult.captureOwnership == "notRequested"
-      && neverLaunchedResult.setupError?.contains("reaped") == true,
+      && neverLaunchedResult.startupCleanupReaped,
     "A granted wrapper that never launched its target was not bounded and typed: \(neverLaunchedResult.report)"
   )
 
@@ -1542,7 +1549,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverAcknowledgedResult.stdoutDrain == .eof
       && neverAcknowledgedResult.stderrDrain == .eof
       && neverAcknowledgedResult.captureOwnership == "notRequested"
-      && neverAcknowledgedResult.setupError?.contains("reaped") == true
+      && neverAcknowledgedResult.startupCleanupReaped
       && !FileManager.default.fileExists(atPath: postForkMarker.path),
     "A forked gated target survived before launch acknowledgement: \(neverAcknowledgedResult.report)"
   )
