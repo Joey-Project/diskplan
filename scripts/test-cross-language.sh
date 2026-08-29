@@ -39,3 +39,4 @@ DISKPLAN_ENGINE_BIN="${ENGINE_BIN}" cargo test --locked -p diskplan --test engin
 scripts/canonical-fixture.sh check
 scripts/protocol13-fixtures.sh check
 scripts/protocol14-fixtures.sh check
+scripts/protocol15-fixtures.sh check

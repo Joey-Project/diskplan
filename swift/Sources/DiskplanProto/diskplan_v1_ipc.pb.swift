@@ -5104,9 +5104,27 @@ public nonisolated struct Diskplan_V1_ActionExecutionPreviewProjection: Sendable
 
   public var mutationSupported: Bool = false
 
+  /// Protocol 1.5: exact execve working-directory bytes. Presence is required
+  /// at 1.5, including an explicitly empty value for a non-mutating preview.
+  /// Protocol 1.4 senders must omit this field.
+  public var rawWorkingDirectory: Data {
+    get {_rawWorkingDirectory ?? Data()}
+    set {_rawWorkingDirectory = newValue}
+  }
+  /// Returns true if `rawWorkingDirectory` has been explicitly set.
+  public var hasRawWorkingDirectory: Bool {self._rawWorkingDirectory != nil}
+  /// Clears the value of `rawWorkingDirectory`. Subsequent reads from it will return its default value.
+  public mutating func clearRawWorkingDirectory() {self._rawWorkingDirectory = nil}
+
+  /// Protocol 1.5: engine-authored residual race classification. Protocol 1.4
+  /// senders must retain the zero value and omit the field from the wire.
+  public var pathRace: Diskplan_V1_PathRaceProjection = .unspecified
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+
+  fileprivate var _rawWorkingDirectory: Data? = nil
 }
 
 public nonisolated struct Diskplan_V1_PlanActionProjection: @unchecked Sendable {
@@ -12846,7 +12864,7 @@ nonisolated extension Diskplan_V1_PlanSafetyEvidenceProjection: SwiftProtobuf.Me
 
 nonisolated extension Diskplan_V1_ActionExecutionPreviewProjection: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ActionExecutionPreviewProjection"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}adapter\0\u{3}raw_executable\0\u{3}raw_argv\0\u{3}display_argv\0\u{1}postcondition\0\u{3}mutation_supported\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}adapter\0\u{3}raw_executable\0\u{3}raw_argv\0\u{3}display_argv\0\u{1}postcondition\0\u{3}mutation_supported\0\u{3}raw_working_directory\0\u{3}path_race\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12860,12 +12878,18 @@ nonisolated extension Diskplan_V1_ActionExecutionPreviewProjection: SwiftProtobu
       case 4: try { try decoder.decodeRepeatedStringField(value: &self.displayArgv) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.postcondition) }()
       case 6: try { try decoder.decodeSingularBoolField(value: &self.mutationSupported) }()
+      case 7: try { try decoder.decodeSingularBytesField(value: &self._rawWorkingDirectory) }()
+      case 8: try { try decoder.decodeSingularEnumField(value: &self.pathRace) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if self.adapter != .unspecified {
       try visitor.visitSingularEnumField(value: self.adapter, fieldNumber: 1)
     }
@@ -12884,6 +12908,12 @@ nonisolated extension Diskplan_V1_ActionExecutionPreviewProjection: SwiftProtobu
     if self.mutationSupported != false {
       try visitor.visitSingularBoolField(value: self.mutationSupported, fieldNumber: 6)
     }
+    try { if let v = self._rawWorkingDirectory {
+      try visitor.visitSingularBytesField(value: v, fieldNumber: 7)
+    } }()
+    if self.pathRace != .unspecified {
+      try visitor.visitSingularEnumField(value: self.pathRace, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -12894,6 +12924,8 @@ nonisolated extension Diskplan_V1_ActionExecutionPreviewProjection: SwiftProtobu
     if lhs.displayArgv != rhs.displayArgv {return false}
     if lhs.postcondition != rhs.postcondition {return false}
     if lhs.mutationSupported != rhs.mutationSupported {return false}
+    if lhs._rawWorkingDirectory != rhs._rawWorkingDirectory {return false}
+    if lhs.pathRace != rhs.pathRace {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

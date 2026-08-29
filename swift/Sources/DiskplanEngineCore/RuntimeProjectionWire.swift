@@ -1,4 +1,5 @@
 import CryptoKit
+import DiskplanCore
 import DiskplanProto
 import Foundation
 
@@ -96,8 +97,10 @@ package enum PlanProjectionWireEncoder {
   package static func encode(
     records: [Diskplan_V1_PlanProjectionRecord],
     metadata: PlanProjectionWireMetadata,
+    negotiatedProtocolMinor: UInt32 = protocolMinor,
     chunkPayloadTargetBytes: Int = maximumChunkPayloadBytes
   ) throws -> EncodedPlanProjectionWire {
+    try SealedRuntimeWire.requireSupportedProtocolMinor(negotiatedProtocolMinor)
     try requireNonempty(metadata.scanSessionID, field: "scan_session_id")
     try requireNonempty(metadata.scanCheckpointID, field: "scan_checkpoint_id")
     try requireDigest(
@@ -130,7 +133,10 @@ package enum PlanProjectionWireEncoder {
       )
     }
 
-    let summary = try validateAndSummarize(records)
+    let summary = try validateAndSummarize(
+      records,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     guard metadata.cleanupCandidateCount <= summary.actionCount else {
       throw RuntimeProjectionWireError.invalidIdentifier(field: "cleanup_candidate_count")
     }
@@ -236,7 +242,8 @@ package enum PlanProjectionWireEncoder {
   }
 
   private static func validateAndSummarize(
-    _ records: [Diskplan_V1_PlanProjectionRecord]
+    _ records: [Diskplan_V1_PlanProjectionRecord],
+    negotiatedProtocolMinor: UInt32
   ) throws -> Summary {
     var actions: [Data: Diskplan_V1_PlanActionProjection] = [:]
     var targets: [Data: Diskplan_V1_PlanTargetProjection] = [:]
@@ -256,7 +263,11 @@ package enum PlanProjectionWireEncoder {
       }
       switch record.body {
       case .action(let action):
-        try validateAction(action, index: index)
+        try validateAction(
+          action,
+          index: index,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
+        )
         try insertUnique(action.actionID.value, value: action, into: &actions, field: "action_id")
         blockerCount = try addingExact(
           blockerCount, UInt64(action.blockers.count), field: "blocker_count")
@@ -315,7 +326,8 @@ package enum PlanProjectionWireEncoder {
 
   private static func validateAction(
     _ action: Diskplan_V1_PlanActionProjection,
-    index: UInt64
+    index: UInt64,
+    negotiatedProtocolMinor: UInt32
   ) throws {
     try requireDigest(action.actionID.value, field: "action_id")
     try requireDigest(action.actionLineageID.value, field: "action_lineage_id")
@@ -381,7 +393,13 @@ package enum PlanProjectionWireEncoder {
         throw RuntimeProjectionWireError.invalidRecord(index: index, reason: "self prerequisite")
       }
     }
-    try validatePreview(action.executionPreview, actionKind: action.kind, index: index)
+    try validatePreview(
+      action.executionPreview,
+      actionKind: action.kind,
+      actionPathRace: action.pathRace,
+      index: index,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     try validateSafetyEvidence(action.safetyEvidence, actionKind: action.kind, index: index)
   }
 
@@ -847,7 +865,9 @@ package enum PlanProjectionWireEncoder {
   private static func validatePreview(
     _ preview: Diskplan_V1_ActionExecutionPreviewProjection,
     actionKind: Diskplan_V1_PlanActionKind,
-    index: UInt64
+    actionPathRace: Diskplan_V1_PathRaceProjection,
+    index: UInt64,
+    negotiatedProtocolMinor: UInt32
   ) throws {
     guard preview.adapter == actionKind else {
       throw RuntimeProjectionWireError.invalidRecord(
@@ -855,22 +875,21 @@ package enum PlanProjectionWireEncoder {
         reason: "preview adapter differs from action kind"
       )
     }
-    if preview.mutationSupported {
-      guard !preview.rawExecutable.isEmpty,
-        !preview.rawExecutable.contains(0),
-        preview.rawArgv.allSatisfy({ !$0.contains(0) }),
-        preview.displayArgv.count == preview.rawArgv.count,
-        !preview.postcondition.isEmpty
-      else {
-        throw RuntimeProjectionWireError.invalidRecord(
-          index: index,
-          reason: "invalid executable preview"
-        )
-      }
-    } else if !preview.rawExecutable.isEmpty || !preview.rawArgv.isEmpty {
+    do {
+      try SealedRuntimeWire.requirePreview(
+        preview,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+    } catch {
       throw RuntimeProjectionWireError.invalidRecord(
         index: index,
-        reason: "unsupported mutation carries executable bytes"
+        reason: "invalid execution preview for negotiated protocol minor"
+      )
+    }
+    if negotiatedProtocolMinor >= protocol15Minor, preview.pathRace != actionPathRace {
+      throw RuntimeProjectionWireError.invalidRecord(
+        index: index,
+        reason: "preview path race differs from action path race"
       )
     }
   }

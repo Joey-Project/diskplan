@@ -1,4 +1,5 @@
 import CryptoKit
+import DiskplanCore
 import DiskplanProto
 import Foundation
 
@@ -27,6 +28,12 @@ package enum SealedRuntimeWire {
   package static let maximumRuntimeFramedEmissionBytes: UInt64 =
     maximumRuntimeSealedEmissionBytes + maximumExecutionEventCount * 512
   package static let maximumOpaqueIdentifierBytes = 256
+
+  package static func requireSupportedProtocolMinor(_ minor: UInt32) throws {
+    guard minor == protocol14Minor || minor == protocol15Minor else {
+      throw SealedRuntimeWireError.invalid(field: "negotiated protocol minor")
+    }
+  }
 
   private static let dryRunPayloadDomain = Data("diskplan/dry-run-projection-payload/v1\0".utf8)
   private static let dryRunFinalDomain = Data("diskplan/dry-run-projection-final/v1\0".utf8)
@@ -164,8 +171,10 @@ package enum SealedRuntimeWire {
 
   package static func sealDryRun(
     payload: Diskplan_V1_DryRunProjectionPayload,
-    manifest base: Diskplan_V1_DryRunProjectionManifest
+    manifest base: Diskplan_V1_DryRunProjectionManifest,
+    negotiatedProtocolMinor: UInt32 = protocolMinor
   ) throws -> Diskplan_V1_DryRunProjection {
+    try requireSupportedProtocolMinor(negotiatedProtocolMinor)
     try requireNonempty(base.projectionID.value, field: "projection_id")
     try requireDigest(base.planSha256.value, field: "plan_sha256")
     try requireDigest(base.overlaySha256.value, field: "overlay_sha256")
@@ -200,7 +209,10 @@ package enum SealedRuntimeWire {
     )
     for action in payload.actions {
       try requireDigest(action.actionID.value, field: "dry-run action_id")
-      try requirePreview(action.executionPreview)
+      try requirePreview(
+        action.executionPreview,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
     }
     guard base.current == summary.current else {
       throw SealedRuntimeWireError.invalid(field: "dry-run current")
@@ -235,8 +247,10 @@ package enum SealedRuntimeWire {
   }
 
   package static func sealApplyReview(
-    _ base: Diskplan_V1_ApplyReviewProjection
+    _ base: Diskplan_V1_ApplyReviewProjection,
+    negotiatedProtocolMinor: UInt32 = protocolMinor
   ) throws -> Diskplan_V1_ApplyReviewProjection {
+    try requireSupportedProtocolMinor(negotiatedProtocolMinor)
     try requireNonempty(base.applyReviewID.value, field: "apply_review_id")
     try requireNonempty(base.projectionID.value, field: "projection_id")
     try requireDigest(base.planSha256.value, field: "plan_sha256")
@@ -269,7 +283,10 @@ package enum SealedRuntimeWire {
     )
     for action in base.actions {
       try requireDigest(action.actionID.value, field: "apply-review action_id")
-      try requirePreview(action.executionPreview)
+      try requirePreview(
+        action.executionPreview,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
     }
     let expectedForceIDs = base.actions.filter(\.requiresForce).map { $0.actionID.value }.sorted {
       $0.lexicographicallyPrecedes($1)
@@ -302,8 +319,10 @@ package enum SealedRuntimeWire {
 
   package static func sealExecutionStream(
     _ baseEvents: [Diskplan_V1_ExecutionStreamEvent],
-    requiredForceWarningActionIDs: [Diskplan_V1_OpaqueIdentifier]
+    requiredForceWarningActionIDs: [Diskplan_V1_OpaqueIdentifier],
+    negotiatedProtocolMinor: UInt32 = protocolMinor
   ) throws -> [Diskplan_V1_ExecutionStreamEvent] {
+    try requireSupportedProtocolMinor(negotiatedProtocolMinor)
     guard !baseEvents.isEmpty else {
       throw SealedRuntimeWireError.invalid(field: "execution events")
     }
@@ -340,7 +359,10 @@ package enum SealedRuntimeWire {
       field: "terminal review_binding_sha256"
     )
 
-    let summary = try executionSummary(events.dropLast())
+    let summary = try executionSummary(
+      events.dropLast(),
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     let requiredForceWarnings = requiredForceWarningActionIDs.map(\.value)
     try requireUniqueDigests(requiredForceWarnings, field: "review force warning action_id")
     let observedForceWarnings = events.dropLast().compactMap { event -> Data? in
@@ -481,7 +503,8 @@ package enum SealedRuntimeWire {
   }
 
   private static func executionSummary(
-    _ events: ArraySlice<Diskplan_V1_ExecutionStreamEvent>
+    _ events: ArraySlice<Diskplan_V1_ExecutionStreamEvent>,
+    negotiatedProtocolMinor: UInt32
   ) throws -> ExecutionSummary {
     var summary = ExecutionSummary()
     var cancellationCount = 0
@@ -528,7 +551,10 @@ package enum SealedRuntimeWire {
         for unit in skipped.blockingPrerequisites { try requireExecutionUnit(unit) }
       case .forceRequiredWarning(let warning):
         try requireDigest(warning.actionID.value, field: "force warning action_id")
-        try requirePreview(warning.preview)
+        try requirePreview(
+          warning.preview,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
+        )
       case .stepFinished(let step):
         try requireStep(step)
       case .releasePostVerificationFinished(let release):
@@ -714,11 +740,31 @@ package enum SealedRuntimeWire {
     }
   }
 
-  private static func requirePreview(
-    _ preview: Diskplan_V1_ActionExecutionPreviewProjection
+  package static func requirePreview(
+    _ preview: Diskplan_V1_ActionExecutionPreviewProjection,
+    negotiatedProtocolMinor: UInt32
   ) throws {
+    try requireSupportedProtocolMinor(negotiatedProtocolMinor)
     guard validActionKind(preview.adapter) else {
       throw SealedRuntimeWireError.invalid(field: "preview adapter")
+    }
+    if negotiatedProtocolMinor == protocol14Minor {
+      guard !preview.hasRawWorkingDirectory, preview.pathRace == .unspecified else {
+        throw SealedRuntimeWireError.invalid(field: "protocol 1.4 execution preview")
+      }
+    } else {
+      guard preview.hasRawWorkingDirectory, validPathRace(preview.pathRace) else {
+        throw SealedRuntimeWireError.invalid(field: "protocol 1.5 execution preview")
+      }
+      if preview.mutationSupported {
+        guard preview.rawWorkingDirectory.first == 47,
+          !preview.rawWorkingDirectory.contains(0)
+        else {
+          throw SealedRuntimeWireError.invalid(field: "execution working directory")
+        }
+      } else if !preview.rawWorkingDirectory.isEmpty {
+        throw SealedRuntimeWireError.invalid(field: "unsupported execution working directory")
+      }
     }
     if preview.mutationSupported {
       guard !preview.rawExecutable.isEmpty, !preview.rawExecutable.contains(0),
@@ -866,6 +912,13 @@ package enum SealedRuntimeWire {
     case .genericRemove, .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges,
       .codexCleanTemporary, .versionedArtifactRemove, .completeReleaseSetRemove, .reportOnly:
       true
+    case .unspecified, .UNRECOGNIZED: false
+    }
+  }
+
+  private static func validPathRace(_ value: Diskplan_V1_PathRaceProjection) -> Bool {
+    switch value {
+    case .noneObserved, .residual, .unknown: true
     case .unspecified, .UNRECOGNIZED: false
     }
   }

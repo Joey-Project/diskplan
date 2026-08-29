@@ -1,3 +1,4 @@
+import DiskplanCore
 import DiskplanEngineCore
 import DiskplanProto
 import Foundation
@@ -79,9 +80,20 @@ private enum DiskplanProtocolFixtureGenerator {
     case "scan-stream-v1.3":
       let spec = try JSONDecoder().decode(FixtureSpec.self, from: source)
       generated = try spec.cases.map { ($0.name, try frames(for: $0)) }
-    case "runtime-v1.4":
+    case "runtime-v1.4", "runtime-v1.5":
       let spec = try JSONDecoder().decode(RuntimeFixtureSpec.self, from: source)
-      generated = try spec.cases.map { ($0.name, try runtimeFrames(for: $0)) }
+      let negotiatedProtocolMinor =
+        header.schema == "runtime-v1.4" ? protocol14Minor : protocol15Minor
+      generated = try spec.cases.map {
+        (
+          $0.name,
+          try runtimeFrames(
+            for: $0,
+            schemaVersion: header.schema,
+            negotiatedProtocolMinor: negotiatedProtocolMinor
+          )
+        )
+      }
     default:
       throw GeneratorError.invalidSchema(header.schema)
     }
@@ -94,7 +106,11 @@ private enum DiskplanProtocolFixtureGenerator {
     }
   }
 
-  private static func runtimeFrames(for fixture: RuntimeFixtureCase) throws -> [Data] {
+  private static func runtimeFrames(
+    for fixture: RuntimeFixtureCase,
+    schemaVersion: String,
+    negotiatedProtocolMinor: UInt32
+  ) throws -> [Data] {
     let planHash = repeated(0xa1)
     let evidenceHash = repeated(0xe1)
     let checkpointEvidenceHash = repeated(0xe2)
@@ -109,7 +125,8 @@ private enum DiskplanProtocolFixtureGenerator {
       requiresForce: fixture.requiresForce,
       actionKind: actionKind,
       actionID: actionID,
-      targetID: targetID
+      targetID: targetID,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
     )
     let targetBytes = try runtimeChunkTarget(records)
     let encodedPlan = try PlanProjectionWireEncoder.encode(
@@ -122,8 +139,9 @@ private enum DiskplanProtocolFixtureGenerator {
         evidenceSHA256: evidenceHash,
         cleanupCandidateCount: fixture.includeAction ? 1 : 0,
         policyVersion: "fixture-policy-v1",
-        schemaVersion: "runtime-v1.4"
+        schemaVersion: schemaVersion
       ),
+      negotiatedProtocolMinor: negotiatedProtocolMinor,
       chunkPayloadTargetBytes: targetBytes
     )
 
@@ -167,7 +185,10 @@ private enum DiskplanProtocolFixtureGenerator {
     if fixture.includeAction {
       var action = Diskplan_V1_DryRunActionProjection()
       action.actionID = opaque(actionID)
-      action.executionPreview = runtimePreview(adapter: actionKind)
+      action.executionPreview = runtimePreview(
+        adapter: actionKind,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
       dryPayload.actions = [action]
     }
     var dryManifest = Diskplan_V1_DryRunProjectionManifest()
@@ -187,7 +208,11 @@ private enum DiskplanProtocolFixtureGenerator {
     dryManifest.scanSessionID = overlay.scanSessionID
     dryManifest.scanCheckpointID = overlay.scanCheckpointID
     dryManifest.scanCheckpointEvidenceSha256 = overlay.scanCheckpointEvidenceSha256
-    let dryRun = try SealedRuntimeWire.sealDryRun(payload: dryPayload, manifest: dryManifest)
+    let dryRun = try SealedRuntimeWire.sealDryRun(
+      payload: dryPayload,
+      manifest: dryManifest,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     bodies.append(.dryRunProjection(dryRun))
 
     var review = Diskplan_V1_ApplyReviewProjection()
@@ -202,7 +227,10 @@ private enum DiskplanProtocolFixtureGenerator {
       var action = Diskplan_V1_ApplyReviewActionProjection()
       action.actionID = opaque(actionID)
       action.requiresForce = fixture.requiresForce
-      action.executionPreview = runtimePreview(adapter: actionKind)
+      action.executionPreview = runtimePreview(
+        adapter: actionKind,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
       review.actions = [action]
     }
     review.reviewBindingSha256 = digestMessage(reviewBindingHash)
@@ -216,7 +244,10 @@ private enum DiskplanProtocolFixtureGenerator {
     review.scanSessionID = overlay.scanSessionID
     review.scanCheckpointID = overlay.scanCheckpointID
     review.scanCheckpointEvidenceSha256 = overlay.scanCheckpointEvidenceSha256
-    let sealedReview = try SealedRuntimeWire.sealApplyReview(review)
+    let sealedReview = try SealedRuntimeWire.sealApplyReview(
+      review,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     bodies.append(.applyReviewProjection(sealedReview))
 
     let execution = try runtimeExecution(
@@ -224,7 +255,8 @@ private enum DiskplanProtocolFixtureGenerator {
       actionID: actionID,
       includeAction: fixture.includeAction,
       requiresForce: fixture.requiresForce,
-      adapter: actionKind
+      adapter: actionKind,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
     )
     bodies.append(
       contentsOf: execution.map(Diskplan_V1_RuntimeEvent.OneOf_Body.executionStreamEvent))
@@ -247,7 +279,8 @@ private enum DiskplanProtocolFixtureGenerator {
     requiresForce: Bool,
     actionKind: Diskplan_V1_PlanActionKind,
     actionID: Data,
-    targetID: Data
+    targetID: Data,
+    negotiatedProtocolMinor: UInt32
   ) throws -> [Diskplan_V1_PlanProjectionRecord] {
     guard includeAction else { return [] }
     var action = Diskplan_V1_PlanActionProjection()
@@ -266,7 +299,10 @@ private enum DiskplanProtocolFixtureGenerator {
     action.forceReason = requiresForce ? "fixture force warning" : ""
     action.pathRace = .residual
     action.targetIds = [opaque(targetID)]
-    action.executionPreview = runtimePreview(adapter: actionKind)
+    action.executionPreview = runtimePreview(
+      adapter: actionKind,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     action.recommendation = .safeToClean
     var evidence = Diskplan_V1_EvidenceSummaryProjection()
     evidence.status = .known
@@ -536,7 +572,8 @@ private enum DiskplanProtocolFixtureGenerator {
     actionID: Data,
     includeAction: Bool,
     requiresForce: Bool,
-    adapter: Diskplan_V1_PlanActionKind
+    adapter: Diskplan_V1_PlanActionKind,
+    negotiatedProtocolMinor: UInt32
   ) throws -> [Diskplan_V1_ExecutionStreamEvent] {
     let executionID = opaque(Data("fixture-execution".utf8))
     var started = Diskplan_V1_ApplyStartedProjection()
@@ -562,7 +599,10 @@ private enum DiskplanProtocolFixtureGenerator {
       if requiresForce {
         var warning = Diskplan_V1_ForceRequiredWarningProjection()
         warning.actionID = opaque(actionID)
-        warning.preview = runtimePreview(adapter: adapter)
+        warning.preview = runtimePreview(
+          adapter: adapter,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
+        )
         events.append(executionEvent(id: executionID, body: .forceRequiredWarning(warning)))
       }
       var unit = Diskplan_V1_ExecutionUnitProjection()
@@ -588,7 +628,8 @@ private enum DiskplanProtocolFixtureGenerator {
     events.append(executionEvent(id: executionID, body: .applyFinished(terminal)))
     return try SealedRuntimeWire.sealExecutionStream(
       events,
-      requiredForceWarningActionIDs: review.forceWarningActionIds
+      requiredForceWarningActionIDs: review.forceWarningActionIds,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
     )
   }
 
@@ -603,7 +644,8 @@ private enum DiskplanProtocolFixtureGenerator {
   }
 
   private static func runtimePreview(
-    adapter: Diskplan_V1_PlanActionKind
+    adapter: Diskplan_V1_PlanActionKind,
+    negotiatedProtocolMinor: UInt32
   ) -> Diskplan_V1_ActionExecutionPreviewProjection {
     var preview = Diskplan_V1_ActionExecutionPreviewProjection()
     var rawPath = Data("/fixture/".utf8)
@@ -614,6 +656,10 @@ private enum DiskplanProtocolFixtureGenerator {
     preview.displayArgv = ["rm", "--", "/fixture/\\xffa"]
     preview.postcondition = "target_absent"
     preview.mutationSupported = true
+    if negotiatedProtocolMinor >= protocol15Minor {
+      preview.rawWorkingDirectory = Data("/fixture".utf8)
+      preview.pathRace = .residual
+    }
     return preview
   }
 

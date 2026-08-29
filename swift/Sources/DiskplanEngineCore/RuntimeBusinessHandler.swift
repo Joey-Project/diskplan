@@ -67,9 +67,13 @@ public struct RuntimeBusinessEmission: Sendable {
   public static func plan(
     planBuildID: Data,
     records: [Diskplan_V1_PlanProjectionRecord],
-    metadata: PlanProjectionWireMetadata
+    metadata: PlanProjectionWireMetadata,
+    negotiatedProtocolMinor: UInt32 = protocolMinor
   ) throws -> Self {
-    _ = try sealedBodies(for: .plan(planBuildID, records, metadata))
+    _ = try sealedBodies(
+      for: .plan(planBuildID, records, metadata),
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     return Self(payload: .plan(planBuildID, records, metadata))
   }
 
@@ -85,27 +89,43 @@ public struct RuntimeBusinessEmission: Sendable {
     reasonCode: String,
     summary: String
   ) throws -> Self {
-    _ = try sealedBodies(for: .planInvalidated(projectionID, reasonCode, summary))
+    _ = try sealedBodies(
+      for: .planInvalidated(projectionID, reasonCode, summary),
+      negotiatedProtocolMinor: protocolMinor
+    )
     return Self(payload: .planInvalidated(projectionID, reasonCode, summary))
   }
 
   public static func decisionOverlayRejected(
     _ rejection: Diskplan_V1_DecisionOverlayRejected
   ) throws -> Self {
-    _ = try sealedBodies(for: .overlayRejected(rejection))
+    _ = try sealedBodies(
+      for: .overlayRejected(rejection),
+      negotiatedProtocolMinor: protocolMinor
+    )
     return Self(payload: .overlayRejected(rejection))
   }
 
   public static func dryRun(
     payload: Diskplan_V1_DryRunProjectionPayload,
-    manifest: Diskplan_V1_DryRunProjectionManifest
+    manifest: Diskplan_V1_DryRunProjectionManifest,
+    negotiatedProtocolMinor: UInt32 = protocolMinor
   ) throws -> Self {
-    _ = try sealedBodies(for: .dryRun(payload, manifest))
+    _ = try sealedBodies(
+      for: .dryRun(payload, manifest),
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     return Self(payload: .dryRun(payload, manifest))
   }
 
-  public static func applyReview(_ projection: Diskplan_V1_ApplyReviewProjection) throws -> Self {
-    _ = try sealedBodies(for: .applyReview(projection))
+  public static func applyReview(
+    _ projection: Diskplan_V1_ApplyReviewProjection,
+    negotiatedProtocolMinor: UInt32 = protocolMinor
+  ) throws -> Self {
+    _ = try sealedBodies(
+      for: .applyReview(projection),
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
     return Self(payload: .applyReview(projection))
   }
 
@@ -122,24 +142,38 @@ public struct RuntimeBusinessEmission: Sendable {
     code: Diskplan_V1_RuntimeRejectCode,
     summary: String
   ) throws -> Self {
-    _ = try sealedBodies(for: .rejected(code, summary))
+    _ = try sealedBodies(
+      for: .rejected(code, summary),
+      negotiatedProtocolMinor: protocolMinor
+    )
     return Self(payload: .rejected(code, summary))
   }
 
-  fileprivate func sealedBodies() throws -> [Diskplan_V1_RuntimeEvent.OneOf_Body] {
-    try Self.sealedBodies(for: payload)
+  fileprivate func sealedBodies(
+    negotiatedProtocolMinor: UInt32 = protocolMinor
+  ) throws -> [Diskplan_V1_RuntimeEvent.OneOf_Body] {
+    try Self.sealedBodies(
+      for: payload,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
   }
 
   fileprivate static func sealedBodies(
-    for payload: Payload
+    for payload: Payload,
+    negotiatedProtocolMinor: UInt32 = protocolMinor
   ) throws -> [Diskplan_V1_RuntimeEvent.OneOf_Body] {
+    try SealedRuntimeWire.requireSupportedProtocolMinor(negotiatedProtocolMinor)
     let bodies: [Diskplan_V1_RuntimeEvent.OneOf_Body]
     switch payload {
     case .plan(let planBuildID, let records, let metadata):
       guard !planBuildID.isEmpty,
         planBuildID.count <= SealedRuntimeWire.maximumOpaqueIdentifierBytes
       else { throw SealedRuntimeWireError.invalid(field: "plan_build_id") }
-      let wire = try PlanProjectionWireEncoder.encode(records: records, metadata: metadata)
+      let wire = try PlanProjectionWireEncoder.encode(
+        records: records,
+        metadata: metadata,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
       var accepted = Diskplan_V1_BuildPlanAccepted()
       accepted.planBuildID.value = planBuildID
       var projection = Diskplan_V1_PlanProjection()
@@ -189,10 +223,23 @@ public struct RuntimeBusinessEmission: Sendable {
       bodies = [.decisionOverlayRejected(rejection)]
     case .dryRun(let payload, let manifest):
       bodies = [
-        .dryRunProjection(try SealedRuntimeWire.sealDryRun(payload: payload, manifest: manifest))
+        .dryRunProjection(
+          try SealedRuntimeWire.sealDryRun(
+            payload: payload,
+            manifest: manifest,
+            negotiatedProtocolMinor: negotiatedProtocolMinor
+          )
+        )
       ]
     case .applyReview(let projection):
-      bodies = [.applyReviewProjection(try SealedRuntimeWire.sealApplyReview(projection))]
+      bodies = [
+        .applyReviewProjection(
+          try SealedRuntimeWire.sealApplyReview(
+            projection,
+            negotiatedProtocolMinor: negotiatedProtocolMinor
+          )
+        )
+      ]
     case .execution:
       throw SealedRuntimeWireError.invalid(field: "execution predecessor receipt")
     case .rejected(let code, let summary):
@@ -242,6 +289,7 @@ private enum RuntimeResponderError: Error {
 private struct RuntimePlanReceipt {
   let records: [Diskplan_V1_PlanProjectionRecord]
   let manifest: Diskplan_V1_PlanProjectionManifest
+  let negotiatedProtocolMinor: UInt32
 }
 
 private struct RuntimeWaiverKey: Hashable {
@@ -425,10 +473,18 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
 
   fileprivate func authorize(
     _ emission: RuntimeBusinessEmission,
-    for request: RuntimeBusinessRequest
+    for request: RuntimeBusinessRequest,
+    negotiatedProtocolMinor: UInt32
   ) throws -> RuntimeAuthorityEmissionTransaction {
     try withLock {
-      try beginEmission(try prepareUnderLock(emission, for: request), request: request)
+      try beginEmission(
+        try prepareUnderLock(
+          emission,
+          for: request,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
+        ),
+        request: request
+      )
     }
   }
 
@@ -489,10 +545,19 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
 
   private func prepareUnderLock(
     _ emission: RuntimeBusinessEmission,
-    for request: RuntimeBusinessRequest
+    for request: RuntimeBusinessRequest,
+    negotiatedProtocolMinor: UInt32
   ) throws -> PreparedRuntimeEmission {
+    do {
+      try SealedRuntimeWire.requireSupportedProtocolMinor(negotiatedProtocolMinor)
+    } catch {
+      throw invalidState("runtime request uses an unsupported negotiated protocol minor")
+    }
     guard activeRequestID == request.requestID else {
       throw invalidState("runtime request has no active authority claim")
+    }
+    if let plan, plan.negotiatedProtocolMinor != negotiatedProtocolMinor {
+      throw invalidState("runtime request protocol minor differs from the live plan")
     }
     switch emission.payload {
     case .plan(_, let records, let metadata):
@@ -501,13 +566,22 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         build.scanCheckpointID.value == metadata.scanCheckpointID,
         build.scanEvidenceSha256.value == metadata.evidenceSHA256
       else { throw invalidState("plan emission differs from build-plan request") }
-      let bodies = try RuntimeBusinessEmission.sealedBodies(for: emission.payload)
+      let bodies = try RuntimeBusinessEmission.sealedBodies(
+        for: emission.payload,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
       guard case .planProjection(let projection)? = bodies.last,
         projection.hasManifest
       else { throw invalidState("plan emission omitted its terminal manifest") }
       return PreparedRuntimeEmission(
         bodies: bodies,
-        transition: .plan(RuntimePlanReceipt(records: records, manifest: projection.manifest))
+        transition: .plan(
+          RuntimePlanReceipt(
+            records: records,
+            manifest: projection.manifest,
+            negotiatedProtocolMinor: negotiatedProtocolMinor
+          )
+        )
       )
 
     case .planInvalidated(let projectionID, _, _):
@@ -515,7 +589,10 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         plan.manifest.projectionID.value == projectionID
       else { throw invalidState("plan invalidation has no exact live predecessor") }
       return PreparedRuntimeEmission(
-        bodies: try RuntimeBusinessEmission.sealedBodies(for: emission.payload),
+        bodies: try RuntimeBusinessEmission.sealedBodies(
+          for: emission.payload,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
+        ),
         transition: .invalidatePlan
       )
 
@@ -544,7 +621,10 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       }
       try validateOverlayRejection(rejection, request: edit)
       return PreparedRuntimeEmission(
-        bodies: try RuntimeBusinessEmission.sealedBodies(for: emission.payload),
+        bodies: try RuntimeBusinessEmission.sealedBodies(
+          for: emission.payload,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
+        ),
         transition: .none
       )
 
@@ -557,7 +637,11 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         matchesPlan(manifest, plan.manifest),
         matchesOverlay(manifest, overlay)
       else { throw stale("dry-run request or predecessor binding is stale") }
-      let sealed = try SealedRuntimeWire.sealDryRun(payload: payload, manifest: manifest)
+      let sealed = try SealedRuntimeWire.sealDryRun(
+        payload: payload,
+        manifest: manifest,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
       try validateSelectedActions(
         payload.actions.map { ($0.actionID, $0.executionPreview) },
         plan: plan,
@@ -575,7 +659,10 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         matchesPlan(candidate, plan.manifest),
         matchesOverlay(candidate, overlay)
       else { throw stale("apply-review request or predecessor binding is stale") }
-      let sealed = try SealedRuntimeWire.sealApplyReview(candidate)
+      let sealed = try SealedRuntimeWire.sealApplyReview(
+        candidate,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
       try validateSelectedReviewActions(sealed.actions, plan: plan, overlay: overlay)
       guard
         Set(sealed.forceWarningActionIds.map(\.value))
@@ -611,7 +698,8 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       }
       let sealed = try SealedRuntimeWire.sealExecutionStream(
         events,
-        requiredForceWarningActionIDs: review.forceWarningActionIds
+        requiredForceWarningActionIDs: review.forceWarningActionIds,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
       )
       try validateExecution(sealed, plan: plan, overlay: overlay, review: review)
       return PreparedRuntimeEmission(
@@ -634,7 +722,10 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         )
       }
       return PreparedRuntimeEmission(
-        bodies: try RuntimeBusinessEmission.sealedBodies(for: emission.payload),
+        bodies: try RuntimeBusinessEmission.sealedBodies(
+          for: emission.payload,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
+        ),
         transition: transition
       )
     }
@@ -965,13 +1056,19 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   private let authority: RuntimeBusinessAuthorityState
   private var completed = false
 
+  /// The exact protocol minor selected by the version handshake for this
+  /// runtime session. Handlers use it to author the closed preview shape.
+  public let negotiatedProtocolMinor: UInt32
+
   init(
     broker: SerialEventBroker,
     request: RuntimeBusinessRequest,
+    negotiatedProtocolMinor: UInt32 = protocolMinor,
     runtimeSessionID: Data,
     authority: RuntimeBusinessAuthorityState
   ) {
     self.broker = broker
+    self.negotiatedProtocolMinor = negotiatedProtocolMinor
     requestID = request.requestID
     self.request = request
     self.runtimeSessionID = runtimeSessionID
@@ -986,7 +1083,11 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     }
     let transaction: RuntimeAuthorityEmissionTransaction
     do {
-      transaction = try authority.authorize(emission, for: request)
+      transaction = try authority.authorize(
+        emission,
+        for: request,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
     } catch let error as RuntimeAuthorityError {
       let transition = authority.rejectionTransition(for: request)
       transaction = try authority.authorize(

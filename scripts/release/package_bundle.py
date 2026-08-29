@@ -195,6 +195,7 @@ class BoundSource:
 class FileState:
     device: int
     inode: int
+    generation: int | None
     size: int
     mtime_ns: int
     ctime_ns: int
@@ -204,13 +205,18 @@ class FileState:
         return cls(
             device=value.st_dev,
             inode=value.st_ino,
+            generation=getattr(value, "st_gen", None),
             size=value.st_size,
             mtime_ns=value.st_mtime_ns,
             ctime_ns=value.st_ctime_ns,
         )
 
     def same_object(self, other: "FileState") -> bool:
-        return (self.device, self.inode) == (other.device, other.inode)
+        return (self.device, self.inode, self.generation) == (
+            other.device,
+            other.inode,
+            other.generation,
+        )
 
     def same_content_state(self, other: "FileState") -> bool:
         return (
@@ -574,7 +580,11 @@ def _open_directory_at(parent_fd: int, name: str, display_path: Path) -> int:
         descriptor = os.open(name, _directory_open_flags(), dir_fd=parent_fd)
     except OSError as error:
         raise ValueError(f"cannot bind directory without following links: {display_path}") from error
-    metadata = os.fstat(descriptor)
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as error:
+        os.close(descriptor)
+        raise ValueError(f"cannot inspect bound directory: {display_path}") from error
     if not stat.S_ISDIR(metadata.st_mode):
         os.close(descriptor)
         raise ValueError(f"not a directory: {display_path}")
@@ -635,10 +645,29 @@ def open_regular_at(
     return descriptor
 
 
+def bound_source_open_failure(
+    cause: BaseException | None,
+    subject: str,
+    relative: str,
+) -> str | None:
+    if not isinstance(cause, OSError):
+        return None
+    if cause.errno == errno.ENOENT:
+        state = "is missing"
+    elif cause.errno in {errno.EACCES, errno.EPERM}:
+        state = "became unreadable"
+    elif cause.errno in {errno.ELOOP, errno.ENOTDIR}:
+        state = "was replaced or changed type"
+    else:
+        state = "revalidation failed"
+    return f"bundle {subject} {state}: {relative}"
+
+
 def bind_relative_source(
     root: BoundDirectory,
     relative: str,
     maximum: int,
+    expected_directory_states: dict[str, FileState] | None = None,
 ) -> BoundSource:
     validate_relative_path(relative, "repository source path")
     root.assert_stable()
@@ -649,17 +678,51 @@ def bind_relative_source(
     parent_fd = root.fd
     try:
         for index, component in enumerate(components[:-1]):
-            child = _open_directory_at(
-                parent_fd,
-                component,
-                root.display_path.joinpath(*components[: index + 1]),
-            )
-            state = FileState.from_stat(os.fstat(child))
-            directory_slots.append(DirectorySlot(parent_fd, component, child, state))
+            ancestor = "/".join(components[: index + 1])
+            try:
+                child = _open_directory_at(
+                    parent_fd,
+                    component,
+                    root.display_path / ancestor,
+                )
+            except ValueError as error:
+                if expected_directory_states is None:
+                    raise
+                message = bound_source_open_failure(
+                    error.__cause__,
+                    "source ancestor",
+                    ancestor,
+                )
+                if message is None:
+                    raise
+                raise ValueError(message) from error
             directory_fds.append(child)
+            metadata = os.fstat(child)
+            state = FileState.from_stat(metadata)
+            if expected_directory_states is not None:
+                expected = expected_directory_states.get(ancestor)
+                if expected is None or not expected.same_object(state):
+                    raise ValueError(f"bundle source ancestor was replaced: {ancestor}")
+                if stat.S_IMODE(metadata.st_mode) != 0o755:
+                    raise ValueError(
+                        f"bundle source ancestor access policy changed: {ancestor}"
+                    )
+            directory_slots.append(DirectorySlot(parent_fd, component, child, state))
             parent_fd = child
         display_path = root.display_path / relative
-        file_fd = open_regular_at(parent_fd, components[-1], display_path, maximum)
+        try:
+            file_fd = open_regular_at(parent_fd, components[-1], display_path, maximum)
+        except ValueError as error:
+            if expected_directory_states is None:
+                raise
+            message = bound_source_open_failure(
+                error.__cause__,
+                "source file",
+                relative,
+            )
+            if message is None:
+                raise
+            raise ValueError(message) from error
         bound = BoundSource(
             display_path,
             root,
@@ -1379,16 +1442,42 @@ def enumerate_bundle_tree(bundle: Path) -> tuple[list[str], list[str]]:
     )
 
 
-def enumerate_bound_bundle_tree(root: BoundDirectory) -> tuple[list[str], list[str]]:
+def enumerate_bound_bundle_tree(
+    root: BoundDirectory,
+) -> tuple[list[str], list[str], dict[str, FileState]]:
+    """Snapshot tree shape and directory identity with depth-bounded descriptors.
+
+    Directory object identity and the required mode are protected. Timestamp and
+    child-entry metadata churn are not treated as replacement by themselves.
+    """
+
     files: list[str] = []
     directories: list[str] = []
-    pending: list[tuple[int, str]] = [(os.dup(root.fd), "")]
-    retained: list[int] = []
+    directory_states: dict[str, FileState] = {}
+    pending = [""]
     entries = 0
-    try:
-        while pending:
-            directory_fd, prefix = pending.pop()
-            retained.append(directory_fd)
+    while pending:
+        prefix = pending.pop()
+        directory_fds: list[int] = []
+        directory_fd = root.fd
+        try:
+            if prefix:
+                components = prefix.split("/")
+                for index, component in enumerate(components):
+                    relative = "/".join(components[: index + 1])
+                    child_fd = _open_directory_at(
+                        directory_fd,
+                        component,
+                        root.display_path / relative,
+                    )
+                    directory_fds.append(child_fd)
+                    directory_fd = child_fd
+                    current = FileState.from_stat(os.fstat(child_fd))
+                    expected = directory_states[relative]
+                    if not expected.same_object(current):
+                        raise ValueError(f"bundle directory was replaced: {relative}")
+                    if stat.S_IMODE(os.fstat(child_fd).st_mode) != 0o755:
+                        raise ValueError(f"bundle directory has wrong mode: {relative}")
             with os.scandir(directory_fd) as iterator:
                 children = sorted(iterator, key=lambda item: os.fsencode(item.name))
             local_folded: set[str] = set()
@@ -1414,87 +1503,119 @@ def enumerate_bound_bundle_tree(root: BoundDirectory) -> tuple[list[str], list[s
                 elif stat.S_ISDIR(metadata.st_mode):
                     if stat.S_IMODE(metadata.st_mode) != 0o755:
                         raise ValueError(f"bundle directory has wrong mode: {relative}")
-                    nested = _open_directory_at(directory_fd, child.name, Path(relative))
-                    rebound = os.fstat(nested)
-                    if not FileState.from_stat(metadata).same_object(
-                        FileState.from_stat(rebound)
-                    ):
-                        os.close(nested)
-                        raise ValueError(f"bundle directory was replaced: {relative}")
                     directories.append(relative)
-                    pending.append((nested, relative))
+                    directory_states[relative] = FileState.from_stat(metadata)
+                    pending.append(relative)
                 else:
                     raise ValueError(
                         f"bundle contains a symlink or special file: {relative}"
                     )
-        return sorted(files, key=os.fsencode), sorted(
+        finally:
+            for descriptor in reversed(directory_fds):
+                os.close(descriptor)
+    return (
+        sorted(files, key=os.fsencode),
+        sorted(
             directories,
             key=lambda item: (item.count("/"), os.fsencode(item)),
-        )
-    finally:
-        for descriptor, _prefix in pending:
-            os.close(descriptor)
-        for descriptor in retained:
-            os.close(descriptor)
+        ),
+        directory_states,
+    )
 
 
 class VerifiedBundle:
+    """A bundle snapshot that rebinds one protected file at a time.
+
+    Initial device/inode/generation tuples protect object identity on macOS,
+    expected mode protects the access policy used by the bundle, and SHA-256
+    protects content stability.
+    """
+
     def __init__(
         self,
         root: BoundDirectory,
         expected: dict[str, tuple[int, int]],
         manifest_data: bytes,
-        files: dict[str, BoundSource],
+        file_states: dict[str, FileState],
+        directory_states: dict[str, FileState],
         digests: dict[str, str],
     ):
         self.root = root
         self.expected = expected
         self.manifest_data = manifest_data
-        self.files = files
+        self.file_states = file_states
+        self.directory_states = directory_states
         self.digests = digests
+
+    def _read_file(self, relative: str, retain_bytes: bool) -> bytes | None:
+        source = bind_relative_source(
+            self.root,
+            relative,
+            max(self.expected[relative][1], 1),
+            self.directory_states,
+        )
+        try:
+            source.assert_stable()
+            metadata = os.fstat(source.file_fd)
+            mode, size = self.expected[relative]
+            current = FileState.from_stat(metadata)
+            if not self.file_states[relative].same_object(current):
+                raise ValueError(f"bundle file was replaced: {relative}")
+            if stat.S_IMODE(metadata.st_mode) != mode or metadata.st_size != size:
+                raise ValueError(f"bundle file mode or size changed: {relative}")
+            data = read_fd(source.file_fd, max(size, 1)) if retain_bytes else None
+            current_digest = (
+                digest(data)
+                if data is not None
+                else digest_fd(source.file_fd, max(size, 1))
+            )
+            if current_digest != self.digests[relative]:
+                raise ValueError(f"bundle file digest changed: {relative}")
+            source.assert_stable()
+            if not self.file_states[relative].same_object(
+                FileState.from_stat(os.fstat(source.file_fd))
+            ):
+                raise ValueError(f"bundle file was replaced: {relative}")
+            return data
+        finally:
+            source.close()
 
     def assert_stable(self) -> None:
         self.root.assert_stable()
-        names, directories = enumerate_bound_bundle_tree(self.root)
+        names, directories, directory_states = enumerate_bound_bundle_tree(self.root)
         if names != sorted(self.expected, key=os.fsencode):
             raise ValueError("bundle contains missing or extra files")
         if directories != bundle_directories(list(self.expected)):
             raise ValueError("bundle contains missing or extra directories")
-        for relative, source in self.files.items():
-            source.assert_stable()
-            metadata = os.fstat(source.file_fd)
-            mode, size = self.expected[relative]
-            if stat.S_IMODE(metadata.st_mode) != mode or metadata.st_size != size:
-                raise ValueError(f"bundle file mode or size changed: {relative}")
-            if digest_fd(source.file_fd, max(size, 1)) != self.digests[relative]:
-                raise ValueError(f"bundle file digest changed: {relative}")
+        for relative, expected in self.directory_states.items():
+            current = directory_states.get(relative)
+            if current is None or not expected.same_object(current):
+                raise ValueError(f"bundle directory was replaced: {relative}")
+        for relative in self.expected:
+            self._read_file(relative, False)
 
     def bytes(self, relative: str) -> bytes:
-        source = self.files[relative]
-        mode, size = self.expected[relative]
-        source.assert_stable()
-        metadata = os.fstat(source.file_fd)
-        if stat.S_IMODE(metadata.st_mode) != mode or metadata.st_size != size:
-            raise ValueError(f"bundle file mode or size changed: {relative}")
-        data = read_fd(source.file_fd, max(size, 1))
-        if digest(data) != self.digests[relative]:
-            raise ValueError(f"bundle file digest changed: {relative}")
+        data = self._read_file(relative, True)
+        assert data is not None
         return data
 
     def close(self) -> None:
-        for source in self.files.values():
-            source.close()
-        self.files = {}
         self.root.close()
 
 
 def bind_verified_bundle(bundle: Path) -> VerifiedBundle:
     root = bind_absolute_directory(bundle)
-    files: dict[str, BoundSource] = {}
+    file_states: dict[str, FileState] = {}
     try:
         manifest_source = bind_relative_source(root, "manifest.json", MAX_METADATA_BYTES)
-        files["manifest.json"] = manifest_source
-        manifest_data = read_fd(manifest_source.file_fd, MAX_METADATA_BYTES)
+        try:
+            manifest_data = read_fd(manifest_source.file_fd, MAX_METADATA_BYTES)
+            file_states["manifest.json"] = FileState.from_stat(
+                os.fstat(manifest_source.file_fd)
+            )
+            manifest_source.assert_stable()
+        finally:
+            manifest_source.close()
         manifest = read_json_bytes(manifest_data, bundle / "manifest.json")
         if manifest_data != canonical_json(manifest):
             raise ValueError("bundle manifest is not canonical JSON")
@@ -1508,7 +1629,7 @@ def bind_verified_bundle(bundle: Path) -> VerifiedBundle:
                 "SHA256SUMS": (0o644, -1),
             }
         )
-        names, directories = enumerate_bound_bundle_tree(root)
+        names, directories, directory_states = enumerate_bound_bundle_tree(root)
         if names != sorted(expected, key=os.fsencode):
             raise ValueError("bundle contains missing or extra files")
         if directories != bundle_directories(list(expected)):
@@ -1517,14 +1638,20 @@ def bind_verified_bundle(bundle: Path) -> VerifiedBundle:
         checksummed: list[tuple[str, str]] = []
         for item in artifacts:
             source = bind_relative_source(root, item["path"], max(item["size"], 1))
-            files[item["path"]] = source
-            metadata = os.fstat(source.file_fd)
-            if stat.S_IMODE(metadata.st_mode) != int(item["mode"], 8):
-                raise ValueError(f"bundle file has wrong mode: {item['path']}")
-            if metadata.st_size != item["size"]:
-                raise ValueError(f"bundle file has wrong size: {item['path']}")
-            if digest_fd(source.file_fd, max(item["size"], 1)) != item["sha256"]:
-                raise ValueError(f"bundle file digest mismatch: {item['path']}")
+            try:
+                metadata = os.fstat(source.file_fd)
+                if stat.S_IMODE(metadata.st_mode) != int(item["mode"], 8):
+                    raise ValueError(f"bundle file has wrong mode: {item['path']}")
+                if metadata.st_size != item["size"]:
+                    raise ValueError(f"bundle file has wrong size: {item['path']}")
+                if digest_fd(source.file_fd, max(item["size"], 1)) != item["sha256"]:
+                    raise ValueError(f"bundle file digest mismatch: {item['path']}")
+                source.assert_stable()
+                file_states[item["path"]] = FileState.from_stat(
+                    os.fstat(source.file_fd)
+                )
+            finally:
+                source.close()
             digests[item["path"]] = item["sha256"]
             checksummed.append((item["path"], item["sha256"]))
         checksummed.append(("manifest.json", digest(manifest_data)))
@@ -1535,18 +1662,29 @@ def bind_verified_bundle(bundle: Path) -> VerifiedBundle:
             )
         ).encode("ascii")
         sums_source = bind_relative_source(root, "SHA256SUMS", MAX_METADATA_BYTES)
-        files["SHA256SUMS"] = sums_source
-        sums_data = read_fd(sums_source.file_fd, MAX_METADATA_BYTES)
+        try:
+            sums_data = read_fd(sums_source.file_fd, MAX_METADATA_BYTES)
+            file_states["SHA256SUMS"] = FileState.from_stat(
+                os.fstat(sums_source.file_fd)
+            )
+            sums_source.assert_stable()
+        finally:
+            sums_source.close()
         if sums_data != expected_sums:
             raise ValueError("SHA256SUMS does not cover the exact manifested bundle")
         expected["SHA256SUMS"] = (0o644, len(sums_data))
         digests["SHA256SUMS"] = digest(sums_data)
-        verified = VerifiedBundle(root, expected, manifest_data, files, digests)
+        verified = VerifiedBundle(
+            root,
+            expected,
+            manifest_data,
+            file_states,
+            directory_states,
+            digests,
+        )
         verified.assert_stable()
         return verified
     except Exception:
-        for source in files.values():
-            source.close()
         root.close()
         raise
 
