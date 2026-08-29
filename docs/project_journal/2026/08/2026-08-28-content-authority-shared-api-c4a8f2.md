@@ -142,11 +142,41 @@ superseded_by:
   remains after the run. The outer sandbox cannot apply SwiftPM's nested manifest
   sandbox on this host, so the accepted repository host-probe shape remains the
   authoritative local full-suite result.
+- The following required max-parallel macOS 26 run did not produce capture-writer
+  inheritance evidence. Instead, one eight-way fork-only iteration exhausted the
+  former two-second writer-ready phase timeout before the wrapper sent its ready
+  byte; neither drain had started and ownership diagnostics were correctly not
+  requested. Startup now has its own typed `startupNotReady` outcome, distinct
+  from execution timeout and post-startup EOF failure. One absolute default
+  15-second deadline covers spawn, writer readiness, both dedicated drain start
+  acknowledgements, the execution grant, and a target-launch acknowledgement, so
+  independent phase waits cannot each reset the bound. The launch acknowledgement
+  is emitted only after the wrapper has forked a gated target and released its
+  own capture writers; a successful grant write alone is not treated as completed
+  startup. Until acknowledgement, the target remains blocked in the supervisor's
+  process group and cannot execute, so one bounded group cleanup owns both process
+  identities. The supervisor restores signal handling before releasing the target
+  to enter its independent group. A three-second injected pre-ready scheduling
+  delay proves that an in-budget start succeeds, while separate five-second delays
+  before writer-ready and after the grant under a 100 ms test deadline prove
+  bounded cleanup and the typed `writer-ready` versus `target-launch`
+  classifications. A third five-second pause after fork but before acknowledgement
+  proves both capture drains reach EOF and a gated `/usr/bin/touch` target never
+  executes. The fork-only test reports startup failure separately and only
+  attributes retained capture writers after startup has completed. The complete
+  gated target-launch acknowledgement delta passes its
+  exact focused Swift gate under the repository's bounded process-group runner:
+  one selected test passes in 6.542 seconds, the bounded command exits zero after
+  53.465 seconds with verified process-group cleanup, and the retained output is
+  14,404 bytes. The generated 534 MiB `.build` directory and task log were removed
+  immediately after evidence extraction. The earlier 460-test full-parallel run
+  remains the baseline; required CI will validate the final delta in the complete
+  macOS 26 lane.
 
 ## Next Steps
 
 1. Land and push the signed follow-up without manually rerunning CI.
-2. Let the required macOS 26 PR lane validate the dedicated-drain handshake and
+2. Let the required macOS 26 PR lane validate the explicit startup deadline and
    parent-writer-free capture contract under the full parallel suite.
 
 ## Evidence
