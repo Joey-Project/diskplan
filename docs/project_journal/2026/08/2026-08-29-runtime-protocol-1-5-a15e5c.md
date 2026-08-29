@@ -84,6 +84,10 @@ superseded_by:
   Protocol 1.5 vector.
 - Local focused Rust `runtime_golden` passed 6/6 before the final exact-byte tamper
   case was added. The final case remains assigned to the India-only rerun.
+- The first India rerun of signed head `f55b35c` stopped at Rust compile error
+  `E0596`: the new force-warning tamper test borrowed `warning.1.body` mutably but
+  bound the `(bytes, event)` tuple as immutable. The focused fix changes only that
+  binding to `let mut warning`; no test result is claimed from the failed run.
 - Static parsing and syntax checks passed for the touched Swift sources and shell
   scripts. Rust formatting and `git diff --check` passed before the final tamper and
   release-doc edits and must be repeated on the frozen head.

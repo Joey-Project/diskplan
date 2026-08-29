@@ -128,7 +128,7 @@ fn preview_bytes_are_bound_across_plan_and_execution_hash_chains() {
     assert!(decode_and_verify_apply_review(PROTOCOL15_MINOR, &apply.encode_to_vec()).is_err());
 
     let mut events = artifacts.execution_events.clone();
-    let warning = events
+    let mut warning = events
         .iter_mut()
         .find_map(|bytes| {
             let event = ExecutionStreamEvent::decode(bytes.as_slice()).unwrap();
