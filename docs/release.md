@@ -168,9 +168,59 @@ closed-output timeouts, signal cancellation, and background descendants.
 ## India Host Acceptance
 
 `scripts/release/india-acceptance.sh` is a host-local runner; it never connects to
-another machine. It requires the exact `India-mac-mini-m4-hoteng` hostname by
-default, macOS 26, and arm64. It installs into a task-scoped prefix, checks the
-real sibling-engine handshake, and runs only this non-mutating real-data shape:
+another machine. It requires the exact `India-mac-mini-m4-hoteng` short hostname,
+macOS 26, and arm64. The target cannot be overridden; in particular, the BL host
+is never an alternate release target. `--describe` is the only host-independent
+mode and prints the checked-in lane catalog without running a command.
+
+The catalog at `fixtures/release/india-acceptance-v1.json` fixes lane order,
+dependencies, capability names, required versus conditional status, deadlines,
+and retained-output ceilings. The matrix covers:
+
+- clean local-source/fixture identity at the exact bundle source revision;
+- install and sibling-engine handshake;
+- standard and bounded full-audit dry-run scans;
+- scanner-level File Provider no-materialization;
+- APFS clone/hardlink owner-graph and activity/open-handle/process snapshots;
+- synthetic million-entry retention with performance, memory, and swap evidence;
+- authoritative batch dry-run and integrated TUI pause/provisional/finalize/cancel;
+- optional artifact persistence disabled and enabled.
+
+Every external command runs under `run_bounded.py`. The supervisor owns a new
+session and process group, enforces one monotonic deadline and output ceiling,
+converts `HUP`, `INT`, and `TERM` into bounded TERM-to-KILL cleanup, and reports
+success only after descendant quiescence. A lane receipt is canonical JSON with
+the exact OS version/build, architecture, hardware model, product/protocol/source
+identity, capability status, limits, command/output digests, and the complete
+bounded-supervisor status. Lane status is one of `passed`, `unsupported`,
+`skipped`, or `failure`.
+
+The runner admits supervisor results only when their declared deadline/output
+limits, process exit, process-group verification, quiescence, retained byte count,
+and SHA-256 match the observed process and log. Batch output uses strict canonical
+JSONL: duplicate keys, non-finite numbers, non-LF framing, and non-canonical
+records fail the lane. Receipts include a privacy-safe resolved audit-root path
+digest plus its device/inode/access-policy binding, an argv template with random
+task and private source paths replaced by stable tokens, and SHA-256 identities
+for the catalog and complete harness source set. The source-integrity lane also
+requires the clean local Swift/File Provider sources and fixtures to match the
+bundle revision and records the exact Git commit and tree. Every lane that builds
+local Swift or File Provider code repeats the source seal immediately before and
+after its command; a final required lane repeats the repository proof before the
+summary.
+
+`required` lanes block the release unless they pass. A `conditional` lane may be
+`unsupported` only when its platform capability is absent; a failure still blocks.
+The current probe-level File Provider fixture explicitly reports
+`scanner_acceptance: not-run`, which the matrix classifies as unsupported rather
+than accepting as scanner evidence. Likewise, a missing integrated artifact or
+TUI acceptance seam cannot be inferred from unit-test success.
+
+The runner installs into an owner-private task root created under the fixed local
+`/private/tmp` parent. It rejects an audit root that contains that parent, so
+changing harness state can never appear in the active scan. Existing user data is
+passed only to standard/full-audit scan-to-plan dry-run commands with history and
+audit files disabled:
 
 ```text
 diskplan --batch --profile full-audit --dry-run --no-history --no-audit-file --root <path>
@@ -234,3 +284,29 @@ failure to persist it, including `ENOSPC`, is reported but does not change a
 successful acceptance result. This infrastructure intentionally exposes the
 required CLI seam; the real-host gate cannot pass until the integrated frontend
 implements that exact dry-run-only batch interface.
+All mutation fixtures, build scratch paths, enabled artifact destinations, and
+TUI state live under that task root. Every installed-product invocation receives
+lane-private `HOME`, `TMPDIR`, and XDG roots, including install, handshake, and
+real-data scans. The File Provider lifecycle keeps its global lock/App Group
+recovery contract, but its DerivedData, package cache, and signed-build log are
+explicitly redirected into the acceptance task root. Cleanup is
+descriptor-relative, no-follow,
+same-device, identity/access-policy checked, entry-count bounded, and time
+bounded. A cleanup uncertainty fails the gate and reports the retained locator;
+`--keep-task-root` is an explicit diagnostic opt-in. The signed File Provider
+fixture remains governed by its separate durable recovery-manifest contract.
+Termination signals remain handled through cleanup and summary publication; the
+runner reports the signal and returns the conventional `128 + signal` status.
+The File Provider fixture emits a canonical lifecycle-complete or
+recovery-required receipt. Until completion is explicit, the harness retains the
+entire task root containing the exact signed app/extension and prints both the
+task-root locator and fixture recovery locator in the summary. The same receipt
+binds the exact retained DerivedData root; the summary emits a machine-readable
+recovery argv that reapplies that override for either manifest or run-ID recovery.
+A completed lifecycle permits normal bounded cleanup even when the scanner-level
+result is still unsupported.
+
+The acceptance report is printed as JSONL to the shell. The harness deliberately
+does not add its own report-file writer: product history and audit files are
+validated through the enabled artifact lane and its File Provider-aware safe
+writer contract. No harness-owned report file is required on a low-disk host.

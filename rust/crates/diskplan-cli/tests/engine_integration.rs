@@ -8,11 +8,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use diskplan::{ClientError, EngineSession, handshake_with_engine};
-use diskplan_core::framing::{FrameError, read_frame, write_frame};
-use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello};
+use diskplan_core::framing::{FrameError, MAX_FRAME_LENGTH, read_frame, write_frame};
+use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello, validate_accepted};
 use diskplan_proto::diskplan::v1::{
-    BusinessEnvelope, ControlAccepted, ControlRejectCode, EngineEvent, Envelope, HelloAccepted,
-    HelloRejected, ProtocolVersion, RejectCode, ScanControlKind, ScanControlRequest,
+    BusinessEnvelope, ControlAccepted, ControlRejectCode, EngineEvent, Envelope, Hello,
+    HelloAccepted, HelloRejected, ProtocolVersion, RejectCode, ScanControlKind, ScanControlRequest,
     ScanMachineState, ScanProgress, ScanSetupRejectCode, ScanState, StartScanRequest, engine_event,
     envelope,
 };
@@ -850,69 +850,34 @@ fn swift_engine_malformed_embedding_consumes_request_id() {
 
 #[test]
 fn fake_engine_acceptance_is_validated_fail_closed() {
-    let cases = [
-        (accepted_without_version(), ExpectedInvalid::MissingVersion),
-        (
-            accepted_envelope(2, 1, 1, &["framing-v1"]),
-            ExpectedInvalid::Sequence,
-        ),
-        (
-            accepted_envelope(1, 2, 0, &["framing-v1"]),
-            ExpectedInvalid::Major,
-        ),
-        (
-            accepted_envelope(1, 1, 4, &["framing-v1"]),
-            ExpectedInvalid::Minor,
-        ),
-        (
-            accepted_envelope(1, 1, 1, &["framing-v1", "framing-v1"]),
-            ExpectedInvalid::Canonical,
-        ),
-        (
-            accepted_envelope(1, 1, 1, &["framing-v1", "rogue"]),
-            ExpectedInvalid::Unoffered,
-        ),
-        (
-            accepted_envelope(1, 1, 1, &["canonical-binary-v1"]),
-            ExpectedInvalid::MissingRequired,
-        ),
-    ];
-
-    for (response, expected) in cases {
+    let hello = rust_client_hello();
+    for mutation in AcceptanceMutation::ALL {
+        let (response, expected) = mutated_acceptance(&hello, mutation);
         let frame = encode_frame(&response);
         let (_root, path) = fake_engine_script(&emit_then_drain(&frame, false));
         let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
             .err()
             .expect("invalid acceptance must fail");
-        match (error, expected) {
+        match (error, &expected) {
             (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::MissingSelectedVersion),
-                ExpectedInvalid::MissingVersion,
-            )
-            | (ClientError::ResponseSequenceMismatch { .. }, ExpectedInvalid::Sequence)
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::MajorMismatch { .. }),
-                ExpectedInvalid::Major,
-            )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::MinorOutOfRange { .. }),
-                ExpectedInvalid::Minor,
-            )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::NonCanonicalCapabilities),
-                ExpectedInvalid::Canonical,
-            )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::UnofferedCapability(_)),
-                ExpectedInvalid::Unoffered,
-            )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::MissingRequiredCapability(
-                    _,
-                )),
-                ExpectedInvalid::MissingRequired,
-            ) => {}
-            (actual, expected) => panic!("unexpected error for {expected:?}: {actual:?}"),
+                ClientError::ResponseSequenceMismatch {
+                    expected: actual_expected,
+                    actual,
+                },
+                AcceptedHandshakeError::SequenceMismatch {
+                    expected: fixture_expected,
+                    actual: fixture_actual,
+                },
+            ) => {
+                assert_eq!(actual_expected, *fixture_expected);
+                assert_eq!(actual, *fixture_actual);
+            }
+            (ClientError::InvalidAcceptance(actual), fixture_expected) => {
+                assert_eq!(&actual, fixture_expected);
+            }
+            (actual, expected) => {
+                panic!("unexpected error for {mutation:?} / {expected:?}: {actual:?}")
+            }
         }
     }
 }
@@ -970,40 +935,59 @@ fn fake_engine_event_sequence_gap_fails_closed() {
 
 #[test]
 fn fake_engine_transport_failures_and_exit_are_typed_and_bounded() {
-    let cases = [
-        (
-            "printf '%b' '\\x00\\x00\\x00\\x01\\xff'\n",
-            ExpectedFailure::Protobuf,
-        ),
-        (
-            "printf '%b' '\\x00\\x00\\x00\\x03\\x01\\x02'\n",
-            ExpectedFailure::Truncated,
-        ),
-        (
-            "printf '%b' '\\x01\\x00\\x00\\x01'\n",
-            ExpectedFailure::Oversized,
-        ),
-        ("exit 17\n", ExpectedFailure::Exit),
-    ];
-
-    for (body, expected) in cases {
-        let (_root, path) = fake_engine_script(body);
+    for mutation in TransportFrameMutation::ALL {
+        let fixture = fake_engine_transport_fixture(mutation);
+        assert_eq!(fixture.emitted_variants.len(), 2);
+        assert_eq!(
+            fixture.emitted_variants[0],
+            FakeEnvelopeVariant::HelloAccepted
+        );
+        assert_eq!(
+            fixture.emitted_variants[1],
+            FakeEnvelopeVariant::EngineEvent
+        );
+        assert_eq!(fixture.mutated_frame_index, 1);
+        assert_eq!(fixture.mutated_request_id, 1);
+        let (_root, path) = fake_engine_script(&fixture.body);
         let started = Instant::now();
-        let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
-            .err()
-            .expect("fake engine must fail");
+        let mut session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+            .expect("the unmodified acceptance frame must complete the handshake");
+        let error = session
+            .read_engine_event()
+            .expect_err("the selected post-handshake frame mutation must fail");
         assert!(started.elapsed() < TEST_OPERATION_BOUND);
-        match (error, expected) {
-            (ClientError::Protobuf(_), ExpectedFailure::Protobuf)
+        match (error, mutation) {
+            (ClientError::InvalidEventProvenance(detail), TransportFrameMutation::UnknownField) => {
+                assert!(
+                    detail.ends_with("envelope or nested message is not canonical protobuf"),
+                    "unexpected canonical-admission detail: {detail}"
+                )
+            }
+            (ClientError::Protobuf(_), TransportFrameMutation::InvalidProtobuf)
             | (
                 ClientError::Frame(FrameError::TruncatedPayload { .. }),
-                ExpectedFailure::Truncated,
+                TransportFrameMutation::TruncatedPayload,
             )
-            | (ClientError::Frame(FrameError::Oversized { .. }), ExpectedFailure::Oversized)
-            | (ClientError::EngineFailure { code: Some(17) }, ExpectedFailure::Exit) => {}
-            (actual, expected) => panic!("unexpected error for {expected:?}: {actual:?}"),
+            | (
+                ClientError::Frame(FrameError::Oversized { .. }),
+                TransportFrameMutation::OversizedLength,
+            ) => {}
+            (actual, mutation) => {
+                panic!("unexpected error for {mutation:?}: {actual:?}")
+            }
         }
     }
+
+    let (_root, path) = fake_engine_script("exit 17\n");
+    let started = Instant::now();
+    let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+        .err()
+        .expect("fake engine exit must fail the handshake");
+    assert!(started.elapsed() < TEST_OPERATION_BOUND);
+    assert!(matches!(
+        error,
+        ClientError::EngineFailure { code: Some(17) }
+    ));
 }
 
 #[test]
@@ -1021,21 +1005,53 @@ fn fake_engine_timeout_is_bounded_and_process_is_terminated() {
 fn timeout_terminates_and_reaps_the_engine_process_group() {
     let root = tempfile::tempdir().unwrap();
     let descendant_pid_path = root.path().join("descendant.pid");
+    let staged_pid_path = root.path().join("descendant.pid.staging");
+    let accepted = encode_frame(&accepted_envelope(
+        1,
+        1,
+        1,
+        &[
+            "canonical-binary-v1",
+            "framing-v1",
+            "plan-bootstrap",
+            "scan-control-v1",
+        ],
+    ));
     let body = format!(
-        "sleep 10 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
-        descendant_pid_path.display()
+        "sleep 10 &\n\
+         descendant_pid=$!\n\
+         printf '%s\\n' \"$descendant_pid\" > '{}'\n\
+         mv '{}' '{}'\n\
+         printf '%b' '{}'\n\
+         wait\n",
+        staged_pid_path.display(),
+        staged_pid_path.display(),
+        descendant_pid_path.display(),
+        shell_bytes(&accepted),
     );
     let path = write_fake_engine(&root, &body);
 
-    let error = EngineSession::connect_with_timeout(&path, PROCESS_GROUP_TEST_TIMEOUT)
-        .err()
-        .expect("silent engine must time out");
-    assert!(matches!(error, ClientError::Timeout { .. }));
-    let descendant_pid: u32 = fs::read_to_string(&descendant_pid_path)
-        .expect("fake engine must record its descendant PID")
-        .trim()
-        .parse()
-        .unwrap();
+    // The accepted handshake is the readiness barrier: the fake engine closes the
+    // staged PID record and atomically publishes it before emitting the response.
+    // This removes scheduler latency from the timeout under test while retaining a
+    // bounded, typed handshake failure if the engine exits or frames incorrectly.
+    let mut session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+        .expect("fake engine must publish its descendant before accepting the handshake");
+    let descendant_pid = read_published_process_id(&descendant_pid_path)
+        .expect("the readiness handshake must bind a complete descendant PID record");
+
+    session.send_start_scan(2, "standard").unwrap();
+    let error = session
+        .read_engine_event_with_timeout(PROCESS_GROUP_TEST_TIMEOUT)
+        .expect_err("silent engine must time out after the readiness handshake");
+    assert!(matches!(
+        error,
+        ClientError::Timeout {
+            phase: "engine event",
+            timeout: PROCESS_GROUP_TEST_TIMEOUT,
+        }
+    ));
+    drop(session);
     assert!(
         wait_for_pid_exit(descendant_pid, Duration::from_secs(2)),
         "descendant process {descendant_pid} survived engine-session cleanup"
@@ -1119,10 +1135,10 @@ fn handshake_helper_rejects_trailing_bytes_and_extra_frames_on_shutdown() {
     let trailing_body = format!("{}printf '%s' 'oops'\n", emit_then_drain(&accepted, false));
     let (_root, path) = fake_engine_script(&trailing_body);
     let error = handshake_with_engine(&path).expect_err("trailing bytes must fail shutdown");
-    assert!(matches!(
-        error,
-        ClientError::Frame(FrameError::Oversized { .. })
-    ));
+    assert!(
+        matches!(error, ClientError::Frame(FrameError::Oversized { .. })),
+        "unexpected trailing-byte shutdown error: {error:?}"
+    );
 
     let extra_frame_body = format!(
         "{}printf '%b' '{}'\n",
@@ -1171,8 +1187,8 @@ fn fake_engine_fragmented_frames_cleanly_shutdown_and_extra_frames_are_not_silen
     ));
 }
 
-#[derive(Debug)]
-enum ExpectedInvalid {
+#[derive(Clone, Copy, Debug)]
+enum AcceptanceMutation {
     MissingVersion,
     Sequence,
     Major,
@@ -1182,22 +1198,46 @@ enum ExpectedInvalid {
     MissingRequired,
 }
 
-fn accepted_without_version() -> Envelope {
-    Envelope {
-        sequence: 1,
-        body: Some(envelope::Body::HelloAccepted(HelloAccepted {
-            selected_version: None,
-            negotiated_capabilities: vec!["framing-v1".into()],
-        })),
-    }
+impl AcceptanceMutation {
+    const ALL: [Self; 7] = [
+        Self::MissingVersion,
+        Self::Sequence,
+        Self::Major,
+        Self::Minor,
+        Self::Canonical,
+        Self::Unoffered,
+        Self::MissingRequired,
+    ];
 }
 
-#[derive(Debug)]
-enum ExpectedFailure {
-    Protobuf,
-    Truncated,
-    Oversized,
-    Exit,
+#[derive(Clone, Copy, Debug)]
+enum TransportFrameMutation {
+    InvalidProtobuf,
+    UnknownField,
+    TruncatedPayload,
+    OversizedLength,
+}
+
+impl TransportFrameMutation {
+    const ALL: [Self; 4] = [
+        Self::InvalidProtobuf,
+        Self::UnknownField,
+        Self::TruncatedPayload,
+        Self::OversizedLength,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FakeEnvelopeVariant {
+    HelloAccepted,
+    EngineEvent,
+}
+
+struct FakeEngineTransportFixture {
+    body: String,
+    emitted_variants: [FakeEnvelopeVariant; 2],
+    mutated_frame_index: usize,
+    mutated_request_id: u64,
 }
 
 fn required_engine_path() -> PathBuf {
@@ -1213,6 +1253,195 @@ fn accepted_envelope(sequence: u64, major: u32, minor: u32, capabilities: &[&str
             selected_version: Some(ProtocolVersion { major, minor }),
             negotiated_capabilities: capabilities.iter().map(|value| (*value).into()).collect(),
         })),
+    }
+}
+
+fn canonical_acceptance_for(hello: &Hello) -> Envelope {
+    let mut negotiated_capabilities = hello.required_capabilities.clone();
+    negotiated_capabilities.sort();
+    let response = Envelope {
+        sequence: 1,
+        body: Some(envelope::Body::HelloAccepted(HelloAccepted {
+            selected_version: hello.version,
+            negotiated_capabilities,
+        })),
+    };
+    let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_ref() else {
+        unreachable!("fixture constructs a HelloAccepted envelope");
+    };
+    validate_accepted(hello, 1, response.sequence, accepted)
+        .expect("baseline fake-engine acceptance must be valid");
+    response
+}
+
+fn mutated_acceptance(
+    hello: &Hello,
+    mutation: AcceptanceMutation,
+) -> (Envelope, AcceptedHandshakeError) {
+    let mut response = canonical_acceptance_for(hello);
+    let baseline = response.encode_to_vec();
+    let offered_version = *hello
+        .version
+        .as_ref()
+        .expect("the built-in client hello has a version");
+    match mutation {
+        AcceptanceMutation::Sequence => {
+            assert_eq!(response.sequence, 1);
+            response.sequence = 2;
+        }
+        AcceptanceMutation::MissingVersion => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            assert_eq!(accepted.selected_version.as_ref(), Some(&offered_version));
+            accepted.selected_version = None;
+        }
+        AcceptanceMutation::Major => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            let selected = accepted
+                .selected_version
+                .as_mut()
+                .expect("baseline acceptance has a version");
+            selected.major = offered_version
+                .major
+                .checked_add(1)
+                .expect("fixture major has successor");
+            assert_ne!(selected.major, offered_version.major);
+        }
+        AcceptanceMutation::Minor => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            let selected = accepted
+                .selected_version
+                .as_mut()
+                .expect("baseline acceptance has a version");
+            selected.minor = offered_version
+                .minor
+                .checked_add(1)
+                .expect("fixture minor has successor");
+            assert!(selected.minor > offered_version.minor);
+        }
+        AcceptanceMutation::Canonical => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            let required = hello
+                .required_capabilities
+                .first()
+                .expect("the built-in client hello has a required capability")
+                .clone();
+            accepted.negotiated_capabilities.push(required.clone());
+            assert_eq!(
+                accepted
+                    .negotiated_capabilities
+                    .iter()
+                    .filter(|capability| **capability == required)
+                    .count(),
+                2
+            );
+        }
+        AcceptanceMutation::Unoffered => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            let rogue = "fixture-unoffered".to_owned();
+            assert!(
+                !hello
+                    .required_capabilities
+                    .iter()
+                    .chain(&hello.optional_capabilities)
+                    .any(|capability| capability == &rogue)
+            );
+            accepted.negotiated_capabilities.push(rogue);
+            accepted.negotiated_capabilities.sort();
+        }
+        AcceptanceMutation::MissingRequired => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            accepted.negotiated_capabilities.clear();
+            assert!(hello.required_capabilities.iter().all(|required| {
+                !accepted
+                    .negotiated_capabilities
+                    .iter()
+                    .any(|capability| capability == required)
+            }));
+        }
+    }
+    assert_ne!(response.encode_to_vec(), baseline);
+    let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_ref() else {
+        unreachable!("acceptance mutation preserves the envelope variant");
+    };
+    let observed = validate_accepted(hello, 1, response.sequence, accepted)
+        .expect_err("the exact acceptance mutation must be rejected");
+    let expected = match mutation {
+        AcceptanceMutation::MissingVersion => AcceptedHandshakeError::MissingSelectedVersion,
+        AcceptanceMutation::Sequence => AcceptedHandshakeError::SequenceMismatch {
+            expected: 1,
+            actual: 2,
+        },
+        AcceptanceMutation::Major => AcceptedHandshakeError::MajorMismatch {
+            expected: offered_version.major,
+            actual: offered_version.major + 1,
+        },
+        AcceptanceMutation::Minor => AcceptedHandshakeError::MinorOutOfRange {
+            offered: offered_version.minor,
+            selected: offered_version.minor + 1,
+        },
+        AcceptanceMutation::Canonical => AcceptedHandshakeError::NonCanonicalCapabilities,
+        AcceptanceMutation::Unoffered => {
+            AcceptedHandshakeError::UnofferedCapability("fixture-unoffered".into())
+        }
+        AcceptanceMutation::MissingRequired => AcceptedHandshakeError::MissingRequiredCapability(
+            hello.required_capabilities[0].clone(),
+        ),
+    };
+    assert_eq!(observed, expected);
+    (response, observed)
+}
+
+fn fake_engine_transport_fixture(mutation: TransportFrameMutation) -> FakeEngineTransportFixture {
+    let hello = rust_client_hello();
+    let accepted = canonical_acceptance_for(&hello);
+    let target = engine_event_envelope(1);
+    let Some(envelope::Body::EngineEvent(event)) = target.body.as_ref() else {
+        unreachable!("transport fixture target is an EngineEvent");
+    };
+    assert_eq!(event.request_id, 1);
+    let target_payload = target.encode_to_vec();
+    assert!(target_payload.len() > 1);
+
+    let mut bytes = encode_frame(&accepted);
+    match mutation {
+        TransportFrameMutation::InvalidProtobuf => {
+            bytes.extend_from_slice(&1_u32.to_be_bytes());
+            bytes.push(0xff);
+        }
+        TransportFrameMutation::UnknownField => {
+            let mut noncanonical = target_payload.clone();
+            noncanonical.extend_from_slice(&[0x98, 0x06, 0x01]);
+            bytes.extend_from_slice(&(noncanonical.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&noncanonical);
+        }
+        TransportFrameMutation::TruncatedPayload => {
+            bytes.extend_from_slice(&(target_payload.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&target_payload[..target_payload.len() - 1]);
+        }
+        TransportFrameMutation::OversizedLength => {
+            bytes.extend_from_slice(&((MAX_FRAME_LENGTH as u32) + 1).to_be_bytes());
+        }
+    }
+    FakeEngineTransportFixture {
+        body: emit_then_close_stdout(&bytes),
+        emitted_variants: [
+            FakeEnvelopeVariant::HelloAccepted,
+            FakeEnvelopeVariant::EngineEvent,
+        ],
+        mutated_frame_index: 1,
+        mutated_request_id: event.request_id,
     }
 }
 
@@ -1336,6 +1565,11 @@ fn emit_then_drain(bytes: &[u8], fragmented: bool) -> String {
     }
 }
 
+fn emit_then_close_stdout(bytes: &[u8]) -> String {
+    let escaped = shell_bytes(bytes);
+    format!("printf '%b' '{escaped}'\nexec 1>&-\ncat >/dev/null\n")
+}
+
 fn fake_engine_script(body: &str) -> (TempDir, PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let path = write_fake_engine(&root, body);
@@ -1353,6 +1587,25 @@ fn write_fake_engine(root: &TempDir, body: &str) -> PathBuf {
 
 fn shell_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect()
+}
+
+fn read_published_process_id(path: &Path) -> Result<u32, String> {
+    let bytes = fs::read(path).map_err(|error| format!("PID publication read failed: {error}"))?;
+    let record = bytes
+        .strip_suffix(b"\n")
+        .ok_or_else(|| "PID publication framing error: missing final newline".to_owned())?;
+    if record.is_empty() || record.contains(&b'\n') {
+        return Err("PID publication framing error: expected exactly one record".to_owned());
+    }
+    let value = std::str::from_utf8(record)
+        .map_err(|error| format!("PID publication framing error: {error}"))?;
+    let process_id = value
+        .parse::<u32>()
+        .map_err(|error| format!("PID publication parse error: {error}"))?;
+    if process_id == 0 {
+        return Err("PID publication parse error: process ID is zero".to_owned());
+    }
+    Ok(process_id)
 }
 
 fn wait_for_pid_exit(process_id: u32, timeout: Duration) -> bool {

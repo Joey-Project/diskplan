@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use diskplan_core::framing::{FrameError, read_frame, write_frame};
 use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello, validate_accepted};
+use diskplan_proto::decode_canonical_envelope;
 use diskplan_proto::diskplan::v1::{
     BusinessEnvelope, EngineEvent, Envelope, HelloAccepted, ScanCheckpointChunk,
     ScanCheckpointChunkDescriptor, ScanCheckpointEvidence, ScanCheckpointManifest, ScanControlKind,
@@ -1936,7 +1937,7 @@ impl EngineSession {
         timeout: Duration,
     ) -> Result<Envelope, ClientError> {
         match self.frames.recv_timeout(timeout) {
-            Ok(Ok(Some(payload))) => Ok(Envelope::decode(payload.as_slice())?),
+            Ok(Ok(Some(payload))) => decode_engine_envelope(&payload),
             Ok(Ok(None)) | Err(RecvTimeoutError::Disconnected) => {
                 if let Some(status) = self.observe_exit()? {
                     return Err(ClientError::EngineFailure {
@@ -2160,14 +2161,21 @@ impl EngineSession {
             }
             Ok(Some(_)) => {}
             Ok(None) => *clean_eof = true,
-            Err(error) if tail_error.is_none() => *tail_error = Some(ClientError::Frame(error)),
-            Err(_) => {}
+            Err(error) => {
+                // The decoder exits after reporting any framing error. Treat that
+                // report as the terminal stdout state so the following channel
+                // disconnect cannot mask the protocol violation.
+                *clean_eof = true;
+                if tail_error.is_none() {
+                    *tail_error = Some(ClientError::Frame(error));
+                }
+            }
         }
     }
 
     fn accept_shutdown_tail_payload(&mut self, payload: &[u8]) -> Result<(), ClientError> {
         let cancelled_was_seen = self.scan_cancelled_seen;
-        let envelope = Envelope::decode(payload)?;
+        let envelope = decode_engine_envelope(payload)?;
         if !matches!(envelope.body, Some(envelope::Body::EngineEvent(_))) {
             return Err(ClientError::ExtraFrameAfterShutdown);
         }
@@ -2182,6 +2190,16 @@ impl EngineSession {
             Err(ClientError::ExtraFrameAfterShutdown)
         }
     }
+}
+
+fn decode_engine_envelope(payload: &[u8]) -> Result<Envelope, ClientError> {
+    // Preserve the transport taxonomy for bytes that are not protobuf at all.
+    // Canonicality and nested unknown-field rejection remain semantic
+    // provenance failures after a syntactically valid envelope decode.
+    Envelope::decode(payload)?;
+    decode_canonical_envelope(payload)
+        .map(|receipt| receipt.envelope().clone())
+        .map_err(|error| ClientError::InvalidEventProvenance(error.to_string()))
 }
 
 fn invalid_checkpoint(detail: impl Into<String>) -> ClientError {
@@ -2432,6 +2450,28 @@ mod event_sequence_tests {
             process_group_id: 0,
             reaper,
         }
+    }
+
+    #[test]
+    fn shutdown_frame_error_is_terminal_and_precedes_decoder_disconnect() {
+        let mut session = session_with_events([]);
+        let mut clean_eof = false;
+        let mut tail_error = None;
+
+        session.accept_shutdown_frame(
+            Err(FrameError::Oversized {
+                length: diskplan_core::framing::MAX_FRAME_LENGTH + 1,
+                maximum: diskplan_core::framing::MAX_FRAME_LENGTH,
+            }),
+            &mut clean_eof,
+            &mut tail_error,
+        );
+
+        assert!(clean_eof);
+        assert!(matches!(
+            tail_error,
+            Some(ClientError::Frame(FrameError::Oversized { .. }))
+        ));
     }
 
     fn accepted_start(sequence: u64) -> EngineEvent {

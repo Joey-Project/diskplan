@@ -98,12 +98,32 @@ public struct AccessPolicyEvidence: Equatable, Sendable {
   public let ownerGroupID: UInt32
   public let mode: UInt32
   public let flags: UInt32
+  public let aclDigest: Observation<EvidenceDigest>
 
-  public init(ownerUserID: UInt32, ownerGroupID: UInt32, mode: UInt32, flags: UInt32) {
+  public init(
+    ownerUserID: UInt32,
+    ownerGroupID: UInt32,
+    mode: UInt32,
+    flags: UInt32,
+    aclDigest: Observation<EvidenceDigest> = .unknown(reason: "ACL not observed")
+  ) {
     self.ownerUserID = ownerUserID
     self.ownerGroupID = ownerGroupID
     self.mode = mode
     self.flags = flags
+    self.aclDigest = aclDigest
+  }
+}
+
+public struct FilesystemFlagMetadataEvidence: Equatable, Sendable {
+  public let rawFlags: UInt32
+  public let accessControlFlags: UInt32
+  public let nonAccessControlFlags: UInt32
+
+  public init(rawFlags: UInt32) {
+    self.rawFlags = rawFlags
+    accessControlFlags = darwinAccessControlFlags(rawFlags)
+    nonAccessControlFlags = rawFlags & ~accessControlFlags
   }
 }
 
@@ -334,7 +354,10 @@ public struct ScannedNode: Equatable, Sendable {
   public let bytes: ItemByteEvidence
   public let storageTopology: StorageTopologyEvidence
   public let filesystemTimes: FilesystemTimeEvidence
+  public let filesystemFlags: Observation<FilesystemFlagMetadataEvidence>
   public let accessPolicy: Observation<AccessPolicyEvidence>
+  public let ancestorAccessPolicy: Observation<AncestorAccessPolicySeal>
+  public let content: ContentEvidence
   public let coverage: Coverage
   public let providerBoundary: ProviderBoundary
   public let providerEvidence: Observation<ProviderScanEvidence>
@@ -345,7 +368,12 @@ public struct ScannedNode: Equatable, Sendable {
     bytes: ItemByteEvidence,
     storageTopology: StorageTopologyEvidence = .unknown,
     filesystemTimes: FilesystemTimeEvidence = .unknown,
+    filesystemFlags: Observation<FilesystemFlagMetadataEvidence> = .unknown(
+      reason: "filesystem flags not observed"),
     accessPolicy: Observation<AccessPolicyEvidence> = .unknown(reason: "not observed"),
+    ancestorAccessPolicy: Observation<AncestorAccessPolicySeal> = .unknown(
+      reason: "ancestor access policy not observed"),
+    content: ContentEvidence = .notRequested,
     coverage: Coverage,
     providerBoundary: ProviderBoundary,
     providerEvidence: Observation<ProviderScanEvidence> = .unknown(reason: "not observed")
@@ -355,7 +383,10 @@ public struct ScannedNode: Equatable, Sendable {
     self.bytes = bytes
     self.storageTopology = storageTopology
     self.filesystemTimes = filesystemTimes
+    self.filesystemFlags = filesystemFlags
     self.accessPolicy = accessPolicy
+    self.ancestorAccessPolicy = ancestorAccessPolicy
+    self.content = content
     self.coverage = coverage
     self.providerBoundary = providerBoundary
     self.providerEvidence = providerEvidence
@@ -374,6 +405,15 @@ public protocol ScanNodeSink: Sendable {
 public struct DiscardingScanNodeSink: ScanNodeSink {
   public init() {}
   public func receive(_ event: ScanNodeEvent) {}
+}
+
+public protocol AccessPolicyEpochSink: Sendable {
+  func receive(_ receipt: DirectoryCloseEpochReceipt)
+}
+
+public struct DiscardingAccessPolicyEpochSink: AccessPolicyEpochSink {
+  public init() {}
+  public func receive(_ receipt: DirectoryCloseEpochReceipt) {}
 }
 
 public struct RootBinding: Equatable, Sendable {
@@ -395,6 +435,9 @@ public struct RootBinding: Equatable, Sendable {
 public struct RootScanResult: Equatable, Sendable {
   public let binding: RootBinding
   public let providerBoundary: ProviderBoundary
+  public let rootAccessPolicy: Observation<AccessPolicyEvidence>
+  public let rootAccessPolicySeal: Observation<AncestorAccessPolicySeal>
+  public let rootFilesystemFlags: Observation<FilesystemFlagMetadataEvidence>
   public let aggregateBytes: ItemByteEvidence
   public let coverage: Coverage
   public let entriesObserved: UInt64
@@ -403,6 +446,12 @@ public struct RootScanResult: Equatable, Sendable {
   public init(
     binding: RootBinding,
     providerBoundary: ProviderBoundary,
+    rootAccessPolicy: Observation<AccessPolicyEvidence> = .unknown(
+      reason: "root access policy not observed"),
+    rootAccessPolicySeal: Observation<AncestorAccessPolicySeal> = .unknown(
+      reason: "root access policy seal not observed"),
+    rootFilesystemFlags: Observation<FilesystemFlagMetadataEvidence> = .unknown(
+      reason: "root filesystem flags not observed"),
     aggregateBytes: ItemByteEvidence,
     coverage: Coverage,
     entriesObserved: UInt64,
@@ -410,6 +459,9 @@ public struct RootScanResult: Equatable, Sendable {
   ) {
     self.binding = binding
     self.providerBoundary = providerBoundary
+    self.rootAccessPolicy = rootAccessPolicy
+    self.rootAccessPolicySeal = rootAccessPolicySeal
+    self.rootFilesystemFlags = rootFilesystemFlags
     self.aggregateBytes = aggregateBytes
     self.coverage = coverage
     self.entriesObserved = entriesObserved

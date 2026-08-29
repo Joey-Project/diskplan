@@ -50,7 +50,11 @@ private struct DirectoryFrame {
   let rootProviderBoundary: ProviderBoundary
   let providerEvidence: Observation<ProviderScanEvidence>
   let filesystemTimes: FilesystemTimeEvidence
+  let filesystemFlags: Observation<FilesystemFlagMetadataEvidence>
   let accessPolicy: Observation<AccessPolicyEvidence>
+  let ancestorAccessPolicy: Observation<AncestorAccessPolicySeal>
+  let descendantAccessPolicy: Observation<AncestorAccessPolicySeal>
+  let closeEpochID: EvidenceDigest
   var nextIndex: Int
   var aggregate: ItemByteEvidence
   let storageTopology: StorageTopologyEvidence
@@ -62,6 +66,8 @@ public final class DeterministicScanner {
   private let scope: ResolvedScanScope
   private let clock: any ScanClock
   private let nodeSink: any ScanNodeSink
+  private let accessPolicyEpochSink: any AccessPolicyEpochSink
+  private let accessPolicyEpochLedger = AccessPolicyEpochLedger()
   private let processActivity: Observation<[ProcessActivityRecord]>
   private let reference: ScanReference
   private var state: ScanMachineState = .ready
@@ -83,6 +89,7 @@ public final class DeterministicScanner {
     scope: ResolvedScanScope,
     clock: any ScanClock = SystemScanClock(),
     nodeSink: any ScanNodeSink = DiscardingScanNodeSink(),
+    accessPolicyEpochSink: any AccessPolicyEpochSink = DiscardingAccessPolicyEpochSink(),
     processActivity: Observation<[ProcessActivityRecord]> = .unknown(
       reason: "process activity snapshot not supplied"),
     collectorConfiguration: ScanCollectorConfiguration = .precollectedOrUnavailable
@@ -91,6 +98,7 @@ public final class DeterministicScanner {
     self.scope = scope
     self.clock = clock
     self.nodeSink = nodeSink
+    self.accessPolicyEpochSink = accessPolicyEpochSink
     self.processActivity = processActivity
     let wallClock = clock.wallClockNow()
     let monotonic = clock.monotonicNowNanoseconds()
@@ -175,12 +183,47 @@ public final class DeterministicScanner {
       directoriesInCurrentRoot = 0
       switch filesystem.bindRoot(request, resolverVersion: scope.resolverVersion) {
       case .known(let root):
+        let rootPath = RawPath(rootID: root.binding.rootID)
+        let rootCloseEpochID = directoryCloseEpochID(
+          rootIdentity: root.binding.identity,
+          path: rootPath,
+          identity: root.binding.identity
+        )
+        let rootAccessPolicySeal = appendAncestorAccessPolicySeal(
+          parent: nil,
+          rootIdentity: root.binding.identity,
+          identity: root.binding.identity,
+          accessPolicy: root.accessPolicy,
+          pendingCloseEpochID: rootCloseEpochID
+        )
         if root.providerBoundary.preventsNormalDescent {
-          let closeCoverage = coverage(for: filesystem.close(root.directory))
+          let closeEvidence = validatedCloseEvidence(
+            expectedIdentity: root.binding.identity,
+            expectedAccessPolicy: root.accessPolicy,
+            observed: filesystem.close(root.directory)
+          )
+          let closeCoverage = coverage(for: closeEvidence)
+          let closedRootSeal = appendAncestorAccessPolicySeal(
+            parent: nil,
+            rootIdentity: root.binding.identity,
+            identity: root.binding.identity,
+            accessPolicy: closeEvidence.accessPolicy,
+            pendingCloseEpochID: nil
+          )
+          publishCloseEpochReceipt(
+            closeEpochReceipt(
+              rootCloseEpochID,
+              expectedIdentity: root.binding.identity,
+              expectedAccessPolicy: root.accessPolicy,
+              evidence: closeEvidence
+            ))
           completedRoots.append(
             RootScanResult(
               binding: root.binding,
               providerBoundary: root.providerBoundary,
+              rootAccessPolicy: closeEvidence.accessPolicy,
+              rootAccessPolicySeal: closedRootSeal,
+              rootFilesystemFlags: root.filesystemFlags,
               aggregateBytes: .lowerBoundZero,
               coverage: Coverage(
                 completeness: .partial,
@@ -193,11 +236,33 @@ public final class DeterministicScanner {
           continue
         }
         if scope.budget.maximumEntriesPerRoot == 0 {
-          let closeCoverage = coverage(for: filesystem.close(root.directory))
+          let closeEvidence = validatedCloseEvidence(
+            expectedIdentity: root.binding.identity,
+            expectedAccessPolicy: root.accessPolicy,
+            observed: filesystem.close(root.directory)
+          )
+          let closeCoverage = coverage(for: closeEvidence)
+          let closedRootSeal = appendAncestorAccessPolicySeal(
+            parent: nil,
+            rootIdentity: root.binding.identity,
+            identity: root.binding.identity,
+            accessPolicy: closeEvidence.accessPolicy,
+            pendingCloseEpochID: nil
+          )
+          publishCloseEpochReceipt(
+            closeEpochReceipt(
+              rootCloseEpochID,
+              expectedIdentity: root.binding.identity,
+              expectedAccessPolicy: root.accessPolicy,
+              evidence: closeEvidence
+            ))
           completedRoots.append(
             RootScanResult(
               binding: root.binding,
               providerBoundary: root.providerBoundary,
+              rootAccessPolicy: closeEvidence.accessPolicy,
+              rootAccessPolicySeal: closedRootSeal,
+              rootFilesystemFlags: root.filesystemFlags,
               aggregateBytes: .lowerBoundZero,
               coverage: Coverage(
                 completeness: .partial,
@@ -222,7 +287,7 @@ public final class DeterministicScanner {
             DirectoryFrame(
               directory: root.directory,
               rootBinding: root.binding,
-              path: RawPath(rootID: root.binding.rootID),
+              path: rootPath,
               identity: root.binding.identity,
               names: enumeration.names,
               retainedNameBytes: enumeration.retainedNameBytes,
@@ -231,7 +296,11 @@ public final class DeterministicScanner {
               rootProviderBoundary: root.providerBoundary,
               providerEvidence: root.providerEvidence,
               filesystemTimes: root.filesystemTimes,
+              filesystemFlags: root.filesystemFlags,
               accessPolicy: root.accessPolicy,
+              ancestorAccessPolicy: .absent(reason: "scan root has no in-scope ancestor"),
+              descendantAccessPolicy: rootAccessPolicySeal,
+              closeEpochID: rootCloseEpochID,
               nextIndex: 0,
               aggregate: .lowerBoundZero,
               storageTopology: .unknown,
@@ -245,7 +314,19 @@ public final class DeterministicScanner {
           ]
           return true
         case let failure:
-          let closeCoverage = coverage(for: filesystem.close(root.directory))
+          let closeEvidence = validatedCloseEvidence(
+            expectedIdentity: root.binding.identity,
+            expectedAccessPolicy: root.accessPolicy,
+            observed: filesystem.close(root.directory)
+          )
+          publishCloseEpochReceipt(
+            closeEpochReceipt(
+              rootCloseEpochID,
+              expectedIdentity: root.binding.identity,
+              expectedAccessPolicy: root.accessPolicy,
+              evidence: closeEvidence
+            ))
+          let closeCoverage = coverage(for: closeEvidence)
           rootFailures.append((request.rootID, failure.erasingValue()))
           globalCoverage = globalCoverage.merging(
             Coverage(completeness: .partial, reasons: coverageReasons(failure))
@@ -307,7 +388,9 @@ public final class DeterministicScanner {
         bytes: item.bytes,
         storageTopology: item.storageTopology,
         filesystemTimes: item.filesystemTimes,
+        filesystemFlags: item.filesystemFlags,
         accessPolicy: item.accessPolicy,
+        ancestorAccessPolicy: stack[frameIndex].descendantAccessPolicy,
         coverage: retainedCoverage,
         providerBoundary: providerBoundary,
         providerEvidence: item.providerEvidence
@@ -348,6 +431,18 @@ public final class DeterministicScanner {
       )
       {
       case .known(let directory):
+        let childCloseEpochID = directoryCloseEpochID(
+          rootIdentity: stack[0].identity,
+          path: path,
+          identity: item.identity
+        )
+        let descendantAccessPolicy = appendAncestorAccessPolicySeal(
+          parent: stack[frameIndex].descendantAccessPolicy,
+          rootIdentity: stack[0].identity,
+          identity: item.identity,
+          accessPolicy: item.accessPolicy,
+          pendingCloseEpochID: childCloseEpochID
+        )
         switch filesystem.enumerate(
           directory.handle,
           limits: enumerationLimits()
@@ -371,7 +466,11 @@ public final class DeterministicScanner {
               rootProviderBoundary: stack[frameIndex].rootProviderBoundary,
               providerEvidence: item.providerEvidence,
               filesystemTimes: item.filesystemTimes,
+              filesystemFlags: item.filesystemFlags,
               accessPolicy: item.accessPolicy,
+              ancestorAccessPolicy: stack[frameIndex].descendantAccessPolicy,
+              descendantAccessPolicy: descendantAccessPolicy,
+              closeEpochID: childCloseEpochID,
               nextIndex: 0,
               aggregate: item.bytes,
               storageTopology: item.storageTopology,
@@ -379,7 +478,19 @@ public final class DeterministicScanner {
             )
           )
         case let failure:
-          let closeCoverage = coverage(for: filesystem.close(directory))
+          let closeEvidence = validatedCloseEvidence(
+            expectedIdentity: item.identity,
+            expectedAccessPolicy: item.accessPolicy,
+            observed: filesystem.close(directory)
+          )
+          publishCloseEpochReceipt(
+            closeEpochReceipt(
+              childCloseEpochID,
+              expectedIdentity: item.identity,
+              expectedAccessPolicy: item.accessPolicy,
+              evidence: closeEvidence
+            ))
+          let closeCoverage = coverage(for: closeEvidence)
           stack[frameIndex].aggregate = .adding(stack[frameIndex].aggregate, item.bytes)
           stack[frameIndex].coverage = stack[frameIndex].coverage.merging(
             Coverage(completeness: .partial, reasons: coverageReasons(failure))
@@ -401,6 +512,7 @@ public final class DeterministicScanner {
         path: path,
         identity: failure.erasingValue(),
         bytes: .unknown,
+        ancestorAccessPolicy: stack[frameIndex].descendantAccessPolicy,
         coverage: coverage,
         providerBoundary: inheritedProvider
           ? .metadataOnly(reason: "inherited provider boundary")
@@ -414,16 +526,37 @@ public final class DeterministicScanner {
 
   private func closeTopDirectory() {
     var frame = stack.removeLast()
-    let closeEvidence = filesystem.close(frame.directory)
+    let closeEvidence = validatedCloseEvidence(
+      expectedIdentity: frame.identity,
+      expectedAccessPolicy: frame.accessPolicy,
+      observed: filesystem.close(frame.directory)
+    )
+    publishCloseEpochReceipt(
+      closeEpochReceipt(
+        frame.closeEpochID,
+        expectedIdentity: frame.identity,
+        expectedAccessPolicy: frame.accessPolicy,
+        evidence: closeEvidence
+      ))
     let closeCoverage = coverage(for: closeEvidence)
     frame.coverage = frame.coverage.merging(closeCoverage)
     directoriesInCurrentRoot += 1
     totalDirectories += 1
     if stack.isEmpty {
+      let closedRootSeal = appendAncestorAccessPolicySeal(
+        parent: nil,
+        rootIdentity: frame.rootBinding.identity,
+        identity: frame.rootBinding.identity,
+        accessPolicy: closeEvidence.accessPolicy,
+        pendingCloseEpochID: nil
+      )
       completedRoots.append(
         RootScanResult(
           binding: frame.rootBinding,
           providerBoundary: frame.rootProviderBoundary,
+          rootAccessPolicy: closeEvidence.accessPolicy,
+          rootAccessPolicySeal: closedRootSeal,
+          rootFilesystemFlags: frame.filesystemFlags,
           aggregateBytes: frame.aggregate,
           coverage: frame.coverage.merging(forcedCoverage),
           entriesObserved: entriesInCurrentRoot,
@@ -440,7 +573,9 @@ public final class DeterministicScanner {
         bytes: frame.aggregate,
         storageTopology: frame.storageTopology,
         filesystemTimes: frame.filesystemTimes,
+        filesystemFlags: frame.filesystemFlags,
         accessPolicy: closeEvidence.accessPolicy,
+        ancestorAccessPolicy: frame.ancestorAccessPolicy,
         coverage: frame.coverage,
         providerBoundary: frame.inheritedProviderBoundary
           ? .metadataOnly(reason: "inherited provider boundary") : .localOrUnindicated,
@@ -465,6 +600,11 @@ public final class DeterministicScanner {
       RootScanResult(
         binding: rootFrame.rootBinding,
         providerBoundary: rootFrame.rootProviderBoundary,
+        rootAccessPolicy: .unknown(
+          reason: "partial finalization does not retain a root close access-policy observation"),
+        rootAccessPolicySeal: .unknown(
+          reason: "partial finalization does not retain a root close access-policy seal"),
+        rootFilesystemFlags: rootFrame.filesystemFlags,
         aggregateBytes: aggregate,
         coverage: coverage,
         entriesObserved: entriesInCurrentRoot,
@@ -480,7 +620,19 @@ public final class DeterministicScanner {
       closeCoverage = closeCoverage.merging(
         Coverage(completeness: .partial, reasons: [.subtreeIncomplete])
       )
-      closeCoverage = closeCoverage.merging(coverage(for: filesystem.close(frame.directory)))
+      let closeEvidence = validatedCloseEvidence(
+        expectedIdentity: frame.identity,
+        expectedAccessPolicy: frame.accessPolicy,
+        observed: filesystem.close(frame.directory)
+      )
+      publishCloseEpochReceipt(
+        closeEpochReceipt(
+          frame.closeEpochID,
+          expectedIdentity: frame.identity,
+          expectedAccessPolicy: frame.accessPolicy,
+          evidence: closeEvidence
+        ))
+      closeCoverage = closeCoverage.merging(coverage(for: closeEvidence))
     }
     pendingNameBytes = 0
     return closeCoverage
@@ -547,6 +699,57 @@ public final class DeterministicScanner {
     )
   }
 
+  private func closeEpochReceipt(
+    _ epochID: EvidenceDigest,
+    expectedIdentity: ObjectIdentity,
+    expectedAccessPolicy: Observation<AccessPolicyEvidence>,
+    evidence: DirectoryCloseEvidence
+  ) -> DirectoryCloseEpochReceipt {
+    let result: Observation<Bool>
+    if evidence.identity.value == nil {
+      result = evidence.identity.erasingValue()
+    } else if evidence.accessPolicy.value == nil {
+      result = evidence.accessPolicy.erasingValue()
+    } else if evidence.identity != .known(expectedIdentity) {
+      result = .failed(reason: "directory identity changed before close", errorCode: ESTALE)
+    } else if evidence.accessPolicy != expectedAccessPolicy {
+      result = .failed(reason: "directory access policy changed before close", errorCode: EAGAIN)
+    } else {
+      result = .known(true)
+    }
+    return DirectoryCloseEpochReceipt(epochID: epochID, result: result)
+  }
+
+  private func publishCloseEpochReceipt(_ receipt: DirectoryCloseEpochReceipt) {
+    accessPolicyEpochLedger.receive(receipt)
+    accessPolicyEpochSink.receive(receipt)
+  }
+
+  private func validatedCloseEvidence(
+    expectedIdentity: ObjectIdentity,
+    expectedAccessPolicy: Observation<AccessPolicyEvidence>,
+    observed: DirectoryCloseEvidence
+  ) -> DirectoryCloseEvidence {
+    let identity: Observation<ObjectIdentity> =
+      if let value = observed.identity.value, value != expectedIdentity {
+        .failed(reason: "directory identity changed before close", errorCode: ESTALE)
+      } else {
+        observed.identity
+      }
+    let accessPolicy: Observation<AccessPolicyEvidence> =
+      if observed.identity.value == expectedIdentity,
+        let value = observed.accessPolicy.value,
+        .known(value) != expectedAccessPolicy
+      {
+        .failed(reason: "directory access policy changed before close", errorCode: EAGAIN)
+      } else if identity.value == nil {
+        identity.erasingValue()
+      } else {
+        observed.accessPolicy
+      }
+    return DirectoryCloseEvidence(identity: identity, accessPolicy: accessPolicy)
+  }
+
   private func addingSaturated(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
     let (sum, overflow) = lhs.addingReportingOverflow(rhs)
     return overflow ? UInt64.max : sum
@@ -593,12 +796,37 @@ public final class DeterministicScanner {
         directoriesClosed: totalDirectories,
         rootsComplete: completeRoots,
         rootsPartial: partialRoots + UInt64(rootFailures.count) + unresolvedRootCount,
-        retainedNodes: retained
+        retainedNodes: finalizedRetainedNodes
       ),
       coverage: allCoverage,
       globalFacts: .publicEvidenceUnavailable,
       processActivity: processActivity
     )
+  }
+
+  private var finalizedRetainedNodes: [ScannedNode] {
+    guard state == .complete || state == .partial || state == .cancelled else { return retained }
+    return retained.map { node in
+      let ancestorAccessPolicy = accessPolicyEpochLedger.finalize(node.ancestorAccessPolicy)
+      return ScannedNode(
+        path: node.path,
+        identity: node.identity,
+        bytes: node.bytes,
+        storageTopology: node.storageTopology,
+        filesystemTimes: node.filesystemTimes,
+        filesystemFlags: node.filesystemFlags,
+        accessPolicy: node.accessPolicy,
+        ancestorAccessPolicy: ancestorAccessPolicy,
+        content: node.content,
+        coverage: node.coverage.merging(
+          Coverage(
+            completeness: .complete,
+            reasons: coverageReasons(ancestorAccessPolicy)
+          )),
+        providerBoundary: node.providerBoundary,
+        providerEvidence: node.providerEvidence
+      )
+    }
   }
 
   private var hasPartialCoverage: Bool {

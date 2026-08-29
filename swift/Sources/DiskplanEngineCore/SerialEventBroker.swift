@@ -14,12 +14,47 @@ private enum PendingOutput: @unchecked Sendable {
     requestID: UInt64,
     scanSessionID: String,
     body: Diskplan_V1_EngineEvent.OneOf_Body,
-    telemetry: Bool
+    telemetry: Bool,
+    writeAcknowledgement: BrokerWriteAcknowledgement?
+  )
+  case runtimeEvent(
+    requestID: UInt64,
+    runtimeSessionID: Data,
+    body: Diskplan_V1_RuntimeEvent.OneOf_Body
   )
 
   var isTelemetry: Bool {
-    if case .event(_, _, _, let telemetry) = self { return telemetry }
+    if case .event(_, _, _, let telemetry, _) = self { return telemetry }
     return false
+  }
+
+  var writeAcknowledgement: BrokerWriteAcknowledgement? {
+    if case .event(_, _, _, _, let acknowledgement) = self { return acknowledgement }
+    return nil
+  }
+}
+
+private final class BrokerWriteAcknowledgement: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var result: Result<Void, EventBrokerError>?
+
+  func resolve(_ result: Result<Void, EventBrokerError>) {
+    condition.lock()
+    guard self.result == nil else {
+      condition.unlock()
+      return
+    }
+    self.result = result
+    condition.broadcast()
+    condition.unlock()
+  }
+
+  func wait() throws {
+    condition.lock()
+    while result == nil { condition.wait() }
+    let result = self.result!
+    condition.unlock()
+    try result.get()
   }
 }
 
@@ -33,6 +68,7 @@ final class SerialEventBroker: @unchecked Sendable {
   private let writer: Writer
   private var pending: [PendingOutput] = []
   private var semanticCount = 0
+  private var inFlightCount = 0
   private var closing = false
   private var finished = false
   private var failure: EventBrokerError?
@@ -74,10 +110,45 @@ final class SerialEventBroker: @unchecked Sendable {
         requestID: requestID,
         scanSessionID: scanSessionID,
         body: body,
-        telemetry: false
+        telemetry: false,
+        writeAcknowledgement: nil
       ),
       semantic: true
     )
+  }
+
+  func sendRuntime(
+    requestID: UInt64,
+    runtimeSessionID: Data,
+    body: Diskplan_V1_RuntimeEvent.OneOf_Body
+  ) throws {
+    try enqueue(
+      .runtimeEvent(
+        requestID: requestID,
+        runtimeSessionID: runtimeSessionID,
+        body: body
+      ),
+      semantic: true
+    )
+  }
+
+  func sendSemanticAwaitingWrite(
+    requestID: UInt64,
+    scanSessionID: String = "",
+    body: Diskplan_V1_EngineEvent.OneOf_Body
+  ) throws {
+    let acknowledgement = BrokerWriteAcknowledgement()
+    try enqueue(
+      .event(
+        requestID: requestID,
+        scanSessionID: scanSessionID,
+        body: body,
+        telemetry: false,
+        writeAcknowledgement: acknowledgement
+      ),
+      semantic: true
+    )
+    try acknowledgement.wait()
   }
 
   func sendProgress(
@@ -94,7 +165,8 @@ final class SerialEventBroker: @unchecked Sendable {
         requestID: 0,
         scanSessionID: scanSessionID,
         body: .scanProgress(progress),
-        telemetry: true
+        telemetry: true,
+        writeAcknowledgement: nil
       )
     } else {
       pending.append(
@@ -102,7 +174,8 @@ final class SerialEventBroker: @unchecked Sendable {
           requestID: 0,
           scanSessionID: scanSessionID,
           body: .scanProgress(progress),
-          telemetry: true
+          telemetry: true,
+          writeAcknowledgement: nil
         ))
     }
     condition.signal()
@@ -113,6 +186,19 @@ final class SerialEventBroker: @unchecked Sendable {
     closing = true
     condition.broadcast()
     while !finished { condition.wait() }
+    let failure = failure
+    condition.unlock()
+    if let failure { throw failure }
+  }
+
+  /// Waits until every output accepted before this call has completed its
+  /// actual writer invocation. Runtime authority receipts commit only after
+  /// this barrier succeeds.
+  func flush() throws {
+    condition.lock()
+    while (!pending.isEmpty || inFlightCount != 0) && failure == nil && !finished {
+      condition.wait()
+    }
     let failure = failure
     condition.unlock()
     if let failure { throw failure }
@@ -146,21 +232,34 @@ final class SerialEventBroker: @unchecked Sendable {
         return
       }
       let output = pending.removeFirst()
+      inFlightCount += 1
       if !output.isTelemetry { semanticCount -= 1 }
       condition.broadcast()
       condition.unlock()
 
       do {
         try writer(serialized(output))
-      } catch {
         condition.lock()
-        failure = .outputFailed(String(describing: error))
+        inFlightCount -= 1
+        condition.broadcast()
+        condition.unlock()
+        output.writeAcknowledgement?.resolve(.success(()))
+      } catch {
+        let outputFailure = EventBrokerError.outputFailed(String(describing: error))
+        condition.lock()
+        inFlightCount -= 1
+        failure = outputFailure
+        let pendingAcknowledgements = pending.compactMap(\.writeAcknowledgement)
         pending.removeAll()
         semanticCount = 0
         closing = true
         finished = true
         condition.broadcast()
         condition.unlock()
+        output.writeAcknowledgement?.resolve(.failure(outputFailure))
+        for acknowledgement in pendingAcknowledgements {
+          acknowledgement.resolve(.failure(outputFailure))
+        }
         return
       }
     }
@@ -172,12 +271,8 @@ final class SerialEventBroker: @unchecked Sendable {
     case .envelope(let sequence, let body):
       envelope.sequence = sequence
       envelope.body = body
-    case .event(let requestID, let scanSessionID, let body, _):
-      let sequence = nextEventSequence
-      guard sequence != 0 else {
-        throw EventBrokerError.outputFailed("event sequence space exhausted")
-      }
-      nextEventSequence = sequence == UInt64.max ? 0 : sequence + 1
+    case .event(let requestID, let scanSessionID, let body, _, _):
+      let sequence = try consumeEventSequence()
       var event = Diskplan_V1_EngineEvent()
       event.eventSequence = sequence
       event.requestID = requestID
@@ -185,7 +280,27 @@ final class SerialEventBroker: @unchecked Sendable {
       event.body = body
       envelope.sequence = sequence
       envelope.body = .engineEvent(event)
+    case .runtimeEvent(let requestID, let runtimeSessionID, let body):
+      let sequence = try consumeEventSequence()
+      var sessionID = Diskplan_V1_OpaqueIdentifier()
+      sessionID.value = runtimeSessionID
+      var event = Diskplan_V1_RuntimeEvent()
+      event.eventSequence = sequence
+      event.requestID = requestID
+      event.runtimeSessionID = sessionID
+      event.body = body
+      envelope.sequence = sequence
+      envelope.body = .runtimeEvent(event)
     }
     return try envelope.serializedData()
+  }
+
+  private func consumeEventSequence() throws -> UInt64 {
+    let sequence = nextEventSequence
+    guard sequence != 0 else {
+      throw EventBrokerError.outputFailed("event sequence space exhausted")
+    }
+    nextEventSequence = sequence == UInt64.max ? 0 : sequence + 1
+    return sequence
   }
 }

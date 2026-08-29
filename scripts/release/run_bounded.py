@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import resource
 import select
 import selectors
 import signal
@@ -210,12 +211,49 @@ def normalize_exit_code(return_code: int) -> int:
     return 128 - return_code if return_code < 0 else return_code
 
 
-def validate_process_group(process: subprocess.Popen[bytes]) -> int:
-    pgid = os.getpgid(process.pid)
-    session_id = os.getsid(process.pid)
-    if pgid != process.pid or session_id != process.pid:
+def validate_process_group(
+    process: subprocess.Popen[bytes],
+    observer: LeaderExitObserver,
+    deadline: float,
+) -> int:
+    """Validate PID == PGID == SID without rejecting an already-exited leader."""
+
+    expected = process.pid
+    try:
+        pgid = os.getpgid(expected)
+    except OSError as error:
+        return validate_exited_session_contract(error, expected, observer, deadline)
+    if pgid != expected:
+        raise RuntimeError(
+            "acceptance command did not create its promised process group"
+        )
+
+    try:
+        session_id = os.getsid(expected)
+    except OSError as error:
+        return validate_exited_session_contract(error, expected, observer, deadline)
+    if session_id != expected:
         raise RuntimeError("acceptance command did not create its promised session")
     return pgid
+
+
+def validate_exited_session_contract(
+    error: OSError,
+    expected: int,
+    observer: LeaderExitObserver,
+    deadline: float,
+) -> int:
+    if error.errno != errno.ESRCH:
+        raise error
+    if not observer.wait_until(deadline):
+        raise RuntimeError(
+            "acceptance leader disappeared before session validation without a verified exit"
+        ) from error
+
+    # Popen returning with start_new_session=True proves that setsid(2) succeeded
+    # before exec. Keeping that direct child unreaped fences its PID and therefore
+    # the promised equal PGID while descendant quiescence is inspected.
+    return expected
 
 
 def send_group_signal(pgid: int, signal_number: int) -> bool:
@@ -356,7 +394,9 @@ def linux_process_group_has_live_members(
             except FileNotFoundError:
                 continue
             except OSError as error:
-                raise RuntimeError("cannot inspect Linux process-group member") from error
+                raise RuntimeError(
+                    "cannot inspect Linux process-group member"
+                ) from error
             if len(stat_data) > 4096:
                 raise RuntimeError("Linux process stat exceeded its byte limit")
             command_end = stat_data.rfind(b")")
@@ -403,7 +443,9 @@ def terminate_process_group(
     cleanup.term_sent = send_group_signal(pgid, signal.SIGTERM) or cleanup.term_sent
     grace_deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
     while time.monotonic() < grace_deadline:
-        time.sleep(min(GROUP_QUIESCENCE_POLL_SECONDS, grace_deadline - time.monotonic()))
+        time.sleep(
+            min(GROUP_QUIESCENCE_POLL_SECONDS, grace_deadline - time.monotonic())
+        )
     cleanup.kill_attempted = True
     cleanup.kill_sent = send_group_signal(pgid, signal.SIGKILL) or cleanup.kill_sent
 
@@ -467,7 +509,9 @@ def main() -> int:
     if os.name != "posix":
         raise RuntimeError("bounded acceptance commands require POSIX")
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
-        raise RuntimeError("bounded acceptance requires default waitable SIGCHLD semantics")
+        raise RuntimeError(
+            "bounded acceptance requires default waitable SIGCHLD semantics"
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -485,6 +529,7 @@ def main() -> int:
     observer: Optional[LeaderExitObserver] = None
     pgid: Optional[int] = None
     selector: Optional[selectors.BaseSelector] = None
+    deadline = started + args.timeout_seconds
 
     try:
         with SignalController() as signals:
@@ -507,13 +552,12 @@ def main() -> int:
                 # Retaining the unreaped child makes this numeric identity safe
                 # even if validation itself reports a platform invariant error.
                 pgid = process.pid
-                pgid = validate_process_group(process)
+                pgid = validate_process_group(process, observer, deadline)
                 process_group_verified = True
                 os.set_blocking(process.stdout.fileno(), False)
                 selector = selectors.DefaultSelector()
                 selector.register(process.stdout, selectors.EVENT_READ, "output")
                 selector.register(signals.descriptor, selectors.EVENT_READ, "signal")
-                deadline = started + args.timeout_seconds
                 pipe_eof = False
 
                 while True:
@@ -621,6 +665,7 @@ def main() -> int:
         os.fsync(descriptor)
         os.close(descriptor)
 
+    usage = child_resource_usage()
     report = {
         "cleanup": asdict(cleanup),
         "elapsed_millis": int((time.monotonic() - started) * 1000),
@@ -634,11 +679,25 @@ def main() -> int:
         "output_bytes": retained_bytes,
         "output_sha256": retained.hexdigest(),
         "process_group_verified": process_group_verified,
+        "resource_usage": usage,
         "result": result,
         "termination_signal": termination_signal,
     }
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return exit_code
+
+
+def child_resource_usage() -> dict[str, int]:
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    resident = int(usage.ru_maxrss)
+    if sys.platform.startswith("linux"):
+        resident *= 1024
+    return {
+        "max_resident_bytes": max(resident, 0),
+        "swap_operations": max(int(usage.ru_nswap), 0),
+        "user_cpu_millis": max(int(usage.ru_utime * 1000), 0),
+        "system_cpu_millis": max(int(usage.ru_stime * 1000), 0),
+    }
 
 
 if __name__ == "__main__":
