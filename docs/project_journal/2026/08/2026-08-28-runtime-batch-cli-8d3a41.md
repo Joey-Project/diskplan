@@ -149,10 +149,12 @@ superseded_by:
   reported three first-observed Insta mismatches after the intentional hotkey
   copy change. Static inspection showed that those three test functions stop at
   their first failed assertion, leaving three later snapshots with the same
-  obsolete footer. The follow-up changes only the six authoritative footer
-  expectations: scan 120/80, runtime-plan 120/80, selected warnings, and
-  execution-preview warnings. The 40-column snapshots do not contain the old
-  copy. Focused snapshot validation remains assigned to the India host.
+  obsolete footer. The follow-up changes only the seven authoritative footer
+  expectations: scan 120/80/40, runtime-plan 120/80, selected warnings, and
+  execution-preview warnings. The runtime-plan 40-column footer is truncated
+  before the changed copy, while scan 40 changes from the old `p provisio`
+  prefix to `p finalize`. Focused snapshot validation remains assigned to the
+  India host.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including
