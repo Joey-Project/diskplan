@@ -29,6 +29,11 @@ let package = Package(
   ],
   targets: [
     .target(
+      name: "CDiskplanTestSupport",
+      path: "swift/Tests/CDiskplanTestSupport",
+      publicHeadersPath: "include"
+    ),
+    .target(
       name: "CDiskplanMacOS",
       path: "swift/Sources/CDiskplanMacOS",
       publicHeadersPath: "include"
@@ -124,6 +129,7 @@ let package = Package(
     .testTarget(
       name: "DiskplanEngineCoreTests",
       dependencies: [
+        "CDiskplanTestSupport",
         "DiskplanCore",
         "DiskplanEngineCore",
         "DiskplanPolicy",
