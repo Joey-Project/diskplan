@@ -128,3 +128,10 @@ superseded_by:
   exposed the broader `cfg(test)` compile surface. The signed follow-up assigns both
   helpers the current `PROTOCOL15_MINOR`. No local build or test result is claimed
   for that correction.
+- India validated exact signed fix head `8ab2bad2` with Rust 1.95.0:
+  `cargo test -p diskplan-proto --lib` passed 4 tests in a bounded 2.248 seconds.
+  `cargo test --workspace --all-targets` passed in a bounded 46.774 seconds with
+  suite totals of 91, 4, 9 (plus 10 ignored), 10, 5, 4, 7, 20, and 0 tests; every
+  suite reported 0 failures. The supervisor confirmed process-group quiescence
+  after both commands. These dynamic results apply to `8ab2bad2`; the successor
+  journal-only commit was not built or tested locally.
