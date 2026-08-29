@@ -3,8 +3,8 @@ id: 20260828-c4a8f2
 title: Scanner Content Authority Shared API
 status: completed
 created: 2026-08-28
-updated: 2026-08-28
-branch: wip/runtime-evidence-enrichment
+updated: 2026-08-29
+branch: wip/runtime-evidence-ci-followup
 pr:
 supersedes: []
 superseded_by:
@@ -172,12 +172,31 @@ superseded_by:
   immediately after evidence extraction. The earlier 460-test full-parallel run
   remains the baseline; required CI will validate the final delta in the complete
   macOS 26 lane.
+- Integration head `06240abe18ddaf933fa866a023058b6ff316750b` exposed a
+  test-stage race in required macOS 26 run `33241118641`, job `99070516304`.
+  Under the 533-test parallel load, the former 100 ms post-fork case expired at
+  `writer-ready` before either drain started; it never reached the post-fork
+  delay its composite expectation claimed to test. This was neither capture-
+  writer inheritance nor an orphaned target. The harness now records an exact
+  startup milestone trace and uses a bidirectional `R/G/A/P/F/C/L/S` handshake:
+  `A` proves the wrapper accepted the grant before fork, while `F` proves the
+  target is forked but remains gated in the supervisor process group. Typed
+  deadline injection occurs only after the selected acknowledgement, so test
+  scheduling cannot silently select an earlier stage. The production absolute
+  15-second startup deadline remains unchanged. Startup-failure cleanup retains
+  the control channel until bounded TERM/KILL and reap complete, preventing EOF
+  from changing the injected failure taxonomy. The exact focused gate passes
+  1/1 with the target test completing in 7.562 seconds. The unchanged CI-shaped
+  default max-parallel suite passes 533/533 in 9.682 seconds, including the target
+  test in 7.140 seconds. Both commands ran under a bounded supervisor with verified
+  process-group quiescence; the generated 630 MiB `.build` and task logs were
+  removed immediately after evidence extraction.
 
 ## Next Steps
 
-1. Land and push the signed follow-up without manually rerunning CI.
-2. Let the required macOS 26 PR lane validate the explicit startup deadline and
-   parent-writer-free capture contract under the full parallel suite.
+1. Continue the parent release workstream through the required macOS 26
+   full-parallel lane; this completed deterministic-stage follow-up does not
+   replace release authority.
 
 ## Evidence
 

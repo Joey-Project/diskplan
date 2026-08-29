@@ -85,14 +85,12 @@ def close_capture_writers():
 def install_capture_writers():
     global command_argv
     if (
-        len(sys.argv) < 15
+        len(sys.argv) < 11
         or sys.argv[1] != "--capture-control-fd"
         or sys.argv[3] != "--stdout-fifo"
         or sys.argv[5] != "--stderr-fifo"
         or sys.argv[7] != "--startup-delay-milliseconds"
-        or sys.argv[9] != "--launch-delay-milliseconds"
-        or sys.argv[11] != "--post-fork-delay-milliseconds"
-        or sys.argv[13] != "--"
+        or sys.argv[9] != "--"
     ):
         raise RuntimeError("invalid capture supervisor arguments")
     control_descriptor = int(sys.argv[2])
@@ -101,12 +99,6 @@ def install_capture_writers():
     startup_delay_milliseconds = int(sys.argv[8])
     if not 0 <= startup_delay_milliseconds <= 60_000:
         raise RuntimeError("invalid startup delay")
-    launch_delay_milliseconds = int(sys.argv[10])
-    if not 0 <= launch_delay_milliseconds <= 60_000:
-        raise RuntimeError("invalid launch delay")
-    post_fork_delay_milliseconds = int(sys.argv[12])
-    if not 0 <= post_fork_delay_milliseconds <= 60_000:
-        raise RuntimeError("invalid post-fork delay")
     if startup_delay_milliseconds:
         time.sleep(startup_delay_milliseconds / 1_000)
     stdout_descriptor = -1
@@ -121,14 +113,16 @@ def install_capture_writers():
             os.close(stdout_descriptor)
         if stderr_descriptor >= 0:
             os.close(stderr_descriptor)
+    command_argv = sys.argv[10:]
     if os.write(control_descriptor, b"R") != 1:
         raise RuntimeError("capture-ready write failed")
     if os.read(control_descriptor, 1) != b"G":
         raise RuntimeError("capture grant was not received")
-    if launch_delay_milliseconds:
-        time.sleep(launch_delay_milliseconds / 1_000)
-    command_argv = sys.argv[14:]
-    return control_descriptor, post_fork_delay_milliseconds
+    if os.write(control_descriptor, b"A") != 1:
+        raise RuntimeError("capture-grant acknowledgement failed")
+    if os.read(control_descriptor, 1) != b"P":
+        raise RuntimeError("target-fork permission was not received")
+    return control_descriptor
 
 
 def process_group_members():
@@ -210,7 +204,7 @@ def mirror_wait_status(wait_status):
 
 def main():
     global target_pid
-    control_descriptor, post_fork_delay_milliseconds = install_capture_writers()
+    control_descriptor = install_capture_writers()
 
     try:
         os.setsid()
@@ -244,8 +238,10 @@ def main():
     # closed its writers, acknowledged the safe fork, and restored signal
     # handling. Before that point one group signal terminates both processes.
     close_capture_writers()
-    if post_fork_delay_milliseconds:
-        time.sleep(post_fork_delay_milliseconds / 1_000)
+    if os.write(control_descriptor, b"F") != 1:
+        raise RuntimeError("target-fork acknowledgement failed")
+    if os.read(control_descriptor, 1) != b"C":
+        raise RuntimeError("target-launch permission was not received")
     if os.write(control_descriptor, b"L") != 1:
         raise RuntimeError("target-launch write failed")
     os.close(control_descriptor)
