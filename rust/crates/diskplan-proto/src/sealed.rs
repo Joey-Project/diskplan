@@ -2046,6 +2046,7 @@ fn validate_unique(values: &[&[u8]], field: &'static str) -> Result<(), RuntimeP
 mod tests {
     use super::*;
     use crate::diskplan::v1::{AcknowledgedWaiver, PlanProjectionRecord, PlanWaiverProjection};
+    use crate::runtime::PROTOCOL15_MINOR;
 
     #[test]
     fn overlay_chain_rejects_not_stageable_and_nonexact_waivers() {
@@ -2127,6 +2128,7 @@ mod tests {
         let review_binding = vec![0x51; 32];
         let apply_review_id = b"apply-review".to_vec();
         let make_chain = || RuntimeChainVerifier {
+            negotiated_protocol_minor: PROTOCOL15_MINOR,
             plan: plan_with_action(PlanActionProjection::default()),
             overlay: None,
             apply_review: Some(ApplyReviewProjection {
@@ -2204,6 +2206,7 @@ mod tests {
         VerifiedPlanProjection {
             records: vec![record],
             manifest: plan_manifest(),
+            negotiated_protocol_minor: PROTOCOL15_MINOR,
         }
     }
 

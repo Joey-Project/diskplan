@@ -120,3 +120,11 @@ superseded_by:
   hardening, descriptor cleanup, typed revalidation errors, and directory-width
   coverage. Signed follow-up `fbfe1597` closed all four, and the same reviewer
   returned `No findings.` on the closure pass.
+- Natural Foundation CI for PR #21 at journal-only head `842e3e3` reached the Rust
+  library-test compile and failed with `E0063`: two module-local test helpers in
+  `sealed.rs` had not supplied the newly required `negotiated_protocol_minor` field
+  for `RuntimeChainVerifier` and `VerifiedPlanProjection`. The production and
+  cross-language paths had already passed at `fbfe1597`; this failure specifically
+  exposed the broader `cfg(test)` compile surface. The signed follow-up assigns both
+  helpers the current `PROTOCOL15_MINOR`. No local build or test result is claimed
+  for that correction.
