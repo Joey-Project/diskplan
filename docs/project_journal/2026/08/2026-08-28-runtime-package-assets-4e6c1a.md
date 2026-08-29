@@ -1,11 +1,11 @@
 ---
 id: 20260828-4e6c1a
 title: Runtime Package Assets
-status: active
+status: completed
 created: 2026-08-28
-updated: 2026-08-28
+updated: 2026-08-29
 branch: wip/runtime-package-assets
-pr:
+pr: https://github.com/Joey-Project/diskplan/pull/18
 supersedes: []
 superseded_by:
 ---
@@ -19,12 +19,10 @@ superseded_by:
 
 ## Current State
 
-- Release CI run `33212730509`, job `98989478657`, completed both release
-  compilations but rejected the private source tree afterward. The former seal
-  retained only an aggregate digest, so that historical run cannot identify the
-  changed path. External Cargo and Swift scratch roots exclude ordinary build
-  products; an equivalent-byte SwiftPM rewrite, most plausibly
-  `Package.resolved`, remains the leading inference rather than a proven path.
+- The exact macOS 26.6.1 Apple Silicon release build passes twice from the same
+  signed source head. Both archives are byte-for-byte identical, and the full
+  install, upgrade, rollback, mixed-version rejection, and uninstall lifecycle
+  passes on the resulting archive.
 - The replacement seal defines its protected properties explicitly: canonical
   namespace and entry kind, exact access mode, regular-file size and SHA-256,
   and symlink target. Device, inode, mtime, and ctime remain strict during each
@@ -44,6 +42,11 @@ superseded_by:
   whose first entry succeeds with `0`, and API errors remain distinct. Python
   packaging, source sealing, and the C lifecycle helper now share that exact
   fail-closed interpretation for owner-private files and directories.
+- Release helpers disable Python bytecode emission before creating the private
+  source copy, and bundle subdirectories normalize their exact descriptor-bound
+  mode after creation under the release process's `077` umask. The C lifecycle
+  harness fixes the same umask as a regression boundary and normalizes receipt
+  fixtures before testing production access-policy proofs.
 
 - Every manifested payload binds canonical relative path, exact mode, byte size, SHA-256, role, and compatibility version.
 - Nested copy, proof, cleanup, publication, and uninstall use descriptor-relative no-follow traversal with fixed directories and regular-file-only leaves.
@@ -68,10 +71,9 @@ superseded_by:
 
 ## Next Steps
 
-- Run the exact release build after the static source-seal gates and fresh review.
-  Preserve the first path-level diagnostic as CI root-cause evidence, then close
-  this workstream only after the release build passes without protected source
-  drift.
+- None for this package-assets workstream. The repository-wide release
+  acceptance and distribution checkpoints remain tracked by the integration
+  workstream.
 
 ## Evidence
 
@@ -79,16 +81,23 @@ superseded_by:
 - `scripts/release/source_manifest.py`
 - `scripts/release/diskplan-fs-helper-tests.c`
 - `release/bundle-contract.json`
-- `python3 -m unittest scripts/release/test_package_bundle.py`: 36 tests passed,
+- `python3 -m unittest scripts/release/test_package_bundle.py
+  scripts/release/test_run_bounded.py`: 66 tests passed,
   including deterministic archive identity, descriptor-bound archive races,
-  conditional output cleanup, contract/schema/collision rejection, and exact
-  packaged runtime contents.
+  source-seal protected/observation classification, extended-ACL rejection,
+  private-umask directory normalization, conditional output cleanup,
+  contract/schema/collision rejection, and exact packaged runtime contents.
 - Release upgrade and mixed-major fixtures rewrite only the three exact
   protocol-bound contract paths after validating their role, source, mode, and
   original compatibility version; same-count path drift and noncanonical
   numeric protocol compatibility on unrelated assets are rejected.
-- The deterministic gzip fixture was emitted twice; both archives have SHA-256
-  `5bce31c2eb91417c4354d3a82d18062a397fe07b5345234c22e741f8e14391c2`.
+- The exact release build ran twice from signed head
+  `519b67a866397371ce8225a9a953eef9ab284109`; both 4,614,152-byte archives
+  are byte-for-byte identical with SHA-256
+  `cfb17cbaa1bbe5c502d01817427a1b6bf8374e4e67190dffef56e31e32d77c1b`.
+- `scripts/release/test-release.sh` passed the full release package lifecycle on
+  that archive. The exact `-Os -Wall -Wextra -Werror` C harness also passed 20
+  consecutive canonical-TMPDIR iterations under `umask 077`.
 - The packaging output namespace rejects non-owner, group/world-writable, or
   extended-ACL directories before creating a temporary output.
 - The arm64 macOS 14 C white-box harness compiled with `-Wall -Wextra -Werror`
