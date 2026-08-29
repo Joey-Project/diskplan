@@ -186,20 +186,24 @@ superseded_by:
   These are user-space admission and classification checks at the closest
   available action boundaries, not a kernel-enforced hard real-time cutoff
   atomic with `execv`; any boundary that observes expiry fails closed, and Swift
-  never accepts a late acknowledgement as ready. In the controlled startup path,
-  a non-inheritable child-status pipe closes when `execv` commits; all catchable
-  pre-exec setup failures and TERM/INT delivery instead write `E`, so the
-  supervisor emits `L` only after the exec boundary rather than merely after
-  writing the `S` release byte. A test-only logical-clock hook advances the
-  child's observed clock to the original deadline at that boundary, exercising
-  the same comparator without a wall-clock wait. On that path the supervisor
-  kills and `waitpid`-reaps the gated target, clears its stale PID identity, and
-  only then returns the distinct `X` frame, which Swift preserves as a typed
-  `target-launch,target-reaped=true` failure. A pre-fork expiry returns `D` as
-  `target-forked-gated`, when no target exists. Test scheduling therefore cannot
-  silently select an earlier stage, and an observed expired bound cannot advance
-  startup. The production absolute 15-second startup deadline remains unchanged.
-  Startup-failure cleanup retains
+  never accepts a late acknowledgement as ready. The supervisor registers a
+  macOS `EVFILT_PROC` watcher before releasing the gate and emits `L` only after
+  the kernel reports `NOTE_EXEC`; `NOTE_EXIT` without `NOTE_EXEC` is a startup
+  failure, so an abrupt pre-exec death cannot masquerade as committed exec.
+  The non-inheritable child-status pipe carries `D` or `E` details but is not
+  itself used as exec proof. A test-only logical-clock hook advances the child's
+  observed clock to the original deadline at that boundary, exercising the same
+  comparator without a wall-clock wait. On that path the supervisor kills and
+  `waitpid`-reaps the gated target, clears its stale PID identity while cleanup
+  signals remain masked, and only then returns the distinct `X` frame, which
+  Swift preserves as a typed `target-launch,target-reaped=true` failure. The
+  ordinary completion reap follows the same signal-masked identity invalidation
+  order. A pre-fork expiry returns `D` as `target-forked-gated`, when no target
+  exists. A separate pre-exec SIGKILL hook proves `NOTE_EXIT` returns `E`, never
+  records launch acknowledgement, and cannot create the target marker. Test
+  scheduling therefore cannot silently select an earlier stage, and an observed
+  expired bound cannot advance startup. The production absolute 15-second startup
+  deadline remains unchanged. Startup-failure cleanup retains
   the control channel until bounded TERM/KILL and reap complete, preventing EOF
   from changing the injected failure taxonomy. The exact focused gate passes
   1/1 with the target test completing in 7.562 seconds. The unchanged CI-shaped

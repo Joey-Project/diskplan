@@ -165,6 +165,11 @@ private enum CompileStartupDeadlineInjection: String, Sendable {
   case atTargetExec = "at-target-exec"
 }
 
+private enum CompileStartupFaultInjection: String, Sendable {
+  case none
+  case killBeforeTargetExec = "kill-before-target-exec"
+}
+
 private enum CompileDrainCompletion: Equatable, Sendable {
   case eof
   case readError(String)
@@ -433,6 +438,9 @@ private final class CompileCaptureControl: @unchecked Sendable {
       }
       if count == 1, ready == 0x58 {
         throw CompileStartupFailure.targetReapedNotReady(stage: stage)
+      }
+      if count == 1, ready == 0x45 {
+        throw compileProcessFailure("capture-control-target-exec", ECHILD)
       }
       guard count == 1, ready == expected else {
         throw compileProcessFailure("capture-control-ready-frame", EPROTO)
@@ -828,7 +836,8 @@ private func spawnIsolatedProcess(
   stderrFIFO: String,
   startupDelayMilliseconds: Int,
   startupDeadline: DispatchTime,
-  startupDeadlineInjection: CompileStartupDeadlineInjection
+  startupDeadlineInjection: CompileStartupDeadlineInjection,
+  startupFaultInjection: CompileStartupFaultInjection
 ) throws -> pid_t {
   let command =
     [
@@ -839,6 +848,7 @@ private func spawnIsolatedProcess(
       "--startup-delay-milliseconds", String(startupDelayMilliseconds),
       "--startup-deadline-uptime-nanoseconds", String(startupDeadline.uptimeNanoseconds),
       "--startup-deadline-test-stage", startupDeadlineInjection.rawValue,
+      "--startup-fault-test-stage", startupFaultInjection.rawValue,
       "--", executable,
     ] + arguments
   var allocations: [UnsafeMutablePointer<CChar>] = []
@@ -1036,6 +1046,7 @@ private func runIsolatedProcess(
   startupTimeout: DispatchTimeInterval = .seconds(15),
   startupDelayMilliseconds: Int = 0,
   deadlineInjection: CompileStartupDeadlineInjection = .none,
+  faultInjection: CompileStartupFaultInjection = .none,
   leaderTimeout: DispatchTimeInterval = .seconds(10),
   postExitDrainGrace: DispatchTimeInterval = .milliseconds(250),
   termGrace: DispatchTimeInterval = .milliseconds(250),
@@ -1083,7 +1094,8 @@ private func runIsolatedProcess(
       stderrFIFO: stderrChannel.fifoPath,
       startupDelayMilliseconds: startupDelayMilliseconds,
       startupDeadline: startupDeadline,
-      startupDeadlineInjection: deadlineInjection
+      startupDeadlineInjection: deadlineInjection,
+      startupFaultInjection: faultInjection
     )
     startupMilestones.append(.spawned)
   } catch {
@@ -1552,6 +1564,35 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverAcknowledgedResult.startupCleanupReaped
       && !FileManager.default.fileExists(atPath: postForkMarker.path),
     "A forked gated target survived before launch acknowledgement: \(neverAcknowledgedResult.report)"
+  )
+
+  let abruptExitMarker = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-pre-exec-abrupt-exit-\(UUID().uuidString)"
+  )
+  defer { try? FileManager.default.removeItem(at: abruptExitMarker) }
+  let abruptExitResult = runIsolatedProcess(
+    isolatedExec: isolatedExec,
+    executable: "/usr/bin/touch",
+    arguments: [abruptExitMarker.path],
+    faultInjection: .killBeforeTargetExec,
+    leaderTimeout: .seconds(2)
+  )
+  #expect(
+    abruptExitResult.startupState == .failed
+      && abruptExitResult.setupError?.contains("capture-control-target-exec") == true
+      && abruptExitResult.startupMilestones == [
+        .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
+        .targetForkPermitted, .targetForkedGated, .targetLaunchPermitted,
+      ]
+      && !abruptExitResult.timedOut
+      && abruptExitResult.terminationReason == .unavailable
+      && abruptExitResult.stdoutDrainStarted && abruptExitResult.stderrDrainStarted
+      && abruptExitResult.stdoutDrain == .eof
+      && abruptExitResult.stderrDrain == .eof
+      && abruptExitResult.captureOwnership == "notRequested"
+      && abruptExitResult.startupCleanupReaped
+      && !FileManager.default.fileExists(atPath: abruptExitMarker.path),
+    "An abrupt pre-exec target exit was mistaken for committed exec: \(abruptExitResult.report)"
   )
 
   var unrelatedProcesses: [Process] = []
