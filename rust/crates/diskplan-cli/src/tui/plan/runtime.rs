@@ -378,7 +378,7 @@ impl PlanRuntime {
         self.overlay.as_ref()
     }
 
-    pub fn pending_overlay_edit(&self) -> Option<&OverlayStageEdit> {
+    pub(crate) fn pending_overlay_edit(&self) -> Option<&OverlayStageEdit> {
         self.pending_overlay_edit.as_ref()
     }
 

@@ -1830,6 +1830,30 @@ mod tests {
                 .unwrap()
                 .contains("already awaiting")
         );
+
+        let mut invalid_acknowledgement = state.clone();
+        let invalid_effects = reduce(
+            &mut invalid_acknowledgement,
+            UiEvent::Plan(PlanRuntimeEvent::OverlayAcknowledged(
+                crate::tui::plan::EngineOverlaySnapshot {
+                    plan_id: PlanId::new("plan-1"),
+                    evidence_reference: "evidence-1".into(),
+                    selected_action_ids: vec![ActionId::new("action-1")],
+                    revision: 2,
+                    digest: "invalid-overlay-digest".into(),
+                },
+            )),
+        );
+        assert_eq!(invalid_effects, vec![Effect::StopDriver]);
+        assert!(matches!(
+            invalid_acknowledgement.terminal,
+            Some(TerminalState::Failed(_))
+        ));
+        assert_eq!(
+            invalid_acknowledgement.banner.as_deref(),
+            Some("plan runtime rejected engine data: InvalidOverlayAcknowledgement")
+        );
+
         reduce(
             &mut state,
             UiEvent::Plan(PlanRuntimeEvent::OverlayAcknowledged(

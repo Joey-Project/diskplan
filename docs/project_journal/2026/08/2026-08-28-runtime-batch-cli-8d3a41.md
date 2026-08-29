@@ -141,8 +141,10 @@ superseded_by:
   replaced the selected action's force warning with the generic immutable-plan
   banner. The static follow-up gives a successful acknowledgement its own typed
   staged or unstaged result and retains the complete engine-authored force
-  reason; the focused reducer and remaining batch/CLI tests require an India
-  rerun at the follow-up head.
+  reason. Fresh review narrowed the transient pending-edit accessor to crate
+  scope and added a malformed-acknowledgement branch proving that a precomputed
+  success banner cannot bypass fail-closed termination. The focused reducer and
+  remaining batch/CLI tests require an India rerun at the follow-up head.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including
