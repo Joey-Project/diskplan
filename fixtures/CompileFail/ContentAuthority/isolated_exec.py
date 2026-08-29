@@ -4,6 +4,7 @@
 import ctypes
 import errno
 import os
+import select
 import signal
 import sys
 import time
@@ -14,11 +15,21 @@ GROUP_PROBE_FAILURE = 253
 SUPERVISOR_SETUP_FAILURE = 254
 TERM_GRACE_SECONDS = 0.1
 GROUP_QUIESCENCE_SECONDS = 2.0
+TARGET_REAP_SECONDS = 2.0
 MAXIMUM_GROUP_MEMBERS = 1_024
 MAXIMUM_SYSTEM_PROCESSES = 65_536
 P_PID = 1
 WEXITED = 0x00000004
 WNOWAIT = 0x00000020
+STARTUP_DEADLINE_STAGES = {
+    "none",
+    "before-target-fork",
+    "at-target-exec",
+}
+STARTUP_FAULT_STAGES = {
+    "none",
+    "kill-before-target-exec",
+}
 
 target_pid = None
 command_argv = None
@@ -85,14 +96,15 @@ def close_capture_writers():
 def install_capture_writers():
     global command_argv
     if (
-        len(sys.argv) < 15
+        len(sys.argv) < 17
         or sys.argv[1] != "--capture-control-fd"
         or sys.argv[3] != "--stdout-fifo"
         or sys.argv[5] != "--stderr-fifo"
         or sys.argv[7] != "--startup-delay-milliseconds"
-        or sys.argv[9] != "--launch-delay-milliseconds"
-        or sys.argv[11] != "--post-fork-delay-milliseconds"
-        or sys.argv[13] != "--"
+        or sys.argv[9] != "--startup-deadline-uptime-nanoseconds"
+        or sys.argv[11] != "--startup-deadline-test-stage"
+        or sys.argv[13] != "--startup-fault-test-stage"
+        or sys.argv[15] != "--"
     ):
         raise RuntimeError("invalid capture supervisor arguments")
     control_descriptor = int(sys.argv[2])
@@ -101,12 +113,15 @@ def install_capture_writers():
     startup_delay_milliseconds = int(sys.argv[8])
     if not 0 <= startup_delay_milliseconds <= 60_000:
         raise RuntimeError("invalid startup delay")
-    launch_delay_milliseconds = int(sys.argv[10])
-    if not 0 <= launch_delay_milliseconds <= 60_000:
-        raise RuntimeError("invalid launch delay")
-    post_fork_delay_milliseconds = int(sys.argv[12])
-    if not 0 <= post_fork_delay_milliseconds <= 60_000:
-        raise RuntimeError("invalid post-fork delay")
+    startup_deadline_uptime_nanoseconds = int(sys.argv[10])
+    if startup_deadline_uptime_nanoseconds <= 0:
+        raise RuntimeError("invalid startup deadline")
+    startup_deadline_test_stage = sys.argv[12]
+    if startup_deadline_test_stage not in STARTUP_DEADLINE_STAGES:
+        raise RuntimeError("invalid startup deadline test stage")
+    startup_fault_test_stage = sys.argv[14]
+    if startup_fault_test_stage not in STARTUP_FAULT_STAGES:
+        raise RuntimeError("invalid startup fault test stage")
     if startup_delay_milliseconds:
         time.sleep(startup_delay_milliseconds / 1_000)
     stdout_descriptor = -1
@@ -121,14 +136,129 @@ def install_capture_writers():
             os.close(stdout_descriptor)
         if stderr_descriptor >= 0:
             os.close(stderr_descriptor)
+    command_argv = sys.argv[16:]
     if os.write(control_descriptor, b"R") != 1:
         raise RuntimeError("capture-ready write failed")
     if os.read(control_descriptor, 1) != b"G":
         raise RuntimeError("capture grant was not received")
-    if launch_delay_milliseconds:
-        time.sleep(launch_delay_milliseconds / 1_000)
-    command_argv = sys.argv[14:]
-    return control_descriptor, post_fork_delay_milliseconds
+    if os.write(control_descriptor, b"A") != 1:
+        raise RuntimeError("capture-grant acknowledgement failed")
+    if os.read(control_descriptor, 1) != b"P":
+        raise RuntimeError("target-fork permission was not received")
+    return (
+        control_descriptor,
+        startup_deadline_uptime_nanoseconds,
+        startup_deadline_test_stage,
+        startup_fault_test_stage,
+    )
+
+
+def startup_deadline_expired(
+    deadline_uptime_nanoseconds,
+    test_stage,
+    current_stage,
+):
+    observed_uptime_nanoseconds = time.monotonic_ns()
+    if test_stage == current_stage:
+        observed_uptime_nanoseconds = max(
+            observed_uptime_nanoseconds,
+            deadline_uptime_nanoseconds,
+        )
+    return observed_uptime_nanoseconds >= deadline_uptime_nanoseconds
+
+
+def enforce_startup_deadline(
+    control_descriptor,
+    deadline_uptime_nanoseconds,
+    test_stage,
+    current_stage,
+):
+    if not startup_deadline_expired(
+        deadline_uptime_nanoseconds,
+        test_stage,
+        current_stage,
+    ):
+        return
+    if os.write(control_descriptor, b"D") != 1:
+        raise RuntimeError("startup-deadline write failed")
+    raise TimeoutError("startup deadline expired")
+
+
+def kill_and_reap_target():
+    global target_pid
+    if target_pid is None or target_pid <= 0:
+        return
+    blocked = {signal.SIGTERM, signal.SIGINT}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    reaped_target_pid = target_pid
+    try:
+        kill_target_best_effort()
+        deadline = time.monotonic() + TARGET_REAP_SECONDS
+        while True:
+            try:
+                waited_pid, _ = os.waitpid(reaped_target_pid, os.WNOHANG)
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                target_pid = None
+                return
+            if waited_pid == reaped_target_pid:
+                target_pid = None
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError("target reap timed out")
+            time.sleep(0.01)
+    finally:
+        # A pending cleanup signal may run as the mask is restored, but it can
+        # no longer act on a successfully reaped and invalidated PID identity.
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def wait_for_target_exec_event(event_queue, deadline_uptime_nanoseconds):
+    while True:
+        remaining_nanoseconds = deadline_uptime_nanoseconds - time.monotonic_ns()
+        if remaining_nanoseconds <= 0:
+            return "deadline"
+        try:
+            events = event_queue.control(
+                None,
+                2,
+                remaining_nanoseconds / 1_000_000_000,
+            )
+        except InterruptedError:
+            continue
+        if not events:
+            return "deadline"
+        for event in events:
+            if event.flags & select.KQ_EV_ERROR:
+                raise OSError(event.data, "target exec event")
+            if event.fflags & select.KQ_NOTE_EXEC:
+                if time.monotonic_ns() >= deadline_uptime_nanoseconds:
+                    return "deadline"
+                return "exec"
+            if event.fflags & select.KQ_NOTE_EXIT:
+                return "exit"
+
+
+def wait_and_invalidate_target():
+    global target_pid
+    if target_pid is None or target_pid <= 0:
+        raise ChildProcessError("target identity is unavailable")
+    blocked = {signal.SIGTERM, signal.SIGINT}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    reaped_target_pid = target_pid
+    try:
+        while True:
+            try:
+                waited_pid, wait_status = os.waitpid(reaped_target_pid, 0)
+            except InterruptedError:
+                continue
+            if waited_pid != reaped_target_pid:
+                raise ChildProcessError("unexpected target reap identity")
+            target_pid = None
+            return wait_status
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def process_group_members():
@@ -210,7 +340,12 @@ def mirror_wait_status(wait_status):
 
 def main():
     global target_pid
-    control_descriptor, post_fork_delay_milliseconds = install_capture_writers()
+    (
+        control_descriptor,
+        startup_deadline_uptime_nanoseconds,
+        startup_deadline_test_stage,
+        startup_fault_test_stage,
+    ) = install_capture_writers()
 
     try:
         os.setsid()
@@ -223,36 +358,114 @@ def main():
     blocked = {signal.SIGTERM, signal.SIGINT}
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
     launch_gate_read, launch_gate_write = os.pipe()
+    launch_status_read, launch_status_write = os.pipe()
+    # This non-inheritable pipe carries pre-exec detail; the independent
+    # EVFILT_PROC NOTE_EXEC event is the authority for committed exec.
+    os.set_inheritable(launch_status_write, False)
+    enforce_startup_deadline(
+        control_descriptor,
+        startup_deadline_uptime_nanoseconds,
+        startup_deadline_test_stage,
+        "before-target-fork",
+    )
     target_pid = os.fork()
     if target_pid == 0:
-        os.close(control_descriptor)
-        os.close(launch_gate_write)
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        if os.read(launch_gate_read, 1) != b"S":
-            os._exit(SUPERVISOR_SETUP_FAILURE)
-        os.close(launch_gate_read)
-        # A separate process group is sufficient for bounded descendant cleanup.
-        # Keeping it in the supervisor's session avoids macOS denying killpg
-        # across the session boundary after the exact leader has exited.
-        os.setpgid(0, 0)
-        os.execv(command_argv[0], command_argv)
+        try:
+            os.close(control_descriptor)
+            os.close(launch_gate_write)
+            os.close(launch_status_read)
 
+            def report_gated_target_termination(_signum, _frame):
+                try:
+                    os.write(launch_status_write, b"E")
+                finally:
+                    os._exit(SUPERVISOR_SETUP_FAILURE)
+
+            # Caught handlers reset to default on successful exec. Until then,
+            # any TERM/INT must report E rather than masquerading as CLOEXEC EOF.
+            signal.signal(signal.SIGTERM, report_gated_target_termination)
+            signal.signal(signal.SIGINT, report_gated_target_termination)
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            if os.read(launch_gate_read, 1) != b"S":
+                raise RuntimeError("target-launch gate was not received")
+            os.close(launch_gate_read)
+            # A separate process group is sufficient for bounded descendant cleanup.
+            # Keeping it in the supervisor's session avoids macOS denying killpg
+            # across the session boundary after the exact leader has exited.
+            os.setpgid(0, 0)
+            if startup_fault_test_stage == "kill-before-target-exec":
+                os.kill(os.getpid(), signal.SIGKILL)
+            if startup_deadline_expired(
+                startup_deadline_uptime_nanoseconds,
+                startup_deadline_test_stage,
+                "at-target-exec",
+            ):
+                if os.write(launch_status_write, b"D") != 1:
+                    raise RuntimeError("target deadline status write failed")
+                os._exit(SUPERVISOR_SETUP_FAILURE)
+            os.execv(command_argv[0], command_argv)
+        except BaseException:
+            try:
+                os.write(launch_status_write, b"E")
+            except OSError:
+                pass
+            os._exit(SUPERVISOR_SETUP_FAILURE)
+
+    launch_events = select.kqueue()
+    launch_events.control(
+        [
+            select.kevent(
+                target_pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                fflags=select.KQ_NOTE_EXEC | select.KQ_NOTE_EXIT,
+            )
+        ],
+        0,
+        0,
+    )
     os.close(launch_gate_read)
+    os.close(launch_status_write)
     # The target remains blocked in the supervisor group until the parent has
     # closed its writers, acknowledged the safe fork, and restored signal
     # handling. Before that point one group signal terminates both processes.
     close_capture_writers()
-    if post_fork_delay_milliseconds:
-        time.sleep(post_fork_delay_milliseconds / 1_000)
-    if os.write(control_descriptor, b"L") != 1:
-        raise RuntimeError("target-launch write failed")
-    os.close(control_descriptor)
+    if os.write(control_descriptor, b"F") != 1:
+        raise RuntimeError("target-fork acknowledgement failed")
+    if os.read(control_descriptor, 1) != b"C":
+        raise RuntimeError("target-launch permission was not received")
     signal.pthread_sigmask(signal.SIG_UNBLOCK, blocked)
     if os.write(launch_gate_write, b"S") != 1:
         raise RuntimeError("target-launch gate failed")
     os.close(launch_gate_write)
+    launch_event = wait_for_target_exec_event(
+        launch_events,
+        startup_deadline_uptime_nanoseconds,
+    )
+    launch_events.close()
+    if launch_event == "deadline":
+        kill_and_reap_target()
+        os.close(launch_status_read)
+        if os.write(control_descriptor, b"X") != 1:
+            raise RuntimeError("target-reaped deadline write failed")
+        raise TimeoutError("target startup deadline expired")
+    launch_status = os.read(launch_status_read, 1) if launch_event == "exit" else b""
+    os.close(launch_status_read)
+    if launch_status == b"D":
+        # X is emitted only after the gated target is no longer waitable by its
+        # supervisor, so Swift can distinguish target-level reap from D before fork.
+        kill_and_reap_target()
+        if os.write(control_descriptor, b"X") != 1:
+            raise RuntimeError("target-reaped deadline write failed")
+        raise TimeoutError("target startup deadline expired")
+    if launch_event != "exec":
+        kill_and_reap_target()
+        if os.write(control_descriptor, b"E") != 1:
+            raise RuntimeError("target-exec failure write failed")
+        raise RuntimeError("target exec failed")
+    if os.write(control_descriptor, b"L") != 1:
+        raise RuntimeError("target-launch write failed")
+    os.close(control_descriptor)
 
     wait_for_target_without_reaping()
     # Keeping the exited leader waitable prevents its PID/process-group ID from
@@ -263,7 +476,7 @@ def main():
         if live_target_descendants():
             signal_target_group(signal.SIGKILL)
     wait_for_group_quiescence()
-    _, wait_status = os.waitpid(target_pid, 0)
+    wait_status = wait_and_invalidate_target()
     mirror_wait_status(wait_status)
     return SUPERVISOR_SETUP_FAILURE
 
@@ -272,6 +485,9 @@ if __name__ == "__main__":
     try:
         main()
     except BaseException:
-        kill_target_best_effort()
+        try:
+            kill_and_reap_target()
+        except BaseException:
+            kill_target_best_effort()
         os._exit(SUPERVISOR_SETUP_FAILURE)
     os._exit(SUPERVISOR_SETUP_FAILURE)

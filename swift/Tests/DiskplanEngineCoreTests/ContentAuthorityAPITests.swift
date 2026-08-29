@@ -134,14 +134,40 @@ private enum CompileStartupState: String, Sendable {
   case ready
 }
 
+private enum CompileStartupMilestone: String, CaseIterable, Sendable {
+  case spawned
+  case writerReady
+  case drainsStarted
+  case grantSent
+  case grantAccepted
+  case targetForkPermitted
+  case targetForkedGated
+  case targetLaunchPermitted
+  case targetLaunchAcknowledged
+}
+
 private enum CompileStartupFailure: Error, CustomStringConvertible {
   case notReady(stage: String)
+  case targetReapedNotReady(stage: String)
 
   var description: String {
     switch self {
     case .notReady(let stage): "startup-not-ready(stage=\(stage))"
+    case .targetReapedNotReady(let stage):
+      "startup-not-ready(stage=\(stage),target-reaped=true)"
     }
   }
+}
+
+private enum CompileStartupDeadlineInjection: String, Sendable {
+  case none
+  case beforeTargetFork = "before-target-fork"
+  case atTargetExec = "at-target-exec"
+}
+
+private enum CompileStartupFaultInjection: String, Sendable {
+  case none
+  case killBeforeTargetExec = "kill-before-target-exec"
 }
 
 private enum CompileDrainCompletion: Equatable, Sendable {
@@ -194,6 +220,7 @@ private final class CompileDrainRecorder: @unchecked Sendable {
 private struct CompileProcessResult: Sendable {
   let setupError: String?
   let startupState: CompileStartupState
+  let startupMilestones: [CompileStartupMilestone]
   let timedOut: Bool
   let terminationReason: CompileTerminationReason
   let terminationStatus: Int32?
@@ -205,10 +232,12 @@ private struct CompileProcessResult: Sendable {
   let stderrDrainStarted: Bool
   let captureOwnership: String
   let processGroupCleanup: CompileProcessGroupCleanup
+  let startupCleanupReaped: Bool
   let processGroupQuiescence: CompileProcessGroupQuiescence
 
   var report: String {
     "setupError=\(setupError ?? "none") startupState=\(startupState.rawValue) "
+      + "startupMilestones=[\(startupMilestones.map(\.rawValue).joined(separator: ","))] "
       + "timedOut=\(timedOut) "
       + "termination=\(terminationReason.rawValue) "
       + "status=\(terminationStatus.map { String($0) } ?? "none") "
@@ -217,6 +246,7 @@ private struct CompileProcessResult: Sendable {
       + "stdoutDrainStarted=\(stdoutDrainStarted) stderrDrainStarted=\(stderrDrainStarted) "
       + "captureOwnership=\(String(reflecting: captureOwnership)) "
       + "processGroupCleanup=\(processGroupCleanup.rawValue) "
+      + "startupCleanupReaped=\(startupCleanupReaped) "
       + "processGroupQuiescence=\(processGroupQuiescence.rawValue) "
       + "stdout=\(String(reflecting: stdout.text)) stderr=\(String(reflecting: stderr.text))"
   }
@@ -314,7 +344,8 @@ private final class CompileCaptureControl: @unchecked Sendable {
   private var childSourceDescriptor: Int32?
 
   init() throws {
-    // The control pair carries three exact bytes and never carries captured output.
+    // The control pair carries seven one-byte startup frames and never carries
+    // captured output.
     // Its endpoints may be inherited across a concurrent fork, but capture EOF
     // cannot depend on them because the test runner never owns a FIFO writer.
     var descriptors: [Int32] = [-1, -1]
@@ -402,8 +433,20 @@ private final class CompileCaptureControl: @unchecked Sendable {
       }
       var ready: UInt8 = 0
       let count = Darwin.read(descriptor, &ready, 1)
+      if count == 1, ready == 0x44 {
+        throw CompileStartupFailure.notReady(stage: stage)
+      }
+      if count == 1, ready == 0x58 {
+        throw CompileStartupFailure.targetReapedNotReady(stage: stage)
+      }
+      if count == 1, ready == 0x45 {
+        throw compileProcessFailure("capture-control-target-exec", ECHILD)
+      }
       guard count == 1, ready == expected else {
         throw compileProcessFailure("capture-control-ready-frame", EPROTO)
+      }
+      guard DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds else {
+        throw CompileStartupFailure.notReady(stage: stage)
       }
       return
     }
@@ -413,22 +456,66 @@ private final class CompileCaptureControl: @unchecked Sendable {
     try waitForFrame(0x52, stage: "writer-ready", until: deadline)
   }
 
+  func waitForGrantAccepted(until deadline: DispatchTime) throws {
+    try waitForFrame(0x41, stage: "grant-accepted", until: deadline)
+  }
+
+  func waitForTargetForkedGated(until deadline: DispatchTime) throws {
+    try waitForFrame(0x46, stage: "target-forked-gated", until: deadline)
+  }
+
   func waitForTargetLaunch(until deadline: DispatchTime) throws {
     try waitForFrame(0x4c, stage: "target-launch", until: deadline)
   }
 
-  func grantExecution() throws {
+  private func sendFrame(
+    _ frame: UInt8,
+    operation: String,
+    stage: String,
+    until deadline: DispatchTime
+  ) throws {
     let descriptor = try lock.withLock { () throws -> Int32 in
       guard let parentDescriptor else {
         throw compileProcessFailure("capture-control-closed", EBADF)
       }
       return parentDescriptor
     }
-    var grant: UInt8 = 0x47
-    while Darwin.write(descriptor, &grant, 1) == -1 {
+    var frame = frame
+    while true {
+      guard DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds else {
+        throw CompileStartupFailure.notReady(stage: stage)
+      }
+      if Darwin.write(descriptor, &frame, 1) == 1 { return }
       if errno == EINTR { continue }
-      throw compileProcessFailure("capture-control-grant", errno)
+      throw compileProcessFailure(operation, errno)
     }
+  }
+
+  func grantExecution(until deadline: DispatchTime) throws {
+    try sendFrame(
+      0x47,
+      operation: "capture-control-grant",
+      stage: "execution-grant",
+      until: deadline
+    )
+  }
+
+  func permitTargetFork(until deadline: DispatchTime) throws {
+    try sendFrame(
+      0x50,
+      operation: "capture-control-target-fork",
+      stage: "target-launch",
+      until: deadline
+    )
+  }
+
+  func permitTargetLaunch(until deadline: DispatchTime) throws {
+    try sendFrame(
+      0x43,
+      operation: "capture-control-target-launch",
+      stage: "target-launch",
+      until: deadline
+    )
   }
 }
 
@@ -637,11 +724,13 @@ private func boundedCaptureOwnershipDiagnostic(paths: [String]) -> String {
 
 private func emptyCompileProcessResult(
   setupError: String,
-  startupState: CompileStartupState = .notStarted
+  startupState: CompileStartupState = .notStarted,
+  startupMilestones: [CompileStartupMilestone] = []
 ) -> CompileProcessResult {
   CompileProcessResult(
     setupError: setupError,
     startupState: startupState,
+    startupMilestones: startupMilestones,
     timedOut: false,
     terminationReason: .unavailable,
     terminationStatus: nil,
@@ -653,6 +742,7 @@ private func emptyCompileProcessResult(
     stderrDrainStarted: false,
     captureOwnership: "notRequested",
     processGroupCleanup: .notRequired,
+    startupCleanupReaped: false,
     processGroupQuiescence: .notStarted
   )
 }
@@ -745,8 +835,9 @@ private func spawnIsolatedProcess(
   stdoutFIFO: String,
   stderrFIFO: String,
   startupDelayMilliseconds: Int,
-  launchDelayMilliseconds: Int,
-  postForkDelayMilliseconds: Int
+  startupDeadline: DispatchTime,
+  startupDeadlineInjection: CompileStartupDeadlineInjection,
+  startupFaultInjection: CompileStartupFaultInjection
 ) throws -> pid_t {
   let command =
     [
@@ -755,8 +846,9 @@ private func spawnIsolatedProcess(
       "--stdout-fifo", stdoutFIFO,
       "--stderr-fifo", stderrFIFO,
       "--startup-delay-milliseconds", String(startupDelayMilliseconds),
-      "--launch-delay-milliseconds", String(launchDelayMilliseconds),
-      "--post-fork-delay-milliseconds", String(postForkDelayMilliseconds),
+      "--startup-deadline-uptime-nanoseconds", String(startupDeadline.uptimeNanoseconds),
+      "--startup-deadline-test-stage", startupDeadlineInjection.rawValue,
+      "--startup-fault-test-stage", startupFaultInjection.rawValue,
       "--", executable,
     ] + arguments
   var allocations: [UnsafeMutablePointer<CChar>] = []
@@ -878,11 +970,15 @@ private func signalCompileChild(_ processID: pid_t, signal: Int32) -> String {
   return "signal-failed(group-errno=\(groupError),pid-errno=\(errno))"
 }
 
-private func forceStopCompileChild(_ processID: pid_t) -> ForcedCompileCleanup {
-  switch waitForCompileChild(processID, until: .now()) {
+private func forceStopCompileChild(
+  _ processID: pid_t,
+  selfCleanupGrace: DispatchTimeInterval = .nanoseconds(0)
+) -> ForcedCompileCleanup {
+  switch waitForCompileChild(processID, until: .now() + selfCleanupGrace) {
   case .exited(let status):
     return ForcedCompileCleanup(
-      cleanup: .notRequired, waitStatus: status, report: "already-reaped")
+      cleanup: .notRequired, waitStatus: status, report: "reaped-after-self-cleanup"
+    )
   case .failed(let code):
     return ForcedCompileCleanup(
       cleanup: .notRequired, waitStatus: nil, report: "initial-wait-failed(errno=\(code))")
@@ -949,8 +1045,8 @@ private func runIsolatedProcess(
   launcherExecutable: String = "/usr/bin/python3",
   startupTimeout: DispatchTimeInterval = .seconds(15),
   startupDelayMilliseconds: Int = 0,
-  launchDelayMilliseconds: Int = 0,
-  postForkDelayMilliseconds: Int = 0,
+  deadlineInjection: CompileStartupDeadlineInjection = .none,
+  faultInjection: CompileStartupFaultInjection = .none,
   leaderTimeout: DispatchTimeInterval = .seconds(10),
   postExitDrainGrace: DispatchTimeInterval = .milliseconds(250),
   termGrace: DispatchTimeInterval = .milliseconds(250),
@@ -958,10 +1054,7 @@ private func runIsolatedProcess(
   endpointCreated: () throws -> Void = {},
   beforeSpawn: () throws -> Void = {}
 ) -> CompileProcessResult {
-  guard (0...60_000).contains(startupDelayMilliseconds),
-    (0...60_000).contains(launchDelayMilliseconds),
-    (0...60_000).contains(postForkDelayMilliseconds)
-  else {
+  guard (0...60_000).contains(startupDelayMilliseconds) else {
     return emptyCompileProcessResult(setupError: "invalid startup delay")
   }
   let stdoutChannel: AtomicCaptureChannel
@@ -982,12 +1075,13 @@ private func runIsolatedProcess(
   let stderrDrain = DispatchGroup()
   let stdoutDrainRecorder = CompileDrainRecorder()
   let stderrDrainRecorder = CompileDrainRecorder()
+  var startupMilestones: [CompileStartupMilestone] = []
   let processID: pid_t
   // One absolute deadline covers process launch, writer readiness, both drain
-  // start acknowledgements, and the execution grant. The required macOS lane
-  // runs the complete suite at maximum parallelism, so startup is allowed a
-  // bounded 15-second scheduling window instead of several independent short
-  // phase timeouts.
+  // start acknowledgements, the execution grant, and the grant, gated-fork, and
+  // target-launch acknowledgements. The required macOS lane runs the complete
+  // suite at maximum parallelism, so startup is allowed a bounded 15-second
+  // scheduling window instead of several independent short phase timeouts.
   let startupDeadline = DispatchTime.now() + startupTimeout
   do {
     processID = try spawnIsolatedProcess(
@@ -999,20 +1093,26 @@ private func runIsolatedProcess(
       stdoutFIFO: stdoutChannel.fifoPath,
       stderrFIFO: stderrChannel.fifoPath,
       startupDelayMilliseconds: startupDelayMilliseconds,
-      launchDelayMilliseconds: launchDelayMilliseconds,
-      postForkDelayMilliseconds: postForkDelayMilliseconds
+      startupDeadline: startupDeadline,
+      startupDeadlineInjection: deadlineInjection,
+      startupFaultInjection: faultInjection
     )
+    startupMilestones.append(.spawned)
   } catch {
     captureControl.closeChildSource()
     captureControl.closeParent()
     stdoutChannel.closeReader()
     stderrChannel.closeReader()
-    return emptyCompileProcessResult(setupError: String(reflecting: error))
+    return emptyCompileProcessResult(
+      setupError: String(reflecting: error),
+      startupMilestones: startupMilestones
+    )
   }
   captureControl.closeChildSource()
 
   do {
     try captureControl.waitForWriterReady(until: startupDeadline)
+    startupMilestones.append(.writerReady)
     try stdoutChannel.activateReader()
     try stderrChannel.activateReader()
     let stdoutStarted = startDrain(
@@ -1034,15 +1134,27 @@ private func runIsolatedProcess(
     else {
       throw CompileStartupFailure.notReady(stage: "drain-start")
     }
-    guard DispatchTime.now().uptimeNanoseconds < startupDeadline.uptimeNanoseconds else {
-      throw CompileStartupFailure.notReady(stage: "execution-grant")
-    }
-    try captureControl.grantExecution()
+    startupMilestones.append(.drainsStarted)
+    try captureControl.grantExecution(until: startupDeadline)
+    startupMilestones.append(.grantSent)
+    try captureControl.waitForGrantAccepted(until: startupDeadline)
+    startupMilestones.append(.grantAccepted)
+    try captureControl.permitTargetFork(until: startupDeadline)
+    startupMilestones.append(.targetForkPermitted)
+    try captureControl.waitForTargetForkedGated(until: startupDeadline)
+    startupMilestones.append(.targetForkedGated)
+    try captureControl.permitTargetLaunch(until: startupDeadline)
+    startupMilestones.append(.targetLaunchPermitted)
     try captureControl.waitForTargetLaunch(until: startupDeadline)
+    startupMilestones.append(.targetLaunchAcknowledged)
     captureControl.closeParent()
   } catch {
+    let forcedCleanup = forceStopCompileChild(
+      processID,
+      selfCleanupGrace:
+        error is CompileStartupFailure ? .milliseconds(250) : .nanoseconds(0)
+    )
     captureControl.closeParent()
-    let forcedCleanup = forceStopCompileChild(processID)
     stdoutChannel.closeReader()
     stderrChannel.closeReader()
     let stdoutFinished = drainCompleted(stdoutDrain, within: .now() + .seconds(1))
@@ -1054,6 +1166,7 @@ private func runIsolatedProcess(
     return CompileProcessResult(
       setupError: errorReport + "; cleanup=" + forcedCleanup.report,
       startupState: startupState,
+      startupMilestones: startupMilestones,
       timedOut: false,
       terminationReason: .unavailable,
       terminationStatus: nil,
@@ -1065,6 +1178,7 @@ private func runIsolatedProcess(
       stderrDrainStarted: stderrDrainRecorder.didStart,
       captureOwnership: "notRequested",
       processGroupCleanup: forcedCleanup.cleanup,
+      startupCleanupReaped: forcedCleanup.waitStatus != nil,
       processGroupQuiescence: .notStarted
     )
   }
@@ -1147,6 +1261,7 @@ private func runIsolatedProcess(
   return CompileProcessResult(
     setupError: setupError,
     startupState: .ready,
+    startupMilestones: startupMilestones,
     timedOut: timedOut,
     terminationReason: terminationReason,
     terminationStatus: terminationStatus,
@@ -1158,6 +1273,7 @@ private func runIsolatedProcess(
     stderrDrainStarted: stderrDrainRecorder.didStart,
     captureOwnership: captureOwnership,
     processGroupCleanup: cleanup,
+    startupCleanupReaped: false,
     processGroupQuiescence: quiescence
   )
 }
@@ -1227,6 +1343,7 @@ private final class CompileProcessResults: @unchecked Sendable {
   func result(
     setupError: String? = nil,
     startupState: CompileStartupState = .ready,
+    startupMilestones: [CompileStartupMilestone] = CompileStartupMilestone.allCases,
     timedOut: Bool = false,
     terminationReason: CompileTerminationReason = .exit,
     terminationStatus: Int32? = 1,
@@ -1243,6 +1360,7 @@ private final class CompileProcessResults: @unchecked Sendable {
     CompileProcessResult(
       setupError: setupError,
       startupState: startupState,
+      startupMilestones: startupMilestones,
       timedOut: timedOut,
       terminationReason: terminationReason,
       terminationStatus: terminationStatus,
@@ -1254,6 +1372,7 @@ private final class CompileProcessResults: @unchecked Sendable {
       stderrDrainStarted: stderrDrainStarted,
       captureOwnership: "notRequested",
       processGroupCleanup: .notRequired,
+      startupCleanupReaped: false,
       processGroupQuiescence: processGroupQuiescence
     )
   }
@@ -1362,6 +1481,7 @@ private final class CompileProcessResults: @unchecked Sendable {
   )
   #expect(
     delayedStartupResult.startupState == .ready
+      && delayedStartupResult.startupMilestones == CompileStartupMilestone.allCases
       && delayedStartupResult.setupError == nil && !delayedStartupResult.timedOut
       && delayedStartupResult.terminationReason == .exit
       && delayedStartupResult.terminationStatus == 0
@@ -1381,11 +1501,12 @@ private final class CompileProcessResults: @unchecked Sendable {
   #expect(
     neverReadyResult.startupState == .startupNotReady
       && neverReadyResult.setupError?.contains("startup-not-ready(stage=writer-ready)") == true
+      && neverReadyResult.startupMilestones == [.spawned]
       && !neverReadyResult.timedOut
       && neverReadyResult.terminationReason == .unavailable
       && !neverReadyResult.stdoutDrainStarted && !neverReadyResult.stderrDrainStarted
       && neverReadyResult.captureOwnership == "notRequested"
-      && neverReadyResult.processGroupCleanup != .notRequired,
+      && neverReadyResult.startupCleanupReaped,
     "A wrapper that never became ready was not bounded and typed: \(neverReadyResult.report)"
   )
 
@@ -1393,18 +1514,24 @@ private final class CompileProcessResults: @unchecked Sendable {
     isolatedExec: isolatedExec,
     executable: "/usr/bin/true",
     arguments: [],
-    startupTimeout: .milliseconds(100),
-    launchDelayMilliseconds: 5_000,
+    deadlineInjection: .beforeTargetFork,
     leaderTimeout: .seconds(2)
   )
   #expect(
     neverLaunchedResult.startupState == .startupNotReady
-      && neverLaunchedResult.setupError?.contains("startup-not-ready(stage=target-launch)") == true
+      && neverLaunchedResult.setupError?.contains(
+        "startup-not-ready(stage=target-forked-gated)") == true
+      && neverLaunchedResult.startupMilestones == [
+        .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
+        .targetForkPermitted,
+      ]
       && !neverLaunchedResult.timedOut
       && neverLaunchedResult.terminationReason == .unavailable
       && neverLaunchedResult.stdoutDrainStarted && neverLaunchedResult.stderrDrainStarted
+      && neverLaunchedResult.stdoutDrain == .eof
+      && neverLaunchedResult.stderrDrain == .eof
       && neverLaunchedResult.captureOwnership == "notRequested"
-      && neverLaunchedResult.processGroupCleanup != .notRequired,
+      && neverLaunchedResult.startupCleanupReaped,
     "A granted wrapper that never launched its target was not bounded and typed: \(neverLaunchedResult.report)"
   )
 
@@ -1416,14 +1543,17 @@ private final class CompileProcessResults: @unchecked Sendable {
     isolatedExec: isolatedExec,
     executable: "/usr/bin/touch",
     arguments: [postForkMarker.path],
-    startupTimeout: .milliseconds(100),
-    postForkDelayMilliseconds: 5_000,
+    deadlineInjection: .atTargetExec,
     leaderTimeout: .seconds(2)
   )
   #expect(
     neverAcknowledgedResult.startupState == .startupNotReady
       && neverAcknowledgedResult.setupError?.contains(
-        "startup-not-ready(stage=target-launch)") == true
+        "startup-not-ready(stage=target-launch,target-reaped=true)") == true
+      && neverAcknowledgedResult.startupMilestones == [
+        .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
+        .targetForkPermitted, .targetForkedGated, .targetLaunchPermitted,
+      ]
       && !neverAcknowledgedResult.timedOut
       && neverAcknowledgedResult.terminationReason == .unavailable
       && neverAcknowledgedResult.stdoutDrainStarted
@@ -1431,9 +1561,38 @@ private final class CompileProcessResults: @unchecked Sendable {
       && neverAcknowledgedResult.stdoutDrain == .eof
       && neverAcknowledgedResult.stderrDrain == .eof
       && neverAcknowledgedResult.captureOwnership == "notRequested"
-      && neverAcknowledgedResult.processGroupCleanup != .notRequired
+      && neverAcknowledgedResult.startupCleanupReaped
       && !FileManager.default.fileExists(atPath: postForkMarker.path),
     "A forked gated target survived before launch acknowledgement: \(neverAcknowledgedResult.report)"
+  )
+
+  let abruptExitMarker = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-pre-exec-abrupt-exit-\(UUID().uuidString)"
+  )
+  defer { try? FileManager.default.removeItem(at: abruptExitMarker) }
+  let abruptExitResult = runIsolatedProcess(
+    isolatedExec: isolatedExec,
+    executable: "/usr/bin/touch",
+    arguments: [abruptExitMarker.path],
+    faultInjection: .killBeforeTargetExec,
+    leaderTimeout: .seconds(2)
+  )
+  #expect(
+    abruptExitResult.startupState == .failed
+      && abruptExitResult.setupError?.contains("capture-control-target-exec") == true
+      && abruptExitResult.startupMilestones == [
+        .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
+        .targetForkPermitted, .targetForkedGated, .targetLaunchPermitted,
+      ]
+      && !abruptExitResult.timedOut
+      && abruptExitResult.terminationReason == .unavailable
+      && abruptExitResult.stdoutDrainStarted && abruptExitResult.stderrDrainStarted
+      && abruptExitResult.stdoutDrain == .eof
+      && abruptExitResult.stderrDrain == .eof
+      && abruptExitResult.captureOwnership == "notRequested"
+      && abruptExitResult.startupCleanupReaped
+      && !FileManager.default.fileExists(atPath: abruptExitMarker.path),
+    "An abrupt pre-exec target exit was mistaken for committed exec: \(abruptExitResult.report)"
   )
 
   var unrelatedProcesses: [Process] = []

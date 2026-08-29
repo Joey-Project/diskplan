@@ -3,8 +3,8 @@ id: 20260828-c4a8f2
 title: Scanner Content Authority Shared API
 status: completed
 created: 2026-08-28
-updated: 2026-08-28
-branch: wip/runtime-evidence-enrichment
+updated: 2026-08-29
+branch: wip/runtime-evidence-ci-followup
 pr:
 supersedes: []
 superseded_by:
@@ -172,12 +172,55 @@ superseded_by:
   immediately after evidence extraction. The earlier 460-test full-parallel run
   remains the baseline; required CI will validate the final delta in the complete
   macOS 26 lane.
+- Integration head `06240abe18ddaf933fa866a023058b6ff316750b` exposed a
+  test-stage race in required macOS 26 run `33241118641`, job `99070516304`.
+  Under the 533-test parallel load, the former 100 ms post-fork case expired at
+  `writer-ready` before either drain started; it never reached the post-fork
+  delay its composite expectation claimed to test. This was neither capture-
+  writer inheritance nor an orphaned target. The harness now records an exact
+  startup milestone trace and uses a bidirectional `R/G/A/P/F/C/S/L` handshake:
+  `A` proves the wrapper accepted the grant before fork, while `F` proves the
+  target is forked but remains gated in the supervisor process group. Swift
+  passes that same absolute monotonic deadline to the Python supervisor, which
+  checks it before fork and again in the gated child immediately before `execv`.
+  These are user-space admission and classification checks at the closest
+  available action boundaries, not a kernel-enforced hard real-time cutoff
+  atomic with `execv`; any boundary that observes expiry fails closed, and Swift
+  never accepts a late acknowledgement as ready. The supervisor registers a
+  macOS `EVFILT_PROC` watcher before releasing the gate and emits `L` only after
+  the kernel reports `NOTE_EXEC`; `NOTE_EXIT` without `NOTE_EXEC` is a startup
+  failure, so an abrupt pre-exec death cannot masquerade as committed exec.
+  The non-inheritable child-status pipe carries `D` or `E` details but is not
+  itself used as exec proof. A test-only logical-clock hook advances the child's
+  observed clock to the original deadline at that boundary, exercising the same
+  comparator without a wall-clock wait. On that path the supervisor kills and
+  `waitpid`-reaps the gated target, clears its stale PID identity while cleanup
+  signals remain masked, and only then returns the distinct `X` frame, which
+  Swift preserves as a typed `target-launch,target-reaped=true` failure. The
+  ordinary completion reap follows the same signal-masked identity invalidation
+  order. A pre-fork expiry returns `D` as `target-forked-gated`, when no target
+  exists. A separate pre-exec SIGKILL hook proves `NOTE_EXIT` returns `E`, never
+  records launch acknowledgement, and cannot create the target marker. Test
+  scheduling therefore cannot silently select an earlier stage, and an observed
+  expired bound cannot advance startup. The production absolute 15-second startup
+  deadline remains unchanged. Startup-failure cleanup retains
+  the control channel until bounded TERM/KILL and reap complete, preventing EOF
+  from changing the injected failure taxonomy. The earlier pre-action-boundary
+  revision passed its focused and 533-test parallel gates, after which its local
+  630 MiB `.build` and task logs were removed. Final follow-up head
+  `34643f5280952b2827e05cf4064c0237139af210` was then validated on
+  `India-mac-mini-m4-hoteng`: the exact focused supervisor selection exited zero
+  in 19.308 bounded seconds, and the unchanged default max-parallel suite exited
+  zero with 533/533 tests in 8.438 bounded seconds; the target test completed in
+  5.567 seconds. Both bounded process groups were confirmed quiescent. The host
+  ran macOS 26.5.1 (25F80), Xcode 26.6 (17F113), and Swift 6.3.3 arm64 targeting
+  macOS 26.0.
 
 ## Next Steps
 
-1. Land and push the signed follow-up without manually rerunning CI.
-2. Let the required macOS 26 PR lane validate the explicit startup deadline and
-   parent-writer-free capture contract under the full parallel suite.
+1. Continue the parent release workstream; this completed deterministic-stage
+   follow-up validates the integration regression but does not replace release
+   authority.
 
 ## Evidence
 
