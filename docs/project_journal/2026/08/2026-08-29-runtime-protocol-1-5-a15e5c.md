@@ -75,8 +75,8 @@ superseded_by:
 
 - Phase: implementation, India validation, signed-head review, and integration-branch
   PR handoff are complete.
-- Next step: let the integration workstream consume this completed slice after its
-  natural PR checks pass.
+- Next step: the parent integration workstream owns consumption of this completed
+  slice.
 - Blocker: none.
 
 ## Evidence
@@ -90,7 +90,8 @@ superseded_by:
   RuntimeBusinessHandler 22/22 after switching the force-warning test to the new
   Protocol 1.5 vector.
 - Local focused Rust `runtime_golden` passed 6/6 before the final exact-byte tamper
-  case was added. The final case remains assigned to the India-only rerun.
+  case was added. At that checkpoint, the final case was assigned to the later
+  India-only rerun recorded below.
 - The first India rerun of signed head `f55b35c` stopped at Rust compile error
   `E0596`: the new force-warning tamper test borrowed `warning.1.body` mutably but
   bound the `(bytes, event)` tuple as immutable. The focused fix changes only that
@@ -104,8 +105,9 @@ superseded_by:
 - The follow-up adds separate synthetic 24-descriptor regression budgets over 64
   files and 64 directories without changing the process limit. Typed tests also
   cover macOS generation changes and keep missing, unreadable, replaced/type-changed,
-  and other revalidation failures distinct. This head has received static-only local
-  validation; the corrected release suite remains assigned to India.
+  and other revalidation failures distinct. At that checkpoint, the head had
+  received static-only local validation and the corrected release suite was assigned
+  to the later India rerun recorded below.
 - The follow-up head passes Python AST parsing, Ruff static lint,
   `git diff --check`, and project-journal validation. No local dynamic command was
   run after the India-only host policy took effect.
