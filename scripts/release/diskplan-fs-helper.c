@@ -310,23 +310,34 @@ static void require_identity(const struct stat *metadata, const char *expected) 
     }
 }
 
-static bool fd_has_acl(int fd) {
+enum acl_probe_result {
+    ACL_PROBE_FREE,
+    ACL_PROBE_PRESENT,
+    ACL_PROBE_ERROR,
+};
+
+static enum acl_probe_result probe_fd_acl(int fd) {
     errno = 0;
     acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
     if (acl == NULL) {
         if (errno == ENOENT || errno == ENOTSUP) {
-            return false;
+            return ACL_PROBE_FREE;
         }
-        fatal_errno("cannot read access-control list");
+        return ACL_PROBE_ERROR;
     }
     acl_entry_t entry;
     int result = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
-    if (result < 0) {
-        acl_free(acl);
-        fatal_errno("cannot inspect access-control list");
-    }
+    int saved_errno = errno;
     acl_free(acl);
-    return result == 1;
+    errno = saved_errno;
+    return result == 0 ? ACL_PROBE_PRESENT : ACL_PROBE_ERROR;
+}
+
+static bool fd_has_acl(int fd) {
+    enum acl_probe_result result = probe_fd_acl(fd);
+    if (result == ACL_PROBE_ERROR)
+        fatal_errno("cannot inspect access-control list");
+    return result == ACL_PROBE_PRESENT;
 }
 
 static void require_directory_policy(int fd, mode_t exact_mode, bool exact) {
@@ -1828,13 +1839,7 @@ static void remove_nested_bundle_directories(
 }
 
 static bool cleanup_acl_free(int fd) {
-    errno = 0;
-    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
-    if (acl == NULL) return errno == ENOENT || errno == ENOTSUP;
-    acl_entry_t entry;
-    int result = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
-    acl_free(acl);
-    return result == 0;
+    return probe_fd_acl(fd) == ACL_PROBE_FREE;
 }
 
 static bool cleanup_safe_directory(int fd) {

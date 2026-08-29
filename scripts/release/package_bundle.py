@@ -1692,7 +1692,7 @@ def output_directory_acl_free(directory_fd: int) -> bool:
         if result < 0:
             error_number = ctypes.get_errno()
             raise OSError(error_number, os.strerror(error_number))
-        return result == 0
+        return False
     finally:
         acl_free(acl)
 

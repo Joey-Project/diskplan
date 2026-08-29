@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import importlib.util
 import json
 import os
@@ -256,7 +257,74 @@ class VersionMetadataTests(unittest.TestCase):
 
 
 class SourceManifestTests(unittest.TestCase):
-    def test_manifest_changes_for_content_drift_and_replacement(self) -> None:
+    def test_release_uses_unlinked_trusted_comparator_and_full_record_seal(self) -> None:
+        script = (SCRIPT_DIR / "build-release.sh").read_text(encoding="ascii")
+        self.assertIn('exec 8<"${TRUSTED_SOURCE_MANIFEST}"', script)
+        self.assertIn('exec 9<"${TRUSTED_SOURCE_MANIFEST}"', script)
+        self.assertIn(
+            '/bin/cp "${SOURCE_ROOT}/scripts/release/source_manifest.py"', script
+        )
+        self.assertNotIn(
+            '/bin/cp "${REPO_ROOT}/scripts/release/source_manifest.py"', script
+        )
+        self.assertIn('/bin/rm "${TRUSTED_SOURCE_MANIFEST}"', script)
+        self.assertIn("exec 8<&-", script)
+        self.assertIn("exec 9<&-", script)
+        self.assertIn("python3 /dev/fd/9", script)
+        self.assertIn('--expected-record-sha256 "${SOURCE_SNAPSHOT_RECORD_SHA256}"', script)
+        self.assertNotIn(
+            'python3 "${SOURCE_ROOT}/scripts/release/source_manifest.py"', script
+        )
+
+    def test_system_bash_holds_trusted_fds_but_closes_them_for_compiler(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            comparator = source_root / "scripts/release/source_manifest.py"
+            comparator.parent.mkdir(parents=True)
+            comparator.write_text("print('trusted')\n", encoding="ascii")
+            trusted = root / "trusted-comparator.py"
+            release_script = (SCRIPT_DIR / "build-release.sh").read_text(
+                encoding="ascii"
+            )
+            block_start = release_script.index(
+                '/bin/cp "${SOURCE_ROOT}/scripts/release/source_manifest.py"'
+            )
+            block_end = release_script.index(
+                'SOURCE_SNAPSHOT_MANIFEST="$(python3 /dev/fd/8', block_start
+            )
+            production_fd_block = release_script[block_start:block_end]
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    f"""
+set -euo pipefail
+SOURCE_ROOT="$1"
+TRUSTED_SOURCE_MANIFEST="$2"
+{production_fd_block}
+run_compiler /bin/bash -c 'test ! -e /dev/fd/8; test ! -e /dev/fd/9'
+test -e /dev/fd/8
+test -e /dev/fd/9
+if /bin/bash -c 'printf attack >&8' 2>/dev/null; then exit 1; fi
+/usr/bin/cmp /dev/fd/8 "$1/scripts/release/source_manifest.py"
+/usr/bin/cmp /dev/fd/9 "$1/scripts/release/source_manifest.py"
+test "$(/usr/bin/stat -f '%l' /dev/fd/8)" = 0
+test "$(/usr/bin/stat -f '%l' /dev/fd/9)" = 0
+test ! -e "$2"
+""",
+                    "diskplan-fd-test",
+                    str(source_root),
+                    str(trusted),
+                ],
+                cwd=temporary,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8"))
+
+    def test_manifest_changes_for_content_drift_but_not_equivalent_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source.txt"
@@ -271,7 +339,432 @@ class SourceManifestTests(unittest.TestCase):
             replacement.write_text("two\n", encoding="ascii")
             os.replace(replacement, source)
             replaced = source_manifest.snapshot_manifest(root)
-            self.assertNotEqual(content_changed, replaced)
+            self.assertEqual(content_changed, replaced)
+
+    def test_timestamp_only_change_preserves_protected_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.txt"
+            source.write_text("stable\n", encoding="ascii")
+            initial = source_manifest.snapshot_manifest(root)
+            metadata = source.stat()
+            os.utime(
+                source,
+                ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000),
+            )
+            self.assertEqual(initial, source_manifest.snapshot_manifest(root))
+
+    def test_compilation_content_mutation_is_rejected_by_sealed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.swift"
+            source.write_text("let value = 1\n", encoding="ascii")
+            baseline = source_manifest.snapshot(root)
+            source.write_text("let value = 2\n", encoding="ascii")
+            comparison = source_manifest.compare_snapshots(
+                baseline, source_manifest.snapshot(root)
+            )
+            self.assertEqual(
+                [(change.relative, change.fields) for change in comparison.protected],
+                [(b"source.swift", ("content",))],
+            )
+
+    def test_compilation_generated_entry_is_rejected_by_sealed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = source_manifest.snapshot(root)
+            generated = root / ".swiftpm"
+            generated.mkdir()
+            (generated / "workspace-state.json").write_text("{}\n", encoding="ascii")
+            comparison = source_manifest.compare_snapshots(
+                baseline, source_manifest.snapshot(root)
+            )
+            self.assertEqual(
+                [(change.relative, change.fields) for change in comparison.protected],
+                [
+                    (b".swiftpm", ("added",)),
+                    (b".swiftpm/workspace-state.json", ("added",)),
+                ],
+            )
+
+    def test_mode_kind_removal_and_symlink_target_drift_are_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_text("stable\n", encoding="ascii")
+            baseline = source_manifest.snapshot(root)
+            source.chmod(0o600)
+            comparison = source_manifest.compare_snapshots(
+                baseline, source_manifest.snapshot(root)
+            )
+            self.assertEqual(comparison.protected[0].fields, ("mode",))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_text("stable\n", encoding="ascii")
+            baseline = source_manifest.snapshot(root)
+            source.unlink()
+            source.mkdir()
+            comparison = source_manifest.compare_snapshots(
+                baseline, source_manifest.snapshot(root)
+            )
+            self.assertEqual(
+                comparison.protected[0].fields, ("kind", "mode", "size", "payload")
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_text("stable\n", encoding="ascii")
+            baseline = source_manifest.snapshot(root)
+            source.unlink()
+            comparison = source_manifest.compare_snapshots(
+                baseline, source_manifest.snapshot(root)
+            )
+            self.assertEqual(comparison.protected[0].fields, ("removed",))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            link = root / "link"
+            link.symlink_to("first")
+            baseline = source_manifest.snapshot(root)
+            link.unlink()
+            link.symlink_to("other")
+            comparison = source_manifest.compare_snapshots(
+                baseline, source_manifest.snapshot(root)
+            )
+            self.assertEqual(comparison.protected[0].fields, ("payload",))
+
+    def test_entry_limit_applies_while_directory_is_enumerated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index in range(5):
+                (root / f"source-{index}").write_text("stable\n", encoding="ascii")
+            real_scandir = os.scandir
+
+            class TrackingScandir:
+                def __init__(self, path: Path) -> None:
+                    self.inner = real_scandir(path)
+                    self.yielded = 0
+
+                def __enter__(self) -> "TrackingScandir":
+                    self.inner.__enter__()
+                    return self
+
+                def __exit__(self, *args: object) -> None:
+                    self.inner.__exit__(*args)
+
+                def __iter__(self) -> "TrackingScandir":
+                    return self
+
+                def __next__(self) -> os.DirEntry[str]:
+                    child = next(self.inner)
+                    self.yielded += 1
+                    return child
+
+            tracking = TrackingScandir(root)
+            with (
+                mock.patch.object(source_manifest, "MAX_ENTRIES", 2),
+                mock.patch.object(source_manifest.os, "scandir", return_value=tracking),
+                self.assertRaisesRegex(ValueError, "exceeds 2 entries"),
+            ):
+                source_manifest.snapshot(root)
+            self.assertEqual(tracking.yielded, 2)
+
+    def test_entry_limit_is_global_across_nested_enumeration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index in range(3):
+                directory = root / f"directory-{index}"
+                directory.mkdir()
+                (directory / "source").write_text("stable\n", encoding="ascii")
+            real_scandir = os.scandir
+            yielded = 0
+
+            class TrackingScandir:
+                def __init__(self, path: Path) -> None:
+                    self.inner = real_scandir(path)
+
+                def __enter__(self) -> "TrackingScandir":
+                    self.inner.__enter__()
+                    return self
+
+                def __exit__(self, *args: object) -> None:
+                    self.inner.__exit__(*args)
+
+                def __iter__(self) -> "TrackingScandir":
+                    return self
+
+                def __next__(self) -> os.DirEntry[str]:
+                    nonlocal yielded
+                    child = next(self.inner)
+                    yielded += 1
+                    return child
+
+            with (
+                mock.patch.object(source_manifest, "MAX_ENTRIES", 4),
+                mock.patch.object(
+                    source_manifest.os,
+                    "scandir",
+                    side_effect=lambda path: TrackingScandir(path),
+                ),
+                self.assertRaisesRegex(ValueError, "exceeds 4 entries"),
+            ):
+                source_manifest.snapshot(root)
+            self.assertEqual(yielded, 4)
+
+    def test_identical_resolved_rewrite_is_observation_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            resolved = root / "Package.resolved"
+            resolved.write_text('{"version":2}\n', encoding="ascii")
+            baseline = source_manifest.snapshot(root)
+            replacement = root / "replacement"
+            replacement.write_bytes(resolved.read_bytes())
+            os.replace(replacement, resolved)
+            current = source_manifest.snapshot(root)
+            comparison = source_manifest.compare_snapshots(baseline, current)
+            self.assertEqual(baseline.protected_digest, current.protected_digest)
+            self.assertEqual(comparison.protected, ())
+            self.assertIn(
+                b"Package.resolved",
+                [change.relative for change in comparison.observations],
+            )
+
+    def test_snapshot_record_round_trip_and_tamper_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "source.txt").write_text("stable\n", encoding="ascii")
+            baseline = source_manifest.snapshot(root)
+            record = source_manifest.snapshot_record(baseline)
+            self.assertEqual(source_manifest.parse_snapshot_record(record), baseline)
+            tampered = json.loads(record)
+            tampered["entries"][1]["payload_hex"] = "00" * 32
+            with self.assertRaisesRegex(ValueError, "protected digest does not match"):
+                source_manifest.parse_snapshot_record(
+                    json.dumps(tampered, separators=(",", ":"), sort_keys=True).encode(
+                        "ascii"
+                    )
+                )
+
+    def test_snapshot_record_rejects_extra_and_duplicate_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "source.txt").write_text("stable\n", encoding="ascii")
+            record = json.loads(
+                source_manifest.snapshot_record(source_manifest.snapshot(root))
+            )
+            record["extra"] = True
+            with self.assertRaisesRegex(ValueError, "record keys are invalid"):
+                source_manifest.parse_snapshot_record(
+                    json.dumps(record, separators=(",", ":"), sort_keys=True).encode(
+                        "ascii"
+                    )
+                )
+            del record["extra"]
+            record["entries"].append(record["entries"][-1])
+            with self.assertRaisesRegex(ValueError, "unique and sorted"):
+                source_manifest.parse_snapshot_record(
+                    json.dumps(record, separators=(",", ":"), sort_keys=True).encode(
+                        "ascii"
+                    )
+                )
+
+    def test_snapshot_record_file_is_owner_private_and_no_follow(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            source_root.mkdir()
+            (source_root / "source.txt").write_text("stable\n", encoding="ascii")
+            record_path = root / "snapshot.json"
+            baseline = source_manifest.snapshot(source_root)
+            source_manifest.write_snapshot_record(record_path, baseline)
+            self.assertEqual(stat.S_IMODE(record_path.stat().st_mode), 0o600)
+            record_digest = hashlib.sha256(record_path.read_bytes()).hexdigest()
+            self.assertEqual(
+                source_manifest.load_snapshot_record(record_path, record_digest), baseline
+            )
+            record_path.unlink()
+            target = root / "target.json"
+            target.write_text("do not replace\n", encoding="ascii")
+            record_path.symlink_to(target)
+            with self.assertRaises(OSError):
+                source_manifest.write_snapshot_record(record_path, baseline)
+            self.assertEqual(target.read_text(encoding="ascii"), "do not replace\n")
+
+    def test_snapshot_record_rejects_noncanonical_and_observation_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            source_root.mkdir()
+            (source_root / "source.txt").write_text("stable\n", encoding="ascii")
+            baseline = source_manifest.snapshot(source_root)
+            canonical = source_manifest.snapshot_record(baseline)
+            noncanonical = json.dumps(json.loads(canonical), indent=2).encode("ascii")
+            with self.assertRaisesRegex(ValueError, "not canonical"):
+                source_manifest.parse_snapshot_record(noncanonical)
+            record_path = root / "snapshot.json"
+            source_manifest.write_snapshot_record(record_path, baseline)
+            record_digest = hashlib.sha256(record_path.read_bytes()).hexdigest()
+            record = json.loads(record_path.read_bytes())
+            record["entries"][0]["observation"]["mtime_ns"] += 1
+            record_path.write_bytes(
+                json.dumps(record, separators=(",", ":"), sort_keys=True).encode("ascii")
+                + b"\n"
+            )
+            with self.assertRaisesRegex(ValueError, "sealed baseline"):
+                source_manifest.load_snapshot_record(record_path, record_digest)
+
+    def test_snapshot_record_rejects_mode_owner_and_link_count_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            source_root.mkdir()
+            baseline = source_manifest.snapshot(source_root)
+            record_path = root / "snapshot.json"
+            source_manifest.write_snapshot_record(record_path, baseline)
+            record_digest = hashlib.sha256(record_path.read_bytes()).hexdigest()
+            record_path.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "owner-private"):
+                source_manifest.load_snapshot_record(record_path, record_digest)
+            record_path.chmod(0o600)
+            linked = root / "linked-snapshot.json"
+            os.link(record_path, linked)
+            with self.assertRaisesRegex(ValueError, "owner-private"):
+                source_manifest.load_snapshot_record(record_path, record_digest)
+            linked.unlink()
+
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            with (
+                mock.patch.object(
+                    source_manifest,
+                    "open_private_record_parent",
+                    return_value=(parent_descriptor, record_path.name),
+                ),
+                mock.patch.object(
+                    source_manifest.os, "geteuid", return_value=os.geteuid() + 1
+                ),
+                self.assertRaisesRegex(ValueError, "owner-private"),
+            ):
+                source_manifest.load_snapshot_record(record_path, record_digest)
+
+    def test_snapshot_record_rejects_name_slot_replacement_during_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            source_root.mkdir()
+            baseline = source_manifest.snapshot(source_root)
+            record_path = root / "snapshot.json"
+            source_manifest.write_snapshot_record(record_path, baseline)
+            record_digest = hashlib.sha256(record_path.read_bytes()).hexdigest()
+            replacement = root / "replacement.json"
+            replacement.write_bytes(record_path.read_bytes())
+            replacement.chmod(0o600)
+            real_read = os.read
+            replaced = False
+
+            def read_then_replace(descriptor: int, maximum: int) -> bytes:
+                nonlocal replaced
+                chunk = real_read(descriptor, maximum)
+                if not replaced:
+                    os.replace(replacement, record_path)
+                    replaced = True
+                return chunk
+
+            with (
+                mock.patch.object(source_manifest.os, "read", side_effect=read_then_replace),
+                self.assertRaisesRegex(ValueError, "changed while reading"),
+            ):
+                source_manifest.load_snapshot_record(record_path, record_digest)
+
+    def test_cli_reports_exact_protected_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            source_root.mkdir()
+            source = source_root / "Package.swift"
+            source.write_text("let value = 1\n", encoding="ascii")
+            baseline = source_manifest.snapshot(source_root)
+            record_path = root / "snapshot.json"
+            source_manifest.write_snapshot_record(record_path, baseline)
+            record_digest = hashlib.sha256(record_path.read_bytes()).hexdigest()
+            source.write_text("let value = 2\n", encoding="ascii")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "source_manifest.py"),
+                    "--compare-to",
+                    str(record_path),
+                    "--expected-record-sha256",
+                    record_digest,
+                    str(source_root),
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.stdout, b"")
+            self.assertIn(b"protected source change: Package.swift: content", completed.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "extended ACLs require macOS")
+    def test_snapshot_record_rejects_extended_acl(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            source_root.mkdir()
+            baseline = source_manifest.snapshot(source_root)
+            record_path = root / "snapshot.json"
+            source_manifest.write_snapshot_record(record_path, baseline)
+            subprocess.run(
+                ["/bin/chmod", "+a", "everyone allow read", str(record_path)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            record_digest = hashlib.sha256(record_path.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, "ACL-free"):
+                source_manifest.load_snapshot_record(record_path, record_digest)
+
+    @unittest.skipUnless(sys.platform == "darwin", "extended ACLs require macOS")
+    def test_snapshot_record_rejects_parent_directory_extended_acl(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            source_root.mkdir()
+            baseline = source_manifest.snapshot(source_root)
+            subprocess.run(
+                ["/bin/chmod", "+a", "everyone allow read", str(root)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            with self.assertRaisesRegex(ValueError, "directory.*ACL-free"):
+                source_manifest.write_snapshot_record(root / "snapshot.json", baseline)
+
+    @unittest.skipUnless(sys.platform == "darwin", "extended ACLs require macOS")
+    def test_acl_probe_distinguishes_absent_present_and_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                self.assertTrue(source_manifest.fd_acl_free(descriptor))
+                self.assertTrue(packager.output_directory_acl_free(descriptor))
+                subprocess.run(
+                    ["/bin/chmod", "+a", "everyone allow read", str(root)],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.assertFalse(source_manifest.fd_acl_free(descriptor))
+                self.assertFalse(packager.output_directory_acl_free(descriptor))
+            finally:
+                os.close(descriptor)
+        with self.assertRaises(OSError):
+            source_manifest.fd_acl_free(-1)
+        with self.assertRaises(OSError):
+            packager.output_directory_acl_free(-1)
 
     def test_hash_regular_rejects_replacement_after_lstat(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -489,6 +982,20 @@ class DeterministicGzipTests(unittest.TestCase):
             output.mkdir(mode=0o777)
             output.chmod(0o777)
             with self.assertRaisesRegex(ValueError, "non-group/world-writable"):
+                packager.open_output_directory(output)
+
+    @unittest.skipUnless(sys.platform == "darwin", "extended ACLs require macOS")
+    def test_output_directory_rejects_extended_acl(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            output.mkdir(mode=0o700)
+            subprocess.run(
+                ["/bin/chmod", "+a", "everyone allow read", str(output)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            with self.assertRaisesRegex(ValueError, "ACL-free"):
                 packager.open_output_directory(output)
 
     def test_archive_rejects_ancestor_replacement_after_descriptor_binding(self) -> None:

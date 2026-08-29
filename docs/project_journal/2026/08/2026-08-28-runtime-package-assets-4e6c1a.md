@@ -1,7 +1,7 @@
 ---
 id: 20260828-4e6c1a
 title: Runtime Package Assets
-status: completed
+status: active
 created: 2026-08-28
 updated: 2026-08-28
 branch: wip/runtime-package-assets
@@ -18,6 +18,32 @@ superseded_by:
 - Keeps one canonical package contract across Python staging, the generated native allowlist, and shell verification; runtime manifests cannot expand filesystem authority.
 
 ## Current State
+
+- Release CI run `33212730509`, job `98989478657`, completed both release
+  compilations but rejected the private source tree afterward. The former seal
+  retained only an aggregate digest, so that historical run cannot identify the
+  changed path. External Cargo and Swift scratch roots exclude ordinary build
+  products; an equivalent-byte SwiftPM rewrite, most plausibly
+  `Package.resolved`, remains the leading inference rather than a proven path.
+- The replacement seal defines its protected properties explicitly: canonical
+  namespace and entry kind, exact access mode, regular-file size and SHA-256,
+  and symlink target. Device, inode, mtime, and ctime remain strict during each
+  no-follow snapshot read but are observation-only across compilation. This
+  accepts an equivalent-byte replacement without accepting content, namespace,
+  or access-policy drift.
+- The owner-private baseline now retains canonical per-path records outside the
+  source tree. Post-build comparison reports bounded exact protected changes and
+  separately reports metadata/identity-only observations, while malformed,
+  tampered, duplicate, unsorted, noncanonical, or non-private records fail closed.
+- Both comparison passes execute separate read-only descriptors for the same
+  unlinked comparator inode, so compilation cannot rewrite the code that judges
+  its source tree. A shell-held SHA-256 binds the complete baseline bytes,
+  including observation fields and canonical JSON encoding.
+- macOS 26 SDK documentation and a minimal C probe establish the extended-ACL
+  contract: no ACL returns `NULL` with `ENOENT`, a present ACL returns an object
+  whose first entry succeeds with `0`, and API errors remain distinct. Python
+  packaging, source sealing, and the C lifecycle helper now share that exact
+  fail-closed interpretation for owner-private files and directories.
 
 - Every manifested payload binds canonical relative path, exact mode, byte size, SHA-256, role, and compatibility version.
 - Nested copy, proof, cleanup, publication, and uninstall use descriptor-relative no-follow traversal with fixed directories and regular-file-only leaves.
@@ -42,13 +68,15 @@ superseded_by:
 
 ## Next Steps
 
-- The integration owner will run the complete Swift/Rust release build and
-  install lifecycle at the repository-wide release checkpoint; that global gate
-  is tracked outside this completed packaging workstream.
+- Run the exact release build after the static source-seal gates and fresh review.
+  Preserve the first path-level diagnostic as CI root-cause evidence, then close
+  this workstream only after the release build passes without protected source
+  drift.
 
 ## Evidence
 
 - `scripts/release/test_package_bundle.py`
+- `scripts/release/source_manifest.py`
 - `scripts/release/diskplan-fs-helper-tests.c`
 - `release/bundle-contract.json`
 - `python3 -m unittest scripts/release/test_package_bundle.py`: 36 tests passed,

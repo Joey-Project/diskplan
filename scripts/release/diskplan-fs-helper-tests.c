@@ -69,6 +69,43 @@ static void make_test_directory(const char *path) {
     }
 }
 
+static void add_test_acl(const char *path) {
+    pid_t child = fork();
+    if (child < 0) test_fail("cannot fork ACL fixture helper");
+    if (child == 0) {
+        execl("/bin/chmod", "chmod", "+a", "everyone allow read", path, NULL);
+        _exit(127);
+    }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        test_fail("cannot add ACL fixture");
+}
+
+static void test_acl_contract(const char *root) {
+    char case_root[PATH_MAX], file_path[PATH_MAX];
+    join_test_path(case_root, root, "acl-contract");
+    join_test_path(file_path, case_root, "record");
+    make_test_directory(case_root);
+    int file = open(file_path, O_RDONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    0600);
+    int directory = open(case_root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (file < 0 || directory < 0) test_fail("cannot create ACL contract fixture");
+    if (probe_fd_acl(file) != ACL_PROBE_FREE ||
+        probe_fd_acl(directory) != ACL_PROBE_FREE)
+        test_fail("ACL-free fixture did not report free");
+    if (probe_fd_acl(-1) != ACL_PROBE_ERROR)
+        test_fail("ACL API failure did not remain distinct");
+    add_test_acl(file_path);
+    add_test_acl(case_root);
+    if (probe_fd_acl(file) != ACL_PROBE_PRESENT ||
+        probe_fd_acl(directory) != ACL_PROBE_PRESENT || !fd_has_acl(file) ||
+        cleanup_acl_free(directory))
+        test_fail("extended ACL fixture was not rejected");
+    close(file);
+    close(directory);
+}
+
 static struct path_binding make_bound_fixture(const char *root, const char *case_name,
                                               char case_root[PATH_MAX],
                                               char parent[PATH_MAX],
@@ -537,6 +574,7 @@ int main(int argc, char **argv) {
     test_managed_child_access_policy_change(argv[1]);
     test_removed_managed_slot_repopulation(argv[1]);
     test_selected_access_flags();
+    test_acl_contract(argv[1]);
     test_copy_time_touch(argv[1]);
     test_nested_artifact_copy(argv[1]);
     test_exact_nested_bundle_lifecycle(argv[1]);
@@ -544,6 +582,6 @@ int main(int argc, char **argv) {
     test_artifact_delete_replacement_is_retained(argv[1]);
     test_exact_delete_uses_preproof_receipts(argv[1]);
     test_partial_cleanup_requires_creation_receipt(argv[1]);
-    puts("fs-helper ancestor, child-slot, mount, flags, and nested lifecycle tests passed");
+    puts("fs-helper ancestor, child-slot, mount, ACL, flags, and nested lifecycle tests passed");
     return 0;
 }
