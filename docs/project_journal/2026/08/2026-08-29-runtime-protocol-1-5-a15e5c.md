@@ -66,9 +66,10 @@ superseded_by:
   1.4 case matrix. Release bundles retain both fixture versions and advertise
   protocol compatibility 1.5 for the schema and version metadata.
 - Bundle tree traversal now retains descriptors only for the currently visited
-  directory ancestry. File verification records initial object identities and then
-  rebinds, hashes, and closes one file at a time; a later replacement, content
-  change, mode change, or path-access failure still fails closed.
+  directory ancestry. File verification records initial device, inode, and macOS
+  generation identities and then rebinds, hashes, and closes one file at a time;
+  a later replacement, content change, mode change, or path-access failure still
+  fails closed.
 
 ## Handoff
 
@@ -102,9 +103,11 @@ superseded_by:
   retaining every traversed directory and verified file, and three protocol
   contract fixture cases still supplied Protocol 1.4 as the canonical source
   version after the package contract advanced to 1.5.
-- The follow-up adds a synthetic 24-descriptor regression budget over a 64-artifact
-  bundle without changing the process limit. This head has received static-only
-  local validation; the corrected 57-test release suite remains assigned to India.
+- The follow-up adds separate synthetic 24-descriptor regression budgets over 64
+  files and 64 directories without changing the process limit. Typed tests also
+  cover macOS generation changes and keep missing, unreadable, replaced/type-changed,
+  and other revalidation failures distinct. This head has received static-only local
+  validation; the corrected release suite remains assigned to India.
 - The follow-up head passes Python AST parsing, Ruff static lint,
   `git diff --check`, and project-journal validation. No local dynamic command was
   run after the India-only host policy took effect.

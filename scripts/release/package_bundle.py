@@ -195,6 +195,7 @@ class BoundSource:
 class FileState:
     device: int
     inode: int
+    generation: int | None
     size: int
     mtime_ns: int
     ctime_ns: int
@@ -204,13 +205,18 @@ class FileState:
         return cls(
             device=value.st_dev,
             inode=value.st_ino,
+            generation=getattr(value, "st_gen", None),
             size=value.st_size,
             mtime_ns=value.st_mtime_ns,
             ctime_ns=value.st_ctime_ns,
         )
 
     def same_object(self, other: "FileState") -> bool:
-        return (self.device, self.inode) == (other.device, other.inode)
+        return (self.device, self.inode, self.generation) == (
+            other.device,
+            other.inode,
+            other.generation,
+        )
 
     def same_content_state(self, other: "FileState") -> bool:
         return (
@@ -574,7 +580,11 @@ def _open_directory_at(parent_fd: int, name: str, display_path: Path) -> int:
         descriptor = os.open(name, _directory_open_flags(), dir_fd=parent_fd)
     except OSError as error:
         raise ValueError(f"cannot bind directory without following links: {display_path}") from error
-    metadata = os.fstat(descriptor)
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as error:
+        os.close(descriptor)
+        raise ValueError(f"cannot inspect bound directory: {display_path}") from error
     if not stat.S_ISDIR(metadata.st_mode):
         os.close(descriptor)
         raise ValueError(f"not a directory: {display_path}")
@@ -635,6 +645,24 @@ def open_regular_at(
     return descriptor
 
 
+def bound_source_open_failure(
+    cause: BaseException | None,
+    subject: str,
+    relative: str,
+) -> str | None:
+    if not isinstance(cause, OSError):
+        return None
+    if cause.errno == errno.ENOENT:
+        state = "is missing"
+    elif cause.errno in {errno.EACCES, errno.EPERM}:
+        state = "became unreadable"
+    elif cause.errno in {errno.ELOOP, errno.ENOTDIR}:
+        state = "was replaced or changed type"
+    else:
+        state = "revalidation failed"
+    return f"bundle {subject} {state}: {relative}"
+
+
 def bind_relative_source(
     root: BoundDirectory,
     relative: str,
@@ -660,29 +688,26 @@ def bind_relative_source(
             except ValueError as error:
                 if expected_directory_states is None:
                     raise
-                cause = error.__cause__
-                if cause is None:
+                message = bound_source_open_failure(
+                    error.__cause__,
+                    "source ancestor",
+                    ancestor,
+                )
+                if message is None:
                     raise
-                if isinstance(cause, FileNotFoundError):
-                    message = f"bundle source ancestor is missing: {ancestor}"
-                elif isinstance(cause, PermissionError):
-                    message = f"bundle source ancestor became unreadable: {ancestor}"
-                else:
-                    message = f"bundle source ancestor access policy changed: {ancestor}"
                 raise ValueError(message) from error
-            state = FileState.from_stat(os.fstat(child))
+            directory_fds.append(child)
+            metadata = os.fstat(child)
+            state = FileState.from_stat(metadata)
             if expected_directory_states is not None:
                 expected = expected_directory_states.get(ancestor)
                 if expected is None or not expected.same_object(state):
-                    os.close(child)
                     raise ValueError(f"bundle source ancestor was replaced: {ancestor}")
-                if stat.S_IMODE(os.fstat(child).st_mode) != 0o755:
-                    os.close(child)
+                if stat.S_IMODE(metadata.st_mode) != 0o755:
                     raise ValueError(
                         f"bundle source ancestor access policy changed: {ancestor}"
                     )
             directory_slots.append(DirectorySlot(parent_fd, component, child, state))
-            directory_fds.append(child)
             parent_fd = child
         display_path = root.display_path / relative
         try:
@@ -690,15 +715,13 @@ def bind_relative_source(
         except ValueError as error:
             if expected_directory_states is None:
                 raise
-            cause = error.__cause__
-            if cause is None:
+            message = bound_source_open_failure(
+                error.__cause__,
+                "source file",
+                relative,
+            )
+            if message is None:
                 raise
-            if isinstance(cause, FileNotFoundError):
-                message = f"bundle source file is missing: {relative}"
-            elif isinstance(cause, PermissionError):
-                message = f"bundle source file became unreadable: {relative}"
-            else:
-                message = f"bundle source file access policy changed: {relative}"
             raise ValueError(message) from error
         bound = BoundSource(
             display_path,
@@ -1503,8 +1526,9 @@ def enumerate_bound_bundle_tree(
 class VerifiedBundle:
     """A bundle snapshot that rebinds one protected file at a time.
 
-    Initial device/inode pairs protect object identity, expected mode protects the
-    access policy used by the bundle, and SHA-256 protects content stability.
+    Initial device/inode/generation tuples protect object identity on macOS,
+    expected mode protects the access policy used by the bundle, and SHA-256
+    protects content stability.
     """
 
     def __init__(

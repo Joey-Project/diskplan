@@ -120,6 +120,45 @@ def make_test_bundle(parent: Path, reverse: bool = False, width: int = 0) -> Pat
     return bundle
 
 
+def run_with_descriptor_budget(action, budget: int = 24) -> int:
+    real_open = os.open
+    real_dup = os.dup
+    real_close = os.close
+    owned: set[int] = set()
+    peak = 0
+
+    def track(descriptor: int) -> int:
+        nonlocal peak
+        owned.add(descriptor)
+        peak = max(peak, len(owned))
+        return descriptor
+
+    def bounded_open(*args, **kwargs) -> int:
+        if len(owned) >= budget:
+            raise OSError(errno.EMFILE, "synthetic descriptor budget exhausted")
+        return track(real_open(*args, **kwargs))
+
+    def bounded_dup(descriptor: int) -> int:
+        if len(owned) >= budget:
+            raise OSError(errno.EMFILE, "synthetic descriptor budget exhausted")
+        return track(real_dup(descriptor))
+
+    def tracked_close(descriptor: int) -> None:
+        owned.discard(descriptor)
+        real_close(descriptor)
+
+    with (
+        mock.patch.object(packager.os, "open", side_effect=bounded_open),
+        mock.patch.object(packager.os, "dup", side_effect=bounded_dup),
+        mock.patch.object(packager.os, "close", side_effect=tracked_close),
+    ):
+        action()
+
+    if owned:
+        raise AssertionError(f"descriptor budget leaked {len(owned)} descriptors")
+    return peak
+
+
 class VersionMetadataTests(unittest.TestCase):
     def test_semver_rejects_numeric_prerelease_leading_zeroes(self) -> None:
         self.assertIsNone(packager.SEMVER.fullmatch("1.2.3-01"))
@@ -802,6 +841,36 @@ test ! -e "$2"
 
 
 class StagedFileTests(unittest.TestCase):
+    def test_file_state_generation_prevents_inode_reuse_identity_match(self) -> None:
+        shared = {
+            "st_dev": 1,
+            "st_ino": 2,
+            "st_size": 3,
+            "st_mtime_ns": 4,
+            "st_ctime_ns": 5,
+        }
+        original = packager.FileState.from_stat(SimpleNamespace(**shared, st_gen=6))
+        reused = packager.FileState.from_stat(SimpleNamespace(**shared, st_gen=7))
+        self.assertFalse(original.same_object(reused))
+
+    def test_bound_source_open_failures_keep_typed_categories(self) -> None:
+        expected = {
+            errno.ENOENT: "is missing",
+            errno.EACCES: "became unreadable",
+            errno.ELOOP: "was replaced or changed type",
+            errno.EIO: "revalidation failed",
+        }
+        for number, category in expected.items():
+            with self.subTest(errno=number):
+                self.assertEqual(
+                    packager.bound_source_open_failure(
+                        OSError(number, "synthetic"),
+                        "source file",
+                        "path",
+                    ),
+                    f"bundle source file {category}: path",
+                )
+
     def test_timestamp_only_source_change_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1046,7 +1115,7 @@ class DeterministicGzipTests(unittest.TestCase):
                 ):
                     with self.assertRaisesRegex(
                         ValueError,
-                        "source ancestor access policy changed",
+                        "source ancestor was replaced or changed type",
                     ):
                         packager.build_archive(bundle, directory_fd, "release.tar.gz")
                 self.assertEqual(list(output.iterdir()), [])
@@ -1097,45 +1166,31 @@ class DeterministicGzipTests(unittest.TestCase):
 
 
 class BundleManifestTests(unittest.TestCase):
+    def test_tree_traversal_bounds_descriptors_for_wide_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle"
+            bundle.mkdir(mode=0o755)
+            bundle.chmod(0o755)
+            for index in range(64):
+                child = bundle / f"directory-{index:04d}"
+                child.mkdir(mode=0o755)
+                child.chmod(0o755)
+            root = packager.bind_absolute_directory(bundle)
+            try:
+                peak = run_with_descriptor_budget(
+                    lambda: packager.enumerate_bound_bundle_tree(root)
+                )
+            finally:
+                root.close()
+            self.assertLess(peak, 24)
+
     def test_verification_bounds_descriptors_for_a_wide_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bundle = make_test_bundle(Path(temporary), width=64)
-            real_open = os.open
-            real_dup = os.dup
-            real_close = os.close
-            owned: set[int] = set()
-            peak = 0
-            budget = 24
-
-            def track(descriptor: int) -> int:
-                nonlocal peak
-                owned.add(descriptor)
-                peak = max(peak, len(owned))
-                return descriptor
-
-            def bounded_open(*args, **kwargs) -> int:
-                if len(owned) >= budget:
-                    raise OSError(errno.EMFILE, "synthetic descriptor budget exhausted")
-                return track(real_open(*args, **kwargs))
-
-            def bounded_dup(descriptor: int) -> int:
-                if len(owned) >= budget:
-                    raise OSError(errno.EMFILE, "synthetic descriptor budget exhausted")
-                return track(real_dup(descriptor))
-
-            def tracked_close(descriptor: int) -> None:
-                owned.discard(descriptor)
-                real_close(descriptor)
-
-            with (
-                mock.patch.object(packager.os, "open", side_effect=bounded_open),
-                mock.patch.object(packager.os, "dup", side_effect=bounded_dup),
-                mock.patch.object(packager.os, "close", side_effect=tracked_close),
-            ):
-                packager.verify_bundle_tree(bundle)
-
-            self.assertFalse(owned)
-            self.assertLess(peak, budget)
+            peak = run_with_descriptor_budget(
+                lambda: packager.verify_bundle_tree(bundle)
+            )
+            self.assertLess(peak, 24)
 
     def test_missing_artifact_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
