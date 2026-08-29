@@ -279,26 +279,65 @@ func gitWorktreeCancellationAfterRootDeletionLeavesTypedAdministrativeResidual()
 }
 
 @Test
-func gitDiscardUsesOnlyTypedGitCommandsAndVerifiesSuccessorCoverage() async throws {
+func dirtyGitWorktreeOperationsAreReportOnlyAndNeverInvokeGit() async throws {
   let fixture = try GitQuarantineFixture(discardLocalChanges: true)
   defer { fixture.cleanup() }
+  let invocations = LockedGitInvocationCount()
   let adapter = GitWorktreeQuarantineAdapter(
     hooks: .init(),
-    gitRunner: { arguments, _, _ in
-      if arguments.dropFirst().first == Data("reset".utf8) {
-        try? Data("clean".utf8).write(to: fixture.payload)
-      }
+    gitRunner: { _, _, _ in
+      invocations.increment()
       return .succeeded(detailCode: "test-git")
     }
   )
+  let production = ProductionExecutionAdapter(
+    genericRemove: PosixRemoveAdapter(),
+    gitWorktree: adapter
+  )
+
+  for operation in [fixture.discardOperation, fixture.removeOperation] {
+    #expect(
+      await adapter.apply(operation, context: gitTestContext())
+        == .failed(ExecutionAdapterFailure(code: "git-worktree-dirty-report-only"))
+    )
+    #expect(
+      await production.apply(operation, context: gitTestContext())
+        == .failed(ExecutionAdapterFailure(code: "git-worktree-dirty-report-only"))
+    )
+    #expect(
+      await production.postverify(operation)
+        == .notSatisfied(code: "git-worktree-dirty-report-only")
+    )
+  }
+  #expect(invocations.value == 0)
+  #expect(try Data(contentsOf: fixture.payload) == Data("dirty".utf8))
+  #expect(slotExists(fixture.worktree))
+
+  let discardPreview = AuthoritativeCommandPreviewBuilder.preview(for: fixture.action)
+  let removePreview = AuthoritativeCommandPreviewBuilder.preview(for: fixture.removeAction)
+  #expect(discardPreview.kind == .reportOnly)
+  #expect(removePreview.kind == .reportOnly)
+  #expect(discardPreview.detailCode == "git-worktree-dirty-report-only")
+  #expect(removePreview.detailCode == "git-worktree-dirty-report-only")
+  #expect(discardPreview.executableRawPath == nil)
+  #expect(removePreview.executableRawPath == nil)
+}
+
+@Test
+func productionRouterKeepsCleanWorktreeQuarantineRemovalExecutable() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let production = ProductionExecutionAdapter(
+    genericRemove: PosixRemoveAdapter(),
+    gitWorktree: testAdapter()
+  )
 
   #expect(
-    await adapter.apply(fixture.discardOperation, context: gitTestContext())
-      == .succeeded(detailCode: "git-worktree-local-changes-discarded")
+    await production.apply(fixture.removeOperation, context: gitTestContext())
+      == .succeeded(detailCode: "git-worktree-quarantine-removed")
   )
-  #expect(await adapter.postverify(fixture.discardOperation) == .satisfied)
-  #expect(try Data(contentsOf: fixture.payload) == Data("clean".utf8))
-  #expect(slotExists(fixture.worktree))
+  #expect(await production.postverify(fixture.removeOperation) == .satisfied)
+  #expect(!slotExists(fixture.worktree))
 }
 
 @Test
@@ -347,6 +386,7 @@ private struct GitQuarantineFixture: @unchecked Sendable {
   let outsideFile: URL
   let registration: GitWorktreeRegistrationEvidence
   let action: ActionDefinition
+  let removeAction: ActionDefinition
   let removeOperation: ExecutionAdapterOperation
   let discardOperation: ExecutionAdapterOperation
 
@@ -524,6 +564,7 @@ private struct GitQuarantineFixture: @unchecked Sendable {
     )
     switch action.prototype.adapterContract {
     case .gitWorktreeRemove(let contract):
+      removeAction = action
       removeOperation = .gitWorktreeRemove(BoundMutationTarget(action: action), contract)
       discardOperation = removeOperation
     case .gitWorktreeDiscardLocalChanges(let contract):
@@ -531,7 +572,30 @@ private struct GitQuarantineFixture: @unchecked Sendable {
         BoundMutationTarget(action: action),
         contract
       )
-      removeOperation = discardOperation
+      let removePrototype = try ActionPrototype.build(
+        request: .gitWorktreeRemove,
+        evidence: evidence
+      )
+      removeAction = try ActionDefinition.build(
+        prototype: removePrototype,
+        evidence: evidence,
+        globalFacts: facts,
+        prerequisites: [action],
+        evaluation: evaluation,
+        displayMetrics: ActionDisplayMetrics(
+          immediateReclaimBytes: .known(1),
+          inactiveDurationSeconds: .known(1),
+          rebuildCost: .known(1),
+          cleanupCost: .known(1),
+          canonicalRawPath: Data("worktree".utf8)
+        )
+      )
+      guard case .gitWorktreeRemove(let removeContract) = removeAction.prototype.adapterContract
+      else { throw GitFixtureError.invalidContract }
+      removeOperation = .gitWorktreeRemove(
+        BoundMutationTarget(action: removeAction),
+        removeContract
+      )
     default:
       throw GitFixtureError.invalidContract
     }
@@ -544,6 +608,23 @@ private struct GitQuarantineFixture: @unchecked Sendable {
 
 private enum GitFixtureError: Error {
   case invalidContract
+}
+
+private final class LockedGitInvocationCount: @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+
+  func increment() {
+    lock.lock()
+    count += 1
+    lock.unlock()
+  }
+
+  var value: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return count
+  }
 }
 
 private func gitRegistrationGuardEvidence(

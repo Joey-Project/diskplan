@@ -90,6 +90,12 @@ still returns that evidence and any force warning. An apply preparation containi
 returns a capability-free `reportOnly` result rather than advertising a command or minting an
 authorization that Phase 5 cannot execute.
 
+Dirty Git worktree discard is one such v1 report-only boundary. The plan retains the observed
+change-set and successor evidence for explanation, but the discard action and any dependent remove
+chain are blocked rather than waiver-stageable. Their previews contain no executable, argv, or
+working directory; apply preparation cannot mint capability bytes for them. Clean worktree
+quarantine removal remains a typed native action.
+
 Apply preparation returns a separate `ApplyReadyReport` plus `ApplyCapability`. The public engine
 API obtains issue and authorization times from its private wall clock; the frontend cannot extend
 a lifetime by supplying timestamps. Capability bytes come from `SystemRandomNumberGenerator`,

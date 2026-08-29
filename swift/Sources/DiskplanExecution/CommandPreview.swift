@@ -138,7 +138,17 @@ enum AuthoritativeCommandPreviewBuilder {
         releaseContext: releaseContext,
         detailCode: "versioned-artifact-slot-remove"
       )
-    case .gitWorktreeRemove:
+    case .gitWorktreeRemove(let contract):
+      if contract.requiresDiscardLocalChanges {
+        return AuthoritativeCommandPreview(
+          actionID: action.id,
+          kind: .reportOnly,
+          adapter: .gitWorktreeRemove,
+          compoundReleaseGroupIDs: releaseContext?.groupIDs ?? [],
+          compoundOwnerActionIDs: releaseContext?.ownerActionIDs ?? [],
+          detailCode: "git-worktree-dirty-report-only"
+        )
+      }
       return AuthoritativeCommandPreview(
         actionID: action.id,
         kind: .nativeAdapter,
@@ -150,11 +160,11 @@ enum AuthoritativeCommandPreviewBuilder {
     case .gitWorktreeDiscardLocalChanges:
       return AuthoritativeCommandPreview(
         actionID: action.id,
-        kind: .nativeAdapter,
+        kind: .reportOnly,
         adapter: .gitWorktreeDiscardLocalChanges,
         compoundReleaseGroupIDs: releaseContext?.groupIDs ?? [],
         compoundOwnerActionIDs: releaseContext?.ownerActionIDs ?? [],
-        detailCode: "descriptor-bound-git-discard"
+        detailCode: "git-worktree-dirty-report-only"
       )
     case .completeReleaseSetRemove:
       return AuthoritativeCommandPreview(
@@ -166,6 +176,10 @@ enum AuthoritativeCommandPreviewBuilder {
         detailCode: "all-owners-revalidate-before-first-mutation"
       )
     }
+  }
+
+  static func preview(for action: ActionDefinition) -> AuthoritativeCommandPreview {
+    preview(action)
   }
 
   private static func rmPreview(

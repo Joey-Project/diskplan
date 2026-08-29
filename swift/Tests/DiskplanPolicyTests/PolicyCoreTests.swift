@@ -796,7 +796,7 @@ func specializedForceContractsAlwaysRequireReviewTier() throws {
 }
 
 @Test
-func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() throws {
+func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
   let worktree = gitWorktreeEvidence(
     localChanges: .present(changeSetDigest: digest(60))
   )
@@ -849,31 +849,17 @@ func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() t
       == discardContract.successorBaseline.contentProtection
   )
 
-  let discardPredicate: WaiverPredicate
-  guard case .requiresConsents(let predicates) = discard.evaluation.stageability,
-    let exactPredicate = predicates.first(where: {
-      $0.kind == .fullyObservedLocalGitWorkDiscard
-    })
-  else {
-    Issue.record("expected exact local-work discard predicate")
-    return
-  }
-  discardPredicate = exactPredicate
-  let consent = WaiverConsentCore.create(
-    action: discard,
-    predicate: discardPredicate,
-    reason: "discard observed local changes",
-    consentEventID: "discard-event"
-  )
+  #expect(discard.evaluation.stageability == .blocked)
+  #expect(remove.evaluation.stageability == .blocked)
   let overlay = DecisionOverlay.create(
     plan: plan,
     selectedActionIDs: [remove.id, discard.id],
-    waiverConsents: [consent],
+    waiverConsents: [],
     userNotes: []
   )
-  let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
-  #expect(validated.executionSteps.map(\.action.id) == [discard.id, remove.id])
-  #expect(validated.epochRequirements.count == 1)
+  #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
+    try DecisionOverlayValidator.validate(overlay, against: plan)
+  }
 
   let mismatchedWorktree = gitWorktreeEvidence(
     indexDigest: .known(digest(99)),
@@ -888,78 +874,14 @@ func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() t
     evidence: mismatchedEvidence,
     request: .gitWorktreeDiscardLocalChanges
   )
-  let removeWithMismatchedPrerequisite = try makeAction(
-    evidence: evidence,
-    prerequisites: [mismatchedDiscard],
-    request: .gitWorktreeRemove
-  )
-  guard
-    case .requiresConsents(let mismatchedPredicates) =
-      removeWithMismatchedPrerequisite.evaluation.stageability
-  else {
-    Issue.record("mismatched Git evidence must not discharge local-work consent")
-    return
-  }
-  #expect(mismatchedPredicates.contains { $0.kind == .fullyObservedLocalGitWorkDiscard })
-
-  let twoDiscardPlan = try makePlan(
-    actions: [discard, mismatchedDiscard],
-    evidence: [evidence, mismatchedEvidence]
-  )
-  let singleDiscardOverlay = DecisionOverlay.create(
-    plan: twoDiscardPlan,
-    selectedActionIDs: [discard.id],
-    waiverConsents: [consent],
-    userNotes: []
-  )
   #expect(throws: PolicyModelError.invalidActionContract) {
-    try DecisionOverlayValidator.validate(singleDiscardOverlay, against: twoDiscardPlan)
-  }
-  let blockedDescendant = snapshot(
-    candidateID: "blocked-worktree-child", path: "worktree/blocked", object: 101,
-    explicitProtection: .known(.protected)
-  )
-  let discardWithBlockedDescendantPlan = try makePlan(
-    actions: [discard],
-    evidence: [evidence, blockedDescendant]
-  )
-  let discardWithBlockedDescendantOverlay = DecisionOverlay.create(
-    plan: discardWithBlockedDescendantPlan,
-    selectedActionIDs: [discard.id],
-    waiverConsents: [consent],
-    userNotes: []
-  )
-  #expect(throws: PolicyModelError.invalidActionContract) {
-    try DecisionOverlayValidator.validate(
-      discardWithBlockedDescendantOverlay,
-      against: discardWithBlockedDescendantPlan
+    try makeAction(
+      evidence: evidence,
+      prerequisites: [mismatchedDiscard],
+      request: .gitWorktreeRemove
     )
   }
-  guard
-    case .requiresConsents(let secondPredicates) =
-      mismatchedDiscard.evaluation.stageability,
-    let secondPredicate = secondPredicates.first(where: {
-      $0.kind == .fullyObservedLocalGitWorkDiscard
-    })
-  else {
-    Issue.record("expected second exact local-work discard predicate")
-    return
-  }
-  let secondConsent = WaiverConsentCore.create(
-    action: mismatchedDiscard,
-    predicate: secondPredicate,
-    reason: "discard second observed local changes",
-    consentEventID: "discard-event-2"
-  )
-  let twoDiscardOverlay = DecisionOverlay.create(
-    plan: twoDiscardPlan,
-    selectedActionIDs: [discard.id, mismatchedDiscard.id],
-    waiverConsents: [consent, secondConsent],
-    userNotes: []
-  )
-  #expect(throws: PolicyModelError.invalidActionContract) {
-    try DecisionOverlayValidator.validate(twoDiscardOverlay, against: twoDiscardPlan)
-  }
+  #expect(mismatchedDiscard.evaluation.stageability == .blocked)
 
   let invalidEvidence = [
     gitWorktreeEvidence(

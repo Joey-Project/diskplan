@@ -3,7 +3,7 @@ id: 20260828-8d4b72
 title: Runtime Revalidation And Typed Adapters
 status: active
 created: 2026-08-28
-updated: 2026-08-28
+updated: 2026-08-29
 branch: wip/runtime-revalidation-adapters
 pr:
 supersedes: []
@@ -39,6 +39,11 @@ superseded_by:
   `rm` command or mint a capability for an unsupported mutation.
 - Versioned-artifact scope binds the exact raw parent namespace and version leaf. Runtime policy
   derives both from the recognized path instead of substituting a classification label.
+- Phase 5 uses the accepted report-only firewall for dirty Git worktrees. A discard action and a
+  remove action whose contract requires discard are policy-blocked, cannot be waiver-unlocked,
+  emit capability-free report-only previews, and are rejected by both the production router and
+  the Git quarantine adapter before Git can run. Clean descriptor-bound quarantine removal remains
+  executable.
 
 ## Protected Properties
 
@@ -73,6 +78,7 @@ superseded_by:
 - [x] Add typed Codex temporary-scope removal.
 - [x] Add typed versioned-artifact removal.
 - [x] Add fixture-only scoped adapter and preview tests.
+- [x] Add the dirty-Git report-only firewall without weakening clean quarantine removal.
 - [ ] Merge the validated evidence-authority baseline and add the concrete live collector.
 - [x] Run focused and full Swift tests in the shared dynamic slot.
 - [x] Complete fresh-context static review with no P0-P2 findings.
@@ -80,11 +86,13 @@ superseded_by:
 
 ## Handoff
 
-- Phase: authoritative preview and typed-adapter implementation review- and test-complete.
-- Next step: merge the evidence-authority baseline and consume its narrow scanner-owned receipt
-  factory when available, then rerun the focused collector/execution boundary tests before landing.
-- Blocker: the live collector correctly waits for the public evidence-authority seam; there is no
-  safe independent substitute for its ACL/provider/access-policy contract.
+- Phase: latest integration merged; authoritative preview, typed adapters, and the dirty-Git
+  report-only firewall are statically validated. Dynamic validation remains pending the shared
+  build slot.
+- Next step: merge the evidence-authority baseline after it lands, consume its scanner-owned receipt
+  factory, then rerun focused policy/execution and full Swift gates before landing.
+- Blocker: no design blocker. The concrete live collector still waits for the evidence-authority
+  branch to land; the shared dynamic build slot is currently owned by the package release gate.
 
 ## Evidence
 
@@ -109,3 +117,14 @@ superseded_by:
   fixture; the first policy target run exposed a specialized alias fixture that had not declared
   content stability not applicable. Both task-scoped fixtures were corrected before the passing
   reruns above.
+- Preservation before integration: binary patch
+  `/tmp/diskplan-runtime-revalidation-adapters-premerge.patch` is 68,243 bytes with SHA-256
+  `4b822946089b3668a993f3fbedf734bad1bbf4df7f79fc6830bb5d8691fb7012`; signed commit
+  `81ef51c` preserves all 13 tracked and two previously untracked files.
+- Integration merge: signed commit `3b840bb` merges `5ca93b9` without rebasing. The union retains
+  SafeArtifacts recovery locators, epoch-aware optional audit handling, and the first-failure
+  persistence latch.
+- Current static A-firewall gate: `git diff --check`, `swift-format 602.0.0 lint --strict`, and
+  `swiftc -parse` pass for all changed Swift files. A bounded source/design search finds no retained
+  `git reset --hard` or `git clean -ffdx` execution path. Dynamic tests intentionally have not run
+  while the package workstream owns the single Swift/Rust build slot.

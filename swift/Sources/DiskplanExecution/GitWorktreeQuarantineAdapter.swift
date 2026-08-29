@@ -131,9 +131,12 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
   ) async -> AdapterOperationOutcome {
     switch operation {
     case .gitWorktreeRemove(let target, let contract):
+      guard !contract.requiresDiscardLocalChanges else {
+        return .failed(ExecutionAdapterFailure(code: "git-worktree-dirty-report-only"))
+      }
       return await remove(target: target, contract: contract, context: context)
-    case .gitWorktreeDiscardLocalChanges(let target, let contract):
-      return await discard(target: target, contract: contract, context: context)
+    case .gitWorktreeDiscardLocalChanges:
+      return .failed(ExecutionAdapterFailure(code: "git-worktree-dirty-report-only"))
     default:
       return .failed(ExecutionAdapterFailure(code: "unsupported-action-adapter"))
     }
@@ -159,28 +162,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         }
       }
       return .unknown(.notRequested)
-    case .gitWorktreeDiscardLocalChanges(let target, let contract):
-      guard await results.value(for: target.actionID) == .localChangesDiscarded else {
-        return .notSatisfied(code: "discard-not-completed")
-      }
-      do {
-        let binding = try openSourceBinding(target)
-        defer { Self.close(binding.descriptors) }
-        _ = try verifyCoverage(
-          rootDescriptor: binding.sourceDescriptor,
-          expectedIdentity: target.expectedIdentity,
-          expectedContent: contract.successorBaseline.contentProtection,
-          expectedAccess: target.expectedTargetAccessPolicy
-        )
-        return .satisfied
-      } catch let AdapterError.failure(failure) {
-        return .failed(
-          ObservationFailure(code: failure.code, collector: "git-worktree-postverify"))
-      } catch {
-        return .failed(
-          ObservationFailure(
-            code: String(reflecting: type(of: error)), collector: "git-worktree-postverify"))
-      }
+    case .gitWorktreeDiscardLocalChanges:
+      return .notSatisfied(code: "git-worktree-dirty-report-only")
     default:
       return .unknown(.unsupported)
     }
@@ -405,75 +388,6 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     return .succeeded(detailCode: "git-worktree-removed-with-administrative-residual")
   }
 
-  private func discard(
-    target: BoundMutationTarget,
-    contract: GitWorktreeDiscardLocalChangesContract,
-    context: MutationExecutionContext
-  ) async -> AdapterOperationOutcome {
-    do {
-      try validateDiscardContract(target, contract)
-      if Task.isCancelled { return .cancelled }
-      if context.isExpired { return .timedOut }
-
-      let source = try openSourceBinding(target)
-      defer { Self.close(source.descriptors) }
-      let administrative = try openGitAdministrativeBinding(
-        worktreeDescriptor: source.sourceDescriptor,
-        evidence: contract.verifiedEvidence
-      )
-      Self.close(administrative.descriptors)
-      let finalPreflight = await context.finalDescriptorPreflight(
-        FinalDescriptorPreflightRequest(
-          target: target,
-          rootDescriptor: source.rootDescriptor,
-          parentDescriptors: source.parentDescriptors,
-          targetDescriptor: source.sourceDescriptor,
-          rawLeafName: source.leaf
-        ))
-      guard finalPreflight == .verified else {
-        return .failed(Self.finalPreflightFailure(finalPreflight))
-      }
-      if Task.isCancelled { return .cancelled }
-      if context.isExpired { return .timedOut }
-      _ = try verifyCoverage(
-        rootDescriptor: source.sourceDescriptor,
-        expectedIdentity: target.expectedIdentity,
-        expectedContent: target.expectedContent,
-        expectedAccess: target.expectedTargetAccessPolicy
-      )
-      if Task.isCancelled { return .cancelled }
-      if context.isExpired { return .timedOut }
-
-      var outcome = await gitRunner(
-        [Data("git".utf8), Data("reset".utf8), Data("--hard".utf8), Data("HEAD".utf8)],
-        source.sourceDescriptor,
-        context
-      )
-      guard case .succeeded = outcome else { return outcome }
-      if Task.isCancelled { return .cancelled }
-      if context.isExpired { return .timedOut }
-      outcome = await gitRunner(
-        [Data("git".utf8), Data("clean".utf8), Data("-ffdx".utf8)],
-        source.sourceDescriptor,
-        context
-      )
-      guard case .succeeded = outcome else { return outcome }
-
-      _ = try verifyCoverage(
-        rootDescriptor: source.sourceDescriptor,
-        expectedIdentity: target.expectedIdentity,
-        expectedContent: contract.successorBaseline.contentProtection,
-        expectedAccess: target.expectedTargetAccessPolicy
-      )
-      await results.set(.localChangesDiscarded, for: target.actionID)
-      return .succeeded(detailCode: "git-worktree-local-changes-discarded")
-    } catch let AdapterError.failure(failure) {
-      return .failed(failure)
-    } catch {
-      return .failed(ExecutionAdapterFailure(code: String(reflecting: type(of: error))))
-    }
-  }
-
   private func restoreAfterVerificationFailure(
     target: BoundMutationTarget,
     source: DescriptorBinding,
@@ -560,6 +474,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           == .known(contract.executionBaseline)
     }
     guard contract.quarantineRequired,
+      !contract.requiresDiscardLocalChanges,
       baselineMatches,
       contract.executionBaseline.localChanges == .clean,
       target.expectedContent == contract.executionBaseline.contentProtection,
@@ -578,34 +493,6 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       contract.verifiedEvidence.registration.knownValue?.registeredWorktreeIdentity
         == target.expectedIdentity
     else { throw failure("invalid-git-worktree-remove-contract") }
-  }
-
-  private func validateDiscardContract(
-    _ target: BoundMutationTarget,
-    _ contract: GitWorktreeDiscardLocalChangesContract
-  ) throws {
-    guard target.expectedIdentity.type == .directory,
-      target.postcondition
-        == .gitWorktreeLocalChangesDiscarded(
-          changeSetDigest: contract.changeSetDigest,
-          successor: contract.successorBaseline
-        ),
-      target.expectedRootSeal.trustedNamespace == .ownerPrivate,
-      target.expectedParentSeals.allSatisfy({ $0.trustedNamespace == .ownerPrivate }),
-      hasBoundLocalNamespaceSeals(target),
-      contract.verifiedEvidence.trustedExclusiveNamespace == .known(true),
-      contract.verifiedEvidence.noFollowTraversalComplete == .known(true),
-      contract.verifiedEvidence.postQuarantineCoverage == .known(.complete),
-      Self.hasExecutableLinkedRegistration(contract.verifiedEvidence),
-      contract.verifiedEvidence.sparseCheckout == .known(.disabled),
-      contract.verifiedEvidence.nestedRepositories == .known(.none),
-      contract.verifiedEvidence.submodules == .known(.none),
-      contract.verifiedEvidence.registration.knownValue?.registeredWorktreeIdentity
-        == target.expectedIdentity,
-      case .some(.present(let digest)) = contract.verifiedEvidence.localChanges.knownValue,
-      digest == contract.changeSetDigest,
-      contract.verifiedEvidence.postDiscardSuccessor == .known(contract.successorBaseline)
-    else { throw failure("invalid-git-worktree-discard-contract") }
   }
 
   static func hasExecutableLinkedRegistration(_ evidence: GitWorktreeEvidence) -> Bool {

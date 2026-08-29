@@ -96,9 +96,11 @@ deletion. Verification failure attempts an exclusive restore; restore collision 
 failure retains a typed recovery locator. Only after root deletion may Git prune administrative
 metadata. Cancellation and deadline are checked again before that follow-up starts; a skipped
 or failed cleanup produces an explicit typed residual and a partially successful step without
-changing the root-deletion result. Dirty-worktree discard uses only its dedicated typed Git
-reset/clean operation and verifies the authorized clean successor. Neither Git operation can
-route to generic removal.
+changing the root-deletion result. In v1, a dirty worktree and every remove chain that requires
+discarding local changes are report-only. They are not stageable, cannot be unlocked by a waiver,
+never mint an apply capability, and both the production router and the quarantine adapter reject
+them before invoking Git. Clean worktree quarantine removal remains executable. No Git worktree
+operation can route to generic removal.
 
 `EngineExecutionComposition` is the production Phase 4/5 factory. It binds one sealed collector
 to the preparation engine, final descriptor verification, JIT/release verification, and a typed

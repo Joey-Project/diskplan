@@ -1529,23 +1529,29 @@ public struct ActionDefinition: Equatable, Sendable {
     prototype: ActionPrototype,
     prerequisites: [ActionDefinition]
   ) throws -> PolicyEvaluation {
-    guard case .gitWorktreeRemove(let contract) = prototype.adapterContract,
-      contract.requiresDiscardLocalChanges,
-      case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges(
-        targetIdentity: prototype.targetIdentity),
-      prerequisites.contains(where: { prerequisite in
-        guard
-          case .gitWorktreeDiscardLocalChanges(let discard) =
-            prerequisite.prototype.adapterContract
-        else { return false }
-        return discard.changeSetDigest == changeSetDigest
-          && discard.verifiedEvidence == contract.verifiedEvidence
-          && discard.successorBaseline == contract.executionBaseline
-          && prerequisite.prototype.namespaceBinding.bindingBytes
-            == prototype.namespaceBinding.bindingBytes
-      })
-    else { return base }
-    return try base.dischargingFullyObservedLocalGitWork(changeSetDigest)
+    switch prototype.adapterContract {
+    case .gitWorktreeDiscardLocalChanges(let contract):
+      return try base.blockingUnsupportedGitDiscard(contract.changeSetDigest)
+    case .gitWorktreeRemove(let contract) where contract.requiresDiscardLocalChanges:
+      guard
+        case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges(
+          targetIdentity: prototype.targetIdentity),
+        prerequisites.contains(where: { prerequisite in
+          guard
+            case .gitWorktreeDiscardLocalChanges(let discard) =
+              prerequisite.prototype.adapterContract
+          else { return false }
+          return discard.changeSetDigest == changeSetDigest
+            && discard.verifiedEvidence == contract.verifiedEvidence
+            && discard.successorBaseline == contract.executionBaseline
+            && prerequisite.prototype.namespaceBinding.bindingBytes
+              == prototype.namespaceBinding.bindingBytes
+        })
+      else { throw PolicyModelError.invalidActionContract }
+      return try base.blockingUnsupportedGitDiscard(changeSetDigest)
+    default:
+      return base
+    }
   }
 
   private static func make(
