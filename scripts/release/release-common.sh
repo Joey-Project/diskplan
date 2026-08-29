@@ -81,9 +81,76 @@ diskplan_expected_files() {
         diskplan-fs-helper \
         install.sh \
         manifest.json \
+        proto/diskplan/v1/ipc.proto \
+        proto/fixtures/canonical-binary-v1/evidence.bin \
+        proto/fixtures/canonical-binary-v1/evidence.json \
+        proto/fixtures/canonical-binary-v1/evidence.sha256 \
+        proto/fixtures/runtime-v1.4/README.md \
+        proto/fixtures/runtime-v1.4/codex-scope-action.frames.hex \
+        proto/fixtures/runtime-v1.4/empty-batch-dry-run.frames.hex \
+        proto/fixtures/runtime-v1.4/fixtures.json \
+        proto/fixtures/runtime-v1.4/force-action-execution.frames.hex \
+        proto/fixtures/runtime-v1.4/git-evidence-action.frames.hex \
+        proto/fixtures/runtime-v1.4/version-survivor-action.frames.hex \
+        proto/fixtures/scan-stream-v1.3/README.md \
+        proto/fixtures/scan-stream-v1.3/fixtures.json \
+        proto/fixtures/scan-stream-v1.3/multi-finalized.frames.hex \
+        proto/fixtures/scan-stream-v1.3/single-ready.frames.hex \
+        proto/fixtures/scan-stream-v1.3/zero-ready.frames.hex \
+        proto/toolchain.lock \
+        protocol-version \
         protocol.json \
         release-common.sh \
+        rules/builtin-v1.json \
+        rules/user-policy-default-v1.json \
+        runtime-capabilities.json \
         uninstall.sh
+}
+
+diskplan_expected_directories() {
+    printf '%s\n' \
+        proto \
+        rules \
+        proto/diskplan \
+        proto/fixtures \
+        proto/diskplan/v1 \
+        proto/fixtures/canonical-binary-v1 \
+        proto/fixtures/runtime-v1.4 \
+        proto/fixtures/scan-stream-v1.3
+}
+
+diskplan_expected_artifact_contract() {
+    printf '%s\n' \
+        $'VERSION\t0644\tproduct-version\tproduct-v1' \
+        $'activate.sh\t0755\tlifecycle-script\tlocal-install-v1' \
+        $'diskplan\t0755\texecutable\tproduct-v1' \
+        $'diskplan-engine\t0755\texecutable\tproduct-v1' \
+        $'diskplan-fs-helper\t0755\texecutable\tfilesystem-helper-v1' \
+        $'install.sh\t0755\tlifecycle-script\tlocal-install-v1' \
+        $'proto/diskplan/v1/ipc.proto\t0644\tprotocol-schema\tprotocol-1.4' \
+        $'proto/fixtures/canonical-binary-v1/evidence.bin\t0644\tcompatibility-fixture\tcanonical-binary-v1' \
+        $'proto/fixtures/canonical-binary-v1/evidence.json\t0644\tcompatibility-fixture\tcanonical-binary-v1' \
+        $'proto/fixtures/canonical-binary-v1/evidence.sha256\t0644\tcompatibility-fixture\tcanonical-binary-v1' \
+        $'proto/fixtures/runtime-v1.4/README.md\t0644\tcompatibility-fixture-documentation\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/codex-scope-action.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/empty-batch-dry-run.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/fixtures.json\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/force-action-execution.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/git-evidence-action.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/runtime-v1.4/version-survivor-action.frames.hex\t0644\tcompatibility-fixture\truntime-v1.4' \
+        $'proto/fixtures/scan-stream-v1.3/README.md\t0644\tcompatibility-fixture-documentation\tscan-stream-v1.3' \
+        $'proto/fixtures/scan-stream-v1.3/fixtures.json\t0644\tcompatibility-fixture\tscan-stream-v1.3' \
+        $'proto/fixtures/scan-stream-v1.3/multi-finalized.frames.hex\t0644\tcompatibility-fixture\tscan-stream-v1.3' \
+        $'proto/fixtures/scan-stream-v1.3/single-ready.frames.hex\t0644\tcompatibility-fixture\tscan-stream-v1.3' \
+        $'proto/fixtures/scan-stream-v1.3/zero-ready.frames.hex\t0644\tcompatibility-fixture\tscan-stream-v1.3' \
+        $'proto/toolchain.lock\t0644\tprotocol-toolchain-lock\tprotocol-toolchain-v1' \
+        $'protocol-version\t0644\tprotocol-version\tprotocol-1.4' \
+        $'protocol.json\t0644\tprotocol-metadata\tprotocol-1.4' \
+        $'release-common.sh\t0644\tlifecycle-library\tlocal-install-v1' \
+        $'rules/builtin-v1.json\t0644\tdeclarative-rules\tdiskplan.rules.v1' \
+        $'rules/user-policy-default-v1.json\t0644\tdefault-policy\tdiskplan.user-policy.v1' \
+        $'runtime-capabilities.json\t0644\truntime-capability-manifest\tdiskplan.runtime-capabilities.v1' \
+        $'uninstall.sh\t0755\tlifecycle-script\tlocal-install-v1'
 }
 
 diskplan_verify_bundle() {
@@ -97,15 +164,27 @@ diskplan_verify_bundle() {
         [[ -f "${bundle}/${name}" && ! -L "${bundle}/${name}" ]] || diskplan_die "bundle file is missing or unsafe: ${name}"
     done < <(diskplan_expected_files)
 
+    local expected_directory_count=0
+    while IFS= read -r name; do
+        expected_directory_count=$((expected_directory_count + 1))
+        [[ -d "${bundle}/${name}" && ! -L "${bundle}/${name}" ]] || diskplan_die "bundle directory is missing or unsafe: ${name}"
+    done < <(diskplan_expected_directories)
+
     local actual_count
-    actual_count="$(/usr/bin/find "${bundle}" -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
-    [[ "${actual_count}" == "${expected_count}" ]] || diskplan_die "bundle contains unexpected top-level entries"
+    actual_count="$(/usr/bin/find "${bundle}" -mindepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+    [[ "${actual_count}" == "$((expected_count + expected_directory_count))" ]] || diskplan_die "bundle contains missing or unexpected entries"
 
     local version
     version="$(<"${bundle}/VERSION")"
     diskplan_validate_version "${version}" || diskplan_die "bundle VERSION is invalid"
 
-    local bundle_format architecture manifest_version protocol_major protocol_minor
+    local manifest_key_count capability_key_count
+    manifest_key_count="$(/usr/bin/plutil -convert xml1 -o - "${bundle}/manifest.json" | /usr/bin/grep -c '<key>')" || diskplan_die "manifest schema cannot be enumerated"
+    [[ "${manifest_key_count}" == "193" ]] || diskplan_die "manifest contains missing or unknown fields"
+    capability_key_count="$(/usr/bin/plutil -convert xml1 -o - "${bundle}/runtime-capabilities.json" | /usr/bin/grep -c '<key>')" || diskplan_die "runtime capability schema cannot be enumerated"
+    [[ "${capability_key_count}" == "18" ]] || diskplan_die "runtime capability manifest contains missing or unknown fields"
+
+    local bundle_format architecture manifest_version protocol_major protocol_minor manifest_schema
     local deployment_target release_gate manifest_capability
     bundle_format="$(diskplan_plist_value "${bundle}/manifest.json" bundle_format)" || diskplan_die "manifest bundle format is unreadable"
     architecture="$(diskplan_plist_value "${bundle}/manifest.json" architecture)" || diskplan_die "manifest architecture is unreadable"
@@ -115,12 +194,50 @@ diskplan_verify_bundle() {
     deployment_target="$(diskplan_plist_value "${bundle}/manifest.json" deployment_target_macos)" || diskplan_die "manifest deployment target is unreadable"
     release_gate="$(diskplan_plist_value "${bundle}/manifest.json" release_gate_macos)" || diskplan_die "manifest release gate is unreadable"
     manifest_capability="$(diskplan_plist_value "${bundle}/manifest.json" required_capabilities.0)" || diskplan_die "manifest capability is unreadable"
+    manifest_schema="$(diskplan_plist_value "${bundle}/manifest.json" manifest_schema_version)" || diskplan_die "manifest schema is unreadable"
     [[ "${bundle_format}" == "1" && "${architecture}" == "arm64" ]] || diskplan_die "unsupported bundle format or architecture"
     [[ "${manifest_version}" == "${version}" ]] || diskplan_die "manifest and VERSION disagree"
+    [[ "${manifest_schema}" == "diskplan.bundle-manifest.v2" ]] || diskplan_die "manifest schema is unsupported"
     [[ "${protocol_major}" == "1" ]] || diskplan_die "unsupported protocol major: ${protocol_major}"
     [[ "${deployment_target}" == "14.0" && "${release_gate}" == "26.0" && "${manifest_capability}" == "framing-v1" ]] || diskplan_die "manifest platform or capability contract is unsupported"
     if diskplan_plist_value "${bundle}/manifest.json" required_capabilities.1 >/dev/null; then
         diskplan_die "manifest contains unsupported additional required capabilities"
+    fi
+    local expected_optional='audit-artifact-v1 execution-record-artifact-v1 history-artifact-v1 saved-plan-artifact-v1'
+    local actual_optional=""
+    local optional_index optional_value
+    for optional_index in 0 1 2 3; do
+        optional_value="$(diskplan_plist_value "${bundle}/manifest.json" "optional_capabilities.${optional_index}")" || diskplan_die "manifest optional capability is unreadable"
+        actual_optional="${actual_optional}${actual_optional:+ }${optional_value}"
+    done
+    [[ "${actual_optional}" == "${expected_optional}" ]] || diskplan_die "manifest optional capability contract is unsupported"
+    if diskplan_plist_value "${bundle}/manifest.json" optional_capabilities.4 >/dev/null; then
+        diskplan_die "manifest contains unexpected optional capabilities"
+    fi
+    local expected_excluded='.codex-tmp/** .git/** docs/project_journal/INDEX.md rust/crates/diskplan-proto/src/generated.rs rust/target/** swift/.build/** swift/Sources/DiskplanProto/**'
+    local actual_excluded=""
+    local excluded_index excluded_value
+    for excluded_index in 0 1 2 3 4 5 6; do
+        excluded_value="$(diskplan_plist_value "${bundle}/manifest.json" "excluded_inputs.${excluded_index}")" || diskplan_die "manifest excluded input is unreadable"
+        actual_excluded="${actual_excluded}${actual_excluded:+ }${excluded_value}"
+    done
+    [[ "${actual_excluded}" == "${expected_excluded}" ]] || diskplan_die "manifest excluded-input contract is unsupported"
+    if diskplan_plist_value "${bundle}/manifest.json" excluded_inputs.7 >/dev/null; then
+        diskplan_die "manifest contains unexpected excluded inputs"
+    fi
+    [[ "$(<"${bundle}/protocol-version")" == "${protocol_major}.${protocol_minor}" ]] || diskplan_die "protocol-version disagrees with manifest"
+
+    local capability_id
+    for optional_index in 0 1 2 3; do
+        capability_id="$(diskplan_plist_value "${bundle}/runtime-capabilities.json" "capabilities.${optional_index}.id")" || diskplan_die "runtime capability ID is unreadable"
+        [[ "${capability_id}" == "$(diskplan_plist_value "${bundle}/manifest.json" "optional_capabilities.${optional_index}")" ]] || diskplan_die "runtime capability and manifest disagree"
+        [[ "$(diskplan_plist_value "${bundle}/runtime-capabilities.json" "capabilities.${optional_index}.default_enabled")" == "false" ]] || diskplan_die "runtime persistence capability must default off"
+        [[ "$(diskplan_plist_value "${bundle}/runtime-capabilities.json" "capabilities.${optional_index}.kind")" == "optional-persistence" ]] || diskplan_die "runtime capability kind is unsupported"
+        [[ "$(diskplan_plist_value "${bundle}/runtime-capabilities.json" "capabilities.${optional_index}.package_effect")" == "declaration-only" ]] || diskplan_die "packaging must not enable persistent output"
+    done
+    [[ "$(diskplan_plist_value "${bundle}/runtime-capabilities.json" schema_version)" == "diskplan.runtime-capabilities.v1" ]] || diskplan_die "runtime capability schema is unsupported"
+    if diskplan_plist_value "${bundle}/runtime-capabilities.json" capabilities.4.id >/dev/null; then
+        diskplan_die "runtime capability manifest contains unexpected entries"
     fi
 
     local metadata_major metadata_minor metadata_architecture metadata_format required_capability
@@ -139,29 +256,25 @@ diskplan_verify_bundle() {
         diskplan_die "protocol metadata contains unsupported additional capabilities"
     fi
 
-    local expected_artifacts="|VERSION|activate.sh|diskplan|diskplan-engine|diskplan-fs-helper|install.sh|protocol.json|release-common.sh|uninstall.sh|"
-    local artifact_seen="|"
-    local artifact_index artifact_name artifact_sha artifact_size artifact_mode
-    local artifact_actual_size expected_mode
-    for artifact_index in 0 1 2 3 4 5 6 7 8; do
-        artifact_name="$(diskplan_plist_value "${bundle}/manifest.json" "artifacts.${artifact_index}.name")" || diskplan_die "manifest artifact name is unreadable"
+    local artifact_index=0 artifact_name artifact_sha artifact_size artifact_mode artifact_role artifact_compatibility
+    local artifact_actual_size expected_name expected_mode expected_role expected_compatibility
+    while IFS=$'\t' read -r expected_name expected_mode expected_role expected_compatibility; do
+        artifact_name="$(diskplan_plist_value "${bundle}/manifest.json" "artifacts.${artifact_index}.path")" || diskplan_die "manifest artifact path is unreadable"
         artifact_sha="$(diskplan_plist_value "${bundle}/manifest.json" "artifacts.${artifact_index}.sha256")" || diskplan_die "manifest artifact checksum is unreadable"
         artifact_size="$(diskplan_plist_value "${bundle}/manifest.json" "artifacts.${artifact_index}.size")" || diskplan_die "manifest artifact size is unreadable"
         artifact_mode="$(diskplan_plist_value "${bundle}/manifest.json" "artifacts.${artifact_index}.mode")" || diskplan_die "manifest artifact mode is unreadable"
-        [[ "${expected_artifacts}" == *"|${artifact_name}|"* && "${artifact_seen}" != *"|${artifact_name}|"* ]] || diskplan_die "manifest artifact set is invalid"
+        artifact_role="$(diskplan_plist_value "${bundle}/manifest.json" "artifacts.${artifact_index}.role")" || diskplan_die "manifest artifact role is unreadable"
+        artifact_compatibility="$(diskplan_plist_value "${bundle}/manifest.json" "artifacts.${artifact_index}.compatibility_version")" || diskplan_die "manifest artifact compatibility version is unreadable"
+        [[ "${artifact_name}" == "${expected_name}" ]] || diskplan_die "manifest artifact order or path is invalid"
         [[ "${artifact_sha}" =~ ^[0-9a-f]{64}$ && "${artifact_size}" =~ ^[0-9]+$ && "${artifact_mode}" =~ ^0(644|755)$ ]] || diskplan_die "manifest artifact metadata is malformed"
-        case "${artifact_name}" in
-            diskplan|diskplan-engine|diskplan-fs-helper|install.sh|activate.sh|uninstall.sh) expected_mode="0755" ;;
-            *) expected_mode="0644" ;;
-        esac
         [[ "${artifact_mode}" == "${expected_mode}" ]] || diskplan_die "manifest artifact mode is invalid: ${artifact_name}"
+        [[ "${artifact_role}" == "${expected_role}" && "${artifact_compatibility}" == "${expected_compatibility}" ]] || diskplan_die "manifest artifact role or compatibility is invalid: ${artifact_name}"
         [[ "$(diskplan_sha256 "${bundle}/${artifact_name}")" == "${artifact_sha}" ]] || diskplan_die "manifest artifact checksum mismatch: ${artifact_name}"
         artifact_actual_size="$(/usr/bin/stat -f '%z' "${bundle}/${artifact_name}")"
         [[ "${artifact_actual_size}" == "${artifact_size}" ]] || diskplan_die "manifest artifact size mismatch: ${artifact_name}"
-        artifact_seen="${artifact_seen}${artifact_name}|"
-    done
-    [[ "${artifact_seen}" == "${expected_artifacts}" ]] || diskplan_die "manifest does not cover the exact artifact set"
-    if diskplan_plist_value "${bundle}/manifest.json" artifacts.9.name >/dev/null; then
+        artifact_index=$((artifact_index + 1))
+    done < <(diskplan_expected_artifact_contract)
+    if diskplan_plist_value "${bundle}/manifest.json" "artifacts.${artifact_index}.path" >/dev/null; then
         diskplan_die "manifest contains unexpected artifacts"
     fi
 
@@ -173,7 +286,7 @@ diskplan_verify_bundle() {
     local line hash file actual
     local sum_count=0
     while IFS= read -r line || [[ -n "${line}" ]]; do
-        if [[ ! "${line}" =~ ^([0-9a-f]{64})[[:space:]][[:space:]]([A-Za-z0-9._-]+)$ ]]; then
+        if [[ ! "${line}" =~ ^([0-9a-f]{64})[[:space:]][[:space:]]([A-Za-z0-9._/-]+)$ ]]; then
             diskplan_die "SHA256SUMS contains a malformed entry"
         fi
         hash="${BASH_REMATCH[1]}"

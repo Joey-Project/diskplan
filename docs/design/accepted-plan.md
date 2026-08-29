@@ -550,6 +550,8 @@ history、saved plan、audit 和 execution artifacts 使用同一安全 writer�
 
 Rust launcher 只从自己的 versioned directory 定位 engine。升级通过安装新目录并切换 symlink；installer 不修改 TCC。signed/notarized app bundle、Homebrew packaging 和 universal binaries 后置。
 
+release bundle 由一个 canonical package contract 封闭：每个 payload 必须绑定 canonical relative path、exact mode、size、SHA-256、role 和 compatibility version。Swift/Rust executables、权威 `.proto`、compatibility fixtures、built-in rules、default policy 和 runtime capability metadata 必须同包发布。native installer 使用由同一 contract 生成的固定 allowlist，未验证的 runtime manifest 不能扩大路径权限。symlink、special file、path escape、duplicate/case-fold collision、missing/extra entry 和 schema mismatch 全部 fail closed；nested copy/proof/remove 继续 descriptor-relative/no-follow。archive 的 mtime、uid/gid 和 enumeration order 固定化，相同 bytes 必须产生相同 archive。history、saved plan、audit 和 execution record capability 只在包内声明且默认关闭，packaging 不写入用户数据。generated bindings、build tree、VCS/local temporary state 和 `docs/project_journal/INDEX.md` 不入包。
+
 ## 20. Implementation Gates And Parallel Work
 
 七个 Phase（Phase 0 至 Phase 6）表示依赖与验收 gate，不要求严格串行。共享 schema 稳定后，允许独立模块同步开发和验证。
