@@ -182,13 +182,17 @@ superseded_by:
   `A` proves the wrapper accepted the grant before fork, while `F` proves the
   target is forked but remains gated in the supervisor process group. Swift
   passes that same absolute monotonic deadline to the Python supervisor, which
-  checks it at the actual fork and launch-gate boundaries; `L` is emitted only
-  after the `S` gate release has completed, and Swift rejects an acknowledgement
-  read after the deadline. A test-only logical-clock hook advances the observed
-  supervisor clock to the original deadline immediately before the selected
-  action, exercising the same action-side comparator without a wall-clock wait.
-  The resulting `D` frame preserves the ordinary typed `target-launch` failure,
-  so test scheduling cannot silently select an earlier stage or authorize a
+  checks it before fork and again in the gated child immediately before `execv`.
+  A non-inheritable child-status pipe closes only when `execv` commits, so the
+  supervisor emits `L` only after that boundary rather than merely after writing
+  the `S` release byte; Swift also rejects an acknowledgement read after the
+  deadline. A test-only logical-clock hook advances the child's observed clock
+  to the original deadline at the real exec boundary, exercising the same
+  action-side comparator without a wall-clock wait. On that path the supervisor
+  kills and `waitpid`-reaps the gated target before returning the distinct `X`
+  frame, which Swift preserves as a typed `target-launch,target-reaped=true`
+  failure. A pre-fork expiry still returns `D`, when no target exists. Test
+  scheduling therefore cannot silently select an earlier stage or authorize a
   target after the bound. The production absolute 15-second startup deadline
   remains unchanged. Startup-failure cleanup retains
   the control channel until bounded TERM/KILL and reap complete, preventing EOF

@@ -148,10 +148,13 @@ private enum CompileStartupMilestone: String, CaseIterable, Sendable {
 
 private enum CompileStartupFailure: Error, CustomStringConvertible {
   case notReady(stage: String)
+  case targetReapedNotReady(stage: String)
 
   var description: String {
     switch self {
     case .notReady(let stage): "startup-not-ready(stage=\(stage))"
+    case .targetReapedNotReady(let stage):
+      "startup-not-ready(stage=\(stage),target-reaped=true)"
     }
   }
 }
@@ -159,7 +162,7 @@ private enum CompileStartupFailure: Error, CustomStringConvertible {
 private enum CompileStartupDeadlineInjection: String, Sendable {
   case none
   case beforeTargetFork = "before-target-fork"
-  case beforeTargetLaunch = "before-target-launch"
+  case atTargetExec = "at-target-exec"
 }
 
 private enum CompileDrainCompletion: Equatable, Sendable {
@@ -425,6 +428,9 @@ private final class CompileCaptureControl: @unchecked Sendable {
       let count = Darwin.read(descriptor, &ready, 1)
       if count == 1, ready == 0x44 {
         throw CompileStartupFailure.notReady(stage: stage)
+      }
+      if count == 1, ready == 0x58 {
+        throw CompileStartupFailure.targetReapedNotReady(stage: stage)
       }
       guard count == 1, ready == expected else {
         throw compileProcessFailure("capture-control-ready-frame", EPROTO)
@@ -951,11 +957,15 @@ private func signalCompileChild(_ processID: pid_t, signal: Int32) -> String {
   return "signal-failed(group-errno=\(groupError),pid-errno=\(errno))"
 }
 
-private func forceStopCompileChild(_ processID: pid_t) -> ForcedCompileCleanup {
-  switch waitForCompileChild(processID, until: .now()) {
+private func forceStopCompileChild(
+  _ processID: pid_t,
+  selfCleanupGrace: DispatchTimeInterval = .nanoseconds(0)
+) -> ForcedCompileCleanup {
+  switch waitForCompileChild(processID, until: .now() + selfCleanupGrace) {
   case .exited(let status):
     return ForcedCompileCleanup(
-      cleanup: .notRequired, waitStatus: status, report: "already-reaped")
+      cleanup: .notRequired, waitStatus: status, report: "reaped-after-self-cleanup"
+    )
   case .failed(let code):
     return ForcedCompileCleanup(
       cleanup: .notRequired, waitStatus: nil, report: "initial-wait-failed(errno=\(code))")
@@ -1124,7 +1134,11 @@ private func runIsolatedProcess(
     startupMilestones.append(.targetLaunchAcknowledged)
     captureControl.closeParent()
   } catch {
-    let forcedCleanup = forceStopCompileChild(processID)
+    let forcedCleanup = forceStopCompileChild(
+      processID,
+      selfCleanupGrace:
+        error is CompileStartupFailure ? .milliseconds(250) : .nanoseconds(0)
+    )
     captureControl.closeParent()
     stdoutChannel.closeReader()
     stderrChannel.closeReader()
@@ -1510,13 +1524,13 @@ private final class CompileProcessResults: @unchecked Sendable {
     isolatedExec: isolatedExec,
     executable: "/usr/bin/touch",
     arguments: [postForkMarker.path],
-    deadlineInjection: .beforeTargetLaunch,
+    deadlineInjection: .atTargetExec,
     leaderTimeout: .seconds(2)
   )
   #expect(
     neverAcknowledgedResult.startupState == .startupNotReady
-      && neverAcknowledgedResult.setupError?.contains("startup-not-ready(stage=target-launch)")
-        == true
+      && neverAcknowledgedResult.setupError?.contains(
+        "startup-not-ready(stage=target-launch,target-reaped=true)") == true
       && neverAcknowledgedResult.startupMilestones == [
         .spawned, .writerReady, .drainsStarted, .grantSent, .grantAccepted,
         .targetForkPermitted, .targetForkedGated, .targetLaunchPermitted,

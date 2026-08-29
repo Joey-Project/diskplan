@@ -14,6 +14,7 @@ GROUP_PROBE_FAILURE = 253
 SUPERVISOR_SETUP_FAILURE = 254
 TERM_GRACE_SECONDS = 0.1
 GROUP_QUIESCENCE_SECONDS = 2.0
+TARGET_REAP_SECONDS = 2.0
 MAXIMUM_GROUP_MEMBERS = 1_024
 MAXIMUM_SYSTEM_PROCESSES = 65_536
 P_PID = 1
@@ -22,7 +23,7 @@ WNOWAIT = 0x00000020
 STARTUP_DEADLINE_STAGES = {
     "none",
     "before-target-fork",
-    "before-target-launch",
+    "at-target-exec",
 }
 
 target_pid = None
@@ -142,8 +143,7 @@ def install_capture_writers():
     )
 
 
-def enforce_startup_deadline(
-    control_descriptor,
+def startup_deadline_expired(
     deadline_uptime_nanoseconds,
     test_stage,
     current_stage,
@@ -154,11 +154,43 @@ def enforce_startup_deadline(
             observed_uptime_nanoseconds,
             deadline_uptime_nanoseconds,
         )
-    if observed_uptime_nanoseconds < deadline_uptime_nanoseconds:
+    return observed_uptime_nanoseconds >= deadline_uptime_nanoseconds
+
+
+def enforce_startup_deadline(
+    control_descriptor,
+    deadline_uptime_nanoseconds,
+    test_stage,
+    current_stage,
+):
+    if not startup_deadline_expired(
+        deadline_uptime_nanoseconds,
+        test_stage,
+        current_stage,
+    ):
         return
     if os.write(control_descriptor, b"D") != 1:
         raise RuntimeError("startup-deadline write failed")
     raise TimeoutError("startup deadline expired")
+
+
+def kill_and_reap_target():
+    if target_pid is None or target_pid <= 0:
+        return
+    kill_target_best_effort()
+    deadline = time.monotonic() + TARGET_REAP_SECONDS
+    while True:
+        try:
+            waited_pid, _ = os.waitpid(target_pid, os.WNOHANG)
+        except InterruptedError:
+            continue
+        except ChildProcessError:
+            return
+        if waited_pid == target_pid:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("target reap timed out")
+        time.sleep(0.01)
 
 
 def process_group_members():
@@ -257,6 +289,10 @@ def main():
     blocked = {signal.SIGTERM, signal.SIGINT}
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
     launch_gate_read, launch_gate_write = os.pipe()
+    launch_status_read, launch_status_write = os.pipe()
+    # EOF on this non-inheritable writer proves exec committed; every pre-exec
+    # exit must report an explicit status byte instead.
+    os.set_inheritable(launch_status_write, False)
     enforce_startup_deadline(
         control_descriptor,
         startup_deadline_uptime_nanoseconds,
@@ -267,19 +303,36 @@ def main():
     if target_pid == 0:
         os.close(control_descriptor)
         os.close(launch_gate_write)
+        os.close(launch_status_read)
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        if os.read(launch_gate_read, 1) != b"S":
+        try:
+            if os.read(launch_gate_read, 1) != b"S":
+                raise RuntimeError("target-launch gate was not received")
+            os.close(launch_gate_read)
+            # A separate process group is sufficient for bounded descendant cleanup.
+            # Keeping it in the supervisor's session avoids macOS denying killpg
+            # across the session boundary after the exact leader has exited.
+            os.setpgid(0, 0)
+            if startup_deadline_expired(
+                startup_deadline_uptime_nanoseconds,
+                startup_deadline_test_stage,
+                "at-target-exec",
+            ):
+                if os.write(launch_status_write, b"D") != 1:
+                    raise RuntimeError("target deadline status write failed")
+                os._exit(SUPERVISOR_SETUP_FAILURE)
+            os.execv(command_argv[0], command_argv)
+        except BaseException:
+            try:
+                os.write(launch_status_write, b"E")
+            except OSError:
+                pass
             os._exit(SUPERVISOR_SETUP_FAILURE)
-        os.close(launch_gate_read)
-        # A separate process group is sufficient for bounded descendant cleanup.
-        # Keeping it in the supervisor's session avoids macOS denying killpg
-        # across the session boundary after the exact leader has exited.
-        os.setpgid(0, 0)
-        os.execv(command_argv[0], command_argv)
 
     os.close(launch_gate_read)
+    os.close(launch_status_write)
     # The target remains blocked in the supervisor group until the parent has
     # closed its writers, acknowledged the safe fork, and restored signal
     # handling. Before that point one group signal terminates both processes.
@@ -289,21 +342,21 @@ def main():
     if os.read(control_descriptor, 1) != b"C":
         raise RuntimeError("target-launch permission was not received")
     signal.pthread_sigmask(signal.SIG_UNBLOCK, blocked)
-    enforce_startup_deadline(
-        control_descriptor,
-        startup_deadline_uptime_nanoseconds,
-        startup_deadline_test_stage,
-        "before-target-launch",
-    )
     if os.write(launch_gate_write, b"S") != 1:
         raise RuntimeError("target-launch gate failed")
     os.close(launch_gate_write)
-    enforce_startup_deadline(
-        control_descriptor,
-        startup_deadline_uptime_nanoseconds,
-        "none",
-        "after-target-launch",
-    )
+    launch_status = os.read(launch_status_read, 1)
+    os.close(launch_status_read)
+    if launch_status == b"D":
+        # X is emitted only after the gated target is no longer waitable by its
+        # supervisor, so Swift can distinguish target-level reap from D before fork.
+        kill_and_reap_target()
+        if os.write(control_descriptor, b"X") != 1:
+            raise RuntimeError("target-reaped deadline write failed")
+        raise TimeoutError("target startup deadline expired")
+    if launch_status:
+        kill_and_reap_target()
+        raise RuntimeError("target exec failed")
     if os.write(control_descriptor, b"L") != 1:
         raise RuntimeError("target-launch write failed")
     os.close(control_descriptor)
