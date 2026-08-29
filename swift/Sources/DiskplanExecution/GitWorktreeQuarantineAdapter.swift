@@ -26,6 +26,7 @@ public enum GitWorktreeMutationDisposition: Equatable, Sendable {
   case localChangesDiscarded
   case restoredAfterVerificationFailure(code: String)
   case quarantineRetained(locator: GitWorktreeRecoveryLocator, failureCode: String)
+  case quarantineBindingUnverified(failureCode: String)
   case removedWithAdministrativeResidual(GitWorktreeAdministrativeResidual)
 }
 
@@ -180,6 +181,13 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           return .expectedResidual(residual.failure)
         case .quarantineRetained:
           return .notSatisfied(code: "verified-quarantine-retained")
+        case .quarantineBindingUnverified(let failureCode):
+          return .failed(
+            ObservationFailure(
+              code: "quarantine-binding-unverified-\(failureCode)",
+              collector: "git-worktree-postverify"
+            )
+          )
         case .restoredAfterVerificationFailure:
           return .notSatisfied(code: "source-restored-after-verification-failure")
         case .localChangesDiscarded:
@@ -464,6 +472,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         expected: source.parentSeal,
         code: "source-parent-seal-mismatch-before-restore"
       )
+      try requireQuarantinePayloadIdentity(
+        target: target,
+        source: source,
+        quarantine: quarantine
+      )
       try requireSourceSlotMissing(parentDescriptor: source.parentDescriptor, leaf: source.leaf)
       try renameExclusive(
         fromDirectory: quarantine.descriptor,
@@ -482,12 +495,23 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           errno: failure.errno
         ))
     } catch {
-      await results.set(
-        .quarantineRetained(locator: quarantine.locator, failureCode: failure.code),
-        for: target.actionID
+      let recovery = verifiedRecoveryDisposition(
+        target: target,
+        source: source,
+        quarantine: quarantine,
+        failureCode: failure.code
       )
-      return .failed(
-        ExecutionAdapterFailure(code: "quarantine-verification-failed-retained"))
+      await results.set(recovery, for: target.actionID)
+      let code =
+        switch recovery {
+        case .quarantineRetained:
+          "quarantine-verification-failed-retained"
+        case .quarantineBindingUnverified:
+          "quarantine-verification-failed-unverified"
+        default:
+          "invalid-quarantine-recovery-state"
+        }
+      return .failed(ExecutionAdapterFailure(code: code))
     }
   }
 
@@ -506,6 +530,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         expected: source.parentSeal,
         code: "source-parent-seal-mismatch-before-restore"
       )
+      try requireQuarantinePayloadIdentity(
+        target: target,
+        source: source,
+        quarantine: quarantine
+      )
       try requireSourceSlotMissing(parentDescriptor: source.parentDescriptor, leaf: source.leaf)
       try renameExclusive(
         fromDirectory: quarantine.descriptor,
@@ -520,11 +549,63 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       )
       return outcome
     } catch {
-      await results.set(
-        .quarantineRetained(locator: quarantine.locator, failureCode: failureCode),
-        for: target.actionID
+      let recovery = verifiedRecoveryDisposition(
+        target: target,
+        source: source,
+        quarantine: quarantine,
+        failureCode: failureCode
       )
-      return .failed(ExecutionAdapterFailure(code: "interrupted-quarantine-retained"))
+      await results.set(recovery, for: target.actionID)
+      let code =
+        switch recovery {
+        case .quarantineRetained:
+          "interrupted-quarantine-retained"
+        case .quarantineBindingUnverified:
+          "interrupted-quarantine-binding-unverified"
+        default:
+          "invalid-quarantine-recovery-state"
+        }
+      return .failed(ExecutionAdapterFailure(code: code))
+    }
+  }
+
+  private func requireQuarantinePayloadIdentity(
+    target: BoundMutationTarget,
+    source: DescriptorBinding,
+    quarantine: QuarantineBinding
+  ) throws {
+    let payload = try openDirectory(
+      at: quarantine.descriptor,
+      name: quarantine.leaf,
+      code: "open-quarantine-payload-before-restore"
+    )
+    defer { _ = Darwin.close(payload) }
+    try requireSameIdentity(
+      sourceDescriptor: source.sourceDescriptor,
+      destinationDescriptor: payload,
+      expected: target.expectedIdentity
+    )
+  }
+
+  private func verifiedRecoveryDisposition(
+    target: BoundMutationTarget,
+    source: DescriptorBinding,
+    quarantine: QuarantineBinding,
+    failureCode: String
+  ) -> GitWorktreeMutationDisposition {
+    do {
+      try requireQuarantineSeal(quarantine)
+      try requireQuarantinePayloadIdentity(
+        target: target,
+        source: source,
+        quarantine: quarantine
+      )
+      return .quarantineRetained(
+        locator: quarantine.locator,
+        failureCode: failureCode
+      )
+    } catch {
+      return .quarantineBindingUnverified(failureCode: failureCode)
     }
   }
 
@@ -718,7 +799,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         expectedDevice: registration.commonDirectoryIdentity.device
       )
       let commonSeal = try trustedOwnerPrivateSeal(common)
-      let coverage = try collectSnapshot(rootDescriptor: admin)
+      let coverage = CoverageToken(records: try collectSnapshot(rootDescriptor: admin))
       guard try administrativeDigest(coverage.records) == registration.metadataDigest else {
         throw failure("git-administrative-metadata-mismatch")
       }

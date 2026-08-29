@@ -173,6 +173,54 @@ func gitWorktreeRestoreCollisionRetainsTypedRecoveryLocator() async throws {
 }
 
 @Test
+func gitWorktreeRestoreRejectsReplacedQuarantinePayloadWithoutPublishingLocator() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let quarantined = fixture.quarantinedURL
+  let displaced = fixture.quarantineDirectory.appendingPathComponent("displaced-payload")
+  let adapter = testAdapter(
+    hooks: .init(
+      beforePostQuarantineVerification: {
+        try? Data("unexpected".utf8).write(
+          to: quarantined.appendingPathComponent("new-local-data")
+        )
+      },
+      beforeRestore: {
+        try? FileManager.default.moveItem(at: quarantined, to: displaced)
+        try? createPrivateDirectory(quarantined)
+        try? Data("replacement".utf8).write(
+          to: quarantined.appendingPathComponent("keep")
+        )
+      }
+    ))
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation,
+      context: gitTestContext()
+    )
+  else {
+    Issue.record("a replaced quarantine payload must not be restored")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-unverified")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(quarantined))
+  #expect(slotExists(displaced))
+  #expect(
+    await adapter.disposition(for: fixture.action.id)
+      == .quarantineBindingUnverified(failureCode: "worktree-content-mismatch")
+  )
+  guard case .failed(let postFailure) = await adapter.postverify(fixture.removeOperation) else {
+    Issue.record("an unverified recovery binding must remain a typed post-verification failure")
+    return
+  }
+  #expect(
+    postFailure.code == "quarantine-binding-unverified-worktree-content-mismatch"
+  )
+}
+
+@Test
 func gitAdministrativeMetadataDriftIsTypedResidualAfterRootDeletion() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }

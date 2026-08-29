@@ -115,5 +115,10 @@ superseded_by:
 - Current dirty head: `swift-format lint --strict`, `swiftc -frontend -parse`, and
   `git diff --check` passed locally as static-only checks; Swift build/test gates are reserved for
   India-mac-mini-m4-hoteng and remain pending the shared slot.
+- Fresh review of checkpoint `714d13e` found one compile-time coverage-token mismatch and one
+  missing quarantine-payload identity rebind before restore. The follow-up wraps administrative
+  coverage in its typed token and binds the restore leaf to the still-held original descriptor.
+  A changed leaf or unsafe quarantine namespace now reports an unverified recovery binding rather
+  than restoring a replacement or publishing a false recovery locator.
 - Follow-up head: exact-head review accepted findings 1-8 and 10 at the static contract level;
   finding 9 remains blocked on the Git configuration execution-boundary decision above.
