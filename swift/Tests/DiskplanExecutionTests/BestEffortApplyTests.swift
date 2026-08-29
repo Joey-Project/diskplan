@@ -592,6 +592,36 @@ func posixRemoveRejectsFinalAccessPolicyMismatchWithoutMutation() async throws {
 }
 
 @Test
+func finalDescriptorCaptureCannotReplayAnEarlierCaptureID() async throws {
+  let fixture = try MultiActionFixture(includeDependency: false)
+  let replayed = digest(249)
+  let collector = EngineRevalidationCollector(
+    collectCurrent: { _ in throw CancellationError() },
+    collectJIT: { _ in throw CancellationError() },
+    collectReleasePostconditions: { _ in [] },
+    collectFinalDescriptors: { request in
+      matchingFinalDescriptorEvidence(request, captureID: replayed)
+    }
+  )
+  let request = FinalDescriptorPreflightRequest(
+    target: BoundMutationTarget(action: fixture.first),
+    rootDescriptor: -1,
+    parentDescriptors: [],
+    targetDescriptor: -1,
+    rawLeafName: Data("unused".utf8),
+    priorCaptureIDs: [replayed]
+  )
+
+  #expect(
+    await collector.finalDescriptorPreflight(for: request)
+      == .failed(
+        ObservationFailure(
+          code: "replayed-final-capture-id",
+          collector: "final-descriptor-revalidation-source"
+        )))
+}
+
+@Test
 func posixRemoveDoesNotSpawnAfterItsDeadline() async throws {
   let root = try TemporaryRemovalRoot()
   defer { root.cleanup() }
@@ -1277,10 +1307,12 @@ private func testMutationContext() -> MutationExecutionContext {
 }
 
 private func matchingFinalDescriptorEvidence(
-  _ request: FinalDescriptorPreflightRequest
+  _ request: FinalDescriptorPreflightRequest,
+  captureID: PolicyDigest = digest(250)
 ) -> FinalDescriptorEvidenceSnapshot {
   let target = request.target
   return FinalDescriptorEvidenceSnapshot(
+    captureID: captureID,
     targetIdentity: .known(target.expectedIdentity),
     targetAccessPolicy: .known(target.expectedTargetAccessPolicy),
     targetContent: .known(target.expectedContent),

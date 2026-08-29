@@ -54,6 +54,15 @@ snapshot from a capture distinct from both the immutable plan and whole-plan pre
 Absent, failed, stale, or reused captures and nonces fail closed. A newer preparation also
 revokes any older authorization that has not yet been claimed.
 
+Whole-plan, each unit's JIT pass, and every final-descriptor pass use separate leases from the
+same Scan-owned authority session. Their capture IDs cannot equal the immutable scan or an earlier
+phase and cannot be replayed. Final preflight transfers only `dup`-owned root, parent, and target
+descriptors to the Scan authority; it never re-resolves the target through an absolute path.
+Identity is device, inode/file ID, type, and generation. Selected content is size-bound SHA-256.
+Access evidence is owner, group, mode, masked access-control flags, canonical ACL digest, File
+Provider state, and mount identity. Directory child-entry churn is not a content or replacement
+signal, and File Provider metadata transitions remain isolated to the provider dimension.
+
 ## Typed adapters and generic remove
 
 All mutations use an `ExecutionAdapterOperation` derived from the immutable action contract.

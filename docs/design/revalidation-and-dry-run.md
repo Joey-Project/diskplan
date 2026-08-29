@@ -39,6 +39,16 @@ rebuilds the action prototype and reruns all seven
 one-vote policy dimensions at the new execution reference time; a blocked vote, changed
 predicate, changed value bucket, or mismatched current typed observation rejects preparation.
 
+`DiskplanScan` owns the descriptor evidence session and strongly retains its content authority.
+Each whole-plan capture receives one non-replayable lease and capture ID. The lease atomically
+binds and consumes one-shot content requests; finishing, epoch advance, cancellation, session
+close, a new scan, or plan invalidation drains every pending owned descriptor. Execution supplies
+the capture ID to the fresh-policy backing before collection, then rejects a backing snapshot that
+does not use that exact ID. It never copies immutable scan evidence forward as current evidence.
+Regular-file content protection binds exact logical size and SHA-256 into one domain-separated
+policy digest. Non-regular not-applicable evidence stays distinct from not-requested, unavailable,
+unreadable, and failed evidence.
+
 Release sets are joined into connected compound units by shared owner ActionIDs or file-object
 IDs. Selecting any complete-release action selects the entire connected unit. Every owner
 action and every current allocation-group topology in that unit must revalidate together.

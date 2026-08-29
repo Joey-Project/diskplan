@@ -7,6 +7,44 @@ import Testing
 @testable import DiskplanEngineCore
 @testable import DiskplanScan
 
+@Test func regularContentMapsExactSizeAndSHA256IntoPolicyBaseline() throws {
+  let baseline = ContentDigestBaseline(
+    logicalBytes: 4_096,
+    digest: try EvidenceDigest(bytes: Data(repeating: 0x5a, count: 32))
+  )
+  let node = authorityNode(
+    path: ["regular-content"],
+    object: 2,
+    type: .regular,
+    content: .collected(baseline)
+  )
+
+  #expect(
+    mapContentProtection(node)
+      == .known(
+        .requiredDigest(try PolicyDigest(bytes: baseline.protectionDigest.bytes))))
+}
+
+@Test func regularContentUnavailableStaysDistinctFromMetadataOnlyNotApplicable() {
+  let regular = authorityNode(
+    path: ["regular-content"],
+    object: 2,
+    type: .regular,
+    content: .unavailable(reason: "read failed", errorCode: EIO)
+  )
+  let directory = authorityNode(
+    path: ["directory"],
+    object: 3,
+    type: .directory,
+    content: .notApplicable(.notRegularFile)
+  )
+
+  #expect(mapContentProtection(regular) == .unknown(.unavailableViaPublicAPI))
+  #expect(
+    mapContentProtection(directory)
+      == .known(.explicitlyNotApplicable(.metadataOnlyObject)))
+}
+
 @Test func boundedEvidenceReplacesOnlyDirectoryProvisionalEvidence() {
   let accumulator = BoundedAuthorityEvidenceAccumulator()
   let provisional = authorityNode(
@@ -2295,6 +2333,7 @@ private func authorityNode(
   type: ScannedObjectType,
   immediatePrivateReclaim: UInt64 = 4_096,
   identity: DiskplanScan.Observation<DiskplanScan.ObjectIdentity>? = nil,
+  content: ContentEvidence = .notRequested,
   coverage: Coverage = .complete,
   providerBoundary: ProviderBoundary = .localOrUnindicated,
   topology: StorageTopologyEvidence = StorageTopologyEvidence(
@@ -2330,6 +2369,7 @@ private func authorityNode(
     accessPolicy: .known(
       AccessPolicyEvidence(ownerUserID: 501, ownerGroupID: 20, mode: 0o700, flags: 0)
     ),
+    content: content,
     coverage: coverage,
     providerBoundary: providerBoundary,
     providerEvidence: .absent(reason: "local object")

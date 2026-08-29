@@ -199,6 +199,13 @@ protocol RevalidationEvidenceSource: Sendable {
   ) async -> FinalDescriptorPreflightOutcome {
     do {
       let snapshot = try await collectFinalDescriptors(request)
+      guard !request.priorCaptureIDs.contains(snapshot.captureID) else {
+        return .failed(
+          ObservationFailure(
+            code: "replayed-final-capture-id",
+            collector: "final-descriptor-revalidation-source"
+          ))
+      }
       return Self.evaluateFinalDescriptorEvidence(snapshot, target: request.target)
     } catch is CancellationError {
       return .failed(

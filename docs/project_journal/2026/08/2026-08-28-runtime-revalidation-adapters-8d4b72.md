@@ -44,6 +44,17 @@ superseded_by:
   emit capability-free report-only previews, and are rejected by both the production router and
   the Git quarantine adapter before Git can run. Clean descriptor-bound quarantine removal remains
   executable.
+- The evidence-authority baseline is now integrated. `DiskplanScan.RuntimeEvidenceSession`
+  strongly owns the content authority and issues one active non-replayable lease at a time for
+  whole-plan, per-unit JIT, and final-descriptor captures. Finish, epoch advance, close, and
+  cancellation drain pending one-shot descriptor receipts.
+- `RuntimeRevalidationCollector` joins a fresh-policy/global backing to descriptor-bound Scan
+  evidence under one preallocated capture ID. The backing must rebuild fresh evidence with that
+  exact ID; immutable scan evidence cannot be passed through as current evidence. Final preflight
+  transfers only CLOEXEC duplicates of held descriptors.
+- Regular-file protection maps exact logical size plus SHA-256 into one domain-separated policy
+  digest. Identity includes generation; access keeps owner/group/mode/masked flags, ACL, File
+  Provider state, and mount identity separate. Unknown provider ownership remains fail-closed.
 
 ## Protected Properties
 
@@ -61,15 +72,10 @@ superseded_by:
 
 ## Dependency
 
-- The live collector will consume the public descriptor-bound authority contract from
-  `wip/runtime-evidence-enrichment` after that slice lands in the integration branch. That slice
-  owns canonical ACL serialization, masked access-control flags, ancestor sealing, provider
-  no-materialization checks, and version-selector namespace tokens. This workstream intentionally
-  does not duplicate those formats or classify provider/access evidence independently.
-- The validated evidence slice currently keeps the scanner-owned held-descriptor receipt registry
-  internal. A narrow DiskplanScan-owned public factory/registry entry point is still required so
-  execution can consume an unforgeable closed request ID without making receipt construction or
-  ACL/provider classification public.
+- The integrated evidence-authority slice owns canonical ACL serialization, masked access-control
+  flags, File Provider no-materialization checks, descriptor binding, and one-shot receipt
+  lifecycle. Execution receives only package-scoped facade evidence and does not expose or recreate
+  the authority, receipt registry, or request-ID constructor.
 
 ## Task List
 
@@ -79,20 +85,19 @@ superseded_by:
 - [x] Add typed versioned-artifact removal.
 - [x] Add fixture-only scoped adapter and preview tests.
 - [x] Add the dirty-Git report-only firewall without weakening clean quarantine removal.
-- [ ] Merge the validated evidence-authority baseline and add the concrete live collector.
+- [x] Merge the validated evidence-authority baseline and add the concrete live collector.
 - [x] Run focused and full Swift tests in the shared dynamic slot.
 - [x] Complete fresh-context static review with no P0-P2 findings.
 - [ ] Complete the signed landing workflow after dynamic validation.
 
 ## Handoff
 
-- Phase: latest integration merged; authoritative preview, typed adapters, and the dirty-Git
-  report-only firewall are statically validated. Dynamic validation remains pending the shared
-  build slot.
-- Next step: merge the evidence-authority baseline after it lands, consume its scanner-owned receipt
-  factory, then rerun focused policy/execution and full Swift gates before landing.
-- Blocker: no design blocker. The concrete live collector still waits for the evidence-authority
-  branch to land; the shared dynamic build slot is currently owned by the package release gate.
+- Phase: the evidence authority, concrete descriptor collector, capture lifecycle, authoritative
+  previews, typed adapters, and dirty-Git report-only firewall are implemented. The new live slice
+  passes its exact focused dynamic gate.
+- Next step: freeze and review this slice, merge the latest integration package-assets commit, then
+  run the smallest affected gates required by the resulting diff before landing.
+- Blocker: none.
 
 ## Evidence
 
@@ -132,3 +137,11 @@ superseded_by:
   assumption that discard would sort before its dependent remove ActionID; the assertion now
   accepts either member of the fully blocked chain, and its rerun passes. Broader target gates are
   deferred until the newly landed evidence-authority integration merge invalidates this build.
+- Live-evidence focused gate: the first bounded compile exposed one Swift 6 sendable-closure capture
+  of mutable `jitReport`; freezing the accepted JIT capture ID before creating the final-preflight
+  closure fixed it. A host-dependent File Provider result in the transferred-descriptor fixture was
+  replaced with an injected, explicitly local provider observation; production still calls the
+  real File Provider API and fails closed on uncertainty. The final exact six-filter run passes 6/6
+  with bounded supervisor output SHA-256
+  `f242339e02ffe30b7d149d99d86aa7425fd7fe4b37bc1f56e48721299669ab04` and quiescent process-group
+  cleanup. The generated `.build` directory was removed immediately afterward.

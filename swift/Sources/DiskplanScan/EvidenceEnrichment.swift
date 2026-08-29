@@ -99,6 +99,17 @@ public struct ContentDigestBaseline: Equatable, Sendable {
     self.logicalBytes = logicalBytes
     self.digest = digest
   }
+
+  /// Binds both exact logical size and the content digest selected by the scan authority.
+  package var protectionDigest: EvidenceDigest {
+    var input = Data("diskplan/content-protection/v1\0".utf8)
+    input.append(Data(algorithm.utf8))
+    input.append(0)
+    var size = logicalBytes.bigEndian
+    withUnsafeBytes(of: &size) { input.append(contentsOf: $0) }
+    input.append(digest.bytes)
+    return EvidenceDigest(unchecked: Data(SHA256.hash(data: input)))
+  }
 }
 
 public enum ContentNotCollectedReason: String, Equatable, Sendable {

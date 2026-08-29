@@ -2351,13 +2351,21 @@ private func mapMountIdentity(
   observationToPolicy(observation) { "real-device:\($0.device)" }
 }
 
-private func mapContentProtection(
+func mapContentProtection(
   _ node: ScannedNode
 ) -> DiskplanPolicy.Observation<ContentProtectionBaseline> {
-  switch node.identity.value?.objectType {
-  case .directory, .symbolicLink:
+  switch (node.identity.value?.objectType, node.content) {
+  case (.directory, _), (.symbolicLink, _):
     return .known(.explicitlyNotApplicable(.metadataOnlyObject))
-  case .regular, .other, nil:
+  case (.regular, .collected(let baseline)) where baseline.algorithm == "sha256":
+    guard let digest = try? PolicyDigest(bytes: baseline.protectionDigest.bytes) else {
+      return .failed(
+        ObservationFailure(code: "invalid-content-digest", collector: "scanner.content"))
+    }
+    return .known(.requiredDigest(digest))
+  case (.regular, .collected), (.regular, .notRequested), (.regular, .notApplicable),
+    (.regular, .unavailable),
+    (.other, _), (nil, _):
     return .unknown(.unavailableViaPublicAPI)
   }
 }

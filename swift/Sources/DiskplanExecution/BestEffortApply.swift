@@ -265,6 +265,7 @@ public actor BestEffortApplyCoordinator {
         )
         continue
       }
+      let currentJITCaptureID = jitReport.captureID
 
       var stepOutcomes: [ExecutionStepOutcome] = []
       var stepStatusByActionID: [ActionID: ExecutionStepStatus] = [:]
@@ -343,7 +344,16 @@ public actor BestEffortApplyCoordinator {
             deadlineSeconds: manifest.epoch.deadlineSeconds,
             nowSeconds: clock,
             finalDescriptorPreflight: { request in
-              await claimed.collector.finalDescriptorPreflight(for: request)
+              var priorCaptureIDs = [
+                plan.globalFacts.captureID,
+                manifest.currentCaptureID,
+              ]
+              if let jitCaptureID = currentJITCaptureID {
+                priorCaptureIDs.append(jitCaptureID)
+              }
+              return await claimed.collector.finalDescriptorPreflight(
+                for: request.bindingPriorCaptureIDs(priorCaptureIDs)
+              )
             }
           )
         )

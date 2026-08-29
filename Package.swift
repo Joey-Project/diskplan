@@ -84,7 +84,7 @@ let package = Package(
     ),
     .target(
       name: "DiskplanExecution",
-      dependencies: ["DiskplanMacOS", "DiskplanPolicy"],
+      dependencies: ["DiskplanMacOS", "DiskplanPolicy", "DiskplanScan"],
       path: "swift/Sources/DiskplanExecution"
     ),
     .target(
@@ -156,7 +156,7 @@ let package = Package(
     ),
     .testTarget(
       name: "DiskplanExecutionTests",
-      dependencies: ["DiskplanExecution", "DiskplanMacOS", "DiskplanPolicy"],
+      dependencies: ["DiskplanExecution", "DiskplanMacOS", "DiskplanPolicy", "DiskplanScan"],
       path: "swift/Tests/DiskplanExecutionTests"
     ),
     .testTarget(
