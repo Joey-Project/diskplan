@@ -857,8 +857,13 @@ func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
     waiverConsents: [],
     userNotes: []
   )
-  #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
-    try DecisionOverlayValidator.validate(overlay, against: plan)
+  do {
+    _ = try DecisionOverlayValidator.validate(overlay, against: plan)
+    Issue.record("a dirty worktree chain must not be stageable")
+  } catch PolicyModelError.actionNotStageable(let actionID) {
+    #expect(actionID == discard.id || actionID == remove.id)
+  } catch {
+    Issue.record("expected a blocked dirty worktree action, got \(error)")
   }
 
   let mismatchedWorktree = gitWorktreeEvidence(

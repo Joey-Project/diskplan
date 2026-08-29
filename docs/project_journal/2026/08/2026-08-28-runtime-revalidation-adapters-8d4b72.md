@@ -124,7 +124,11 @@ superseded_by:
 - Integration merge: signed commit `3b840bb` merges `5ca93b9` without rebasing. The union retains
   SafeArtifacts recovery locators, epoch-aware optional audit handling, and the first-failure
   persistence latch.
-- Current static A-firewall gate: `git diff --check`, `swift-format 602.0.0 lint --strict`, and
+- Current A-firewall gate: `git diff --check`, `swift-format 602.0.0 lint --strict`, and
   `swiftc -parse` pass for all changed Swift files. A bounded source/design search finds no retained
-  `git reset --hard` or `git clean -ffdx` execution path. Dynamic tests intentionally have not run
-  while the package workstream owns the single Swift/Rust build slot.
+  `git reset --hard` or `git clean -ffdx` execution path. Four focused Swift regressions pass for
+  dirty policy blocking, capability-free report-only preparation, no-Git dirty adapter/router
+  rejection, and successful clean quarantine removal. The first policy run exposed only a test
+  assumption that discard would sort before its dependent remove ActionID; the assertion now
+  accepts either member of the fully blocked chain, and its rerun passes. Broader target gates are
+  deferred until the newly landed evidence-authority integration merge invalidates this build.
