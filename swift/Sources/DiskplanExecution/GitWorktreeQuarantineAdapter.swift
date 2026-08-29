@@ -845,9 +845,9 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       throw failure("git-administrative-path-not-absolute")
     }
     guard
-      let administrativeLeaf = adminPath.split(
+      let administrativeLeaf = [UInt8](adminPath).split(
         separator: UInt8(ascii: "/"), omittingEmptySubsequences: true
-      ).last.map(Data.init),
+      ).last.map({ Data($0) }),
       !administrativeLeaf.isEmpty,
       administrativeLeaf != Data(".".utf8),
       administrativeLeaf != Data("..".utf8)
@@ -1669,9 +1669,9 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       }
       throw failure("read-extended-acl", errno)
     }
-    defer { _ = acl_free(acl) }
+    defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
     var entry: acl_entry_t?
-    let entryResult = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry)
+    let entryResult = acl_get_entry(acl, 0, &entry)
     guard entryResult >= 0 else { throw failure("enumerate-extended-acl", errno) }
     let hasEntries = entryResult == 1
     var textLength: ssize_t = 0

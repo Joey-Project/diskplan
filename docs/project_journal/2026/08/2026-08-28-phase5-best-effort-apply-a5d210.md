@@ -128,3 +128,10 @@ superseded_by:
   verifies the quarantine directory slot before either restore or locator publication. A moved
   raw root now produces an unverified typed recovery state and leaves the quarantined payload
   untouched.
+- India focused validation of `5c5a28b` stopped at five compile errors after 9.937 seconds; the
+  bounded process group was quiescent and the serial full gate was not started. The follow-up
+  keeps the authorization closure single-use while avoiding Swift 6 shadowing, reads the
+  already-policy-validated dirty change-set observation without crossing an internal API
+  boundary, makes raw administrative path splitting type-explicit, and uses the macOS 26 ACL C
+  import signatures for entry enumeration and release. Local static format, parse, and diff
+  checks pass; the corrected exact head still requires the same India focused/full rerun.

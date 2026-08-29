@@ -1150,8 +1150,7 @@ enum Revalidator {
     guard stage == .beforePrerequisites,
       case .gitWorktreeRemove(let contract) = action.prototype.adapterContract,
       contract.requiresDiscardLocalChanges,
-      case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges(
-        targetIdentity: action.prototype.targetIdentity)
+      case .known(.present(let changeSetDigest)) = contract.verifiedEvidence.localChanges
     else { return predicates }
     return predicates.filter {
       !($0.kind == .fullyObservedLocalGitWorkDiscard

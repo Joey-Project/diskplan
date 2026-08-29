@@ -666,9 +666,9 @@ public actor ApplyAuthorization {
   }
 
   func claimForExecution() async -> ApplyAuthorizationClaimResult {
-    guard let claim else { return .replayed }
+    guard let pendingClaim = claim else { return .replayed }
     claim = nil
-    return await claim()
+    return await pendingClaim()
   }
 
   /// Phase 5 may claim the authorization once. A second claim is a replay and returns nil.
