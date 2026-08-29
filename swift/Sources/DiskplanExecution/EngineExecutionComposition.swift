@@ -27,7 +27,7 @@ public final class EngineExecutionComposition: @unchecked Sendable {
 }
 
 /// A typed router prevents a specialized action from reaching generic `/bin/rm`.
-private final class ProductionExecutionAdapter: ExecutionMutationAdapter, @unchecked Sendable {
+final class ProductionExecutionAdapter: ExecutionMutationAdapter, @unchecked Sendable {
   private let genericRemove: PosixRemoveAdapter
   private let gitWorktree: GitWorktreeQuarantineAdapter
 
@@ -46,8 +46,13 @@ private final class ProductionExecutionAdapter: ExecutionMutationAdapter, @unche
     switch operation {
     case .genericRemove:
       return await genericRemove.apply(operation, context: context)
-    case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges:
+    case .gitWorktreeRemove(_, let contract):
+      guard !contract.requiresDiscardLocalChanges else {
+        return .failed(ExecutionAdapterFailure(code: "git-worktree-dirty-report-only"))
+      }
       return await gitWorktree.apply(operation, context: context)
+    case .gitWorktreeDiscardLocalChanges:
+      return .failed(ExecutionAdapterFailure(code: "git-worktree-dirty-report-only"))
     case .codexCleanTemporary:
       return .failed(
         ExecutionAdapterFailure(code: "codex-temporary-adapter-not-configured"))
@@ -61,8 +66,13 @@ private final class ProductionExecutionAdapter: ExecutionMutationAdapter, @unche
     switch operation {
     case .genericRemove:
       return await genericRemove.postverify(operation)
-    case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges:
+    case .gitWorktreeRemove(_, let contract):
+      guard !contract.requiresDiscardLocalChanges else {
+        return .notSatisfied(code: "git-worktree-dirty-report-only")
+      }
       return await gitWorktree.postverify(operation)
+    case .gitWorktreeDiscardLocalChanges:
+      return .notSatisfied(code: "git-worktree-dirty-report-only")
     case .codexCleanTemporary, .versionedArtifactRemove:
       return .unknown(.unsupported)
     }

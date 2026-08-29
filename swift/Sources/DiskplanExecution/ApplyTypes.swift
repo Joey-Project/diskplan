@@ -62,11 +62,23 @@ struct ReleasePostVerificationRequest: Equatable, Sendable {
   let plan: ImmutablePlan
   let manifest: ExecutionManifest
   let allocationGroupIDs: [String]
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.plan == rhs.plan
+      && lhs.manifest == rhs.manifest
+      && lhs.allocationGroupIDs.map(RawUTF8Key.init)
+        == rhs.allocationGroupIDs.map(RawUTF8Key.init)
+  }
 }
 
 struct CurrentReleasePostcondition: Equatable, Sendable {
   let allocationGroupID: String
   let released: Observation<Bool>
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    RawUTF8Key(lhs.allocationGroupID) == RawUTF8Key(rhs.allocationGroupID)
+      && lhs.released == rhs.released
+  }
 }
 
 public struct JITRevalidationReport: Equatable, Sendable {
@@ -95,6 +107,29 @@ public struct JITRevalidationReport: Equatable, Sendable {
 public enum ExecutionUnitID: Equatable, Hashable, Sendable {
   case action(ActionID)
   case compoundRelease([String])
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    switch (lhs, rhs) {
+    case (.action(let left), .action(let right)):
+      left == right
+    case (.compoundRelease(let left), .compoundRelease(let right)):
+      left.map(RawUTF8Key.init) == right.map(RawUTF8Key.init)
+    default:
+      false
+    }
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    switch self {
+    case .action(let actionID):
+      hasher.combine(0 as UInt8)
+      hasher.combine(actionID)
+    case .compoundRelease(let groupIDs):
+      hasher.combine(1 as UInt8)
+      hasher.combine(groupIDs.count)
+      for groupID in groupIDs { hasher.combine(RawUTF8Key(groupID)) }
+    }
+  }
 }
 
 public struct BoundMutationTarget: Equatable, Sendable {
@@ -332,6 +367,11 @@ public struct ReleasePostVerificationOutcome: Equatable, Sendable {
   public init(allocationGroupID: String, outcome: PostVerificationOutcome) {
     self.allocationGroupID = allocationGroupID
     self.outcome = outcome
+  }
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    RawUTF8Key(lhs.allocationGroupID) == RawUTF8Key(rhs.allocationGroupID)
+      && lhs.outcome == rhs.outcome
   }
 }
 

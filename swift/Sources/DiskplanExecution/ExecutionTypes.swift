@@ -1,6 +1,16 @@
 import DiskplanPolicy
 import Foundation
 
+struct RawUTF8Key: Equatable, Hashable, Comparable, Sendable {
+  let bytes: Data
+
+  init(_ value: String) { bytes = Data(value.utf8) }
+
+  static func < (lhs: Self, rhs: Self) -> Bool {
+    lhs.bytes.lexicographicallyPrecedes(rhs.bytes)
+  }
+}
+
 public enum PreparationMode: Equatable, Sendable {
   case dryRun
   case apply
@@ -74,6 +84,11 @@ struct FreshPolicyEvidence: Equatable, Sendable {
 struct CurrentReleaseTopology: Equatable, Sendable {
   let allocationGroupID: String
   let topology: Observation<ReleaseTopologyExpectation>
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    RawUTF8Key(lhs.allocationGroupID) == RawUTF8Key(rhs.allocationGroupID)
+      && lhs.topology == rhs.topology
+  }
 }
 
 struct CurrentPlanInvariants: Equatable, Sendable {
@@ -354,6 +369,40 @@ public enum RevalidationSubject: Equatable, Sendable {
   case collector
   case policyEvidence
   case waiverConsent(WaiverKind)
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    switch (lhs, rhs) {
+    case (.targetIdentity, .targetIdentity),
+      (.targetContent, .targetContent),
+      (.targetAccessPolicy, .targetAccessPolicy),
+      (.coverage, .coverage),
+      (.collectorStatus, .collectorStatus),
+      (.activity, .activity),
+      (.explicitProtection, .explicitProtection),
+      (.providerState, .providerState),
+      (.recoverability, .recoverability),
+      (.dependency, .dependency),
+      (.rootIdentity, .rootIdentity),
+      (.rootAccessPolicy, .rootAccessPolicy),
+      (.gitPrerequisites, .gitPrerequisites),
+      (.duplicateSurvivors, .duplicateSurvivors),
+      (.terminalNamespaces, .terminalNamespaces),
+      (.collector, .collector),
+      (.policyEvidence, .policyEvidence):
+      true
+    case (.parentIdentity(let left), .parentIdentity(let right)),
+      (.parentAccessPolicy(let left), .parentAccessPolicy(let right)):
+      left == right
+    case (.releaseTopology(let left), .releaseTopology(let right)):
+      RawUTF8Key(left) == RawUTF8Key(right)
+    case (.compoundReleaseUnit(let left), .compoundReleaseUnit(let right)):
+      left.map(RawUTF8Key.init) == right.map(RawUTF8Key.init)
+    case (.waiverConsent(let left), .waiverConsent(let right)):
+      left == right
+    default:
+      false
+    }
+  }
 }
 
 public struct RevalidationFinding: Equatable, Sendable {
@@ -396,6 +445,12 @@ public struct CompoundReleaseUnit: Equatable, Sendable {
   public init(allocationGroupIDs: [String], ownerActionIDs: [ActionID]) {
     self.allocationGroupIDs = allocationGroupIDs
     self.ownerActionIDs = ownerActionIDs
+  }
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.allocationGroupIDs.map(RawUTF8Key.init)
+      == rhs.allocationGroupIDs.map(RawUTF8Key.init)
+      && lhs.ownerActionIDs == rhs.ownerActionIDs
   }
 }
 
@@ -597,32 +652,23 @@ enum ApplyAuthorizationClaimResult: Sendable {
   case claimed(ClaimedApplyAuthorization)
   case replayed
   case superseded
+  case expired
+  case bindingMismatch
 }
 
 public actor ApplyAuthorization {
-  private var claim: ClaimedApplyAuthorization?
+  private var claim: (@Sendable () async -> ApplyAuthorizationClaimResult)?
 
   init(
-    manifest: ExecutionManifest,
-    collector: EngineRevalidationCollector,
-    generation: UInt64,
-    confirmedForceActionIDs: [ActionID],
-    generationIsCurrent: @escaping @Sendable () async -> Bool
+    claim: @escaping @Sendable () async -> ApplyAuthorizationClaimResult
   ) {
-    claim = ClaimedApplyAuthorization(
-      manifest: manifest,
-      collector: collector,
-      generation: generation,
-      confirmedForceActionIDs: confirmedForceActionIDs,
-      generationIsCurrent: generationIsCurrent
-    )
+    self.claim = claim
   }
 
   func claimForExecution() async -> ApplyAuthorizationClaimResult {
-    guard let candidate = claim else { return .replayed }
+    guard let claim else { return .replayed }
     claim = nil
-    guard await candidate.generationIsCurrent() else { return .superseded }
-    return .claimed(candidate)
+    return await claim()
   }
 
   /// Phase 5 may claim the authorization once. A second claim is a replay and returns nil.

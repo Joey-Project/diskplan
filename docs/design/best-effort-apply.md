@@ -10,6 +10,9 @@ The coordinator reconstructs the validated overlay DAG and verifies that its exe
 JIT action IDs exactly match the authorized manifest. Ordinary execution steps become one
 unit each. Selected release actions whose APFS release sets share owner ActionIDs or file
 objects are represented by the connected compound units already frozen in the manifest.
+Allocation-group and file-object identities are keyed by raw UTF-8 bytes throughout topology
+lookup, runtime-unit construction, and post-verification; canonically equivalent Swift strings
+do not collapse distinct filesystem identifiers.
 
 A compound unit:
 
@@ -51,7 +54,8 @@ Each JIT request binds the authorization's current binding hash, preparation gen
 epoch/reference time, exact unit actions, exact allocation groups, and a random 32-byte
 one-shot nonce. The collector must echo that envelope and return a complete fresh policy
 snapshot from a capture distinct from both the immutable plan and whole-plan preparation.
-Absent, failed, stale, or reused captures and nonces fail closed. A newer preparation also
+Every action in that snapshot must also bind the same global-facts hash. Absent, failed, stale,
+mixed-global-facts, or reused captures and nonces fail closed. A newer preparation also
 revokes any older authorization that has not yet been claimed.
 
 ## Typed adapters and generic remove
@@ -89,16 +93,38 @@ expiry supervises it with `TERM`, a bounded grace interval, `KILL`, and reap; PO
 normal exit status, terminating signal, cancellation, and timeout stay typed separately.
 
 Git worktree removal uses a dedicated descriptor-bound quarantine adapter. It verifies the
-owner-private source namespace and complete raw-byte subtree coverage, atomically moves the
-exact root into an exclusive same-filesystem quarantine slot, proves the held source and
-destination descriptors name the same object, and repeats coverage before recursive native
-deletion. Verification failure attempts an exclusive restore; restore collision or deletion
-failure retains a typed recovery locator. Only after root deletion may Git prune administrative
-metadata. Cancellation and deadline are checked again before that follow-up starts; a skipped
-or failed cleanup produces an explicit typed residual and a partially successful step without
-changing the root-deletion result. Dirty-worktree discard uses only its dedicated typed Git
-reset/clean operation and verifies the authorized clean successor. Neither Git operation can
-route to generic removal.
+owner-private source namespace and complete raw-byte subtree coverage, creates a per-execution
+exclusive `0700` same-filesystem quarantine directory, and seals its object identity and access
+policy. The held source parent receives the same runtime seal. UID/GID, mode, ACL, flags,
+device, `fstatfs` mount identity, missing state, unreadability, and collection failure are
+rechecked independently at rename/restore and before deletion. It
+atomically moves the exact root into the fixed leaf, proves the held source and destination
+descriptors name the same object, and repeats coverage before recursive native deletion.
+Verification failure attempts an exclusive restore; restore collision or deletion failure
+retains a typed recovery locator.
+
+Only after root deletion may the adapter delete administrative metadata, and it deletes only
+the descriptor-bound worktree registration whose full metadata coverage digest was frozen in
+the plan. Immediately before unlinking the registration root, the canonical raw leaf must still
+name the held administrative identity. It never runs repository-
+wide `git worktree prune`, so unrelated registered or stale worktrees remain untouched.
+Cancellation, deadline, or registration identity/coverage drift produces an explicit typed
+residual and a partially successful step without changing the root-deletion result.
+
+Dirty worktrees and every remove chain that requires discarding local changes are report-only in
+v1. The immutable plan retains their observed change set and clean-successor evidence for
+explanation, but policy marks both the discard and dependent remove actions blocked. A waiver
+cannot stage them, apply preparation cannot mint a capability for them, and both the production
+router and quarantine adapter reject them before any Git process starts. Clean descriptor-bound
+quarantine removal remains executable. No Git worktree operation can route to generic removal.
+
+Raw subtree coverage protects three independent properties. Device/inode/type/generation protect
+object identity; owner/group/mode/ACL/flags protect access policy; and size plus digest protect
+content stability. Access fields are excluded from the content digest, so a stable ACL/flag
+change reports an access-policy failure rather than a content mismatch. `mtime`/`ctime` changes only trigger one bounded reread within the same byte
+budget. Matching bytes and identity after that reread are accepted, while byte drift rejects
+even if the file identity is unchanged. Missing, unreadable, failed collection, and each
+property mismatch remain typed separately.
 
 `EngineExecutionComposition` is the production Phase 4/5 factory. It binds one sealed collector
 to the preparation engine, final descriptor verification, JIT/release verification, and a typed

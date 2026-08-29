@@ -19,12 +19,20 @@ Revalidation compares only properties selected by each action contract:
 - the complete typed Git worktree prerequisite bundle for Git actions; and
 - APFS release topology for selected complete-release actions.
 
-The current-evidence schema has no timestamp, directory size, directory link count, or
-directory-entry generation field. Child-entry churn and File Provider metadata transitions
-therefore cannot accidentally become an identity or content mismatch. If an action selects a
-required content digest, a different digest is a real content-stability failure. Missing,
-unknown, unreadable, collector failure, identity mismatch, content mismatch, and access-policy
-mismatch remain separate typed outcomes.
+Object identity is the bound device/inode/type tuple plus generation when it is available.
+Content stability is the selected size/digest contract, never a timestamp alone. Access policy
+is the bound owner, group, mode, ACL, flags, provider boundary, and mount identity. The
+current-evidence schema has no directory size, directory link count, or directory-entry
+generation field. Child-entry churn and File Provider metadata transitions therefore cannot
+accidentally become an identity or content mismatch. Missing, unknown, unreadable, collector
+failure, identity mismatch, content mismatch, and access-policy mismatch remain separate typed
+outcomes.
+
+An unknown recoverability observation can be waived only when it carries a typed semantic fact
+for the same stable unknown reason and source binding. Capture IDs, timestamps, and whole
+evidence IDs are deliberately excluded from that semantic predicate so a fresh capture can
+reproduce it. A changed reason, missing typed fact, absent observation, unreadable source, or
+collector failure still rejects.
 
 ## Whole-plan boundary
 
@@ -33,14 +41,16 @@ Phase 4 then collects one read-only snapshot for every unique JIT-revalidation a
 rejects missing, duplicate, and unexpected action observations. Duplicate-survivor and
 terminal-namespace invariants are collected and checked as explicit global observations.
 Every selected action also carries a freshly frozen policy evidence snapshot from the same
-capture and global-facts binding. The snapshot-level fresh capture ID also encloses release
+capture and one snapshot-wide global-facts binding. Mixed global-facts hashes reject even when
+all action observations report the same capture ID. The snapshot-level fresh capture ID also encloses release
 topology and survivor observations and must differ from the immutable plan capture. Phase 4
 rebuilds the action prototype and reruns all seven
 one-vote policy dimensions at the new execution reference time; a blocked vote, changed
 predicate, changed value bucket, or mismatched current typed observation rejects preparation.
 
-Release sets are joined into connected compound units by shared owner ActionIDs or file-object
-IDs. Selecting any complete-release action selects the entire connected unit. Every owner
+Release sets are joined into connected compound units by shared owner ActionIDs or raw UTF-8
+file-object IDs. Allocation-group and file-object identifiers are keyed by their raw UTF-8 bytes;
+Swift canonical-equivalent strings are distinct graph identities. Selecting any complete-release action selects the entire connected unit. Every owner
 action and every current allocation-group topology in that unit must revalidate together.
 Partial release selection, missing topology, a changed refcount/link-count/owner topology, or
 an unreadable APFS observation rejects the whole preparation.
@@ -77,6 +87,12 @@ Dry-run returns `DryRunReport`, which structurally has no capability field and h
 on an execution adapter. The dry-run preparation path never constructs or invokes an adapter,
 final-descriptor verifier, authorization, or mutation context.
 
+Dirty Git worktree discard is report-only in v1. The plan retains the observed change-set and
+successor evidence for explanation, but the discard action and any dependent remove chain are
+blocked rather than waiver-stageable. They cannot mint an apply capability, and production
+execution rejects them before invoking Git. Clean worktree quarantine removal remains a typed
+native action.
+
 Apply preparation returns a separate `ApplyReadyReport` plus `ApplyCapability`. The public engine
 API obtains issue and authorization times from its private wall clock; the frontend cannot extend
 a lifetime by supplying timestamps. Capability bytes come from `SystemRandomNumberGenerator`,
@@ -84,10 +100,12 @@ remain private to the module, are not hash-derived, and are stored only in an en
 registry. The registry binds them to the exact plan,
 overlay, epoch, deadline, and manifest. Authorization removes the registry entry before checking
 the supplied binding, so replay and wrong-binding attempts consume the capability. Expired,
-forged, and unknown capabilities fail closed. The resulting `ApplyAuthorization` permits its
-manifest to be claimed once and remains tied to the preparation registry generation until that
-claim. Starting any newer preparation revokes an older unclaimed authorization, even if its
-deadline has not expired. Its internal-only initializer means Phase 5 can treat it as proof
+forged, and unknown capabilities fail closed. The resulting `ApplyAuthorization` is only an
+opaque claim handle: the authoritative manifest remains in an engine-owned authorization
+registry. Claim atomically consumes that record while checking its preparation generation,
+deadline, and manifest/current-binding envelope against the handle and current engine state.
+Starting any newer preparation removes every older unclaimed authorization, even if its
+deadline has not expired. Its internal-only initializer means Phase 5 can treat a successful claim as proof
 that the engine performed authoritative current collection and whole-plan revalidation, without
 making the editable overlay or dry-run output mutation-capable.
 

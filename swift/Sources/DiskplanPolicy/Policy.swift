@@ -330,6 +330,27 @@ public struct PolicyEvaluation: Equatable, Sendable {
       defaultReviewRecommendation: defaultReviewRecommendation
     )
   }
+
+  func blockingUnsupportedGitDiscard(_ changeSetDigest: PolicyDigest) throws -> Self {
+    var blocked = false
+    let votes = votes.map { vote -> GateVote in
+      guard vote.dimension == .recoverability else { return vote }
+      blocked = true
+      return GateVote(
+        dimension: vote.dimension,
+        result: .rejected(
+          reasons: vote.result.reasons + [
+            GateReason(
+              code: "git-worktree-dirty-report-only",
+              semanticEvidenceHash: changeSetDigest
+            )
+          ]
+        )
+      )
+    }
+    guard blocked else { throw PolicyModelError.invalidActionContract }
+    return try replacingVotesPreservingContext(votes)
+  }
 }
 
 extension GateResult {
@@ -346,6 +367,15 @@ extension GateResult {
   fileprivate var conditions: [RevalidationCondition] {
     guard case .unmetCondition(let conditions, _) = self else { return [] }
     return conditions
+  }
+
+  fileprivate var reasons: [GateReason] {
+    switch self {
+    case .satisfied(let reasons), .notApplicable(let reasons),
+      .requiresWaiver(_, let reasons), .unmetCondition(_, let reasons),
+      .rejected(let reasons):
+      return reasons
+    }
   }
 }
 

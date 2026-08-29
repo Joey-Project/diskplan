@@ -67,6 +67,8 @@ public actor BestEffortApplyCoordinator {
     case .claimed(let value): claimed = value
     case .replayed: return startFailure(.authorizationAlreadyClaimed)
     case .superseded: return startFailure(.preparationSuperseded)
+    case .expired: return startFailure(.expired)
+    case .bindingMismatch: return startFailure(.manifestBindingMismatch)
     }
     let manifest = claimed.manifest
     guard clock() < manifest.epoch.deadlineSeconds else {
@@ -490,8 +492,11 @@ public actor BestEffortApplyCoordinator {
           manifest: manifest,
           allocationGroupIDs: groupIDs
         ))
-      let groups = Dictionary(grouping: observations, by: \.allocationGroupID)
-      let hasUnexpected = groups.keys.contains { !groupIDs.contains($0) }
+      let groups = Dictionary(grouping: observations) {
+        RawUTF8Key($0.allocationGroupID)
+      }
+      let expectedGroupKeys = Set(groupIDs.map(RawUTF8Key.init))
+      let hasUnexpected = groups.keys.contains { !expectedGroupKeys.contains($0) }
       return groupIDs.map { groupID in
         guard !hasUnexpected else {
           return ReleasePostVerificationOutcome(
@@ -503,7 +508,7 @@ public actor BestEffortApplyCoordinator {
               ))
           )
         }
-        guard let matches = groups[groupID] else {
+        guard let matches = groups[RawUTF8Key(groupID)] else {
           return ReleasePostVerificationOutcome(
             allocationGroupID: groupID,
             outcome: .missing
@@ -620,21 +625,24 @@ public actor BestEffortApplyCoordinator {
 
     let actionByID = Dictionary(uniqueKeysWithValues: plan.actions.map { ($0.id, $0) })
     let releaseSteps = validated.executionSteps.filter { $0.releaseSet != nil }
-    let selectedGroups = Set(releaseSteps.compactMap { $0.releaseSet?.allocationGroupID })
-    var compoundByGroup: [String: CompoundReleaseUnit] = [:]
+    let selectedGroups = Set(
+      releaseSteps.compactMap { $0.releaseSet.map { RawUTF8Key($0.allocationGroupID) } })
+    var compoundByGroup: [RawUTF8Key: CompoundReleaseUnit] = [:]
     for compound in manifest.compoundReleaseUnits {
       guard !compound.allocationGroupIDs.isEmpty, !compound.ownerActionIDs.isEmpty else {
         throw GraphError.invalid
       }
       for groupID in compound.allocationGroupIDs {
-        guard selectedGroups.contains(groupID), compoundByGroup[groupID] == nil else {
+        let groupKey = RawUTF8Key(groupID)
+        guard selectedGroups.contains(groupKey), compoundByGroup[groupKey] == nil else {
           throw GraphError.invalid
         }
-        compoundByGroup[groupID] = compound
+        compoundByGroup[groupKey] = compound
       }
       let expectedOwners = Set(
         plan.releaseSets.filter {
-          compound.allocationGroupIDs.contains($0.allocationGroupID)
+          Set(compound.allocationGroupIDs.map(RawUTF8Key.init)).contains(
+            RawUTF8Key($0.allocationGroupID))
         }.flatMap(\.ownerActionIDs)
       ).sorted()
       guard expectedOwners == compound.ownerActionIDs else { throw GraphError.invalid }
@@ -662,14 +670,14 @@ public actor BestEffortApplyCoordinator {
           ))
         continue
       }
-      guard let compound = compoundByGroup[releaseSet.allocationGroupID] else {
+      guard let compound = compoundByGroup[RawUTF8Key(releaseSet.allocationGroupID)] else {
         throw GraphError.invalid
       }
       let unitID = ExecutionUnitID.compoundRelease(compound.allocationGroupIDs)
       guard emittedCompounds.insert(unitID).inserted else { continue }
       let memberSteps = releaseSteps.filter {
         guard let groupID = $0.releaseSet?.allocationGroupID else { return false }
-        return compound.allocationGroupIDs.contains(groupID)
+        return compound.allocationGroupIDs.map(RawUTF8Key.init).contains(RawUTF8Key(groupID))
       }
       let logicalIDs = memberSteps.map(\.action.id)
       let prerequisiteIDs = Set(

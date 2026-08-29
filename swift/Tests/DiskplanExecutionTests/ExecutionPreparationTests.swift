@@ -33,7 +33,8 @@ func applyCapabilityAndAuthorizationAreSingleUse() async throws {
   let fixture = try Fixture()
   let engine = ExecutionPreparationEngine(
     evidenceSource: SequenceSource([fixture.currentSnapshot()]),
-    randomBytes: deterministicEntropy
+    randomBytes: deterministicEntropy,
+    clock: { 205 }
   )
   let (ready, capability) = try await prepareApply(engine, fixture: fixture)
   let authorization = try await engine.authorizeApply(
@@ -57,6 +58,56 @@ func applyCapabilityAndAuthorizationAreSingleUse() async throws {
 }
 
 @Test
+func registryBackedAuthorizationExpiresBeforeClaim() async throws {
+  let fixture = try Fixture()
+  let clock = LockedPreparationClock(200)
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([fixture.currentSnapshot()]),
+    randomBytes: deterministicEntropy,
+    clock: { clock.value }
+  )
+  let result = try await engine.prepare(
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    mode: .apply,
+    lifetimeSeconds: 30
+  )
+  guard case .applyReady(let ready, let capability) = result else {
+    Issue.record("expected apply preparation")
+    return
+  }
+  let authorization = try await engine.authorizeApply(
+    capability, ready: ready, plan: fixture.plan, overlay: fixture.overlay)
+  clock.value = 230
+  #expect(await authorization.claimManifest() == nil)
+  #expect(await authorization.claimManifest() == nil)
+}
+
+@Test
+func concurrentAuthorizationClaimsConsumeOneRegistryRecord() async throws {
+  let fixture = try Fixture()
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([fixture.currentSnapshot()]),
+    randomBytes: deterministicEntropy,
+    clock: { 205 }
+  )
+  let (ready, capability) = try await prepareApply(engine, fixture: fixture)
+  let authorization = try await engine.authorizeApply(
+    capability,
+    ready: ready,
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    nowSeconds: 205
+  )
+  async let first = authorization.claimManifest()
+  async let second = authorization.claimManifest()
+  let values = await (first, second)
+  let claimed = [values.0, values.1]
+  #expect(claimed.compactMap { $0 }.count == 1)
+  #expect(claimed.compactMap { $0 }.first == ready.revalidation.manifest)
+}
+
+@Test
 func forceWarningsRequireAnExactlyBoundApplyReviewConfirmation() async throws {
   let fixture = try Fixture(
     content: .explicitlyNotApplicable(.metadataOnlyObject),
@@ -64,7 +115,8 @@ func forceWarningsRequireAnExactlyBoundApplyReviewConfirmation() async throws {
   )
   let engine = ExecutionPreparationEngine(
     evidenceSource: SequenceSource([fixture.currentSnapshot(), fixture.currentSnapshot()]),
-    randomBytes: deterministicEntropy
+    randomBytes: deterministicEntropy,
+    clock: { 205 }
   )
   let (missingReady, missingCapability) = try await prepareApply(engine, fixture: fixture)
   #expect(missingReady.forceWarningActionIDs == [fixture.action.id])
@@ -101,7 +153,8 @@ func newerPreparationRevokesAnUnclaimedMintedAuthorization() async throws {
   let fixture = try Fixture()
   let engine = ExecutionPreparationEngine(
     evidenceSource: SequenceSource([fixture.currentSnapshot(), fixture.currentSnapshot()]),
-    randomBytes: deterministicEntropy
+    randomBytes: deterministicEntropy,
+    clock: { 205 }
   )
   let (ready, capability) = try await prepareApply(engine, fixture: fixture)
   let authorization = try await engine.authorizeApply(
@@ -223,7 +276,8 @@ func forgedWrongBindingAndExpiredCapabilitiesFailClosed() async throws {
   ])
   let engine = ExecutionPreparationEngine(
     evidenceSource: source,
-    randomBytes: deterministicEntropy
+    randomBytes: deterministicEntropy,
+    clock: { 201 }
   )
 
   let forged = ApplyCapability(opaqueBytes: Data(repeating: 0xff, count: 32))
@@ -284,7 +338,8 @@ func capabilityRejectsWrongPlanAndOverlayBindings() async throws {
   let source = SequenceSource([fixture.currentSnapshot(), fixture.currentSnapshot()])
   let engine = ExecutionPreparationEngine(
     evidenceSource: source,
-    randomBytes: deterministicEntropy
+    randomBytes: deterministicEntropy,
+    clock: { 201 }
   )
 
   let (wrongPlanReady, wrongPlanCapability) = try await prepareApply(engine, fixture: fixture)
@@ -384,7 +439,8 @@ func newerFailedPreparationSupersedesOlderInFlightSuccess() async throws {
   let source = ControlledSource()
   let engine = ExecutionPreparationEngine(
     evidenceSource: source,
-    randomBytes: deterministicEntropy
+    randomBytes: deterministicEntropy,
+    clock: { 201 }
   )
   let older = Task {
     try await engine.prepare(
@@ -423,7 +479,8 @@ func newerSuccessfulPreparationSupersedesOlderInFlightSuccess() async throws {
   let source = ControlledSource()
   let engine = ExecutionPreparationEngine(
     evidenceSource: source,
-    randomBytes: deterministicEntropy
+    randomBytes: deterministicEntropy,
+    clock: { 201 }
   )
   let older = Task {
     try await engine.prepare(
@@ -652,6 +709,133 @@ func selectedGitPrerequisitesAreRevalidatedAsTypedEvidence() async throws {
 }
 
 @Test
+func dirtyDiscardRemovePreparationUsesThePrePrerequisiteBaseline() async throws {
+  let dirtyContent = ContentProtectionBaseline.requiredDigest(digest(92))
+  let git = gitEvidence(
+    worktreeObject: 1,
+    localChanges: .present(changeSetDigest: digest(73))
+  )
+  let facts = globalFacts()
+  let evidence = snapshot(
+    content: dirtyContent,
+    gitWorktree: git,
+    adapterScope: .gitWorktree
+  )
+  let discard = try makeAction(
+    evidence: evidence,
+    facts: facts,
+    request: .gitWorktreeDiscardLocalChanges
+  )
+  let remove = try makeAction(
+    evidence: evidence,
+    facts: facts,
+    prerequisites: [discard],
+    request: .gitWorktreeRemove
+  )
+  guard case .requiresConsents(let predicates) = discard.evaluation.stageability else {
+    Issue.record("dirty discard must retain its explicit local-work consent")
+    return
+  }
+  let consents = predicates.map {
+    WaiverConsentCore.create(
+      action: discard,
+      predicate: $0,
+      reason: "discard fully observed local changes",
+      consentEventID: "dirty-discard-consent"
+    )
+  }
+  let plan = try ImmutablePlan(
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1",
+    globalFacts: facts,
+    evidenceSnapshots: [evidence],
+    actions: [discard, remove],
+    releaseSets: []
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: [discard.id, remove.id],
+    waiverConsents: consents,
+    userNotes: []
+  )
+  let snapshot = CurrentRevalidationSnapshot(
+    captureID: digest(90),
+    actions: [
+      currentEvidence(discard, content: .known(dirtyContent)),
+      currentEvidence(remove, content: .known(dirtyContent)),
+    ],
+    releaseTopologies: [],
+    invariants: passingInvariants
+  )
+  let result = try await ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([snapshot]),
+    randomBytes: deterministicEntropy
+  ).prepare(
+    plan: plan,
+    overlay: overlay,
+    mode: .dryRun,
+    issuedAtSeconds: 200,
+    lifetimeSeconds: 30
+  )
+
+  guard case .dryRun(let report) = result else {
+    Issue.record("the dirty pre-prerequisite baseline must remain current")
+    return
+  }
+  #expect(report.revalidation.isCurrent)
+  let manifest = try #require(report.revalidation.manifest)
+  guard case .gitWorktreeRemove(let removeContract) = remove.prototype.adapterContract else {
+    Issue.record("expected the typed remove contract")
+    return
+  }
+  let cleanGit = postDiscardGitEvidence(removeContract)
+  let cleanCaptureID = digest(91)
+  let cleanContent = removeContract.executionBaseline.contentProtection
+  let cleanEvidence = currentEvidence(
+    remove,
+    content: .known(cleanContent),
+    freshCaptureID: cleanCaptureID,
+    freshPolicyEvidence: .known(
+      retimedPolicyEvidence(
+        remove,
+        referenceTimeSeconds: 200,
+        contentProtection: .known(cleanContent),
+        gitWorktree: cleanGit,
+        captureID: cleanCaptureID
+      )
+    ),
+    gitWorktree: .known(cleanGit)
+  )
+  let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
+  let nonce = Data(repeating: 0xa5, count: 32)
+  let request = JITRevalidationRequest(
+    plan: plan,
+    validatedOverlay: validated,
+    manifest: manifest,
+    actionIDs: [remove.id],
+    releaseGroupIDs: [],
+    preparationGeneration: 1,
+    oneShotNonce: nonce
+  )
+  let jitReport = Revalidator.evaluateJIT(
+    request: request,
+    collected: JITRevalidationSnapshot(
+      oneShotNonce: nonce,
+      authorizationCurrentBindingHash: manifest.currentBindingHash,
+      preparationGeneration: 1,
+      epochID: manifest.epoch.epochID,
+      snapshot: CurrentRevalidationSnapshot(
+        captureID: cleanCaptureID,
+        actions: [cleanEvidence],
+        releaseTopologies: [],
+        invariants: passingInvariants
+      )
+    )
+  )
+  #expect(jitReport.isCurrent)
+}
+
+@Test
 func freshExecutionEpochConsumesAndBindsEveryWaiverRequirement() async throws {
   let fixture = try ConsentFixture()
   let snapshot = CurrentRevalidationSnapshot(
@@ -695,6 +879,217 @@ func freshExecutionEpochConsumesAndBindsEveryWaiverRequirement() async throws {
   #expect(requirement.originalSemanticReferenceTimeSeconds == 100)
   #expect(requirement.executionReferenceTimeSeconds == 200)
   #expect(requirement.currentPredicate == fixture.predicate)
+}
+
+@Test
+func typedUnknownRecoverabilityConsentRevalidatesAcrossFreshCapture() async throws {
+  let facts = globalFacts()
+  let semantic = try UnknownRecoverabilitySemanticEvidence(
+    reason: .unsupported,
+    kind: .rebuildCostUnknown,
+    sourceBindingHash: digest(152)
+  )
+  let evidence = snapshot(
+    recoverability: .unknown(.unsupported),
+    recoverabilityReviewFacts: [.unknownRecoverability(semantic)]
+  )
+  let action = try makeAction(evidence: evidence, facts: facts)
+  guard case .requiresConsents(let predicates) = action.evaluation.stageability,
+    let predicate = predicates.first(where: { $0.predicate == "recoverability-unknown" })
+  else {
+    Issue.record("typed unknown recoverability must produce a stable consent predicate")
+    return
+  }
+  let consent = WaiverConsentCore.create(
+    action: action,
+    predicate: predicate,
+    reason: "accept stable public API limitation",
+    consentEventID: "unknown-recoverability-consent"
+  )
+  let plan = try ImmutablePlan(
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1",
+    globalFacts: facts,
+    evidenceSnapshots: [evidence],
+    actions: [action],
+    releaseSets: []
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: [action.id],
+    waiverConsents: [consent],
+    userNotes: []
+  )
+  let current = CurrentRevalidationSnapshot(
+    captureID: digest(90),
+    actions: [currentEvidence(action)],
+    releaseTopologies: [],
+    invariants: passingInvariants
+  )
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([current]),
+    randomBytes: deterministicEntropy
+  )
+
+  let result = try await engine.prepare(
+    plan: plan,
+    overlay: overlay,
+    mode: .dryRun,
+    issuedAtSeconds: 200,
+    lifetimeSeconds: 30
+  )
+  guard case .dryRun(let report) = result else {
+    Issue.record("stable typed unknown recoverability must remain authorizable")
+    return
+  }
+  #expect(report.revalidation.isCurrent)
+  #expect(report.revalidation.manifest?.consentRequirements.first?.currentPredicate == predicate)
+}
+
+@Test
+func typedUnknownRecoverabilityRejectsSemanticSourceDrift() async throws {
+  let facts = globalFacts()
+  let plannedSemantic = try UnknownRecoverabilitySemanticEvidence(
+    reason: .unsupported,
+    kind: .rebuildCostUnknown,
+    sourceBindingHash: digest(152)
+  )
+  let evidence = snapshot(
+    recoverability: .unknown(.unsupported),
+    recoverabilityReviewFacts: [.unknownRecoverability(plannedSemantic)]
+  )
+  let action = try makeAction(evidence: evidence, facts: facts)
+  guard case .requiresConsents(let predicates) = action.evaluation.stageability else {
+    Issue.record("typed unknown recoverability must require consent")
+    return
+  }
+  let consents = predicates.map {
+    WaiverConsentCore.create(
+      action: action,
+      predicate: $0,
+      reason: "accept the planned public API limitation",
+      consentEventID: "planned-unknown-\($0.semanticEvidenceHash.hex)"
+    )
+  }
+  let plan = try ImmutablePlan(
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1",
+    globalFacts: facts,
+    evidenceSnapshots: [evidence],
+    actions: [action],
+    releaseSets: []
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: [action.id],
+    waiverConsents: consents,
+    userNotes: []
+  )
+  let changedSemantic = try UnknownRecoverabilitySemanticEvidence(
+    reason: .unsupported,
+    kind: .rebuildCostUnknown,
+    sourceBindingHash: digest(154)
+  )
+  let current = CurrentRevalidationSnapshot(
+    captureID: digest(90),
+    actions: [
+      currentEvidence(
+        action,
+        freshPolicyEvidence: .known(
+          retimedPolicyEvidence(
+            action,
+            referenceTimeSeconds: 200,
+            recoverabilityReviewFacts: [.unknownRecoverability(changedSemantic)]
+          )))
+    ],
+    releaseTopologies: [],
+    invariants: passingInvariants
+  )
+  let result = try await ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([current]),
+    randomBytes: deterministicEntropy
+  ).prepare(
+    plan: plan,
+    overlay: overlay,
+    mode: .dryRun,
+    issuedAtSeconds: 200,
+    lifetimeSeconds: 30
+  )
+
+  guard case .rejected(let report) = result else {
+    Issue.record("changed typed recoverability semantics must reject stale consent")
+    return
+  }
+  #expect(report.actionOutcomes.first?.findings.map(\.kind).contains(.staleConsent) == true)
+  #expect(report.manifest == nil)
+}
+
+@Test
+func unknownRecoverabilityAbsentUnreadableAndFailedRemainDistinct() async throws {
+  let facts = globalFacts()
+  let semantic = try UnknownRecoverabilitySemanticEvidence(
+    reason: .unsupported,
+    kind: .rebuildCostUnknown,
+    sourceBindingHash: digest(153)
+  )
+  let evidence = snapshot(
+    recoverability: .unknown(.unsupported),
+    recoverabilityReviewFacts: [.unknownRecoverability(semantic)]
+  )
+  let action = try makeAction(evidence: evidence, facts: facts)
+  guard case .requiresConsents(let predicates) = action.evaluation.stageability else {
+    Issue.record("missing unknown recoverability predicate")
+    return
+  }
+  let consents = predicates.map {
+    WaiverConsentCore.create(
+      action: action,
+      predicate: $0,
+      reason: "test consent",
+      consentEventID: "unknown-\($0.semanticEvidenceHash.hex)"
+    )
+  }
+  let plan = try ImmutablePlan(
+    policyVersion: "policy-1",
+    schemaVersion: "schema-1",
+    globalFacts: facts,
+    evidenceSnapshots: [evidence],
+    actions: [action],
+    releaseSets: []
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan, selectedActionIDs: [action.id], waiverConsents: consents, userNotes: [])
+  let failure = ObservationFailure(code: "recoverability-read", collector: "test")
+  let cases: [(Observation<RecoverabilityState>, RevalidationFailureKind)] = [
+    (.absent, .missing),
+    (.unreadable(failure), .unreadable),
+    (.failed(failure), .collectionFailed),
+  ]
+  for (recoverability, expectedKind) in cases {
+    let snapshot = CurrentRevalidationSnapshot(
+      captureID: digest(90),
+      actions: [currentEvidence(action, recoverability: recoverability)],
+      releaseTopologies: [],
+      invariants: passingInvariants
+    )
+    let engine = ExecutionPreparationEngine(
+      evidenceSource: SequenceSource([snapshot]),
+      randomBytes: deterministicEntropy
+    )
+    let result = try await engine.prepare(
+      plan: plan,
+      overlay: overlay,
+      mode: .apply,
+      issuedAtSeconds: 200,
+      lifetimeSeconds: 30
+    )
+    guard case .rejected(let report) = result else {
+      Issue.record("unavailable recoverability must reject")
+      continue
+    }
+    #expect(report.actionOutcomes.first?.findings.map(\.kind).contains(expectedKind) == true)
+    #expect(report.manifest == nil)
+  }
 }
 
 @Test
@@ -840,6 +1235,87 @@ func selectedPlanRequiresOneFreshCaptureAndGlobalFactsBinding() async throws {
 }
 
 @Test
+func jitRejectsMixedGlobalFactsWithinOneFreshCapture() async throws {
+  let release = try ReleaseFixture()
+  let initialSnapshot = CurrentRevalidationSnapshot(
+    captureID: digest(90),
+    actions: release.ownerActions.map { currentEvidence($0) }
+      + [currentEvidence(release.releaseAction)],
+    releaseTopologies: [
+      CurrentReleaseTopology(
+        allocationGroupID: release.releaseSet.allocationGroupID,
+        topology: .known(release.releaseSet.topologyExpectation)
+      )
+    ],
+    invariants: passingInvariants
+  )
+  let preparation = try await ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([initialSnapshot]),
+    randomBytes: deterministicEntropy
+  ).prepare(
+    plan: release.plan,
+    overlay: release.overlay,
+    mode: .dryRun,
+    issuedAtSeconds: 200,
+    lifetimeSeconds: 30
+  )
+  guard case .dryRun(let prepared) = preparation,
+    let manifest = prepared.revalidation.manifest
+  else {
+    Issue.record("expected a current preparation manifest")
+    return
+  }
+
+  let captureID = digest(91)
+  let currentActions = zip(
+    release.ownerActions,
+    [Data("config-a".utf8), Data("config-b".utf8)]
+  ).map { action, configuration in
+    currentEvidence(
+      action,
+      freshCaptureID: captureID,
+      freshPolicyEvidence: .known(
+        retimedPolicyEvidence(
+          action,
+          referenceTimeSeconds: 200,
+          captureID: captureID,
+          globalFactsConfiguration: configuration
+        )
+      )
+    )
+  }
+  let validated = try DecisionOverlayValidator.validate(release.overlay, against: release.plan)
+  let nonce = Data(repeating: 0xa6, count: 32)
+  let request = JITRevalidationRequest(
+    plan: release.plan,
+    validatedOverlay: validated,
+    manifest: manifest,
+    actionIDs: release.ownerActions.map(\.id),
+    releaseGroupIDs: [],
+    preparationGeneration: 1,
+    oneShotNonce: nonce
+  )
+  let report = Revalidator.evaluateJIT(
+    request: request,
+    collected: JITRevalidationSnapshot(
+      oneShotNonce: nonce,
+      authorizationCurrentBindingHash: manifest.currentBindingHash,
+      preparationGeneration: 1,
+      epochID: manifest.epoch.epochID,
+      snapshot: CurrentRevalidationSnapshot(
+        captureID: captureID,
+        actions: currentActions,
+        releaseTopologies: [],
+        invariants: passingInvariants
+      )
+    )
+  )
+
+  #expect(!report.isCurrent)
+  #expect(report.globalFindings.map(\.kind).contains(.policyEvidenceMismatch))
+}
+
+@Test
 func partialSelectionCannotForgeACompleteReleaseAction() throws {
   let release = try ReleaseFixture()
   let partial = DecisionOverlay.create(
@@ -932,6 +1408,18 @@ private actor SequenceSource: RevalidationEvidenceSource {
   }
 
   enum SourceError: Error { case exhausted }
+}
+
+private final class LockedPreparationClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var stored: Int64
+
+  init(_ value: Int64) { stored = value }
+
+  var value: Int64 {
+    get { lock.withLock { stored } }
+    set { lock.withLock { stored = newValue } }
+  }
 }
 
 private actor ControlledSource: RevalidationEvidenceSource {
@@ -1197,10 +1685,12 @@ func currentEvidence(
   access: Observation<RequiredAccessPolicyBaseline>? = nil,
   activity: Observation<ActivityState>? = nil,
   providerState: Observation<ProviderState>? = nil,
+  recoverability: Observation<RecoverabilityState>? = nil,
   dependencyState: Observation<DependencyState>? = nil,
   executionReferenceTimeSeconds: Int64 = 200,
   freshCaptureID: PolicyDigest = digest(90),
-  freshPolicyEvidence: Observation<FreshPolicyEvidence>? = nil
+  freshPolicyEvidence: Observation<FreshPolicyEvidence>? = nil,
+  gitWorktree: Observation<GitWorktreeEvidence>? = nil
 ) -> CurrentActionEvidence {
   let namespace = action.prototype.namespaceBinding
   return CurrentActionEvidence(
@@ -1215,7 +1705,7 @@ func currentEvidence(
     activity: activity ?? action.evidence.activity,
     explicitProtection: action.evidence.explicitProtection,
     providerState: providerState ?? action.evidence.providerState,
-    recoverability: action.evidence.recoverability,
+    recoverability: recoverability ?? action.evidence.recoverability,
     dependencyState: dependencyState ?? action.evidence.dependencyState,
     freshPolicyEvidence: freshPolicyEvidence
       ?? .known(
@@ -1236,13 +1726,14 @@ func currentEvidence(
         seal: .known($0.seal)
       )
     },
-    gitWorktree: {
-      switch action.prototype.adapterContract {
-      case .gitWorktreeRemove(let contract): return .known(contract.verifiedEvidence)
-      case .gitWorktreeDiscardLocalChanges(let contract): return .known(contract.verifiedEvidence)
-      default: return .absent
-      }
-    }()
+    gitWorktree: gitWorktree
+      ?? {
+        switch action.prototype.adapterContract {
+        case .gitWorktreeRemove(let contract): return .known(contract.verifiedEvidence)
+        case .gitWorktreeDiscardLocalChanges(let contract): return .known(contract.verifiedEvidence)
+        default: return .absent
+        }
+      }()
   )
 }
 
@@ -1252,12 +1743,13 @@ func digest(_ byte: UInt8) -> PolicyDigest {
 
 func globalFacts(
   semanticReferenceTimeSeconds: Int64 = 100,
-  captureID: PolicyDigest = digest(89)
+  captureID: PolicyDigest = digest(89),
+  configuration: Data = Data("config".utf8)
 ) -> FrozenGlobalFacts {
   FrozenGlobalFacts(
     captureID: captureID,
     profile: "standard",
-    configuration: Data("config".utf8),
+    configuration: configuration,
     coverage: [
       GlobalCoverageFact(
         rawRoot: try! RawRootPath(absoluteBytes: Data("/root".utf8)),
@@ -1275,12 +1767,16 @@ private func retimedPolicyEvidence(
   _ action: ActionDefinition,
   referenceTimeSeconds: Int64,
   recoverabilityReviewFacts: [RecoverabilityReviewFact]? = nil,
-  captureID: PolicyDigest = digest(90)
+  contentProtection: Observation<ContentProtectionBaseline>? = nil,
+  gitWorktree: GitWorktreeEvidence? = nil,
+  captureID: PolicyDigest = digest(90),
+  globalFactsConfiguration: Data = Data("config".utf8)
 ) -> FreshPolicyEvidence {
   let source = action.evidence
   let facts = globalFacts(
     semanticReferenceTimeSeconds: referenceTimeSeconds,
-    captureID: captureID
+    captureID: captureID,
+    configuration: globalFactsConfiguration
   )
   let evidence = try! FrozenEvidenceSnapshot(
     captureID: facts.captureID,
@@ -1298,12 +1794,12 @@ private func retimedPolicyEvidence(
     dependencyState: source.dependencyState,
     semanticReviewFacts: source.semanticReviewFacts,
     accessPolicy: source.accessPolicy,
-    contentProtection: source.contentProtection,
+    contentProtection: contentProtection ?? source.contentProtection,
     aclDigest: source.aclDigest,
     targetMountIdentity: source.targetMountIdentity,
     removalForceRequirement: source.removalForceRequirement,
     quarantineCapability: source.quarantineCapability,
-    gitWorktree: source.gitWorktree,
+    gitWorktree: gitWorktree ?? source.gitWorktree,
     adapterScope: source.adapterScope,
     additionalAdapterScopes: source.additionalAdapterScopes,
     classificationClaims: source.classificationClaims,
@@ -1379,7 +1875,8 @@ func snapshot(
 
 func gitEvidence(
   worktreeObject: UInt64,
-  indexDigest: Observation<PolicyDigest> = .known(digest(71))
+  indexDigest: Observation<PolicyDigest> = .known(digest(71)),
+  localChanges: GitLocalChangesState = .clean
 ) -> GitWorktreeEvidence {
   let identity = ObjectIdentity(
     device: 1, object: worktreeObject, generation: .known(1), type: .directory)
@@ -1392,11 +1889,24 @@ func gitEvidence(
     registrationID: digest(75),
     metadataDigest: digest(74)
   )
+  let successor: Observation<GitWorktreeExecutionBaseline>
+  switch localChanges {
+  case .clean:
+    successor = .absent
+  case .present:
+    successor = .known(
+      try! GitWorktreeExecutionBaseline(
+        headIdentity: digest(70),
+        indexDigest: digest(72),
+        localChanges: .clean,
+        contentProtection: .requiredDigest(digest(76))
+      ))
+  }
   return GitWorktreeEvidence(
     noFollowTraversalComplete: .known(true),
     headIdentity: .known(digest(70)),
     indexDigest: indexDigest,
-    localChanges: .known(.clean),
+    localChanges: .known(localChanges),
     registration: .known(registration),
     linkage: .known(.ordinary),
     sparseCheckout: .known(.disabled),
@@ -1404,6 +1914,27 @@ func gitEvidence(
     submodules: .known(.none),
     trustedExclusiveNamespace: .known(true),
     postQuarantineCoverage: .known(.complete),
+    postDiscardSuccessor: successor
+  )
+}
+
+private func postDiscardGitEvidence(
+  _ contract: GitWorktreeRemoveContract
+) -> GitWorktreeEvidence {
+  let source = contract.verifiedEvidence
+  let successor = contract.executionBaseline
+  return GitWorktreeEvidence(
+    noFollowTraversalComplete: source.noFollowTraversalComplete,
+    headIdentity: .known(successor.headIdentity),
+    indexDigest: .known(successor.indexDigest),
+    localChanges: .known(.clean),
+    registration: source.registration,
+    linkage: source.linkage,
+    sparseCheckout: source.sparseCheckout,
+    nestedRepositories: source.nestedRepositories,
+    submodules: source.submodules,
+    trustedExclusiveNamespace: source.trustedExclusiveNamespace,
+    postQuarantineCoverage: source.postQuarantineCoverage,
     postDiscardSuccessor: .absent
   )
 }

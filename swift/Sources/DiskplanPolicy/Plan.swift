@@ -236,6 +236,7 @@ public enum SemanticReviewFact: Equatable, Sendable {
 public enum RecoverabilityReviewFact: Equatable, Sendable {
   case staticOnlyRebuildEvidence(artifactKind: String, evidenceHash: PolicyDigest)
   case unknownRebuildCost(valueBucket: String, evidenceHash: PolicyDigest)
+  case unknownRecoverability(UnknownRecoverabilitySemanticEvidence)
 
   var bindingBytes: Data {
     var encoder = PolicyBindingEncoder()
@@ -248,7 +249,51 @@ public enum RecoverabilityReviewFact: Equatable, Sendable {
       encoder.uint8(1)
       encoder.string(valueBucket)
       encoder.data(evidenceHash.bytes)
+    case .unknownRecoverability(let evidence):
+      encoder.uint8(2)
+      encoder.data(evidence.bindingBytes)
     }
+    return encoder.data
+  }
+}
+
+public enum UnknownRecoverabilitySemanticKind: String, Equatable, Sendable {
+  case rebuildCostUnknown
+}
+
+/// Stable, policy-relevant proof for a recoverability value that cannot be reduced to a known
+/// state. The source binding excludes capture IDs, reference times, and whole-snapshot hashes.
+public struct UnknownRecoverabilitySemanticEvidence: Equatable, Sendable {
+  public let reason: UnknownReason
+  public let kind: UnknownRecoverabilitySemanticKind
+  public let sourceBindingHash: PolicyDigest
+
+  public init(
+    reason: UnknownReason,
+    kind: UnknownRecoverabilitySemanticKind,
+    sourceBindingHash: PolicyDigest
+  ) throws {
+    guard reason == .unsupported || reason == .unavailableViaPublicAPI else {
+      throw PolicyModelError.invalidGateSet
+    }
+    self.reason = reason
+    self.kind = kind
+    self.sourceBindingHash = sourceBindingHash
+  }
+
+  public var semanticHash: PolicyDigest {
+    PolicyBindings.digest(kind: "recoverability-unknown-semantic") { encoder in
+      encoder.string(reason.rawValue)
+      encoder.string(kind.rawValue)
+      encoder.data(sourceBindingHash.bytes)
+    }
+  }
+
+  fileprivate var bindingBytes: Data {
+    var encoder = PolicyBindingEncoder()
+    encoder.string(reason.rawValue)
+    encoder.string(kind.rawValue)
+    encoder.data(sourceBindingHash.bytes)
     return encoder.data
   }
 }
@@ -539,6 +584,8 @@ public struct FrozenEvidenceSnapshot: Equatable, Sendable {
       Set(canonicalClassificationClaims.map(\.bindingBytes)).count
         == canonicalClassificationClaims.count,
       canonicalRecoverabilityFacts.allSatisfy(Self.valid),
+      Self.hasConsistentRecoverabilitySemantics(
+        recoverability, facts: canonicalRecoverabilityFacts),
       canonicalSemanticFacts.allSatisfy(Self.valid),
       Self.hasConsistentDuplicateSurvivors(canonicalSemanticFacts),
       canonicalClassificationClaims.allSatisfy(Self.valid),
@@ -579,6 +626,24 @@ public struct FrozenEvidenceSnapshot: Equatable, Sendable {
     switch fact {
     case .staticOnlyRebuildEvidence(let artifactKind, _): hasNonWhitespace(artifactKind)
     case .unknownRebuildCost(let valueBucket, _): hasNonWhitespace(valueBucket)
+    case .unknownRecoverability:
+      true
+    }
+  }
+
+  private static func hasConsistentRecoverabilitySemantics(
+    _ recoverability: Observation<RecoverabilityState>,
+    facts: [RecoverabilityReviewFact]
+  ) -> Bool {
+    let semanticEvidence = facts.compactMap { fact -> UnknownRecoverabilitySemanticEvidence? in
+      guard case .unknownRecoverability(let evidence) = fact else { return nil }
+      return evidence
+    }
+    switch recoverability {
+    case .unknown(let reason):
+      return semanticEvidence.count == 1 && semanticEvidence[0].reason == reason
+    case .known, .absent, .unreadable, .failed:
+      return semanticEvidence.isEmpty
     }
   }
 
@@ -1371,37 +1436,29 @@ public struct ActionDefinition: Equatable, Sendable {
     prototype: ActionPrototype,
     prerequisites: [ActionDefinition]
   ) throws -> PolicyEvaluation {
-    guard case .gitWorktreeRemove(let contract) = prototype.adapterContract,
-      contract.requiresDiscardLocalChanges,
-      case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges(
-        targetIdentity: prototype.targetIdentity),
-      prerequisites.contains(where: { prerequisite in
-        guard
-          case .gitWorktreeDiscardLocalChanges(let discard) =
-            prerequisite.prototype.adapterContract
-        else { return false }
-        return discard.changeSetDigest == changeSetDigest
-          && discard.verifiedEvidence == contract.verifiedEvidence
-          && discard.successorBaseline == contract.executionBaseline
-          && prerequisite.prototype.namespaceBinding.bindingBytes
-            == prototype.namespaceBinding.bindingBytes
-      })
-    else { return base }
-    let votes = base.votes.map { vote -> GateVote in
-      guard vote.dimension == .recoverability,
-        case .requiresWaiver(let predicates, let reasons) = vote.result
-      else { return vote }
-      let remaining = predicates.filter {
-        !($0.kind == .fullyObservedLocalGitWorkDiscard
-          && $0.semanticEvidenceHash == changeSetDigest)
-      }
-      let result: GateResult =
-        remaining.isEmpty
-        ? .satisfied(reasons: reasons)
-        : .requiresWaiver(predicates: remaining, reasons: reasons)
-      return GateVote(dimension: vote.dimension, result: result)
+    switch prototype.adapterContract {
+    case .gitWorktreeDiscardLocalChanges(let contract):
+      return try base.blockingUnsupportedGitDiscard(contract.changeSetDigest)
+    case .gitWorktreeRemove(let contract) where contract.requiresDiscardLocalChanges:
+      guard
+        case .present(let changeSetDigest) = contract.verifiedEvidence.verifiedLocalChanges(
+          targetIdentity: prototype.targetIdentity),
+        prerequisites.contains(where: { prerequisite in
+          guard
+            case .gitWorktreeDiscardLocalChanges(let discard) =
+              prerequisite.prototype.adapterContract
+          else { return false }
+          return discard.changeSetDigest == changeSetDigest
+            && discard.verifiedEvidence == contract.verifiedEvidence
+            && discard.successorBaseline == contract.executionBaseline
+            && prerequisite.prototype.namespaceBinding.bindingBytes
+              == prototype.namespaceBinding.bindingBytes
+        })
+      else { throw PolicyModelError.invalidActionContract }
+      return try base.blockingUnsupportedGitDiscard(changeSetDigest)
+    default:
+      return base
     }
-    return try base.replacingVotesPreservingContext(votes)
   }
 
   private static func make(

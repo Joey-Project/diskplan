@@ -1,9 +1,9 @@
 ---
 id: 20260828-a5d210
 title: Phase 5 Best-Effort Apply
-status: completed
+status: active
 created: 2026-08-28
-updated: 2026-08-28
+updated: 2026-08-29
 branch: wip/phase5-best-effort-apply
 pr:
 supersedes: []
@@ -44,7 +44,20 @@ superseded_by:
   The production composition router cannot send Git or unconfigured specialized actions
   through generic removal.
 - Authorization is registry/generation-backed until its single claim, so any newer preparation
-  revokes an older unconsumed authorization.
+  revokes an older unconsumed authorization. The opaque claim now atomically consumes the
+  authoritative engine record while checking generation, deadline, and manifest binding.
+- Release graph, runtime-unit, JIT topology, and post-verification joins use raw UTF-8 keys, so
+  NFC/NFD-equivalent allocation-group and file-object identifiers remain distinct.
+- Typed unknown-recoverability waivers revalidate a stable semantic proof rather than a fresh
+  capture/evidence ID; missing, unreadable, and failed observations remain fail-closed.
+- Dirty Git worktrees and their dependent remove chains remain evidence-rich but report-only in
+  v1. Policy blocks them without a waiver path, apply preparation cannot mint authority for them,
+  and both production routing and the quarantine adapter reject them without a Git executable in
+  the mutation implementation. Clean quarantine removal remains executable.
+- Quarantine uses a per-execution exclusive directory sealed for identity and access policy,
+  including ACL/flags/`fstatfs` mount, and rechecks the held source parent at rename/restore.
+  Administrative cleanup binds the planned metadata digest and canonical root slot. Coverage
+  timestamps trigger only a bounded reread, while content and access digests remain separate.
 - Shell/TUI events require no persistence. Optional audit failures, including `ENOSPC`, are
   reported but cannot stop cleanup.
 
@@ -62,25 +75,45 @@ superseded_by:
   final descriptor recollection into the apply authority.
 - [x] Add compound owner DAG semantics and typed allocation-group post-verification.
 - [x] Finish the dedicated Git worktree quarantine adapter and production adapter composition.
-- [x] Complete static adversarial fixtures and documentation review.
-- [x] Run focused/full Swift gates, release integration, journal validation, and formatting.
+- [x] Add review follow-up fixtures for registry claims, NFC/NFD IDs, mixed global facts,
+  dirty-to-clean Git baselines, sibling registrations, external filters, ACL/flag drift, and
+  timestamp-only versus byte drift.
+- [x] Replace the provisional pathname-opened dirty Git discard path with the accepted v1
+  report-only boundary at policy, router, adapter, test, and design layers.
+- [x] Statically audit the slice against immutable plan/overlay authority, force confirmation,
+  best-effort continuation, optional audit output, provider evidence, and APFS allocation-owner
+  closure requirements.
+- [x] Complete static review follow-up implementation and documentation updates.
+- [ ] Run the focused/full Swift follow-up gates on India-mac-mini-m4-hoteng after the shared
+  dynamic-test slot is released.
+- [ ] Run release integration, journal validation, and formatting for the follow-up head.
 - [ ] Complete frozen-range review and the signed landing commit.
 
 ## Handoff
 
-- Phase: Phase 5 implementation and local validation complete.
-- Next step: complete frozen-range review and land the signed commit.
-- Blocker: none.
+- Phase: Phase 5 best-effort apply and the accepted dirty-Git report-only boundary are complete at
+  the static gate.
+- Next step: run the focused and serial full Swift gates on India-mac-mini-m4-hoteng, resolve any
+  compiler/runtime findings, reconcile the branch with the current integration head, then freeze
+  the range for review and a signed landing commit.
+- Dependency: the final live production route must consume the separately owned concrete
+  revalidation collector and typed survivor/terminal-namespace invariant proofs. This slice does
+  not fabricate or weaken those inputs and does not depend on their two pending hookup decisions.
 
 ## Evidence
 
 - Accepted architecture: `docs/design/accepted-plan.md`.
 - Detailed contract: `docs/design/best-effort-apply.md`.
 - Phase 4 boundary: `docs/design/revalidation-and-dry-run.md`.
-- Focused `swift test --filter DiskplanExecutionTests`: 62 tests passed.
-- Serial full `swift test --no-parallel`: 133 tests passed.
+- Pre-follow-up head: focused `swift test --filter DiskplanExecutionTests`: 62 tests passed.
+- Pre-follow-up head: serial full `swift test --no-parallel`: 133 tests passed.
 - Parallel `swift test`: all Phase 5 execution tests passed, but the pre-existing
   `boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy` timing assertion failed in two
   full concurrent runs and passed when run alone; no production change was made for this
   parallel-only flake.
-- Production `swift build -c release --product diskplan-engine`: passed.
+- Pre-follow-up head: production `swift build -c release --product diskplan-engine`: passed.
+- Current dirty head: `swift-format lint --strict`, `swiftc -frontend -parse`, and
+  `git diff --check` passed locally as static-only checks; Swift build/test gates are reserved for
+  India-mac-mini-m4-hoteng and remain pending the shared slot.
+- Follow-up head: exact-head review accepted findings 1-8 and 10 at the static contract level;
+  finding 9 remains blocked on the Git configuration execution-boundary decision above.
