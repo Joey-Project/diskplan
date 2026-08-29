@@ -205,20 +205,22 @@ superseded_by:
   expired bound cannot advance startup. The production absolute 15-second startup
   deadline remains unchanged. Startup-failure cleanup retains
   the control channel until bounded TERM/KILL and reap complete, preventing EOF
-  from changing the injected failure taxonomy. The exact focused gate passes
-  1/1 with the target test completing in 7.562 seconds. The unchanged CI-shaped
-  default max-parallel suite passes 533/533 in 9.682 seconds, including the target
-  test in 7.140 seconds. Both commands ran under a bounded supervisor with verified
-  process-group quiescence; the generated 630 MiB `.build` and task logs were
-  removed immediately after evidence extraction. Those timings describe the
-  pre-action-boundary revision; fresh India-host evidence is required for the
-  final follow-up head.
+  from changing the injected failure taxonomy. The earlier pre-action-boundary
+  revision passed its focused and 533-test parallel gates, after which its local
+  630 MiB `.build` and task logs were removed. Final follow-up head
+  `34643f5280952b2827e05cf4064c0237139af210` was then validated on
+  `India-mac-mini-m4-hoteng`: the exact focused supervisor selection exited zero
+  in 19.308 bounded seconds, and the unchanged default max-parallel suite exited
+  zero with 533/533 tests in 8.438 bounded seconds; the target test completed in
+  5.567 seconds. Both bounded process groups were confirmed quiescent. The host
+  ran macOS 26.5.1 (25F80), Xcode 26.6 (17F113), and Swift 6.3.3 arm64 targeting
+  macOS 26.0.
 
 ## Next Steps
 
-1. Continue the parent release workstream through the required macOS 26
-   full-parallel lane; this completed deterministic-stage follow-up does not
-   replace release authority.
+1. Continue the parent release workstream; this completed deterministic-stage
+   follow-up validates the integration regression but does not replace release
+   authority.
 
 ## Evidence
 
