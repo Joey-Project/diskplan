@@ -24,5 +24,5 @@ expression: "snapshot(&state, 80, 24)"
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────
-j/k move  Enter/l expand  h collapse  Space stage  p plan  / filter  ? help
+j/k move  Enter/l expand  h collapse  Space stage  p plan  f filter  ? or / help
 immutable engine plan ready
