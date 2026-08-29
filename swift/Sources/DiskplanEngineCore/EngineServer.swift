@@ -82,6 +82,7 @@ public enum EngineServer {
       try runReadyLoop(
         input: input,
         output: output,
+        negotiatedProtocolMinor: accepted.selectedVersion.minor,
         negotiatedCapabilities: Set(accepted.negotiatedCapabilities),
         advertisedRuntimeCapabilities: runtimeCapabilities,
         runtimeHandler: runtimeHandler
@@ -92,6 +93,7 @@ public enum EngineServer {
   private static func runReadyLoop(
     input: FileHandle,
     output: FileHandle,
+    negotiatedProtocolMinor: UInt32,
     negotiatedCapabilities: Set<String>,
     advertisedRuntimeCapabilities: Set<String>,
     runtimeHandler: (any RuntimeBusinessHandler)?
@@ -197,6 +199,7 @@ public enum EngineServer {
           .buildPlan(request),
           envelopeSequence: envelopeSequence,
           handler: runtimeHandler,
+          negotiatedProtocolMinor: negotiatedProtocolMinor,
           advertisedCapabilities: advertisedRuntimeCapabilities,
           negotiatedCapabilities: negotiatedCapabilities,
           runtimeSessionID: runtimeSessionID,
@@ -209,6 +212,7 @@ public enum EngineServer {
           .editDecisionOverlay(request),
           envelopeSequence: envelopeSequence,
           handler: runtimeHandler,
+          negotiatedProtocolMinor: negotiatedProtocolMinor,
           advertisedCapabilities: advertisedRuntimeCapabilities,
           negotiatedCapabilities: negotiatedCapabilities,
           runtimeSessionID: runtimeSessionID,
@@ -221,6 +225,7 @@ public enum EngineServer {
           .prepareDryRun(request),
           envelopeSequence: envelopeSequence,
           handler: runtimeHandler,
+          negotiatedProtocolMinor: negotiatedProtocolMinor,
           advertisedCapabilities: advertisedRuntimeCapabilities,
           negotiatedCapabilities: negotiatedCapabilities,
           runtimeSessionID: runtimeSessionID,
@@ -233,6 +238,7 @@ public enum EngineServer {
           .prepareApplyReview(request),
           envelopeSequence: envelopeSequence,
           handler: runtimeHandler,
+          negotiatedProtocolMinor: negotiatedProtocolMinor,
           advertisedCapabilities: advertisedRuntimeCapabilities,
           negotiatedCapabilities: negotiatedCapabilities,
           runtimeSessionID: runtimeSessionID,
@@ -245,6 +251,7 @@ public enum EngineServer {
           .confirmApply(request),
           envelopeSequence: envelopeSequence,
           handler: runtimeHandler,
+          negotiatedProtocolMinor: negotiatedProtocolMinor,
           advertisedCapabilities: advertisedRuntimeCapabilities,
           negotiatedCapabilities: negotiatedCapabilities,
           runtimeSessionID: runtimeSessionID,
@@ -257,6 +264,7 @@ public enum EngineServer {
           .cancelExecution(request),
           envelopeSequence: envelopeSequence,
           handler: runtimeHandler,
+          negotiatedProtocolMinor: negotiatedProtocolMinor,
           advertisedCapabilities: advertisedRuntimeCapabilities,
           negotiatedCapabilities: negotiatedCapabilities,
           runtimeSessionID: runtimeSessionID,
@@ -281,6 +289,7 @@ public enum EngineServer {
     _ request: RuntimeBusinessRequest,
     envelopeSequence: UInt64,
     handler: (any RuntimeBusinessHandler)?,
+    negotiatedProtocolMinor: UInt32,
     advertisedCapabilities: Set<String>,
     negotiatedCapabilities: Set<String>,
     runtimeSessionID: Data,
@@ -359,6 +368,7 @@ public enum EngineServer {
     let responder = RuntimeBusinessResponder(
       broker: broker,
       request: request,
+      negotiatedProtocolMinor: negotiatedProtocolMinor,
       runtimeSessionID: runtimeSessionID,
       authority: runtimeAuthority
     )

@@ -39,6 +39,48 @@ and runtime zlib implementation to `1.2.12`; a toolchain change fails closed unt
 that reproducibility input is reviewed and updated. The archive and its checksum
 sidecar are published as one verified output set using private, exclusive
 temporary files.
+The selected output directory is itself a trust boundary: it must be owned by
+the current effective UID, have no group/other write bits, and carry no extended
+ACL entries. The packager retains its directory FD and revalidates that access
+policy before conditional quarantine cleanup. This excludes other-UID namespace
+writers from the documented final compare-to-`unlinkat` residual; an unsafe
+output directory is rejected before any temporary output is created.
+
+`release/bundle-contract.json` is the canonical package-input allowlist. It
+names every bundle-relative path, exact mode, byte ceiling, role, compatibility
+version, and source. The native install helper's tracked generated contract and
+the shell verifier are checked against those same records. An unverified
+`manifest.json` therefore cannot grant access to another path. The bundle
+contains the executables and lifecycle files plus:
+
+```text
+protocol-version
+runtime-capabilities.json
+rules/
+  builtin-v1.json
+  user-policy-default-v1.json
+proto/
+  diskplan/v1/ipc.proto
+  toolchain.lock
+  fixtures/...
+```
+
+Each `manifest.json` artifact record binds its canonical relative `path`, exact
+`mode`, `size`, SHA-256, `role`, and `compatibility_version`. The packager and
+installer reject missing, changed, additional, symlink, special-file,
+path-escape, duplicate, case-fold-colliding, or unsupported-schema entries.
+Nested copy, proof, rollback cleanup, and uninstall remain descriptor-relative
+and no-follow. Directory and archive metadata do not enter artifact content
+digests; tar ownership, directory/file modes, mtime, and ordering are emitted
+from the fixed contract, so source enumeration order, uid/gid, and timestamps
+cannot perturb the archive.
+
+Generated Swift/Rust protocol sources, build trees, `.git`, `.codex-tmp`, and
+the local generated project-journal index are explicitly excluded. The shipped
+`runtime-capabilities.json` declares optional history, saved-plan, audit, and
+execution-record persistence with `default_enabled: false` and
+`package_effect: declaration-only`; packaging never creates user history or
+artifact data.
 
 `build-release.sh` accepts only a clean, stable source checkout. It binds the
 manifest revision to the exact Git tree and revalidates tracked and untracked
@@ -110,6 +152,17 @@ replacement cannot redirect it:
 ```sh
 ~/.local/libexec/diskplan/<version>/uninstall.sh <version>
 ```
+
+Exact and rollback cleanup bind creation/proof-time receipts, move the selected
+object to an exclusive random quarantine name on the same filesystem, reopen it
+without following links, and retain it on any identity, content, access-policy,
+or mount mismatch. macOS does not expose an atomic compare-and-unlink-by-FD
+operation. The final `unlinkat` therefore relies on the managed staging/version
+directories being owner-private (`0700`) and exclusively controlled for the
+lifecycle operation. As established by the accepted plan, malicious concurrent
+namespace mutation by another process with the same effective UID is outside the
+phase-one threat model; the helper does not claim to resist it. A deployment
+that cannot provide this exclusive namespace must treat deletion as report-only.
 
 Use `--prefix /absolute/path` with any lifecycle script for an isolated install.
 The installer never calls `sudo`, modifies TCC, or removes an older version.

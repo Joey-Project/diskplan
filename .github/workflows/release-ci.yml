@@ -79,6 +79,7 @@ jobs:
           shellcheck scripts/release/*.sh
           python3 -m py_compile \
             scripts/release/package_bundle.py \
+            scripts/release/generate_bundle_contract.py \
             scripts/release/run_bounded.py \
             scripts/release/source_manifest.py \
             scripts/release/test_package_bundle.py \

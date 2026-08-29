@@ -36,6 +36,7 @@ import Testing
   #expect(accepted.negotiatedCapabilities.contains("plan-projection-v1"))
   #expect(!accepted.negotiatedCapabilities.contains("decision-overlay-v1"))
   #expect(handler.requestIDs == [2])
+  #expect(handler.negotiatedProtocolMinors == [protocol15Minor])
   guard case .runtimeEvent(let event) = envelopes[1].body,
     case .runtimeRejected(let rejected) = event.body
   else {
@@ -43,6 +44,17 @@ import Testing
     return
   }
   #expect(rejected.code == .invalidState)
+}
+
+@Test func runtimeResponderReceivesDowngradedNegotiatedProtocolMinor() throws {
+  let handler = RecordingRuntimeHandler()
+  let envelopes = try runRuntimeExchange(handler: handler, peerProtocolMinor: protocol14Minor)
+  guard case .helloAccepted(let accepted) = envelopes.first?.body else {
+    Issue.record("expected accepted handshake")
+    return
+  }
+  #expect(accepted.selectedVersion.minor == protocol14Minor)
+  #expect(handler.negotiatedProtocolMinors == [protocol14Minor])
 }
 
 @Test func externalHandlerCannotSelfReportPlanOrForceAuthority() throws {
@@ -316,6 +328,48 @@ import Testing
       Data(repeating: 0x61, count: PlanProjectionWireEncoder.maximumRawSelectorTargetBytes + 1)
     )
   }
+}
+
+@Test func executionPreviewShapeIsClosedByNegotiatedProtocolMinor() throws {
+  var protocol14 = Diskplan_V1_ActionExecutionPreviewProjection()
+  protocol14.adapter = .genericRemove
+  try SealedRuntimeWire.requirePreview(
+    protocol14,
+    negotiatedProtocolMinor: protocol14Minor
+  )
+
+  var incomplete15 = protocol14
+  incomplete15.pathRace = .noneObserved
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.requirePreview(
+      incomplete15,
+      negotiatedProtocolMinor: protocol15Minor
+    )
+  }
+
+  incomplete15.rawWorkingDirectory = Data()
+  try SealedRuntimeWire.requirePreview(
+    incomplete15,
+    negotiatedProtocolMinor: protocol15Minor
+  )
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.requirePreview(
+      incomplete15,
+      negotiatedProtocolMinor: protocol14Minor
+    )
+  }
+
+  var mutation15 = incomplete15
+  mutation15.mutationSupported = true
+  mutation15.rawExecutable = Data("/bin/rm".utf8)
+  mutation15.rawArgv = [Data("rm".utf8), Data("target".utf8)]
+  mutation15.displayArgv = ["rm", "target"]
+  mutation15.postcondition = "Target is absent."
+  mutation15.rawWorkingDirectory = Data("/fixture".utf8)
+  try SealedRuntimeWire.requirePreview(
+    mutation15,
+    negotiatedProtocolMinor: protocol15Minor
+  )
 }
 
 @Test func executionForceWarningsAreAnExactSet() throws {
@@ -619,12 +673,14 @@ import Testing
 private final class RecordingRuntimeHandler: RuntimeBusinessHandler {
   let supportedCapabilities: Set<String> = ["plan-projection-v1"]
   private(set) var requestIDs: [UInt64] = []
+  private(set) var negotiatedProtocolMinors: [UInt32] = []
 
   func handle(
     _ request: RuntimeBusinessRequest,
     responder: RuntimeBusinessResponder
   ) throws {
     requestIDs.append(request.requestID)
+    negotiatedProtocolMinors.append(responder.negotiatedProtocolMinor)
     try responder.send(
       try .rejected(code: .invalidState, summary: "fixture response")
     )
@@ -789,12 +845,14 @@ private func runtimePlanTransactionFixture() throws -> (
 private func runRuntimeExchange(
   handler: (any RuntimeBusinessHandler)?,
   requestBody: Diskplan_V1_Envelope.OneOf_Body? = nil,
-  requestPayloadTransform: ((Data) -> Data)? = nil
+  requestPayloadTransform: ((Data) -> Data)? = nil,
+  peerProtocolMinor: UInt32 = protocolMinor
 ) throws -> [Diskplan_V1_Envelope] {
   let input = Pipe()
   let output = Pipe()
 
   var peer = Handshake.swiftEngineHello(runtimeCapabilities: protocol14RuntimeCapabilities)
+  peer.version.minor = peerProtocolMinor
   peer.implementation = "diskplan-runtime-handler-test"
   var hello = Diskplan_V1_Envelope()
   hello.sequence = 1
@@ -901,7 +959,7 @@ private func forceExecutionFixture() throws -> (
     .deletingLastPathComponent()
   let text = try String(
     contentsOf: root.appendingPathComponent(
-      "proto/fixtures/runtime-v1.4/force-action-execution.frames.hex"
+      "proto/fixtures/runtime-v1.5/force-action-execution.frames.hex"
     ),
     encoding: .utf8
   )

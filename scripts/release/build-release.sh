@@ -2,6 +2,7 @@
 
 set -euo pipefail
 umask 077
+export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -63,12 +64,31 @@ SOURCE_REVISION="$(/usr/bin/printf '%s\n' "${INITIAL_SOURCE_STATE}" | /usr/bin/s
 readonly SOURCE_REVISION
 
 readonly SOURCE_ROOT="${WORK_ROOT}/source"
+readonly SOURCE_SNAPSHOT_RECORD="${WORK_ROOT}/source-snapshot-before.json"
+readonly TRUSTED_SOURCE_MANIFEST="${WORK_ROOT}/source-manifest.py"
 mkdir "${SOURCE_ROOT}"
 git -C "${REPO_ROOT}" archive --format=tar "${SOURCE_REVISION}" | /usr/bin/tar -xf - -C "${SOURCE_ROOT}"
-SOURCE_SNAPSHOT_MANIFEST="$(python3 "${SOURCE_ROOT}/scripts/release/source_manifest.py" "${SOURCE_ROOT}")"
+/bin/cp "${SOURCE_ROOT}/scripts/release/source_manifest.py" "${TRUSTED_SOURCE_MANIFEST}"
+exec 8<"${TRUSTED_SOURCE_MANIFEST}"
+exec 9<"${TRUSTED_SOURCE_MANIFEST}"
+/bin/rm "${TRUSTED_SOURCE_MANIFEST}"
+run_compiler() (
+    exec 8<&-
+    exec 9<&-
+    "$@"
+)
+SOURCE_SNAPSHOT_MANIFEST="$(python3 /dev/fd/8 \
+    --output-record "${SOURCE_SNAPSHOT_RECORD}" \
+    "${SOURCE_ROOT}")"
 readonly SOURCE_SNAPSHOT_MANIFEST
 [[ "${SOURCE_SNAPSHOT_MANIFEST}" =~ ^[0-9a-f]{64}$ ]] || {
     echo "release source snapshot manifest is malformed" >&2
+    exit 1
+}
+SOURCE_SNAPSHOT_RECORD_SHA256="$(/usr/bin/shasum -a 256 "${SOURCE_SNAPSHOT_RECORD}" | /usr/bin/awk '{print $1}')"
+readonly SOURCE_SNAPSHOT_RECORD_SHA256
+[[ "${SOURCE_SNAPSHOT_RECORD_SHA256}" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "release source snapshot record digest is malformed" >&2
     exit 1
 }
 
@@ -104,8 +124,9 @@ readonly FS_HELPER="${WORK_ROOT}/diskplan-fs-helper"
 export CARGO_TARGET_DIR
 
 cd "${SOURCE_ROOT}"
-cargo build --locked --release --target aarch64-apple-darwin -p diskplan
-swift build \
+run_compiler python3 "${SOURCE_ROOT}/scripts/release/generate_bundle_contract.py" check
+run_compiler cargo build --locked --release --target aarch64-apple-darwin -p diskplan
+run_compiler swift build \
     --disable-automatic-resolution \
     --configuration release \
     --scratch-path "${SWIFT_SCRATCH_PATH}" \
@@ -113,7 +134,7 @@ swift build \
     -Xswiftc "${WORK_ROOT}=/diskplan-release" \
     -Xlinker -S \
     --product diskplan-engine
-/usr/bin/xcrun clang \
+run_compiler /usr/bin/xcrun clang \
     -arch arm64 \
     "-mmacosx-version-min=${DEPLOYMENT_TARGET}" \
     -std=c11 \
@@ -128,7 +149,7 @@ swift build \
     -o "${FS_HELPER}"
 
 readonly FRONTEND="${CARGO_TARGET_DIR}/aarch64-apple-darwin/release/diskplan"
-SWIFT_BIN_DIR="$(swift build \
+SWIFT_BIN_DIR="$(run_compiler swift build \
     --disable-automatic-resolution \
     --configuration release \
     --scratch-path "${SWIFT_SCRATCH_PATH}" \
@@ -142,7 +163,14 @@ readonly AFTER_BUILD_SOURCE_STATE
     echo "release source revision or input manifest changed during compilation" >&2
     exit 1
 }
-AFTER_BUILD_SNAPSHOT_MANIFEST="$(python3 "${SOURCE_ROOT}/scripts/release/source_manifest.py" "${SOURCE_ROOT}")"
+AFTER_BUILD_SNAPSHOT_MANIFEST=""
+if ! AFTER_BUILD_SNAPSHOT_MANIFEST="$(python3 /dev/fd/9 \
+    --compare-to "${SOURCE_SNAPSHOT_RECORD}" \
+    --expected-record-sha256 "${SOURCE_SNAPSHOT_RECORD_SHA256}" \
+    "${SOURCE_ROOT}")"; then
+    echo "private release source snapshot changed during compilation" >&2
+    exit 1
+fi
 readonly AFTER_BUILD_SNAPSHOT_MANIFEST
 [[ "${AFTER_BUILD_SNAPSHOT_MANIFEST}" == "${SOURCE_SNAPSHOT_MANIFEST}" ]] || {
     echo "private release source snapshot changed during compilation" >&2

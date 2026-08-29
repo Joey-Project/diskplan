@@ -8,14 +8,17 @@ use crate::diskplan::v1::{
     ActionExecutionPreviewProjection, AdapterOutcomeKind, ApplyReviewProjection,
     ApplyStartFailureKind, DecisionOverlayAcknowledged, Digest256, DryRunProjection,
     DryRunProjectionManifest, DryRunProjectionPayload, ExecutionStepStatus, ExecutionStreamEvent,
-    ExecutionUnitProjection, ExecutionUnitStatus, OpaqueIdentifier, PlanActionKind,
-    PlanActionProjection, PlanProjectionManifest, PlanStageability, PostVerificationKind,
-    RevalidationFailureKind, RevalidationProjectionPayload, RevalidationSubject, RuntimeRejectCode,
+    ExecutionUnitProjection, ExecutionUnitStatus, OpaqueIdentifier, PlanActionProjection,
+    PlanProjectionManifest, PlanStageability, PostVerificationKind, RevalidationFailureKind,
+    RevalidationProjectionPayload, RevalidationSubject, RuntimeRejectCode,
     adapter_outcome_projection, envelope, execution_stream_event, execution_unit_projection,
     plan_projection_record, post_verification_projection, revalidation_finding_projection,
     runtime_event,
 };
-use crate::runtime::{RuntimeProjectionError, VerifiedPlanProjection};
+use crate::runtime::{
+    RuntimeProjectionError, VerifiedPlanProjection, validate_execution_preview,
+    validate_runtime_protocol_minor,
+};
 
 pub const RUNTIME_MANIFEST_VERSION: u32 = 1;
 pub const MAXIMUM_RUNTIME_ACTION_COUNT: u32 = 100_000;
@@ -60,6 +63,7 @@ impl VerifiedDryRunProjection {
 /// overlay, or cross-review substitution.
 #[derive(Clone, Debug)]
 pub struct RuntimeChainVerifier {
+    negotiated_protocol_minor: u32,
     plan: VerifiedPlanProjection,
     overlay: Option<DecisionOverlayAcknowledged>,
     apply_review: Option<ApplyReviewProjection>,
@@ -68,7 +72,9 @@ pub struct RuntimeChainVerifier {
 
 impl RuntimeChainVerifier {
     pub fn new(plan: VerifiedPlanProjection) -> Self {
+        let negotiated_protocol_minor = plan.negotiated_protocol_minor();
         Self {
+            negotiated_protocol_minor,
             plan,
             overlay: None,
             apply_review: None,
@@ -197,7 +203,10 @@ impl RuntimeChainVerifier {
         &self,
         canonical_projection: &[u8],
     ) -> Result<VerifiedDryRunProjection, RuntimeProjectionError> {
-        let verified = decode_and_verify_dry_run_projection(canonical_projection)?;
+        let verified = decode_and_verify_dry_run_projection(
+            self.negotiated_protocol_minor,
+            canonical_projection,
+        )?;
         let overlay = self
             .overlay
             .as_ref()
@@ -240,7 +249,8 @@ impl RuntimeChainVerifier {
         &mut self,
         canonical_projection: &[u8],
     ) -> Result<ApplyReviewProjection, RuntimeProjectionError> {
-        let review = decode_and_verify_apply_review(canonical_projection)?;
+        let review =
+            decode_and_verify_apply_review(self.negotiated_protocol_minor, canonical_projection)?;
         let review_binding = digest_value(
             review.review_binding_sha256.as_ref(),
             "review_binding_sha256",
@@ -397,7 +407,8 @@ impl RuntimeChainVerifier {
         &mut self,
         canonical_events: &[Vec<u8>],
     ) -> Result<Vec<ExecutionStreamEvent>, RuntimeProjectionError> {
-        let events = decode_and_verify_execution_stream(canonical_events)?;
+        let events =
+            decode_and_verify_execution_stream(self.negotiated_protocol_minor, canonical_events)?;
         let review = self
             .apply_review
             .as_ref()
@@ -976,8 +987,10 @@ pub fn decode_and_verify_decision_overlay(
 }
 
 fn verify_dry_run_projection(
+    negotiated_protocol_minor: u32,
     projection: &DryRunProjection,
 ) -> Result<VerifiedDryRunProjection, RuntimeProjectionError> {
+    validate_runtime_protocol_minor(negotiated_protocol_minor)?;
     let manifest = projection
         .manifest
         .as_ref()
@@ -1012,7 +1025,7 @@ fn verify_dry_run_projection(
         .collect::<Result<_, _>>()?;
     validate_unique(&action_ids, "dry-run action_id")?;
     for action in &payload.actions {
-        validate_preview(action.execution_preview.as_ref())?;
+        validate_preview(negotiated_protocol_minor, action.execution_preview.as_ref())?;
     }
     let summary = validate_revalidation(revalidation, &action_ids, manifest.current)?;
     if manifest.action_count != action_ids.len() as u64
@@ -1058,8 +1071,10 @@ fn verify_dry_run_projection(
 }
 
 pub fn decode_and_verify_dry_run_projection(
+    negotiated_protocol_minor: u32,
     canonical_projection: &[u8],
 ) -> Result<VerifiedDryRunProjection, RuntimeProjectionError> {
+    validate_runtime_protocol_minor(negotiated_protocol_minor)?;
     if canonical_projection.len() > MAXIMUM_RUNTIME_PROJECTION_BYTES as usize {
         return Err(RuntimeProjectionError::InvalidManifest(
             "dry-run projection exceeds maximum",
@@ -1072,12 +1087,14 @@ pub fn decode_and_verify_dry_run_projection(
             "dry-run projection is not canonical protobuf",
         ));
     }
-    verify_dry_run_projection(&projection)
+    verify_dry_run_projection(negotiated_protocol_minor, &projection)
 }
 
 pub fn decode_and_verify_apply_review(
+    negotiated_protocol_minor: u32,
     canonical_projection: &[u8],
 ) -> Result<ApplyReviewProjection, RuntimeProjectionError> {
+    validate_runtime_protocol_minor(negotiated_protocol_minor)?;
     if canonical_projection.len() > MAXIMUM_RUNTIME_PROJECTION_BYTES as usize {
         return Err(RuntimeProjectionError::InvalidManifest(
             "apply-review projection exceeds maximum",
@@ -1090,7 +1107,7 @@ pub fn decode_and_verify_apply_review(
             "apply-review projection is not canonical protobuf",
         ));
     }
-    validate_apply_review(&projection)?;
+    validate_apply_review(negotiated_protocol_minor, &projection)?;
     let expected = digest_value(
         projection.projection_sha256.as_ref(),
         "apply-review projection_sha256",
@@ -1108,8 +1125,10 @@ pub fn decode_and_verify_apply_review(
 }
 
 pub fn decode_and_verify_execution_stream(
+    negotiated_protocol_minor: u32,
     canonical_events: &[Vec<u8>],
 ) -> Result<Vec<ExecutionStreamEvent>, RuntimeProjectionError> {
+    validate_runtime_protocol_minor(negotiated_protocol_minor)?;
     if canonical_events.is_empty() || canonical_events.len() as u64 > MAXIMUM_EXECUTION_EVENT_COUNT
     {
         return Err(RuntimeProjectionError::InvalidManifest(
@@ -1154,7 +1173,7 @@ pub fn decode_and_verify_execution_stream(
                 reason: "invalid execution event sequence",
             });
         }
-        validate_execution_event_body(offset, event.body.as_ref())?;
+        validate_execution_event_body(negotiated_protocol_minor, offset, event.body.as_ref())?;
     }
     let Some(execution_stream_event::Body::ApplyFinished(terminal)) =
         events.last().and_then(|e| e.body.as_ref())
@@ -1203,6 +1222,7 @@ pub fn decode_and_verify_execution_stream(
 }
 
 fn validate_execution_event_body(
+    negotiated_protocol_minor: u32,
     offset: usize,
     body: Option<&execution_stream_event::Body>,
 ) -> Result<(), RuntimeProjectionError> {
@@ -1217,7 +1237,7 @@ fn validate_execution_event_body(
         }
         Some(execution_stream_event::Body::ForceRequiredWarning(warning)) => {
             digest_opaque(warning.action_id.as_ref(), "force warning action_id")?;
-            validate_preview(warning.preview.as_ref())
+            validate_preview(negotiated_protocol_minor, warning.preview.as_ref())
         }
         Some(execution_stream_event::Body::StepFinished(step)) => {
             digest_opaque(step.action_id.as_ref(), "step action_id")?;
@@ -1410,7 +1430,11 @@ fn validate_dry_run_manifest(
     validate_epoch(manifest.epoch.as_ref())
 }
 
-fn validate_apply_review(projection: &ApplyReviewProjection) -> Result<(), RuntimeProjectionError> {
+fn validate_apply_review(
+    negotiated_protocol_minor: u32,
+    projection: &ApplyReviewProjection,
+) -> Result<(), RuntimeProjectionError> {
+    validate_runtime_protocol_minor(negotiated_protocol_minor)?;
     if projection.maximum_action_count != MAXIMUM_RUNTIME_ACTION_COUNT
         || projection.maximum_finding_count != MAXIMUM_RUNTIME_FINDING_COUNT
         || projection.maximum_encoded_bytes != MAXIMUM_RUNTIME_PROJECTION_BYTES
@@ -1453,7 +1477,7 @@ fn validate_apply_review(projection: &ApplyReviewProjection) -> Result<(), Runti
         .collect::<Result<_, _>>()?;
     validate_unique(&action_ids, "apply-review action_id")?;
     for action in &projection.actions {
-        validate_preview(action.execution_preview.as_ref())?;
+        validate_preview(negotiated_protocol_minor, action.execution_preview.as_ref())?;
     }
     let revalidation =
         projection
@@ -1784,27 +1808,13 @@ fn validate_unit(
 }
 
 fn validate_preview(
+    negotiated_protocol_minor: u32,
     preview: Option<&crate::diskplan::v1::ActionExecutionPreviewProjection>,
 ) -> Result<(), RuntimeProjectionError> {
     let preview = preview.ok_or(RuntimeProjectionError::InvalidManifest(
         "missing execution preview",
     ))?;
-    if PlanActionKind::try_from(preview.adapter).is_err()
-        || preview.adapter == PlanActionKind::Unspecified as i32
-        || (preview.mutation_supported
-            && (preview.raw_executable.is_empty()
-                || preview.raw_executable.contains(&0)
-                || preview.raw_argv.iter().any(|value| value.contains(&0))
-                || preview.raw_argv.len() != preview.display_argv.len()
-                || preview.postcondition.is_empty()))
-        || (!preview.mutation_supported
-            && (!preview.raw_executable.is_empty() || !preview.raw_argv.is_empty()))
-    {
-        return Err(RuntimeProjectionError::InvalidManifest(
-            "execution preview is invalid",
-        ));
-    }
-    Ok(())
+    validate_execution_preview(negotiated_protocol_minor, preview)
 }
 
 fn validate_plan_evidence_binding(
@@ -2036,6 +2046,7 @@ fn validate_unique(values: &[&[u8]], field: &'static str) -> Result<(), RuntimeP
 mod tests {
     use super::*;
     use crate::diskplan::v1::{AcknowledgedWaiver, PlanProjectionRecord, PlanWaiverProjection};
+    use crate::runtime::PROTOCOL15_MINOR;
 
     #[test]
     fn overlay_chain_rejects_not_stageable_and_nonexact_waivers() {
@@ -2117,6 +2128,7 @@ mod tests {
         let review_binding = vec![0x51; 32];
         let apply_review_id = b"apply-review".to_vec();
         let make_chain = || RuntimeChainVerifier {
+            negotiated_protocol_minor: PROTOCOL15_MINOR,
             plan: plan_with_action(PlanActionProjection::default()),
             overlay: None,
             apply_review: Some(ApplyReviewProjection {
@@ -2194,6 +2206,7 @@ mod tests {
         VerifiedPlanProjection {
             records: vec![record],
             manifest: plan_manifest(),
+            negotiated_protocol_minor: PROTOCOL15_MINOR,
         }
     }
 

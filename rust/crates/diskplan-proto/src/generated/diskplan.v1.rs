@@ -975,6 +975,15 @@ pub struct ActionExecutionPreviewProjection {
     pub postcondition: ::prost::alloc::string::String,
     #[prost(bool, tag = "6")]
     pub mutation_supported: bool,
+    /// Protocol 1.5: exact execve working-directory bytes. Presence is required
+    /// at 1.5, including an explicitly empty value for a non-mutating preview.
+    /// Protocol 1.4 senders must omit this field.
+    #[prost(bytes = "vec", optional, tag = "7")]
+    pub raw_working_directory: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Protocol 1.5: engine-authored residual race classification. Protocol 1.4
+    /// senders must retain the zero value and omit the field from the wire.
+    #[prost(enumeration = "PathRaceProjection", tag = "8")]
+    pub path_race: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PlanActionProjection {

@@ -7,7 +7,8 @@ use diskplan_proto::diskplan::v1::{
 };
 use diskplan_proto::runtime::{
     MAXIMUM_PLAN_PROJECTION_MANIFEST_BYTES, MAXIMUM_PLAN_PROJECTION_RAW_CHUNK_BYTES,
-    MAXIMUM_PLAN_PROJECTION_RECORD_COUNT, decode_and_verify_plan_projection,
+    MAXIMUM_PLAN_PROJECTION_RECORD_COUNT, PROTOCOL14_MINOR, PROTOCOL15_MINOR,
+    decode_and_verify_plan_projection, escape_raw_working_directory,
 };
 use diskplan_proto::sealed::{
     RuntimeChainVerifier, decode_and_verify_apply_review, decode_and_verify_decision_overlay,
@@ -25,11 +26,12 @@ fn swift_runtime_vectors_are_canonical_and_strictly_verified() {
         "codex-scope-action",
         "version-survivor-action",
     ] {
-        verify_fixture(name);
+        verify_fixture("runtime-v1.5", PROTOCOL15_MINOR, name);
     }
 
-    let accepted = fixture_chain_artifacts("empty-batch-dry-run");
-    let foreign = fixture_chain_artifacts("force-action-execution");
+    let accepted = fixture_chain_artifacts("runtime-v1.5", PROTOCOL15_MINOR, "empty-batch-dry-run");
+    let foreign =
+        fixture_chain_artifacts("runtime-v1.5", PROTOCOL15_MINOR, "force-action-execution");
     let mut chain = RuntimeChainVerifier::new(accepted.plan);
     assert!(chain.verify_overlay(&foreign.overlay).is_err());
     chain.verify_overlay(&accepted.overlay).unwrap();
@@ -44,13 +46,127 @@ fn swift_runtime_vectors_are_canonical_and_strictly_verified() {
 }
 
 #[test]
+fn protocol14_vectors_remain_byte_compatible_but_mutation_is_fail_closed() {
+    verify_fixture("runtime-v1.4", PROTOCOL14_MINOR, "empty-batch-dry-run");
+
+    let (chunks, manifest) = fixture_plan_bytes("runtime-v1.4", "force-action-execution");
+    assert!(decode_and_verify_plan_projection(PROTOCOL14_MINOR, &chunks, &manifest).is_err());
+    assert!(decode_and_verify_plan_projection(PROTOCOL15_MINOR, &chunks, &manifest).is_err());
+}
+
+#[test]
+fn raw_working_directory_display_is_byte_exact_and_escaped() {
+    assert_eq!(
+        escape_raw_working_directory(b"/tmp/\\\xff\0"),
+        "/tmp/\\\\\\xff\\x00"
+    );
+}
+
+#[test]
+fn preview_bytes_are_bound_across_plan_and_execution_hash_chains() {
+    let (mut chunks, manifest) = fixture_plan_bytes("runtime-v1.5", "force-action-execution");
+    let mut first_chunk =
+        diskplan_proto::diskplan::v1::PlanProjectionChunk::decode(chunks[0].as_slice()).unwrap();
+    let record_length = u32::from_be_bytes(
+        first_chunk.canonical_record_payload[..4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let mut record = diskplan_proto::diskplan::v1::PlanProjectionRecord::decode(
+        &first_chunk.canonical_record_payload[4..4 + record_length],
+    )
+    .unwrap();
+    let remaining_records = first_chunk.canonical_record_payload[4 + record_length..].to_vec();
+    let Some(diskplan_proto::diskplan::v1::plan_projection_record::Body::Action(action)) =
+        record.body.as_mut()
+    else {
+        panic!("fixture first plan record is not an action")
+    };
+    action
+        .execution_preview
+        .as_mut()
+        .unwrap()
+        .raw_working_directory = Some(b"/changed-plan-cwd".to_vec());
+    let encoded_record = record.encode_to_vec();
+    first_chunk.canonical_record_payload = (encoded_record.len() as u32)
+        .to_be_bytes()
+        .into_iter()
+        .chain(encoded_record)
+        .chain(remaining_records)
+        .collect();
+    chunks[0] = first_chunk.encode_to_vec();
+    assert!(decode_and_verify_plan_projection(PROTOCOL15_MINOR, &chunks, &manifest).is_err());
+
+    let artifacts =
+        fixture_chain_artifacts("runtime-v1.5", PROTOCOL15_MINOR, "force-action-execution");
+    let mut dry_run =
+        diskplan_proto::diskplan::v1::DryRunProjection::decode(artifacts.dry_run.as_slice())
+            .unwrap();
+    let mut dry_payload = diskplan_proto::diskplan::v1::DryRunProjectionPayload::decode(
+        dry_run.canonical_projection_payload.as_slice(),
+    )
+    .unwrap();
+    dry_payload.actions[0]
+        .execution_preview
+        .as_mut()
+        .unwrap()
+        .raw_working_directory = Some(b"/changed-dry-cwd".to_vec());
+    dry_run.canonical_projection_payload = dry_payload.encode_to_vec();
+    assert!(
+        decode_and_verify_dry_run_projection(PROTOCOL15_MINOR, &dry_run.encode_to_vec()).is_err()
+    );
+
+    let mut apply = diskplan_proto::diskplan::v1::ApplyReviewProjection::decode(
+        artifacts.apply_review.as_slice(),
+    )
+    .unwrap();
+    apply.actions[0]
+        .execution_preview
+        .as_mut()
+        .unwrap()
+        .path_race = diskplan_proto::diskplan::v1::PathRaceProjection::NoneObserved as i32;
+    assert!(decode_and_verify_apply_review(PROTOCOL15_MINOR, &apply.encode_to_vec()).is_err());
+
+    let mut events = artifacts.execution_events.clone();
+    let mut warning = events
+        .iter_mut()
+        .find_map(|bytes| {
+            let event = ExecutionStreamEvent::decode(bytes.as_slice()).unwrap();
+            matches!(
+                event.body.as_ref(),
+                Some(execution_stream_event::Body::ForceRequiredWarning(_))
+            )
+            .then_some((bytes, event))
+        })
+        .unwrap();
+    let Some(execution_stream_event::Body::ForceRequiredWarning(force_warning)) =
+        warning.1.body.as_mut()
+    else {
+        unreachable!()
+    };
+    force_warning
+        .preview
+        .as_mut()
+        .unwrap()
+        .raw_working_directory = Some(b"/changed-warning-cwd".to_vec());
+    *warning.0 = warning.1.encode_to_vec();
+    reseal_execution_stream(&mut events);
+    decode_and_verify_execution_stream(PROTOCOL15_MINOR, &events).unwrap();
+    let mut chain = RuntimeChainVerifier::new(artifacts.plan);
+    chain.verify_overlay(&artifacts.overlay).unwrap();
+    chain.verify_apply_review(&artifacts.apply_review).unwrap();
+    assert!(chain.verify_execution_stream(&events).is_err());
+}
+
+#[test]
 fn canonical_admission_rejects_unknown_fields_at_envelope_and_nested_levels() {
-    let frame = fixture_frames("empty-batch-dry-run").remove(0);
+    let frame = fixture_frames("runtime-v1.5", "empty-batch-dry-run").remove(0);
     let mut envelope_unknown = frame[4..].to_vec();
     envelope_unknown.extend_from_slice(&[0x98, 0x06, 0x01]);
     assert!(decode_canonical_envelope(&envelope_unknown).is_err());
 
-    let artifacts = fixture_chain_artifacts("force-action-execution");
+    let artifacts =
+        fixture_chain_artifacts("runtime-v1.5", PROTOCOL15_MINOR, "force-action-execution");
     let mut overlay_unknown = artifacts.overlay;
     overlay_unknown.extend_from_slice(&[0x98, 0x06, 0x01]);
     assert!(decode_and_verify_decision_overlay(&overlay_unknown).is_err());
@@ -61,12 +177,15 @@ fn canonical_admission_rejects_unknown_fields_at_envelope_and_nested_levels() {
     dry_run
         .canonical_projection_payload
         .extend_from_slice(&[0x98, 0x06, 0x01]);
-    assert!(decode_and_verify_dry_run_projection(&dry_run.encode_to_vec()).is_err());
+    assert!(
+        decode_and_verify_dry_run_projection(PROTOCOL15_MINOR, &dry_run.encode_to_vec()).is_err()
+    );
 }
 
 #[test]
 fn execution_force_warning_omission_and_duplication_are_rejected() {
-    let artifacts = fixture_chain_artifacts("force-action-execution");
+    let artifacts =
+        fixture_chain_artifacts("runtime-v1.5", PROTOCOL15_MINOR, "force-action-execution");
     for mutation in ["missing", "duplicate", "extra"] {
         let mut chain = RuntimeChainVerifier::new(artifacts.plan.clone());
         chain.verify_overlay(&artifacts.overlay).unwrap();
@@ -106,7 +225,7 @@ fn execution_force_warning_omission_and_duplication_are_rejected() {
             _ => unreachable!(),
         }
         reseal_execution_stream(&mut events);
-        decode_and_verify_execution_stream(&events).unwrap();
+        decode_and_verify_execution_stream(PROTOCOL15_MINOR, &events).unwrap();
         assert!(chain.verify_execution_stream(&events).is_err());
     }
 }
@@ -115,6 +234,7 @@ fn execution_force_warning_omission_and_duplication_are_rejected() {
 fn raw_plan_admission_rejects_oversized_inputs_before_decode() {
     assert!(
         decode_and_verify_plan_projection(
+            PROTOCOL15_MINOR,
             &vec![Vec::new(); MAXIMUM_PLAN_PROJECTION_RECORD_COUNT + 1],
             &[]
         )
@@ -122,6 +242,7 @@ fn raw_plan_admission_rejects_oversized_inputs_before_decode() {
     );
     assert!(
         decode_and_verify_plan_projection(
+            PROTOCOL15_MINOR,
             &[],
             &vec![0; MAXIMUM_PLAN_PROJECTION_MANIFEST_BYTES + 1]
         )
@@ -129,6 +250,7 @@ fn raw_plan_admission_rejects_oversized_inputs_before_decode() {
     );
     assert!(
         decode_and_verify_plan_projection(
+            PROTOCOL15_MINOR,
             &[vec![0; MAXIMUM_PLAN_PROJECTION_RAW_CHUNK_BYTES + 1]],
             &[]
         )
@@ -136,7 +258,7 @@ fn raw_plan_admission_rejects_oversized_inputs_before_decode() {
     );
 }
 
-fn verify_fixture(name: &str) {
+fn verify_fixture(schema: &str, protocol_minor: u32, name: &str) {
     let mut chunks: Vec<Vec<u8>> = Vec::new();
     let mut execution_events = Vec::new();
     let mut plan_reference = None;
@@ -145,7 +267,7 @@ fn verify_fixture(name: &str) {
     let mut saw_dry_run = false;
     let mut saw_apply_review = false;
 
-    for frame in fixture_frames(name) {
+    for frame in fixture_frames(schema, name) {
         let payload_length = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
         assert_eq!(payload_length, frame.len() - 4);
         let payload = &frame[4..];
@@ -160,8 +282,12 @@ fn verify_fixture(name: &str) {
             runtime_event::Body::PlanProjectionChunk(chunk) => chunks.push(chunk.encode_to_vec()),
             runtime_event::Body::PlanProjection(projection) => {
                 let manifest = projection.manifest.unwrap();
-                let verified =
-                    decode_and_verify_plan_projection(&chunks, &manifest.encode_to_vec()).unwrap();
+                let verified = decode_and_verify_plan_projection(
+                    protocol_minor,
+                    &chunks,
+                    &manifest.encode_to_vec(),
+                )
+                .unwrap();
                 assert_eq!(verified.manifest(), &manifest);
                 chain = Some(RuntimeChainVerifier::new(verified));
                 plan_reference = Some((
@@ -204,7 +330,8 @@ fn verify_fixture(name: &str) {
             }
             runtime_event::Body::DryRunProjection(projection) => {
                 let encoded = projection.encode_to_vec();
-                let verified = decode_and_verify_dry_run_projection(&encoded).unwrap();
+                let verified =
+                    decode_and_verify_dry_run_projection(protocol_minor, &encoded).unwrap();
                 chain.as_ref().unwrap().verify_dry_run(&encoded).unwrap();
                 let overlay = overlay_reference.as_ref().unwrap();
                 assert_eq!(
@@ -219,11 +346,15 @@ fn verify_fixture(name: &str) {
                 assert_eq!(verified.manifest().selected_action_count, overlay.3);
                 let mut forged = projection;
                 forged.manifest.as_mut().unwrap().selected_action_count += 1;
-                assert!(decode_and_verify_dry_run_projection(&forged.encode_to_vec()).is_err());
+                assert!(
+                    decode_and_verify_dry_run_projection(protocol_minor, &forged.encode_to_vec())
+                        .is_err()
+                );
                 saw_dry_run = true;
             }
             runtime_event::Body::ApplyReviewProjection(projection) => {
-                decode_and_verify_apply_review(&projection.encode_to_vec()).unwrap();
+                decode_and_verify_apply_review(protocol_minor, &projection.encode_to_vec())
+                    .unwrap();
                 chain
                     .as_mut()
                     .unwrap()
@@ -231,7 +362,10 @@ fn verify_fixture(name: &str) {
                     .unwrap();
                 let mut forged = projection;
                 forged.overlay_revision += 1;
-                assert!(decode_and_verify_apply_review(&forged.encode_to_vec()).is_err());
+                assert!(
+                    decode_and_verify_apply_review(protocol_minor, &forged.encode_to_vec())
+                        .is_err()
+                );
                 saw_apply_review = true;
             }
             runtime_event::Body::ExecutionStreamEvent(event) => {
@@ -244,7 +378,7 @@ fn verify_fixture(name: &str) {
                         )
                     )
                 ) {
-                    decode_and_verify_execution_stream(&execution_events).unwrap();
+                    decode_and_verify_execution_stream(protocol_minor, &execution_events).unwrap();
                     chain
                         .as_mut()
                         .unwrap()
@@ -259,7 +393,7 @@ fn verify_fixture(name: &str) {
                     );
                     let mut forged = execution_events.clone();
                     *forged.last_mut().unwrap().last_mut().unwrap() ^= 1;
-                    assert!(decode_and_verify_execution_stream(&forged).is_err());
+                    assert!(decode_and_verify_execution_stream(protocol_minor, &forged).is_err());
                 }
             }
             runtime_event::Body::BuildPlanAccepted(_) => {}
@@ -281,14 +415,14 @@ struct FixtureChainArtifacts {
     execution_events: Vec<Vec<u8>>,
 }
 
-fn fixture_chain_artifacts(name: &str) -> FixtureChainArtifacts {
+fn fixture_chain_artifacts(schema: &str, protocol_minor: u32, name: &str) -> FixtureChainArtifacts {
     let mut chunks = Vec::new();
     let mut plan = None;
     let mut overlay = None;
     let mut dry_run = None;
     let mut apply_review = None;
     let mut execution_events = Vec::new();
-    for frame in fixture_frames(name) {
+    for frame in fixture_frames(schema, name) {
         let payload = &frame[4..];
         let envelope = decode_canonical_envelope(payload)
             .unwrap()
@@ -302,7 +436,12 @@ fn fixture_chain_artifacts(name: &str) -> FixtureChainArtifacts {
             runtime_event::Body::PlanProjection(projection) => {
                 let manifest = projection.manifest.unwrap();
                 plan = Some(
-                    decode_and_verify_plan_projection(&chunks, &manifest.encode_to_vec()).unwrap(),
+                    decode_and_verify_plan_projection(
+                        protocol_minor,
+                        &chunks,
+                        &manifest.encode_to_vec(),
+                    )
+                    .unwrap(),
                 );
             }
             runtime_event::Body::DecisionOverlayAcknowledged(value) => {
@@ -312,12 +451,12 @@ fn fixture_chain_artifacts(name: &str) -> FixtureChainArtifacts {
             }
             runtime_event::Body::DryRunProjection(value) => {
                 let encoded = value.encode_to_vec();
-                decode_and_verify_dry_run_projection(&encoded).unwrap();
+                decode_and_verify_dry_run_projection(protocol_minor, &encoded).unwrap();
                 dry_run = Some(encoded);
             }
             runtime_event::Body::ApplyReviewProjection(value) => {
                 let encoded = value.encode_to_vec();
-                decode_and_verify_apply_review(&encoded).unwrap();
+                decode_and_verify_apply_review(protocol_minor, &encoded).unwrap();
                 apply_review = Some(encoded);
             }
             runtime_event::Body::ExecutionStreamEvent(value) => {
@@ -326,7 +465,7 @@ fn fixture_chain_artifacts(name: &str) -> FixtureChainArtifacts {
             _ => {}
         }
     }
-    decode_and_verify_execution_stream(&execution_events).unwrap();
+    decode_and_verify_execution_stream(protocol_minor, &execution_events).unwrap();
     FixtureChainArtifacts {
         plan: plan.unwrap(),
         overlay: overlay.unwrap(),
@@ -336,9 +475,10 @@ fn fixture_chain_artifacts(name: &str) -> FixtureChainArtifacts {
     }
 }
 
-fn fixture_frames(name: &str) -> Vec<Vec<u8>> {
+fn fixture_frames(schema: &str, name: &str) -> Vec<Vec<u8>> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../proto/fixtures/runtime-v1.4")
+        .join("../../../proto/fixtures")
+        .join(schema)
         .join(format!("{name}.frames.hex"));
     fs::read_to_string(path)
         .unwrap()
@@ -346,6 +486,27 @@ fn fixture_frames(name: &str) -> Vec<Vec<u8>> {
         .filter(|line| !line.is_empty())
         .map(|line| hex::decode(line).unwrap())
         .collect()
+}
+
+fn fixture_plan_bytes(schema: &str, name: &str) -> (Vec<Vec<u8>>, Vec<u8>) {
+    let mut chunks = Vec::new();
+    for frame in fixture_frames(schema, name) {
+        let envelope = decode_canonical_envelope(&frame[4..])
+            .unwrap()
+            .envelope()
+            .clone();
+        let Some(envelope::Body::RuntimeEvent(event)) = envelope.body else {
+            continue;
+        };
+        match event.body.unwrap() {
+            runtime_event::Body::PlanProjectionChunk(chunk) => chunks.push(chunk.encode_to_vec()),
+            runtime_event::Body::PlanProjection(projection) => {
+                return (chunks, projection.manifest.unwrap().encode_to_vec());
+            }
+            _ => {}
+        }
+    }
+    panic!("fixture contains no plan projection")
 }
 
 fn reseal_execution_stream(canonical_events: &mut Vec<Vec<u8>>) {

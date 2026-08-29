@@ -22,6 +22,23 @@ func handshakeSelectsMinorAndSortedIntersection() throws {
 }
 
 @Test
+func protocol15EndpointNegotiatesProtocol14WithoutChangingTheCurrentMinor() throws {
+  #expect(protocolMinor == protocol15Minor)
+  var peer = Handshake.swiftEngineHello(runtimeCapabilities: protocol14RuntimeCapabilities)
+  peer.version.minor = protocol14Minor
+  guard
+    case .accepted(let accepted) = Handshake.negotiate(
+      local: Handshake.swiftEngineHello(runtimeCapabilities: protocol14RuntimeCapabilities),
+      peer: peer
+    )
+  else {
+    Issue.record("expected protocol 1.4 negotiation")
+    return
+  }
+  #expect(accepted.selectedVersion.minor == protocol14Minor)
+}
+
+@Test
 func handshakeRejectsMajorMismatchAndMissingCapabilities() {
   var peer = Handshake.swiftEngineHello()
   peer.version = version(major: 2, minor: 0)
