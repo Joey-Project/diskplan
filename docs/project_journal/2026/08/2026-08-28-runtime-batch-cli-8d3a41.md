@@ -155,6 +155,14 @@ superseded_by:
   before the changed copy, while scan 40 changes from the old `p provisio`
   prefix to `p finalize`. Focused snapshot validation remains assigned to the
   India host.
+- India validated exact head
+  `526f1c5e4b0c444f0e9afa2e8c87e709eb0fb39e`: the focused scan,
+  runtime-plan, and warning-view snapshot tests all passed with bounded wall
+  times of 1.708, 0.065, and 0.060 seconds respectively, and each command was
+  quiescent at completion. `cargo test -p diskplan --lib` then passed 112/112
+  tests in 23.92 test seconds and 23.969 bounded wall seconds, also quiescent.
+  This evidence binds the snapshot implementation head; the following
+  documentation-only commit awaits its naturally triggered current-head CI.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including
