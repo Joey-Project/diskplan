@@ -34,5 +34,5 @@ expression: "snapshot(&state, 120, 34)"
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-q cancel  Space pause/resume  p provisional evidence  ? or / help
+q cancel  Space pause/resume  p finalize partial + plan  ? or / help
 scan is running

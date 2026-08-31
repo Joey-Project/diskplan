@@ -7,6 +7,7 @@
 mod model;
 mod runtime;
 mod types;
+mod wire;
 
 #[cfg(test)]
 mod tests;
@@ -16,9 +17,10 @@ pub use model::{
     PlanSearchField, RowKey, RowLevel, SortMode, TargetRowKey, TargetViewRow, ViewRow,
 };
 pub use runtime::{
-    DecisionOverlay, EnginePlanSnapshot, ExecutionPreviewProjection, ExecutionUnitProjection,
-    ExecutionWarningProjection, OverlayStageResult, PlanIntent, PlanIntentKind,
-    PlanProjectionAdapter, PlanRuntime, PlanRuntimeError, PlanRuntimeEvent, PlanView,
+    DecisionOverlay, EngineOverlaySnapshot, EnginePlanSnapshot, ExecutionPreviewProjection,
+    ExecutionUnitProjection, ExecutionWarningProjection, OverlayStageEdit, OverlayStageResult,
+    PlanIntent, PlanIntentKind, PlanProjectionAdapter, PlanRuntime, PlanRuntimeError,
+    PlanRuntimeEvent, PlanView,
 };
 pub use types::{
     ActionId, ActionKindId, ActionKindProjection, ActionProjection, Activity, BlockerId,
@@ -27,3 +29,4 @@ pub use types::{
     Recoverability, ReleaseSetId, ReleaseSetProjection, Stageability, TargetId, TargetKind,
     TargetProjection, WaiverId,
 };
+pub(crate) use wire::snapshot_from_verified;

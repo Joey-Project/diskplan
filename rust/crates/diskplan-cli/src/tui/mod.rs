@@ -132,7 +132,7 @@ impl<W: Write, M: RawMode> Drop for TerminalGuard<W, M> {
     }
 }
 
-pub use model::{AppState, ControlCommand, Screen, TerminalState};
+pub use model::{AppState, ControlCommand, PlanCommand, Screen, TerminalState};
 pub use reducer::reduce;
 pub use render::render;
 

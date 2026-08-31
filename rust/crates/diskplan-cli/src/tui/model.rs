@@ -4,7 +4,7 @@ use diskplan_proto::diskplan::v1::{
     ScanState,
 };
 
-use super::plan::{PlanRuntime, PlanRuntimeEvent};
+use super::plan::{OverlayStageEdit, PlanIntentKind, PlanRuntime, PlanRuntimeEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -162,8 +162,15 @@ impl EngineDelivery {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     SendControl(ControlCommand),
+    SendPlan(PlanCommand),
     StopDriver,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanCommand {
+    EditStage(OverlayStageEdit),
+    Prepare(PlanIntentKind),
 }

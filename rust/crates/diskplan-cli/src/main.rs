@@ -1,64 +1,120 @@
 use std::path::{Path, PathBuf};
 
-use diskplan::BoundEngine;
+use diskplan::batch::ProtocolBatchEngineClient;
+use diskplan::cli::{CommandLine, USAGE};
+use diskplan::{BoundEngine, batch, cli};
 use diskplan_core::handshake::{PROTOCOL_MAJOR, PROTOCOL_MINOR};
-
-const USAGE: &str = "usage: diskplan [--handshake] [diskplan-engine]";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args_os();
     let program = args.next().unwrap_or_else(|| "diskplan".into());
-    let first = args.next();
-    if first.as_deref() == Some(Path::new("--version-json").as_os_str()) {
-        if args.next().is_some() {
-            usage(&program);
-        }
-        println!(
-            "{{\"component\":\"diskplan\",\"product_version\":\"{}\",\"protocol_major\":{},\"protocol_minor\":{}}}",
-            env!("CARGO_PKG_VERSION"),
-            PROTOCOL_MAJOR,
-            PROTOCOL_MINOR
-        );
+    let command = cli::parse(args).unwrap_or_else(|error| {
+        eprintln!("diskplan: {}", error.detail());
+        usage(&program);
+    });
+    if command == CommandLine::VersionJson {
+        print_version_json();
         return;
     }
+    let batch_mode = matches!(&command, CommandLine::Batch(_));
 
-    let (handshake_only, engine) = match first {
-        Some(first) if first == "--handshake" => (true, args.next()),
-        Some(first) => (false, Some(first)),
-        None => (false, None),
+    let engine = match &command {
+        CommandLine::Handshake { engine } | CommandLine::Interactive { engine } => engine.clone(),
+        CommandLine::Batch(_) | CommandLine::VersionJson => None,
     };
-    if args.next().is_some() {
-        usage(&program);
-    }
-
     let engine = match engine {
-        Some(engine) => PathBuf::from(engine),
-        None => sibling_engine().unwrap_or_else(|error| {
-            eprintln!("diskplan: cannot resolve sibling engine: {error}");
-            std::process::exit(1);
-        }),
+        Some(engine) => engine,
+        None => sibling_engine()
+            .map_err(|error| setup_io_failure("cannot resolve sibling engine", error))
+            .unwrap_or_else(|failure| abort_engine_setup(batch_mode, failure)),
     };
-    let bound_engine = BoundEngine::open(&engine).unwrap_or_else(|error| {
-        eprintln!("diskplan: cannot bind engine object: {error}");
-        std::process::exit(1);
-    });
-    verify_engine_identity(&bound_engine, &engine).unwrap_or_else(|error| {
-        eprintln!("diskplan: engine identity check failed: {error}");
-        std::process::exit(1);
-    });
-    if handshake_only {
-        match diskplan::handshake_with_bound_engine(&bound_engine) {
+    let bound_engine = BoundEngine::open(&engine)
+        .map_err(|error| setup_io_failure("cannot bind engine object", error))
+        .unwrap_or_else(|failure| abort_engine_setup(batch_mode, failure));
+    verify_engine_identity(&bound_engine, &engine)
+        .unwrap_or_else(|failure| abort_engine_setup(batch_mode, failure));
+    match command {
+        CommandLine::Handshake { .. } => match diskplan::handshake_with_bound_engine(&bound_engine)
+        {
             Ok(capabilities) => println!("handshake ok: {}", capabilities.join(",")),
             Err(error) => {
                 eprintln!("handshake failed: {error}");
                 std::process::exit(1);
             }
+        },
+        CommandLine::Interactive { .. } => {
+            if let Err(error) = diskplan::tui::run_bound(&bound_engine).await {
+                eprintln!("diskplan: {error}");
+                std::process::exit(1);
+            }
         }
-    } else if let Err(error) = diskplan::tui::run_bound(&bound_engine).await {
-        eprintln!("diskplan: {error}");
-        std::process::exit(1);
+        CommandLine::Batch(options) => {
+            let mut client = ProtocolBatchEngineClient::new(&bound_engine);
+            if let Err(error) = batch::run(&mut client, &options, &mut std::io::stdout().lock()) {
+                eprintln!("diskplan: {error}");
+                std::process::exit(error.exit_code());
+            }
+        }
+        CommandLine::VersionJson => unreachable!("version command returned before engine binding"),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum EngineSetupFailure {
+    #[error("{context}: {source}")]
+    Unavailable {
+        context: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{context}: {detail}")]
+    InvalidIdentityOrProtocol {
+        context: &'static str,
+        detail: String,
+    },
+    #[error("{context}: {source}")]
+    Io {
+        context: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn setup_io_failure(context: &'static str, source: std::io::Error) -> EngineSetupFailure {
+    match source.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => {
+            EngineSetupFailure::Unavailable { context, source }
+        }
+        _ => EngineSetupFailure::Io { context, source },
+    }
+}
+
+fn abort_engine_setup(batch_mode: bool, failure: EngineSetupFailure) -> ! {
+    eprintln!("diskplan: {failure}");
+    let exit_code = engine_setup_exit_code(batch_mode, &failure);
+    std::process::exit(exit_code);
+}
+
+const fn engine_setup_exit_code(batch_mode: bool, failure: &EngineSetupFailure) -> i32 {
+    if batch_mode {
+        match failure {
+            EngineSetupFailure::Unavailable { .. } => 69,
+            EngineSetupFailure::InvalidIdentityOrProtocol { .. } => 70,
+            EngineSetupFailure::Io { .. } => 74,
+        }
+    } else {
+        1
+    }
+}
+
+fn print_version_json() {
+    println!(
+        "{{\"component\":\"diskplan\",\"product_version\":\"{}\",\"protocol_major\":{},\"protocol_minor\":{}}}",
+        env!("CARGO_PKG_VERSION"),
+        PROTOCOL_MAJOR,
+        PROTOCOL_MINOR
+    );
 }
 
 fn sibling_engine() -> std::io::Result<PathBuf> {
@@ -142,27 +198,34 @@ fn expected_engine_identity() -> String {
     )
 }
 
-fn verify_engine_identity(engine: &BoundEngine, label: &Path) -> std::io::Result<()> {
-    let output = engine.output(&[std::ffi::OsStr::new("--version-json")])?;
-    engine.revalidate()?;
+fn verify_engine_identity(engine: &BoundEngine, label: &Path) -> Result<(), EngineSetupFailure> {
+    let output = engine
+        .output(&[std::ffi::OsStr::new("--version-json")])
+        .map_err(|error| setup_io_failure("engine identity probe failed", error))?;
+    engine
+        .revalidate()
+        .map_err(|error| setup_io_failure("engine identity revalidation failed", error))?;
     if !output.status.success() {
-        return Err(std::io::Error::other(format!(
-            "{} --version-json exited {}",
-            label.display(),
-            output.status
-        )));
+        return Err(EngineSetupFailure::InvalidIdentityOrProtocol {
+            context: "engine identity probe exited unsuccessfully",
+            detail: format!(
+                "{} --version-json exited {}",
+                label.display(),
+                output.status
+            ),
+        });
     }
     if !engine_identity_matches(&output.stdout, &output.stderr) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
+        return Err(EngineSetupFailure::InvalidIdentityOrProtocol {
+            context: "engine identity or protocol is invalid",
+            detail: format!(
                 "{} does not exactly match frontend version {} and protocol {}.{}",
                 label.display(),
                 env!("CARGO_PKG_VERSION"),
                 PROTOCOL_MAJOR,
                 PROTOCOL_MINOR
             ),
-        ));
+        });
     }
     Ok(())
 }
@@ -181,6 +244,54 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn batch_engine_setup_failures_use_stable_exit_classes() {
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let failure = setup_io_failure("fixture unavailable", std::io::Error::from(kind));
+            assert_eq!(engine_setup_exit_code(true, &failure), 69);
+        }
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::Other,
+        ] {
+            let failure = setup_io_failure("fixture I/O", std::io::Error::from(kind));
+            assert_eq!(engine_setup_exit_code(true, &failure), 74);
+        }
+        for context in [
+            "engine identity probe exited unsuccessfully",
+            "engine identity is invalid",
+            "engine protocol is invalid",
+        ] {
+            let failure = EngineSetupFailure::InvalidIdentityOrProtocol {
+                context,
+                detail: "fixture rejection".into(),
+            };
+            assert_eq!(engine_setup_exit_code(true, &failure), 70);
+        }
+    }
+
+    #[test]
+    fn interactive_and_handshake_setup_failures_keep_legacy_status() {
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::Other,
+        ] {
+            let failure = setup_io_failure("fixture setup", std::io::Error::from(kind));
+            assert_eq!(engine_setup_exit_code(false, &failure), 1);
+        }
+        let failure = EngineSetupFailure::InvalidIdentityOrProtocol {
+            context: "engine protocol is invalid",
+            detail: "fixture rejection".into(),
+        };
+        assert_eq!(engine_setup_exit_code(false, &failure), 1);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -250,6 +361,40 @@ mod tests {
             expected.as_bytes(),
             b"unexpected diagnostics"
         ));
+    }
+
+    #[test]
+    fn identity_probe_rejection_and_mismatch_are_typed_invalid() {
+        let root = tempfile::tempdir().expect("temporary identity-probe root");
+        for (source, expected_context) in [
+            (
+                Path::new("/usr/bin/false"),
+                "engine identity probe exited unsuccessfully",
+            ),
+            (
+                Path::new("/usr/bin/true"),
+                "engine identity or protocol is invalid",
+            ),
+        ] {
+            let engine = root.path().join(
+                source
+                    .file_name()
+                    .expect("identity fixture executable name"),
+            );
+            fs::copy(source, &engine).expect("copy identity fixture executable");
+            fs::set_permissions(&engine, fs::Permissions::from_mode(0o755))
+                .expect("set identity fixture mode");
+            let bound = BoundEngine::open(&engine).expect("bind identity fixture");
+            let failure = verify_engine_identity(&bound, &engine)
+                .expect_err("identity fixture must not match the sibling contract");
+            assert!(matches!(
+                &failure,
+                EngineSetupFailure::InvalidIdentityOrProtocol { context, .. }
+                    if *context == expected_context
+            ));
+            assert_eq!(engine_setup_exit_code(true, &failure), 70);
+            assert_eq!(engine_setup_exit_code(false, &failure), 1);
+        }
     }
 
     #[test]

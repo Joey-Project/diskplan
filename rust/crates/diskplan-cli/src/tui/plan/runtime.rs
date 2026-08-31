@@ -187,6 +187,33 @@ pub enum OverlayStageResult {
     NotStageable,
     NoActionSelected,
     RevisionExhausted,
+    AwaitingAcknowledgement,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlayStageEdit {
+    action_id: ActionId,
+    stage: bool,
+    base_revision: u64,
+    force_warning: Option<String>,
+}
+
+impl OverlayStageEdit {
+    pub fn action_id(&self) -> &ActionId {
+        &self.action_id
+    }
+
+    pub fn stage(&self) -> bool {
+        self.stage
+    }
+
+    pub fn base_revision(&self) -> u64 {
+        self.base_revision
+    }
+
+    pub fn force_warning(&self) -> Option<&str> {
+        self.force_warning.as_deref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,6 +281,15 @@ pub struct ExecutionPreviewProjection {
     pub final_warnings: Vec<ExecutionWarningProjection>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineOverlaySnapshot {
+    pub plan_id: PlanId,
+    pub evidence_reference: String,
+    pub selected_action_ids: Vec<ActionId>,
+    pub revision: u64,
+    pub digest: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum PlanRuntimeEvent {
     Load(EnginePlanSnapshot),
@@ -272,6 +308,16 @@ pub enum PlanRuntimeEvent {
         reason: String,
     },
     ExecutionPreviewReady(ExecutionPreviewProjection),
+    OverlayAcknowledged(EngineOverlaySnapshot),
+    DryRunReady {
+        current: bool,
+        action_count: u64,
+        finding_count: u64,
+    },
+    OperationRejected {
+        operation: &'static str,
+        summary: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,6 +340,7 @@ pub enum PlanRuntimeError {
     NoActionSelected,
     RevisionExhausted,
     InvalidExecutionPreview,
+    InvalidOverlayAcknowledgement,
 }
 
 impl fmt::Display for PlanRuntimeError {
@@ -313,6 +360,7 @@ pub struct PlanRuntime {
     filter_editing: bool,
     filter_buffer: String,
     pending_intents: Vec<PlanIntent>,
+    pending_overlay_edit: Option<OverlayStageEdit>,
     sort_mode: SortMode,
     sort_modes: HashMap<(super::PlanDisposition, super::ActionKindId), SortMode>,
     compact_columns: bool,
@@ -328,6 +376,10 @@ impl PlanRuntime {
 
     pub fn overlay(&self) -> Option<&DecisionOverlay> {
         self.overlay.as_ref()
+    }
+
+    pub(crate) fn pending_overlay_edit(&self) -> Option<&OverlayStageEdit> {
+        self.pending_overlay_edit.as_ref()
     }
 
     pub fn view(&self) -> PlanView {
@@ -621,6 +673,58 @@ impl PlanRuntime {
         }
     }
 
+    /// Creates a user edit intent without changing the acknowledged overlay.
+    pub fn selected_stage_edit(&self) -> Result<OverlayStageEdit, OverlayStageResult> {
+        let Some(action_id) = self.selected_action_id().cloned() else {
+            return Err(OverlayStageResult::NoActionSelected);
+        };
+        let Some(action) = self.model.action(&action_id) else {
+            return Err(OverlayStageResult::NoActionSelected);
+        };
+        let Some(overlay) = self.overlay.as_ref() else {
+            return Err(OverlayStageResult::NoActionSelected);
+        };
+        if !overlay.can_advance() {
+            return Err(OverlayStageResult::RevisionExhausted);
+        }
+        let stage = !overlay.is_selected(&action_id);
+        if stage {
+            match &action.stageability {
+                Stageability::Stageable => {}
+                Stageability::RequiresWaivers(required) => {
+                    let acknowledged = overlay.allowed_waivers.get(&action_id);
+                    if !required
+                        .iter()
+                        .all(|waiver| acknowledged.is_some_and(|allowed| allowed.contains(waiver)))
+                    {
+                        return Err(OverlayStageResult::RequiresWaivers(required.clone()));
+                    }
+                }
+                Stageability::NotStageable => return Err(OverlayStageResult::NotStageable),
+            }
+        }
+        Ok(OverlayStageEdit {
+            action_id,
+            stage,
+            base_revision: overlay.revision,
+            force_warning: stage.then(|| force_reason(action.force.clone())).flatten(),
+        })
+    }
+
+    /// Reserves the acknowledged overlay revision until the engine seals a result.
+    pub fn queue_selected_stage_edit(&mut self) -> Result<OverlayStageEdit, OverlayStageResult> {
+        if self.pending_overlay_edit.is_some() {
+            return Err(OverlayStageResult::AwaitingAcknowledgement);
+        }
+        let edit = self.selected_stage_edit()?;
+        self.pending_overlay_edit = Some(edit.clone());
+        Ok(edit)
+    }
+
+    pub fn reject_pending_overlay_edit(&mut self) {
+        self.pending_overlay_edit = None;
+    }
+
     pub fn set_selected_user_note(&mut self, note: String) -> Result<(), PlanRuntimeError> {
         let Some(action_id) = self.selected_action_id().cloned() else {
             return Err(PlanRuntimeError::NoActionSelected);
@@ -687,6 +791,7 @@ impl PlanRuntime {
                 self.filter_editing = false;
                 self.filter_buffer.clear();
                 self.pending_intents.clear();
+                self.pending_overlay_edit = None;
                 self.sort_mode = SortMode::EngineOrder;
                 self.sort_modes.clear();
                 self.compact_columns = false;
@@ -794,7 +899,78 @@ impl PlanRuntime {
                 self.detail_viewport_top = 0;
                 Ok(())
             }
+            PlanRuntimeEvent::OverlayAcknowledged(snapshot) => {
+                let Some(current) = self.overlay.as_ref() else {
+                    return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
+                };
+                let Some(pending) = self.pending_overlay_edit.as_ref() else {
+                    return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
+                };
+                let expected_revision = pending
+                    .base_revision
+                    .checked_add(1)
+                    .ok_or(PlanRuntimeError::InvalidOverlayAcknowledgement)?;
+                let mut expected_selected = current.selected_actions.clone();
+                if pending.stage {
+                    expected_selected.insert(pending.action_id.clone());
+                } else {
+                    expected_selected.remove(&pending.action_id);
+                }
+                if current.plan_id != snapshot.plan_id
+                    || current.evidence_reference != snapshot.evidence_reference
+                    || current.revision != pending.base_revision
+                    || snapshot.revision != expected_revision
+                    || snapshot.digest.is_empty()
+                {
+                    return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
+                }
+                let selected = snapshot
+                    .selected_action_ids
+                    .iter()
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                if selected.len() != snapshot.selected_action_ids.len()
+                    || selected != expected_selected
+                    || selected
+                        .iter()
+                        .any(|action_id| self.model.action(action_id).is_none())
+                {
+                    return Err(PlanRuntimeError::InvalidOverlayAcknowledgement);
+                }
+                let overlay = self
+                    .overlay
+                    .as_mut()
+                    .expect("the acknowledged overlay predecessor exists");
+                overlay.selected_actions = selected;
+                overlay.selected_action_order = snapshot.selected_action_ids;
+                overlay.allowed_waivers.clear();
+                overlay.waiver_reasons.clear();
+                overlay.user_notes.clear();
+                overlay.revision = snapshot.revision;
+                overlay.digest = snapshot.digest;
+                self.pending_intents.clear();
+                self.pending_overlay_edit = None;
+                self.execution_preview = None;
+                Ok(())
+            }
+            PlanRuntimeEvent::DryRunReady { .. } => {
+                self.complete_intent(PlanIntentKind::DryRun);
+                Ok(())
+            }
+            PlanRuntimeEvent::OperationRejected { operation, .. } => {
+                match operation {
+                    "overlay edit" => self.pending_overlay_edit = None,
+                    "dry-run" => self.complete_intent(PlanIntentKind::DryRun),
+                    "apply review" => self.complete_intent(PlanIntentKind::ApplyReview),
+                    _ => {}
+                }
+                Ok(())
+            }
         }
+    }
+
+    fn complete_intent(&mut self, kind: PlanIntentKind) {
+        self.pending_intents.retain(|intent| intent.kind != kind);
     }
 
     fn apply_filter_buffer(&mut self) {
@@ -823,6 +999,7 @@ impl PlanRuntime {
         self.filter_editing = false;
         self.filter_buffer.clear();
         self.pending_intents.clear();
+        self.pending_overlay_edit = None;
         self.execution_preview = None;
         Ok(())
     }
@@ -1158,6 +1335,52 @@ mod tests {
             runtime.toggle_selected_stage(),
             OverlayStageResult::Unstaged
         );
+        assert!(runtime.pending_intents().is_empty());
+    }
+
+    #[test]
+    fn terminal_runtime_events_complete_only_the_matching_intent() {
+        let mut runtime = runtime(
+            false,
+            Stageability::Stageable,
+            ForceRequirement::NotRequired,
+        );
+        select_action(&mut runtime);
+        assert!(matches!(
+            runtime.toggle_selected_stage(),
+            OverlayStageResult::Staged { .. }
+        ));
+        runtime.queue_intent(PlanIntentKind::DryRun).unwrap();
+        runtime.queue_intent(PlanIntentKind::ApplyReview).unwrap();
+
+        runtime
+            .apply_event(PlanRuntimeEvent::DryRunReady {
+                current: true,
+                action_count: 1,
+                finding_count: 0,
+            })
+            .unwrap();
+        assert_eq!(runtime.pending_intents().len(), 1);
+        assert_eq!(
+            runtime.pending_intents()[0].kind(),
+            PlanIntentKind::ApplyReview
+        );
+
+        runtime
+            .apply_event(PlanRuntimeEvent::OperationRejected {
+                operation: "apply review",
+                summary: "execution transport unavailable".into(),
+            })
+            .unwrap();
+        assert!(runtime.pending_intents().is_empty());
+
+        runtime.queue_intent(PlanIntentKind::DryRun).unwrap();
+        runtime
+            .apply_event(PlanRuntimeEvent::OperationRejected {
+                operation: "dry-run",
+                summary: "dry-run transport unavailable".into(),
+            })
+            .unwrap();
         assert!(runtime.pending_intents().is_empty());
     }
 
