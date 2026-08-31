@@ -193,6 +193,17 @@ superseded_by:
   removes only the matching intent on each terminal event, preserves any other
   in-flight intent, and adds focused state-machine coverage. Dynamic validation
   remains assigned to the India host.
+- India validated exact implementation head
+  `428dfca4fefaa5268ec32b9c120f9741382d15ef` on macOS 26.5.1 with Rust
+  1.95.0. The bounded `cargo check -p diskplan --all-targets` gate passed in
+  1.280 seconds and was quiescent at completion. The focused runtime-client,
+  event-sequence, plan-wire, terminal-intent, hotkey, batch, and CLI gates all
+  passed and were quiescent, with bounded wall times of 3.591, 0.054, 0.048,
+  0.051, 0.051, 0.052, and 0.048 seconds respectively. The full
+  `cargo test -p diskplan --lib` gate passed 114/114 tests in 23.36 test
+  seconds and 23.412 bounded wall seconds, also quiescent. This evidence binds
+  the implementation head; the following documentation-only successor has not
+  been dynamically tested and awaits naturally triggered current-head CI.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including
