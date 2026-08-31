@@ -151,6 +151,41 @@ func changedPreRenameNamespaceDoesNotBlockAUniqueRetryAttempt() async throws {
 }
 
 @Test
+func replacedPreRenameNamespaceIsNeverDeletedAndDoesNotBlockRetry() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let firstNamespace = fixture.quarantineDirectory(nonce: "replaced-attempt")
+  let displaced = fixture.root.appendingPathComponent("displaced-attempt")
+  let marker = firstNamespace.appendingPathComponent("replacement-marker")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeQuarantine = {
+    withUnsafeCurrentTask { task in task?.cancel() }
+  }
+  hooks.beforeUnusedQuarantineCleanup = {
+    try? FileManager.default.moveItem(at: firstNamespace, to: displaced)
+    try? createPrivateDirectory(firstNamespace)
+    try? Data("replacement".utf8).write(to: marker)
+  }
+  let first = testAdapter(hooks: hooks, quarantineNonce: "replaced-attempt")
+
+  let firstOutcome = await Task {
+    await first.apply(fixture.removeOperation, context: gitTestContext())
+  }.value
+  #expect(firstOutcome == .cancelled)
+  #expect(slotExists(fixture.worktree))
+  #expect(slotExists(displaced))
+  #expect(FileManager.default.fileExists(atPath: marker.path))
+
+  #expect(
+    await testAdapter(quarantineNonce: "retry-after-replacement").apply(
+      fixture.removeOperation, context: gitTestContext())
+      == .succeeded(detailCode: "git-worktree-quarantine-removed")
+  )
+  #expect(slotExists(displaced))
+  #expect(FileManager.default.fileExists(atPath: marker.path))
+}
+
+@Test
 func gitWorktreeVerificationFailureRestoresTheExactSourceSlot() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
@@ -249,6 +284,47 @@ func interruptionRestoreAccessDriftRetainsQuarantine() async throws {
     return
   }
   #expect(failureCode == "restore-protected-properties-mismatch-access-policy")
+}
+
+@Test
+func restoreSnapshotRejectsAReplacedQuarantineLeaf() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let displaced = fixture.quarantineDirectory.appendingPathComponent("displaced-payload")
+  let replacementMarker = fixture.quarantinedURL.appendingPathComponent("replacement-marker")
+  let mutation = LockedTriggeredOneShotMutation()
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    try? Data("unexpected".utf8).write(
+      to: fixture.quarantinedURL.appendingPathComponent("new-local-data")
+    )
+  }
+  hooks.beforeRestore = {
+    mutation.activate()
+  }
+  hooks.afterCoverageFileFirstRead = { _, path in
+    guard path.last == Data("payload".utf8), mutation.claimIfActive() else { return }
+    try? FileManager.default.moveItem(at: fixture.quarantinedURL, to: displaced)
+    try? createPrivateDirectory(fixture.quarantinedURL)
+    try? Data("replacement".utf8).write(to: replacementMarker)
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("restore must not rename an unverified quarantine replacement")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-unverified")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(displaced))
+  #expect(FileManager.default.fileExists(atPath: replacementMarker.path))
+  #expect(
+    await adapter.disposition(for: fixture.action.id)
+      == .quarantineBindingUnverified(failureCode: "source-slot-identity-mismatch")
+  )
 }
 
 @Test
@@ -689,6 +765,7 @@ func sourceParentACLDriftBeforeRenameRetainsTheSource() async throws {
   }
   #expect(failure.code == "source-parent-seal-mismatch-before-quarantine")
   #expect(slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantineDirectory))
 }
 
 @Test
@@ -710,6 +787,54 @@ func sourceAccessPolicyDriftBeforeRenameRetainsTheSource() async throws {
   #expect(failure.code == "source-seal-mismatch-before-quarantine")
   #expect(slotExists(fixture.worktree))
   #expect(!slotExists(fixture.quarantinedURL))
+}
+
+@Test
+func gitIndexDriftBeforeRenameRetainsTheSource() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeQuarantine = {
+    try? Data("changed-index".utf8).write(
+      to: fixture.administrative.appendingPathComponent("index")
+    )
+  }
+
+  guard
+    case .failed(let failure) = await testAdapter(hooks: hooks).apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("Git index drift must fail before quarantine rename")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-changed-before-delete-entry-set")
+  #expect(slotExists(fixture.worktree))
+  #expect(!slotExists(fixture.quarantineDirectory))
+}
+
+@Test
+func gitHeadReferenceDriftBeforeRenameRetainsTheSource() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let headReference = fixture.common.appendingPathComponent("refs/heads/main")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeQuarantine = {
+    overwriteExistingFile(
+      headReference,
+      with: Data("fedcba9876543210fedcba9876543210fedcba98\n".utf8)
+    )
+  }
+
+  guard
+    case .failed(let failure) = await testAdapter(hooks: hooks).apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("resolved Git HEAD drift must fail before quarantine rename")
+    return
+  }
+  #expect(failure.code == "git-head-resolution-mismatch-at-mutation-commit")
+  #expect(slotExists(fixture.worktree))
+  #expect(!slotExists(fixture.quarantineDirectory))
 }
 
 @Test
@@ -823,6 +948,38 @@ func postQuarantineAccessDriftWinsOverCancellationAndRequiresManualRecovery() as
     return
   }
   #expect(failureCode == "post-quarantine-protected-properties-mismatch-access-policy")
+}
+
+@Test
+func postQuarantineContentDriftCannotMaskAccessPolicyDrift() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let payload = fixture.quarantinedURL.appendingPathComponent("payload")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    overwriteExistingFile(payload, with: Data("changed".utf8))
+    _ = payload.path.withCString { Darwin.chmod($0, 0o400) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("content drift must not mask simultaneous access-policy drift")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantinedURL))
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("combined content/access drift must retain a typed locator")
+    return
+  }
+  #expect(failureCode == "recovery-access-policy-mismatch")
 }
 
 @Test
@@ -976,6 +1133,33 @@ func recursiveDeleteCommitRejectsAccessPolicyDrift() async throws {
 }
 
 @Test
+func recursiveDeleteCommitRevalidatesTheQuarantineWrapperSeal() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  defer { _ = fixture.quarantineDirectory.path.withCString { Darwin.chmod($0, 0o700) } }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteCommit = {
+    _ = fixture.quarantineDirectory.path.withCString { Darwin.chmod($0, 0o750) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("quarantine wrapper access drift must stop recursive deletion")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-binding-unverified")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantinedURL))
+  #expect(
+    await adapter.disposition(for: fixture.action.id)
+      == .quarantineBindingUnverified(failureCode: "quarantine-seal-mismatch")
+  )
+}
+
+@Test
 func recursiveDeleteFailureRevalidatesRecoveryBindingBeforePublishingLocator() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
@@ -1105,6 +1289,14 @@ private struct GitQuarantineFixture: @unchecked Sendable {
     try createPrivateDirectory(common)
     try createPrivateDirectory(worktrees)
     try createPrivateDirectory(administrative)
+    let refs = common.appendingPathComponent("refs")
+    let heads = refs.appendingPathComponent("heads")
+    try createPrivateDirectory(refs)
+    try createPrivateDirectory(heads)
+    try Data("0123456789abcdef0123456789abcdef01234567\n".utf8)
+      .write(to: heads.appendingPathComponent("main"))
+    try Data("ref: refs/heads/main\n".utf8)
+      .write(to: administrative.appendingPathComponent("HEAD"))
     try Data("[core]\n\tbare = false\n".utf8)
       .write(to: common.appendingPathComponent("config"))
     try Data("gitdir: \(administrative.path)\n".utf8)
@@ -1130,6 +1322,10 @@ private struct GitQuarantineFixture: @unchecked Sendable {
     let administrativeDigest = try GitWorktreeQuarantineAdapter.measuredAdministrativeDigest(
       atRawPath: Data(administrative.path.utf8)
     )
+    let headResolutionDigest = try GitWorktreeQuarantineAdapter.measuredHeadResolutionDigest(
+      administrativeRawPath: Data(administrative.path.utf8),
+      commonRawPath: Data(common.path.utf8)
+    )
     let worktreeACLDigest = try GitWorktreeQuarantineAdapter.measuredACLDigest(
       atRawPath: Data(worktree.path.utf8)
     )
@@ -1142,7 +1338,8 @@ private struct GitQuarantineFixture: @unchecked Sendable {
       ),
       commonDirectoryIdentity: try gitFilesystemIdentity(common, kind: .directory),
       registrationID: gitDigest(75),
-      metadataDigest: administrativeDigest
+      metadataDigest: administrativeDigest,
+      headResolutionDigest: headResolutionDigest
     )
     let successor = try successorDigest.map {
       try GitWorktreeExecutionBaseline(
@@ -1331,6 +1528,26 @@ private final class LockedOneShotMutation: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     guard available else { return false }
+    available = false
+    return true
+  }
+}
+
+private final class LockedTriggeredOneShotMutation: @unchecked Sendable {
+  private let lock = NSLock()
+  private var active = false
+  private var available = true
+
+  func activate() {
+    lock.lock()
+    active = true
+    lock.unlock()
+  }
+
+  func claimIfActive() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard active, available else { return false }
     available = false
     return true
   }

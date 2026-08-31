@@ -62,6 +62,35 @@ final class ProductionExecutionAdapter: ExecutionMutationAdapter, @unchecked Sen
     }
   }
 
+  func applyResult(
+    _ operation: ExecutionAdapterOperation,
+    context: MutationExecutionContext
+  ) async -> AdapterOperationResult {
+    switch operation {
+    case .genericRemove:
+      return await genericRemove.applyResult(operation, context: context)
+    case .gitWorktreeRemove(_, let contract):
+      guard !contract.requiresDiscardLocalChanges else {
+        return AdapterOperationResult(
+          outcome: .failed(
+            ExecutionAdapterFailure(code: "git-worktree-dirty-report-only")))
+      }
+      return await gitWorktree.applyResult(operation, context: context)
+    case .gitWorktreeDiscardLocalChanges:
+      return AdapterOperationResult(
+        outcome: .failed(
+          ExecutionAdapterFailure(code: "git-worktree-dirty-report-only")))
+    case .codexCleanTemporary:
+      return AdapterOperationResult(
+        outcome: .failed(
+          ExecutionAdapterFailure(code: "codex-temporary-adapter-not-configured")))
+    case .versionedArtifactRemove:
+      return AdapterOperationResult(
+        outcome: .failed(
+          ExecutionAdapterFailure(code: "versioned-artifact-adapter-not-configured")))
+    }
+  }
+
   func postverify(_ operation: ExecutionAdapterOperation) async -> PostVerificationOutcome {
     switch operation {
     case .genericRemove:
@@ -71,6 +100,25 @@ final class ProductionExecutionAdapter: ExecutionMutationAdapter, @unchecked Sen
         return .notSatisfied(code: "git-worktree-dirty-report-only")
       }
       return await gitWorktree.postverify(operation)
+    case .gitWorktreeDiscardLocalChanges:
+      return .notSatisfied(code: "git-worktree-dirty-report-only")
+    case .codexCleanTemporary, .versionedArtifactRemove:
+      return .unknown(.unsupported)
+    }
+  }
+
+  func postverify(
+    _ operation: ExecutionAdapterOperation,
+    result: AdapterOperationResult
+  ) async -> PostVerificationOutcome {
+    switch operation {
+    case .genericRemove:
+      return await genericRemove.postverify(operation, result: result)
+    case .gitWorktreeRemove(_, let contract):
+      guard !contract.requiresDiscardLocalChanges else {
+        return .notSatisfied(code: "git-worktree-dirty-report-only")
+      }
+      return await gitWorktree.postverify(operation, result: result)
     case .gitWorktreeDiscardLocalChanges:
       return .notSatisfied(code: "git-worktree-dirty-report-only")
     case .codexCleanTemporary, .versionedArtifactRemove:

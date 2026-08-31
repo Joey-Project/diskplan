@@ -202,3 +202,17 @@ superseded_by:
   before restore commit, and keeps access drift typed as manual recovery. Deterministic fixtures
   cover both verification-failure recovery and cancellation recovery hooks. The successor head
   requires static gates, signed append, fresh closure review, and India focused/full validation.
+- The 2026-09-01 closure audit found that ordinary-file access drift could be hidden by an earlier
+  content mismatch, restore publication lacked a final namespace/payload binding, recursive delete
+  had one remaining hook-to-commit window, and Git `HEAD` resolution was not part of the mutation
+  boundary. The follow-up keeps access policy independently protected, proves restore source and
+  quarantine slots before and after the exclusive rename, repeats the complete subtree token at
+  the deletion commit point, and binds both administrative coverage and the exact loose symbolic
+  `HEAD` target. Packed-ref-only symbolic resolution remains fail-closed and therefore report-only
+  in this v1 executable subset.
+- Mutation recovery is now returned atomically with the exact adapter invocation. Production
+  post-verification, step outcomes, shell/TUI events, optional audit events, and the final report
+  consume that attempt-scoped value; the old ActionID lookup remains SPI-only test compatibility.
+  This prevents a retry from inheriting a stale locator or administrative residual from an earlier
+  attempt. The current checkpoint passed local `swiftc -frontend -parse`, strict Swift formatting,
+  and `git diff --check`; no local build or dynamic test was run.

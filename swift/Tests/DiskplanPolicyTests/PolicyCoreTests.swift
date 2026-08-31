@@ -939,7 +939,8 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
     commonDirectoryIdentity: ObjectIdentity(
       device: 1, object: 703, generation: .known(1), type: .directory),
     registrationID: digest(75),
-    metadataDigest: digest(77)
+    metadataDigest: digest(77),
+    headResolutionDigest: digest(78)
   )
   let changedEvidence = snapshot(
     candidateID: "ordinary", path: "ordinary", object: 1,
@@ -2293,7 +2294,8 @@ private func gitWorktreeEvidence(
       type: .directory
     ),
     registrationID: digest(75),
-    metadataDigest: digest(74)
+    metadataDigest: digest(74),
+    headResolutionDigest: digest(77)
   )
   return GitWorktreeEvidence(
     noFollowTraversalComplete: noFollowTraversalComplete,

@@ -218,6 +218,26 @@ public enum AdapterOperationOutcome: Equatable, Sendable {
   case notStarted(ExecutionNotStartedReason)
 }
 
+/// One adapter invocation's mutation result. The disposition belongs to this exact invocation;
+/// callers must not recover it later through an action-keyed cache.
+public struct AdapterOperationResult: Equatable, Sendable {
+  public let outcome: AdapterOperationOutcome
+  public let mutationDisposition: ExecutionMutationDisposition?
+
+  public init(
+    outcome: AdapterOperationOutcome,
+    mutationDisposition: ExecutionMutationDisposition? = nil
+  ) {
+    self.outcome = outcome
+    self.mutationDisposition = mutationDisposition
+  }
+}
+
+/// Adapter-specific recovery information surfaced through the ordinary step/event/report path.
+public enum ExecutionMutationDisposition: Equatable, Sendable {
+  case gitWorktree(GitWorktreeMutationDisposition)
+}
+
 public enum ExecutionNotStartedReason: String, Equatable, Sendable {
   case taskCancelled
   case epochExpired
@@ -290,6 +310,34 @@ public protocol ExecutionMutationAdapter: Sendable {
     context: MutationExecutionContext
   ) async -> AdapterOperationOutcome
   func postverify(_ operation: ExecutionAdapterOperation) async -> PostVerificationOutcome
+
+  /// Returns the outcome and any recovery disposition as one attempt-scoped value.
+  func applyResult(
+    _ operation: ExecutionAdapterOperation,
+    context: MutationExecutionContext
+  ) async -> AdapterOperationResult
+
+  /// Post-verifies against the result of the exact adapter invocation being reported.
+  func postverify(
+    _ operation: ExecutionAdapterOperation,
+    result: AdapterOperationResult
+  ) async -> PostVerificationOutcome
+}
+
+extension ExecutionMutationAdapter {
+  public func applyResult(
+    _ operation: ExecutionAdapterOperation,
+    context: MutationExecutionContext
+  ) async -> AdapterOperationResult {
+    AdapterOperationResult(outcome: await apply(operation, context: context))
+  }
+
+  public func postverify(
+    _ operation: ExecutionAdapterOperation,
+    result _: AdapterOperationResult
+  ) async -> PostVerificationOutcome {
+    await postverify(operation)
+  }
 }
 
 public enum ExecutionStepStatus: String, Equatable, Sendable {
@@ -306,17 +354,20 @@ public struct ExecutionStepOutcome: Equatable, Sendable {
   public let actionID: ActionID
   public let status: ExecutionStepStatus
   public let adapterOutcome: AdapterOperationOutcome
+  public let mutationDisposition: ExecutionMutationDisposition?
   public let postVerification: PostVerificationOutcome
 
   public init(
     actionID: ActionID,
     status: ExecutionStepStatus,
     adapterOutcome: AdapterOperationOutcome,
+    mutationDisposition: ExecutionMutationDisposition? = nil,
     postVerification: PostVerificationOutcome
   ) {
     self.actionID = actionID
     self.status = status
     self.adapterOutcome = adapterOutcome
+    self.mutationDisposition = mutationDisposition
     self.postVerification = postVerification
   }
 }
@@ -462,7 +513,7 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
       return "force-required action=\(actionID.hex)"
     case .stepFinished(let outcome):
       return
-        "step-finished action=\(outcome.actionID.hex) status=\(outcome.status.rawValue) adapter=\(adapterLabel(outcome.adapterOutcome)) postverify=\(postverifyLabel(outcome.postVerification))"
+        "step-finished action=\(outcome.actionID.hex) status=\(outcome.status.rawValue) adapter=\(adapterLabel(outcome.adapterOutcome)) disposition=\(dispositionLabel(outcome.mutationDisposition)) postverify=\(postverifyLabel(outcome.postVerification))"
     case .releasePostVerificationFinished(let outcome):
       return
         "release-postverify group=\(outcome.allocationGroupID) outcome=\(postverifyLabel(outcome.outcome))"
@@ -488,6 +539,25 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
     case .cancelled: return "cancelled"
     case .timedOut: return "timed-out"
     case .notStarted(let reason): return "not-started:\(reason.rawValue)"
+    }
+  }
+
+  private static func dispositionLabel(_ disposition: ExecutionMutationDisposition?) -> String {
+    guard let disposition else { return "none" }
+    switch disposition {
+    case .gitWorktree(let disposition):
+      switch disposition {
+      case .removed: return "git-worktree:removed"
+      case .localChangesDiscarded: return "git-worktree:local-changes-discarded"
+      case .restoredAfterVerificationFailure(let code):
+        return "git-worktree:restored:\(code)"
+      case .quarantineRetained(_, let failureCode):
+        return "git-worktree:quarantine-retained:\(failureCode)"
+      case .quarantineBindingUnverified(let failureCode):
+        return "git-worktree:quarantine-binding-unverified:\(failureCode)"
+      case .removedWithAdministrativeResidual(let residual):
+        return "git-worktree:administrative-residual:\(residual.failure.code)"
+      }
     }
   }
 

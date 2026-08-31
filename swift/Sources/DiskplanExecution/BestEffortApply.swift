@@ -335,7 +335,7 @@ public actor BestEffortApplyCoordinator {
           continue
         }
         let operation = mutationStep.operation
-        let adapterOutcome = await adapter.apply(
+        let adapterResult = await adapter.applyResult(
           operation,
           context: MutationExecutionContext(
             deadlineSeconds: manifest.epoch.deadlineSeconds,
@@ -345,13 +345,18 @@ public actor BestEffortApplyCoordinator {
             }
           )
         )
-        let postVerification = await adapter.postverify(operation)
+        let adapterOutcome = adapterResult.outcome
+        let postVerification = await adapter.postverify(
+          operation,
+          result: adapterResult
+        )
         let stepStatus = stepStatus(
           adapterOutcome: adapterOutcome, postVerification: postVerification)
         let step = ExecutionStepOutcome(
           actionID: action.id,
           status: stepStatus,
           adapterOutcome: adapterOutcome,
+          mutationDisposition: adapterResult.mutationDisposition,
           postVerification: postVerification
         )
         stepOutcomes.append(step)

@@ -94,6 +94,43 @@ func expectedAdministrativeResidualProducesTypedPartialUnit() async throws {
 }
 
 @Test
+func adapterDispositionRemainsBoundToTheReportedExecutionAttempt() async throws {
+  let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
+  let authorization = try await makeAuthorization(plan: fixture.plan, overlay: fixture.overlay)
+  let adapterFailure = ExecutionAdapterFailure(
+    code: "quarantine-verification-failed-unverified",
+    errno: EIO
+  )
+  let disposition = ExecutionMutationDisposition.gitWorktree(
+    .quarantineBindingUnverified(
+      failureCode: "recovery-namespace-binding-unreadable"))
+  let adapterResult = AdapterOperationResult(
+    outcome: .failed(adapterFailure),
+    mutationDisposition: disposition
+  )
+  let events = RecordingEventSink()
+  let adapter = AttemptScopedRecordingMutationAdapter(result: adapterResult)
+
+  let report = await BestEffortApplyCoordinator(
+    adapter: adapter,
+    eventSink: events,
+    auditSink: nil,
+    clock: { 202 }
+  ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
+
+  let steps = report.unitOutcomes.flatMap(\.steps)
+  #expect(steps.count == 1)
+  #expect(steps.first?.adapterOutcome == .failed(adapterFailure))
+  #expect(steps.first?.mutationDisposition == disposition)
+  #expect(await adapter.postverifiedResult == adapterResult)
+  #expect(
+    await events.events.contains {
+      guard case .execution(.stepFinished(let step)) = $0 else { return false }
+      return step.mutationDisposition == disposition
+    })
+}
+
+@Test
 func jitIdentityReplacementRejectsBeforeMutation() async throws {
   let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
   let replacement = ObjectIdentity(
@@ -1026,6 +1063,45 @@ private actor FirstMutationGateAdapter: ExecutionMutationAdapter {
   func releaseFirstMutation() {
     firstRelease?.resume()
     firstRelease = nil
+  }
+}
+
+private actor AttemptScopedRecordingMutationAdapter: ExecutionMutationAdapter {
+  let result: AdapterOperationResult
+  private(set) var postverifiedResult: AdapterOperationResult?
+
+  init(result: AdapterOperationResult) {
+    self.result = result
+  }
+
+  func apply(
+    _: ExecutionAdapterOperation,
+    context _: MutationExecutionContext
+  ) async -> AdapterOperationOutcome {
+    result.outcome
+  }
+
+  func applyResult(
+    _: ExecutionAdapterOperation,
+    context _: MutationExecutionContext
+  ) async -> AdapterOperationResult {
+    result
+  }
+
+  func postverify(_: ExecutionAdapterOperation) async -> PostVerificationOutcome {
+    .unknown(.notRequested)
+  }
+
+  func postverify(
+    _: ExecutionAdapterOperation,
+    result: AdapterOperationResult
+  ) async -> PostVerificationOutcome {
+    postverifiedResult = result
+    return .failed(
+      ObservationFailure(
+        code: "attempt-scoped-recovery-disposition",
+        collector: "attempt-scoped-test-adapter"
+      ))
   }
 }
 

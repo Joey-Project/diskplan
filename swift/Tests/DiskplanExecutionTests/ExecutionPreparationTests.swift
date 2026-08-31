@@ -709,7 +709,7 @@ func selectedGitPrerequisitesAreRevalidatedAsTypedEvidence() async throws {
 }
 
 @Test
-func dirtyDiscardRemovePreparationRemainsReportOnly() throws {
+func dirtyDiscardRemovePreparationRemainsReportOnly() async throws {
   let dirtyContent = ContentProtectionBaseline.requiredDigest(digest(92))
   let git = gitEvidence(
     worktreeObject: 1,
@@ -734,6 +734,23 @@ func dirtyDiscardRemovePreparationRemainsReportOnly() throws {
   )
   #expect(discard.evaluation.stageability == .blocked)
   #expect(remove.evaluation.stageability == .blocked)
+  let recoverabilityVote = try #require(
+    discard.evaluation.votes.first { $0.dimension == .recoverability }
+  )
+  guard case .requiresWaiver(let legacyPredicates, _) = recoverabilityVote.result,
+    let legacyPredicate = legacyPredicates.first(where: {
+      $0.kind == .fullyObservedLocalGitWorkDiscard
+    })
+  else {
+    Issue.record("dirty Git evidence must retain the legacy explanatory predicate")
+    return
+  }
+  let legacyConsent = WaiverConsentCore.create(
+    action: discard,
+    predicate: legacyPredicate,
+    reason: "legacy exact dirty Git consent must remain non-executable",
+    consentEventID: "legacy-dirty-git-consent"
+  )
   let plan = try ImmutablePlan(
     policyVersion: "policy-1",
     schemaVersion: "schema-1",
@@ -745,12 +762,27 @@ func dirtyDiscardRemovePreparationRemainsReportOnly() throws {
   let overlay = DecisionOverlay.create(
     plan: plan,
     selectedActionIDs: [discard.id, remove.id],
-    waiverConsents: [],
+    waiverConsents: [legacyConsent],
     userNotes: []
   )
   #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
     try DecisionOverlayValidator.validate(overlay, against: plan)
   }
+  let source = SequenceSource([])
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: source,
+    randomBytes: deterministicEntropy
+  )
+  await #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
+    _ = try await engine.prepare(
+      plan: plan,
+      overlay: overlay,
+      mode: .apply,
+      issuedAtSeconds: 200,
+      lifetimeSeconds: 30
+    )
+  }
+  #expect(await source.collectionCount == 0)
 }
 
 @Test
@@ -1805,7 +1837,8 @@ func gitEvidence(
     commonDirectoryIdentity: ObjectIdentity(
       device: 1, object: 701, generation: .known(1), type: .directory),
     registrationID: digest(75),
-    metadataDigest: digest(74)
+    metadataDigest: digest(74),
+    headResolutionDigest: digest(77)
   )
   let successor: Observation<GitWorktreeExecutionBaseline>
   switch localChanges {

@@ -314,13 +314,15 @@ public struct GitWorktreeRegistrationEvidence: Equatable, Sendable {
   public let commonDirectoryIdentity: ObjectIdentity
   public let registrationID: PolicyDigest
   public let metadataDigest: PolicyDigest
+  public let headResolutionDigest: PolicyDigest
 
   public init(
     registeredWorktreeIdentity: ObjectIdentity,
     administrativeDirectoryIdentity: ObjectIdentity,
     commonDirectoryIdentity: ObjectIdentity,
     registrationID: PolicyDigest,
-    metadataDigest: PolicyDigest
+    metadataDigest: PolicyDigest,
+    headResolutionDigest: PolicyDigest
   ) throws {
     guard registeredWorktreeIdentity.type == .directory,
       administrativeDirectoryIdentity.type == .directory,
@@ -331,6 +333,7 @@ public struct GitWorktreeRegistrationEvidence: Equatable, Sendable {
     self.commonDirectoryIdentity = commonDirectoryIdentity
     self.registrationID = registrationID
     self.metadataDigest = metadataDigest
+    self.headResolutionDigest = headResolutionDigest
   }
 
   var bindingBytes: Data {
@@ -340,6 +343,7 @@ public struct GitWorktreeRegistrationEvidence: Equatable, Sendable {
     encodeIdentity(commonDirectoryIdentity, into: &encoder)
     encoder.data(registrationID.bytes)
     encoder.data(metadataDigest.bytes)
+    encoder.data(headResolutionDigest.bytes)
     return encoder.data
   }
 }

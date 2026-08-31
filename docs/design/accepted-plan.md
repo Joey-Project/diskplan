@@ -329,10 +329,9 @@ explicit protection/type hint 同样受这个边界约束：protection 可以直
 - Agent-assisted classification.
 - Task-semantic completion.
 - Duplicate survivor choice.
-- Fully observed local Git work discard.
 - Normal keep policy.
 
-dirty/untracked Git 内容必须使用专门的 `discard-local-work` action，不得伪装成普通删除。
+v1 的 dirty/untracked Git 内容及其 dependent remove chain 固定为 report-only：plan 可保留专门的 `discard-local-work` action、完整证据和 successor baseline 用于解释，但该 action 不可 stage、不可 waiver，apply preparation 不得为它签发 capability。只有 clean worktree 的 descriptor-bound quarantine remove 可执行。
 
 ### 13.1 Canonical IDs And Bindings
 
@@ -393,7 +392,7 @@ directory child-entry churn、directory size/link-count/mtime 变化只有在 ac
 - nested repositories、submodules、linked worktrees 和 sparse-checkout state 被显式识别；其本地内容必须分别证明 recoverable 或作为用户可见的 unique/local changes 进入同一 action；
 - action 执行前重新验证 filesystem coverage、Git state 和所有已声明 local-change entries，任何新增或未观察项目都阻止 stage/apply。
 
-只有满足上述 coverage 的 action 才能使用 `Fully observed local Git work discard` waiver；否则只能 report-only。adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。
+上述 coverage 在 v1 只用于解释 dirty worktree、冻结 future adapter contract 与拒绝理由；它不启用 destructive waiver。所有 dirty discard/remove action 都是 report-only，adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。未来若引入可执行 discard，必须作为新的专用 adapter/waiver 版本重新验收，不能复用当前 plan 或 consent。
 
 point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use。mutation 前必须证明 source parent chain 是 owner-private、无 group/other writer、无 provider/mount boundary，并且 activity snapshot 没有其他 process reference；adapter 将它标记为 `trusted-exclusive-namespace`。同一用户的恶意或不可观测并发 namespace mutation不在首版可安全执行的 threat model 内；无法满足该 trust precondition 时必须 report-only，不能先移动后判断。
 
