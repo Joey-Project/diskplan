@@ -48,6 +48,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     var beforePostQuarantineVerification: @Sendable () -> Void = {}
     var beforeRestore: @Sendable () -> Void = {}
     var beforeRecursiveDelete: @Sendable () -> Void = {}
+    var beforeRecursiveDeleteCommit: @Sendable () -> Void = {}
     var beforeAdministrativeCleanup: @Sendable () -> Void = {}
     var afterCoverageFileFirstRead: @Sendable (Int32, [Data]) -> Void = { _, _ in }
   }
@@ -134,8 +135,14 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     let records: [NodeRecord]
   }
 
-  private enum AdapterError: Error {
-    case failure(ExecutionAdapterFailure)
+  private enum RecoverySafety: Equatable {
+    case automaticRestoreAllowed
+    case manualRecoveryRequired
+  }
+
+  private struct AdapterError: Error {
+    let failure: ExecutionAdapterFailure
+    let recoverySafety: RecoverySafety
   }
 
   private let hooks: Hooks
@@ -236,7 +243,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       if Task.isCancelled { return .cancelled }
       if context.isExpired { return .timedOut }
 
-      _ = try verifyCoverage(
+      let preQuarantineToken = try verifyCoverage(
         rootDescriptor: source.sourceDescriptor,
         expectedIdentity: target.expectedIdentity,
         expectedContent: contract.executionBaseline.contentProtection,
@@ -334,12 +341,17 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           )
         }
 
-      } catch let AdapterError.failure(verificationFailure) {
+        try requireMatchingSnapshot(
+          preQuarantineToken,
+          actual: token,
+          mismatchCode: "post-quarantine-protected-properties-mismatch"
+        )
+      } catch let verificationError as AdapterError {
         return await restoreAfterVerificationFailure(
           target: target,
           source: source,
           quarantine: quarantine,
-          failure: verificationFailure
+          error: verificationError
         )
       }
       guard let destinationDescriptor else {
@@ -355,14 +367,15 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           code: "source-seal-mismatch-before-delete"
         )
         try requireSnapshotStillCurrent(token, rootDescriptor: destinationDescriptor)
-      } catch let AdapterError.failure(verificationFailure) {
+      } catch let verificationError as AdapterError {
         return await restoreAfterVerificationFailure(
           target: target,
           source: source,
           quarantine: quarantine,
-          failure: verificationFailure
+          error: verificationError
         )
       }
+      hooks.beforeRecursiveDeleteCommit()
       do {
         try recursivelyDeleteVerifiedTree(
           token,
@@ -370,18 +383,27 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           quarantineDescriptor: quarantine.descriptor,
           quarantineLeaf: quarantine.leaf
         )
-      } catch let AdapterError.failure(deletionFailure) {
-        await results.set(
-          .quarantineRetained(
-            locator: quarantine.locator,
-            failureCode: deletionFailure.code
-          ),
-          for: target.actionID
+      } catch let deletionError as AdapterError {
+        let recovery = verifiedRecoveryDisposition(
+          target: target,
+          source: source,
+          quarantine: quarantine,
+          failureCode: deletionError.failure.code
         )
+        await results.set(recovery, for: target.actionID)
+        let code =
+          switch recovery {
+          case .quarantineRetained:
+            "verified-quarantine-deletion-residual"
+          case .quarantineBindingUnverified:
+            "verified-quarantine-deletion-binding-unverified"
+          default:
+            "invalid-quarantine-recovery-state"
+          }
         return .failed(
           ExecutionAdapterFailure(
-            code: "verified-quarantine-deletion-residual",
-            errno: deletionFailure.errno
+            code: code,
+            errno: deletionError.failure.errno
           ))
       }
 
@@ -427,18 +449,18 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           quarantineDescriptor: administrative.worktreesDirectoryDescriptor,
           quarantineLeaf: administrative.administrativeLeaf
         )
-      } catch let AdapterError.failure(failure) {
+      } catch let error as AdapterError {
         return await recordAdministrativeResidual(
           target: target,
           administrative: administrative,
-          failure: failure
+          failure: error.failure
         )
       }
 
       await results.set(.removed, for: target.actionID)
       return .succeeded(detailCode: "git-worktree-quarantine-removed")
-    } catch let AdapterError.failure(failure) {
-      return .failed(failure)
+    } catch let error as AdapterError {
+      return .failed(error.failure)
     } catch {
       return .failed(ExecutionAdapterFailure(code: String(reflecting: type(of: error))))
     }
@@ -464,9 +486,10 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     target: BoundMutationTarget,
     source: DescriptorBinding,
     quarantine: QuarantineBinding,
-    failure: ExecutionAdapterFailure
+    error: AdapterError
   ) async -> AdapterOperationOutcome {
-    if Self.requiresManualRecovery(failure.code) {
+    let failure = error.failure
+    if error.recoverySafety == .manualRecoveryRequired {
       let recovery = verifiedRecoveryDisposition(
         target: target,
         source: source,
@@ -604,18 +627,6 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       destinationDescriptor: payload,
       expected: target.expectedIdentity
     )
-  }
-
-  private static func requiresManualRecovery(_ failureCode: String) -> Bool {
-    switch failureCode {
-    case "namespace-not-owner-private",
-      "source-seal-mismatch-after-quarantine",
-      "source-seal-mismatch-before-delete",
-      "worktree-access-policy-mismatch":
-      true
-    default:
-      false
-    }
   }
 
   private func requireRecoveryNamespaceBinding(
@@ -969,12 +980,13 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     do {
       let seal = try directorySeal(descriptor)
       guard seal.identity.type == .directory,
-        seal.device == target.expectedIdentity.device,
-        seal.owner == Darwin.geteuid(),
+        seal.device == target.expectedIdentity.device
+      else { throw failure("quarantine-identity-or-mount-mismatch") }
+      guard seal.owner == Darwin.geteuid(),
         seal.mode == 0o700,
         seal.flags == 0,
         !(try aclSnapshot(descriptor).hasEntries)
-      else { throw failure("quarantine-access-policy-mismatch") }
+      else { throw accessPolicyFailure("quarantine-access-policy-mismatch") }
       let leaf = Data("payload".utf8)
       let locator = GitWorktreeRecoveryLocator(
         rawRoot: target.rawRoot,
@@ -998,7 +1010,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       code: "quarantine-seal-mismatch"
     )
     guard !(try aclSnapshot(quarantine.descriptor).hasEntries) else {
-      throw failure("quarantine-seal-mismatch")
+      throw accessPolicyFailure("quarantine-seal-mismatch")
     }
   }
 
@@ -1021,11 +1033,15 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     let rootSeal = try directorySeal(rootDescriptor)
     guard rootSeal.flags == 0,
       try PolicyDigest(bytes: rootSeal.aclDigest) == expectedAccess.aclDigest
-    else { throw failure("worktree-access-policy-mismatch") }
+    else { throw accessPolicyFailure("worktree-access-policy-mismatch") }
 
     let first = try collectSnapshot(rootDescriptor: rootDescriptor)
     let second = try collectSnapshot(rootDescriptor: rootDescriptor)
-    guard first == second else { throw failure("post-quarantine-coverage-raced") }
+    try requireMatchingSnapshot(
+      CoverageToken(records: first),
+      actual: CoverageToken(records: second),
+      mismatchCode: "coverage-raced"
+    )
     let actualDigest = try digest(first)
     guard case .requiredDigest(let expectedDigest) = expectedContent,
       actualDigest == expectedDigest
@@ -1164,8 +1180,41 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     rootDescriptor: Int32
   ) throws {
     let current = try collectSnapshot(rootDescriptor: rootDescriptor)
-    guard current == token.records else {
-      throw failure("verified-quarantine-changed-before-delete")
+    try requireMatchingSnapshot(
+      token,
+      actual: CoverageToken(records: current),
+      mismatchCode: "verified-quarantine-changed-before-delete"
+    )
+  }
+
+  private func requireMatchingSnapshot(
+    _ expected: CoverageToken,
+    actual: CoverageToken,
+    mismatchCode: String
+  ) throws {
+    guard expected.records.count == actual.records.count else {
+      throw failure("\(mismatchCode)-entry-set")
+    }
+    for (expectedRecord, actualRecord) in zip(expected.records, actual.records) {
+      guard expectedRecord.path == actualRecord.path else {
+        throw failure("\(mismatchCode)-entry-set")
+      }
+      guard expectedRecord.identity == actualRecord.identity else {
+        throw failure("\(mismatchCode)-identity")
+      }
+      guard expectedRecord.mode == actualRecord.mode,
+        expectedRecord.owner == actualRecord.owner,
+        expectedRecord.group == actualRecord.group,
+        expectedRecord.flags == actualRecord.flags,
+        expectedRecord.aclDigest == actualRecord.aclDigest
+      else {
+        throw accessPolicyFailure("\(mismatchCode)-access-policy")
+      }
+      guard expectedRecord.size == actualRecord.size,
+        expectedRecord.payloadDigest == actualRecord.payloadDigest
+      else {
+        throw failure("\(mismatchCode)-content")
+      }
     }
   }
 
@@ -1253,9 +1302,9 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       if result == 0 { return .notSatisfied(code: "worktree-root-still-present") }
       return .failed(
         ObservationFailure(code: "postverify-stat-target", collector: "git-worktree-postverify"))
-    } catch let AdapterError.failure(failure) {
+    } catch let error as AdapterError {
       return .failed(
-        ObservationFailure(code: failure.code, collector: "git-worktree-postverify"))
+        ObservationFailure(code: error.failure.code, collector: "git-worktree-postverify"))
     } catch {
       return .failed(
         ObservationFailure(
@@ -1477,10 +1526,10 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       expected.st_uid == current.st_uid,
       expected.st_gid == current.st_gid,
       expected.st_flags == current.st_flags
-    else { throw failure("coverage-file-access-policy-raced") }
+    else { throw accessPolicyFailure("coverage-file-access-policy-raced") }
     if let expectedACLDigest {
       guard try aclDigest(descriptor) == expectedACLDigest else {
-        throw failure("coverage-file-access-policy-raced")
+        throw accessPolicyFailure("coverage-file-access-policy-raced")
       }
     }
   }
@@ -1514,12 +1563,17 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         let result = try Self.withRawCString(name) {
           Darwin.fstatat(parentDescriptor, $0, &current, AT_SYMLINK_NOFOLLOW)
         }
-        guard result == 0, Self.identity(current) == Self.identity(expected),
-          current.st_mode == expected.st_mode,
+        guard result == 0 else {
+          throw failure("coverage-symlink-unreadable", errno)
+        }
+        guard Self.identity(current) == Self.identity(expected) else {
+          throw failure("coverage-symlink-replaced")
+        }
+        guard current.st_mode == expected.st_mode,
           current.st_uid == expected.st_uid,
           current.st_gid == expected.st_gid,
           current.st_flags == expected.st_flags
-        else { throw failure("coverage-symlink-raced", result == 0 ? nil : errno) }
+        else { throw accessPolicyFailure("coverage-symlink-access-policy-raced") }
         return Data(buffer.prefix(count))
       }
       capacity *= 2
@@ -1607,10 +1661,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
   ) throws {
     let value = try status(descriptor)
     guard Self.kind(value.st_mode) == .directory,
-      Self.device(value) == expectedDevice,
-      value.st_uid == Darwin.geteuid(),
+      Self.device(value) == expectedDevice
+    else { throw failure("coverage-mount-or-type-mismatch") }
+    guard value.st_uid == Darwin.geteuid(),
       (value.st_mode & (S_IWGRP | S_IWOTH)) == 0
-    else { throw failure("namespace-not-owner-private") }
+    else { throw accessPolicyFailure("namespace-not-owner-private") }
   }
 
   private func requireIdentity(
@@ -1665,7 +1720,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       seal.mode & UInt32(S_IWGRP | S_IWOTH) == 0,
       seal.flags == 0,
       !(try aclSnapshot(descriptor).hasEntries)
-    else { throw failure("namespace-access-policy-not-owner-private") }
+    else { throw accessPolicyFailure("namespace-access-policy-not-owner-private") }
     return seal
   }
 
@@ -1674,7 +1729,17 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     expected: QuarantineNamespaceSeal,
     code: String
   ) throws {
-    guard try directorySeal(descriptor) == expected else { throw failure(code) }
+    let current = try directorySeal(descriptor)
+    guard current.identity == expected.identity,
+      current.device == expected.device,
+      current.mountIdentity == expected.mountIdentity
+    else { throw failure(code) }
+    guard current.owner == expected.owner,
+      current.group == expected.group,
+      current.mode == expected.mode,
+      current.flags == expected.flags,
+      current.aclDigest == expected.aclDigest
+    else { throw accessPolicyFailure(code) }
   }
 
   private func mountIdentity(_ descriptor: Int32) throws -> Data {
@@ -1793,7 +1858,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
   ) throws -> Int32? {
     do {
       return try openDirectory(at: descriptor, name: name, code: code)
-    } catch let AdapterError.failure(value) where value.errno == ENOENT {
+    } catch let error as AdapterError where error.failure.errno == ENOENT {
       return nil
     }
   }
@@ -1878,11 +1943,29 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     }
   }
 
-  private static func failure(_ code: String, _ value: Int32? = nil) -> AdapterError {
-    .failure(ExecutionAdapterFailure(code: code, errno: value))
+  private static func failure(
+    _ code: String,
+    _ value: Int32? = nil,
+    recoverySafety: RecoverySafety = .automaticRestoreAllowed
+  ) -> AdapterError {
+    AdapterError(
+      failure: ExecutionAdapterFailure(code: code, errno: value),
+      recoverySafety: recoverySafety
+    )
   }
 
   private func failure(_ code: String, _ value: Int32? = nil) -> AdapterError {
     Self.failure(code, value)
+  }
+
+  private static func accessPolicyFailure(
+    _ code: String,
+    _ value: Int32? = nil
+  ) -> AdapterError {
+    failure(code, value, recoverySafety: .manualRecoveryRequired)
+  }
+
+  private func accessPolicyFailure(_ code: String, _ value: Int32? = nil) -> AdapterError {
+    Self.accessPolicyFailure(code, value)
   }
 }

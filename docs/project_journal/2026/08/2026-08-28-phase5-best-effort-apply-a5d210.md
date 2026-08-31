@@ -3,7 +3,7 @@ id: 20260828-a5d210
 title: Phase 5 Best-Effort Apply
 status: active
 created: 2026-08-28
-updated: 2026-08-29
+updated: 2026-08-31
 branch: wip/phase5-best-effort-apply
 pr:
 supersedes: []
@@ -60,6 +60,15 @@ superseded_by:
   quarantine directory name still resolves to the held object. Administrative cleanup binds the
   planned metadata digest and canonical root slot. Coverage timestamps trigger only a bounded
   reread, while content and access digests remain separate.
+- Recovery safety is now typed independently from diagnostic failure strings. The adapter retains
+  a complete pre-quarantine subtree token and compares path membership, object identity, content,
+  and access policy separately after rename and immediately before deletion. Stable access drift
+  on the root, an ordinary file, a symbolic link, or a descendant directory requires manual
+  recovery; missing, unreadable, collection failure, identity drift, and content drift keep their
+  distinct failure paths.
+- A recursive-deletion failure no longer publishes the cached quarantine pathname. It first
+  rebinds the raw root, every source parent, the quarantine namespace, and the payload identity;
+  if that proof fails, the result is a typed unverified binding without a locator.
 - Shell/TUI events require no persistence. Optional audit failures, including `ENOSPC`, are
   reported but cannot stop cleanup.
 
@@ -146,3 +155,12 @@ superseded_by:
   quarantined target's access mode changed; access policy is a separately protected property, so
   the adapter now deliberately retains the identity- and namespace-verified quarantine and emits
   its typed recovery locator for manual handling instead of restoring altered access state.
+- Static audit of `b952060` found that its four-code recovery allowlist did not cover stable access
+  drift in ordinary subtree files, symbolic links, or descendant directories, and that recursive
+  deletion failure still published a cached locator. The follow-up replaces that string policy
+  with typed recovery safety, binds post-rename verification to the pre-quarantine token, adds
+  descriptor-bound failure recovery, and corrects the design contract. Focused fixtures cover all
+  three subtree node kinds plus a moved quarantine namespace during recursive-delete failure.
+  `swift-format lint --strict`, `swiftc -frontend -parse`, and `git diff --check` pass locally; no
+  local build or dynamic test was run, and the exact follow-up head still requires India focused
+  and serial full gates.

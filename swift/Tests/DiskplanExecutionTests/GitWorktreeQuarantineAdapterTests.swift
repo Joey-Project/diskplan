@@ -289,7 +289,7 @@ func gitAdministrativeMetadataDriftIsTypedResidualAfterRootDeletion() async thro
     Issue.record("missing typed Git administrative residual")
     return
   }
-  #expect(residual.failure.code == "verified-quarantine-changed-before-delete")
+  #expect(residual.failure.code == "verified-quarantine-changed-before-delete-entry-set")
   #expect(await adapter.postverify(fixture.removeOperation) == .expectedResidual(residual.failure))
   #expect(
     residual.registrationID
@@ -636,6 +636,127 @@ func postQuarantineTargetModeDriftRetainsTypedRecoveryLocator() async throws {
 }
 
 @Test
+func postQuarantineFileModeDriftRequiresManualRecovery() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    _ = fixture.quarantinedURL.appendingPathComponent("payload").path.withCString {
+      Darwin.chmod($0, 0o400)
+    }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("post-quarantine file access drift must reject")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  #expect(!slotExists(fixture.worktree))
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("file access drift must retain a typed recovery locator")
+    return
+  }
+  #expect(failureCode == "post-quarantine-protected-properties-mismatch-access-policy")
+}
+
+@Test
+func postQuarantineDirectoryModeDriftRequiresManualRecovery() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let nested = fixture.quarantinedURL.appendingPathComponent("nested")
+  defer { _ = nested.path.withCString { Darwin.chmod($0, 0o700) } }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    _ = nested.path.withCString { Darwin.chmod($0, 0o500) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("post-quarantine directory access drift must reject")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("directory access drift must retain a typed recovery locator")
+    return
+  }
+  #expect(failureCode == "post-quarantine-protected-properties-mismatch-access-policy")
+}
+
+@Test
+func postQuarantineSymbolicLinkFlagDriftRequiresManualRecovery() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let link = fixture.quarantinedURL.appendingPathComponent("outside-link")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    _ = link.path.withCString { Darwin.lchflags($0, UInt32(UF_HIDDEN)) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("post-quarantine symlink access drift must reject")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("symlink access drift must retain a typed recovery locator")
+    return
+  }
+  #expect(failureCode == "post-quarantine-protected-properties-mismatch-access-policy")
+}
+
+@Test
+func recursiveDeleteFailureRevalidatesRecoveryBindingBeforePublishingLocator() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let displaced = fixture.root.appendingPathComponent("displaced-quarantine")
+  let displacedPayload = displaced.appendingPathComponent("payload")
+  defer { _ = displacedPayload.path.withCString { Darwin.chmod($0, 0o700) } }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteCommit = {
+    _ = fixture.quarantinedURL.path.withCString { Darwin.chmod($0, 0o500) }
+    try? FileManager.default.moveItem(at: fixture.quarantineDirectory, to: displaced)
+    try? createPrivateDirectory(fixture.quarantineDirectory)
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("recursive deletion failure must remain typed")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-binding-unverified")
+  #expect(slotExists(displacedPayload))
+  #expect(slotExists(fixture.quarantineDirectory))
+  #expect(
+    await adapter.disposition(for: fixture.action.id)
+      == .quarantineBindingUnverified(failureCode: "delete-verified-quarantine-entry")
+  )
+}
+
+@Test
 func coverageAcceptsTimestampOnlyChurnAfterOneBoundedReread() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
@@ -744,6 +865,9 @@ private struct GitQuarantineFixture: @unchecked Sendable {
       try Data("payload".utf8).write(to: payload)
       successorDigest = nil
     }
+    let nested = worktree.appendingPathComponent("nested")
+    try createPrivateDirectory(nested)
+    try Data("nested".utf8).write(to: nested.appendingPathComponent("keep"))
     let currentDigest = try GitWorktreeQuarantineAdapter.measuredContentDigest(
       atRawPath: Data(worktree.path.utf8)
     )

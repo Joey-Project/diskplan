@@ -100,8 +100,14 @@ device, `fstatfs` mount identity, missing state, unreadability, and collection f
 rechecked independently at rename/restore and before deletion. It
 atomically moves the exact root into the fixed leaf, proves the held source and destination
 descriptors name the same object, and repeats coverage before recursive native deletion.
-Verification failure attempts an exclusive restore; restore collision or deletion failure
-retains a typed recovery locator.
+Verification compares the pre-quarantine and post-quarantine subtree snapshots by protected
+property. Object-identity and content-stability failures may attempt an exclusive restore only
+after rebinding the original namespace and payload identity. An access-policy change on the root,
+an ordinary file, a symbolic link, or a descendant directory is never auto-restored: the adapter
+retains the quarantine for manual recovery and publishes a typed locator only after the same
+descriptor-bound namespace and payload revalidation. Restore collision and recursive-deletion
+failure use that same locator-publication gate; an unprovable binding reports an unverified
+recovery state without a pathname.
 
 Only after root deletion may the adapter delete administrative metadata, and it deletes only
 the descriptor-bound worktree registration whose full metadata coverage digest was frozen in
