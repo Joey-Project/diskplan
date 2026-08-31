@@ -187,6 +187,12 @@ superseded_by:
   and gives the TUI one version-aware `PlanCommand` transport preflight. Local
   dynamic validation remains prohibited; the combined head requires the India
   focused gate.
+- Fresh whole-range review of the negotiated Protocol 1.5 boundary found one
+  pending-intent lifecycle gap: successful dry-run and rejected apply-review
+  terminal events left their request markers live in the TUI. The follow-up
+  removes only the matching intent on each terminal event, preserves any other
+  in-flight intent, and adds focused state-machine coverage. Dynamic validation
+  remains assigned to the India host.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including

@@ -953,14 +953,24 @@ impl PlanRuntime {
                 self.execution_preview = None;
                 Ok(())
             }
-            PlanRuntimeEvent::DryRunReady { .. } => Ok(()),
+            PlanRuntimeEvent::DryRunReady { .. } => {
+                self.complete_intent(PlanIntentKind::DryRun);
+                Ok(())
+            }
             PlanRuntimeEvent::OperationRejected { operation, .. } => {
-                if operation == "overlay edit" {
-                    self.pending_overlay_edit = None;
+                match operation {
+                    "overlay edit" => self.pending_overlay_edit = None,
+                    "dry-run" => self.complete_intent(PlanIntentKind::DryRun),
+                    "apply review" => self.complete_intent(PlanIntentKind::ApplyReview),
+                    _ => {}
                 }
                 Ok(())
             }
         }
+    }
+
+    fn complete_intent(&mut self, kind: PlanIntentKind) {
+        self.pending_intents.retain(|intent| intent.kind != kind);
     }
 
     fn apply_filter_buffer(&mut self) {
@@ -1325,6 +1335,52 @@ mod tests {
             runtime.toggle_selected_stage(),
             OverlayStageResult::Unstaged
         );
+        assert!(runtime.pending_intents().is_empty());
+    }
+
+    #[test]
+    fn terminal_runtime_events_complete_only_the_matching_intent() {
+        let mut runtime = runtime(
+            false,
+            Stageability::Stageable,
+            ForceRequirement::NotRequired,
+        );
+        select_action(&mut runtime);
+        assert!(matches!(
+            runtime.toggle_selected_stage(),
+            OverlayStageResult::Staged { .. }
+        ));
+        runtime.queue_intent(PlanIntentKind::DryRun).unwrap();
+        runtime.queue_intent(PlanIntentKind::ApplyReview).unwrap();
+
+        runtime
+            .apply_event(PlanRuntimeEvent::DryRunReady {
+                current: true,
+                action_count: 1,
+                finding_count: 0,
+            })
+            .unwrap();
+        assert_eq!(runtime.pending_intents().len(), 1);
+        assert_eq!(
+            runtime.pending_intents()[0].kind(),
+            PlanIntentKind::ApplyReview
+        );
+
+        runtime
+            .apply_event(PlanRuntimeEvent::OperationRejected {
+                operation: "apply review",
+                summary: "execution transport unavailable".into(),
+            })
+            .unwrap();
+        assert!(runtime.pending_intents().is_empty());
+
+        runtime.queue_intent(PlanIntentKind::DryRun).unwrap();
+        runtime
+            .apply_event(PlanRuntimeEvent::OperationRejected {
+                operation: "dry-run",
+                summary: "dry-run transport unavailable".into(),
+            })
+            .unwrap();
         assert!(runtime.pending_intents().is_empty());
     }
 
