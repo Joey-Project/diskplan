@@ -223,19 +223,27 @@ public enum AdapterOperationOutcome: Equatable, Sendable {
 public struct AdapterOperationResult: Equatable, Sendable {
   public let outcome: AdapterOperationOutcome
   public let mutationDisposition: ExecutionMutationDisposition?
+  public let cleanupDisposition: ExecutionCleanupDisposition?
 
   public init(
     outcome: AdapterOperationOutcome,
-    mutationDisposition: ExecutionMutationDisposition? = nil
+    mutationDisposition: ExecutionMutationDisposition? = nil,
+    cleanupDisposition: ExecutionCleanupDisposition? = nil
   ) {
     self.outcome = outcome
     self.mutationDisposition = mutationDisposition
+    self.cleanupDisposition = cleanupDisposition
   }
 }
 
 /// Adapter-specific recovery information surfaced through the ordinary step/event/report path.
 public enum ExecutionMutationDisposition: Equatable, Sendable {
   case gitWorktree(GitWorktreeMutationDisposition)
+}
+
+/// Cleanup information that is orthogonal to the mutation's primary outcome.
+public enum ExecutionCleanupDisposition: Equatable, Sendable {
+  case gitWorktreeAttemptDirectory(GitWorktreeAttemptCleanupDisposition)
 }
 
 public enum ExecutionNotStartedReason: String, Equatable, Sendable {
@@ -355,6 +363,7 @@ public struct ExecutionStepOutcome: Equatable, Sendable {
   public let status: ExecutionStepStatus
   public let adapterOutcome: AdapterOperationOutcome
   public let mutationDisposition: ExecutionMutationDisposition?
+  public let cleanupDisposition: ExecutionCleanupDisposition?
   public let postVerification: PostVerificationOutcome
 
   public init(
@@ -362,12 +371,14 @@ public struct ExecutionStepOutcome: Equatable, Sendable {
     status: ExecutionStepStatus,
     adapterOutcome: AdapterOperationOutcome,
     mutationDisposition: ExecutionMutationDisposition? = nil,
+    cleanupDisposition: ExecutionCleanupDisposition? = nil,
     postVerification: PostVerificationOutcome
   ) {
     self.actionID = actionID
     self.status = status
     self.adapterOutcome = adapterOutcome
     self.mutationDisposition = mutationDisposition
+    self.cleanupDisposition = cleanupDisposition
     self.postVerification = postVerification
   }
 }
@@ -513,7 +524,7 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
       return "force-required action=\(actionID.hex)"
     case .stepFinished(let outcome):
       return
-        "step-finished action=\(outcome.actionID.hex) status=\(outcome.status.rawValue) adapter=\(adapterLabel(outcome.adapterOutcome)) disposition=\(dispositionLabel(outcome.mutationDisposition)) postverify=\(postverifyLabel(outcome.postVerification))"
+        "step-finished action=\(outcome.actionID.hex) status=\(outcome.status.rawValue) adapter=\(adapterLabel(outcome.adapterOutcome)) disposition=\(dispositionLabel(outcome.mutationDisposition)) cleanup=\(cleanupDispositionLabel(outcome.cleanupDisposition)) postverify=\(postverifyLabel(outcome.postVerification))"
     case .releasePostVerificationFinished(let outcome):
       return
         "release-postverify group=\(outcome.allocationGroupID) outcome=\(postverifyLabel(outcome.outcome))"
@@ -557,6 +568,21 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
         return "git-worktree:quarantine-binding-unverified:\(failureCode)"
       case .removedWithAdministrativeResidual(let residual):
         return "git-worktree:administrative-residual:\(residual.failure.code)"
+      }
+    }
+  }
+
+  private static func cleanupDispositionLabel(
+    _ disposition: ExecutionCleanupDisposition?
+  ) -> String {
+    guard let disposition else { return "none" }
+    switch disposition {
+    case .gitWorktreeAttemptDirectory(let value):
+      switch value {
+      case .retained(_, let failure):
+        return "git-worktree:attempt-directory-retained:\(failure.code)"
+      case .bindingUnverified(let failure):
+        return "git-worktree:attempt-directory-binding-unverified:\(failure.code)"
       }
     }
   }

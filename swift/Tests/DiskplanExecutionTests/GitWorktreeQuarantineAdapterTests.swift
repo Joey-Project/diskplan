@@ -16,6 +16,7 @@ func gitWorktreeQuarantineDeletesOnlyTheVerifiedTree() async throws {
   )
   #expect(await adapter.postverify(fixture.removeOperation) == .satisfied)
   #expect(!slotExists(fixture.worktree))
+  #expect(!slotExists(fixture.quarantineDirectory))
   #expect(FileManager.default.fileExists(atPath: fixture.outsideFile.path))
   #expect(await adapter.disposition(for: fixture.action.id) == .removed)
 }
@@ -121,6 +122,35 @@ func preRenameCancellationCleansAttemptNamespaceAndAllowsRetry() async throws {
 }
 
 @Test
+func postMkdirPreparationFailureCleansExactAttemptAndAllowsRetry() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let failedNamespace = fixture.quarantineDirectory(nonce: "preparation-failure")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.quarantinePreparationFailureCode = { "injected-quarantine-preparation-failure" }
+  let first = testAdapter(hooks: hooks, quarantineNonce: "preparation-failure")
+
+  let firstResult = await first.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  #expect(
+    firstResult.outcome
+      == .failed(ExecutionAdapterFailure(code: "injected-quarantine-preparation-failure")))
+  #expect(firstResult.cleanupDisposition == nil)
+  #expect(slotExists(fixture.worktree))
+  #expect(!slotExists(failedNamespace))
+
+  #expect(
+    await testAdapter(quarantineNonce: "retry-after-preparation-failure").apply(
+      fixture.removeOperation,
+      context: gitTestContext()
+    ) == .succeeded(detailCode: "git-worktree-quarantine-removed")
+  )
+}
+
+@Test
 func changedPreRenameNamespaceDoesNotBlockAUniqueRetryAttempt() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
@@ -130,11 +160,12 @@ func changedPreRenameNamespaceDoesNotBlockAUniqueRetryAttempt() async throws {
     _ = firstNamespace.path.withCString { Darwin.chmod($0, 0o750) }
   }
 
-  guard
-    case .failed(let failure) = await testAdapter(
-      hooks: hooks,
-      quarantineNonce: "changed-attempt"
-    ).apply(fixture.removeOperation, context: gitTestContext())
+  let first = testAdapter(hooks: hooks, quarantineNonce: "changed-attempt")
+  let firstResult = await first.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+  guard case .failed(let failure) = firstResult.outcome
   else {
     Issue.record("changed pre-rename namespace must reject")
     return
@@ -142,6 +173,14 @@ func changedPreRenameNamespaceDoesNotBlockAUniqueRetryAttempt() async throws {
   #expect(failure.code == "quarantine-seal-mismatch")
   #expect(slotExists(fixture.worktree))
   #expect(slotExists(firstNamespace))
+  guard
+    case .gitWorktreeAttemptDirectory(.bindingUnverified(let cleanupFailure))? =
+      firstResult.cleanupDisposition
+  else {
+    Issue.record("changed attempt cleanup must report an unverified binding")
+    return
+  }
+  #expect(cleanupFailure.code == "quarantine-seal-mismatch")
 
   #expect(
     await testAdapter(quarantineNonce: "retry-after-change").apply(
@@ -168,13 +207,21 @@ func replacedPreRenameNamespaceIsNeverDeletedAndDoesNotBlockRetry() async throws
   }
   let first = testAdapter(hooks: hooks, quarantineNonce: "replaced-attempt")
 
-  let firstOutcome = await Task {
-    await first.apply(fixture.removeOperation, context: gitTestContext())
+  let firstResult = await Task {
+    await first.applyResult(fixture.removeOperation, context: gitTestContext())
   }.value
-  #expect(firstOutcome == .cancelled)
+  #expect(firstResult.outcome == .cancelled)
   #expect(slotExists(fixture.worktree))
   #expect(slotExists(displaced))
   #expect(FileManager.default.fileExists(atPath: marker.path))
+  guard
+    case .gitWorktreeAttemptDirectory(.bindingUnverified(let cleanupFailure))? =
+      firstResult.cleanupDisposition
+  else {
+    Issue.record("replaced attempt cleanup must report an unverified binding")
+    return
+  }
+  #expect(cleanupFailure.code == "source-slot-identity-mismatch")
 
   #expect(
     await testAdapter(quarantineNonce: "retry-after-replacement").apply(
@@ -183,6 +230,38 @@ func replacedPreRenameNamespaceIsNeverDeletedAndDoesNotBlockRetry() async throws
   )
   #expect(slotExists(displaced))
   #expect(FileManager.default.fileExists(atPath: marker.path))
+}
+
+@Test
+func successfulRemovalReportsAnExactRetainedAttemptDirectory() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let marker = fixture.quarantineDirectory.appendingPathComponent("late-marker")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeUnusedQuarantineCleanup = {
+    try? Data("retained".utf8).write(to: marker)
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  #expect(result.outcome == .succeeded(detailCode: "git-worktree-quarantine-removed"))
+  #expect(!slotExists(fixture.worktree))
+  #expect(FileManager.default.fileExists(atPath: marker.path))
+  guard
+    case .gitWorktreeAttemptDirectory(.retained(let locator, let failure))? =
+      result.cleanupDisposition
+  else {
+    Issue.record("successful removal cleanup must publish the exact retained wrapper")
+    return
+  }
+  #expect(
+    locator.quarantineDirectoryName == Data(fixture.quarantineDirectory.lastPathComponent.utf8))
+  #expect(failure.code == "remove-unused-quarantine")
+  #expect(failure.errno == ENOTEMPTY)
 }
 
 @Test
@@ -209,6 +288,7 @@ func gitWorktreeVerificationFailureRestoresTheExactSourceSlot() async throws {
   #expect(failure.code == "quarantine-verification-failed-restored")
   #expect(slotExists(fixture.worktree))
   #expect(!slotExists(quarantined))
+  #expect(!slotExists(fixture.quarantineDirectory))
   #expect(
     await adapter.disposition(for: fixture.action.id)
       == .restoredAfterVerificationFailure(code: "worktree-content-mismatch")
@@ -795,8 +875,9 @@ func gitIndexDriftBeforeRenameRetainsTheSource() async throws {
   defer { fixture.cleanup() }
   var hooks = GitWorktreeQuarantineAdapter.Hooks()
   hooks.beforeQuarantine = {
-    try? Data("changed-index".utf8).write(
-      to: fixture.administrative.appendingPathComponent("index")
+    overwriteExistingFile(
+      fixture.administrative.appendingPathComponent("index"),
+      with: Data("changed-index".utf8)
     )
   }
 
@@ -807,7 +888,7 @@ func gitIndexDriftBeforeRenameRetainsTheSource() async throws {
     Issue.record("Git index drift must fail before quarantine rename")
     return
   }
-  #expect(failure.code == "verified-quarantine-changed-before-delete-entry-set")
+  #expect(failure.code == "verified-quarantine-changed-before-delete-content")
   #expect(slotExists(fixture.worktree))
   #expect(!slotExists(fixture.quarantineDirectory))
 }
@@ -835,6 +916,71 @@ func gitHeadReferenceDriftBeforeRenameRetainsTheSource() async throws {
   #expect(failure.code == "git-head-resolution-mismatch-at-mutation-commit")
   #expect(slotExists(fixture.worktree))
   #expect(!slotExists(fixture.quarantineDirectory))
+}
+
+@Test
+func gitIndexDriftAtDeleteCommitRetainsTheQuarantinedSource() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteCommit = {
+    overwriteExistingFile(
+      fixture.administrative.appendingPathComponent("index"),
+      with: Data("changed-index".utf8)
+    )
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
+    Issue.record("Git index drift must fail at the delete commit point")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-residual")
+  guard
+    case .gitWorktree(.quarantineRetained(_, let failureCode))? = result.mutationDisposition
+  else {
+    Issue.record("Git index commit-point drift must retain the quarantine locator")
+    return
+  }
+  #expect(failureCode == "verified-quarantine-changed-before-delete-content")
+}
+
+@Test
+func gitHeadReferenceDriftAtDeleteCommitRetainsTheQuarantinedSource() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let headReference = fixture.common.appendingPathComponent("refs/heads/main")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteCommit = {
+    overwriteExistingFile(
+      headReference,
+      with: Data("fedcba9876543210fedcba9876543210fedcba98\n".utf8)
+    )
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
+    Issue.record("resolved Git HEAD drift must fail at the delete commit point")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-residual")
+  guard
+    case .gitWorktree(.quarantineRetained(_, let failureCode))? = result.mutationDisposition
+  else {
+    Issue.record("resolved Git HEAD commit-point drift must retain the quarantine locator")
+    return
+  }
+  #expect(failureCode == "git-head-resolution-mismatch-at-mutation-commit")
 }
 
 @Test
@@ -1157,6 +1303,71 @@ func recursiveDeleteCommitRevalidatesTheQuarantineWrapperSeal() async throws {
     await adapter.disposition(for: fixture.action.id)
       == .quarantineBindingUnverified(failureCode: "quarantine-seal-mismatch")
   )
+}
+
+@Test
+func recursiveDeleteReportsAnActualRootUnlinkFailure() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let lateChild = fixture.quarantinedURL.appendingPathComponent("late-child")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteRootRemoval = {
+    try? Data("late".utf8).write(to: lateChild)
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
+    Issue.record("a non-empty verified root must fail at the actual unlink")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-residual")
+  #expect(failure.errno == ENOTEMPTY)
+  guard
+    case .gitWorktree(.quarantineRetained(_, let failureCode))? =
+      result.mutationDisposition
+  else {
+    Issue.record("actual unlink failure must retain a typed recovery locator")
+    return
+  }
+  #expect(failureCode == "delete-verified-quarantine-root")
+  #expect(FileManager.default.fileExists(atPath: lateChild.path))
+}
+
+@Test
+func modeZeroPayloadStillPublishesADescriptorRelativeRecoveryLocator() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  defer { _ = fixture.quarantinedURL.path.withCString { Darwin.chmod($0, 0o700) } }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteCommit = {
+    _ = fixture.quarantinedURL.path.withCString { Darwin.chmod($0, 0o000) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
+    Issue.record("mode-zero payload access drift must stop deletion")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-residual")
+  guard
+    case .gitWorktree(.quarantineRetained(let locator, let failureCode))? =
+      result.mutationDisposition
+  else {
+    Issue.record("mode-zero payload must remain descriptor-relatively locatable")
+    return
+  }
+  #expect(locator.identity == fixture.action.prototype.targetIdentity)
+  #expect(failureCode == "delete-commit-root-access-policy-mismatch")
 }
 
 @Test

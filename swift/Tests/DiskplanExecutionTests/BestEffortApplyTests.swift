@@ -131,6 +131,44 @@ func adapterDispositionRemainsBoundToTheReportedExecutionAttempt() async throws 
 }
 
 @Test
+func attemptCleanupResidualIsVisibleAndMakesSuccessfulMutationPartial() async throws {
+  let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
+  let authorization = try await makeAuthorization(plan: fixture.plan, overlay: fixture.overlay)
+  let cleanupFailure = ExecutionAdapterFailure(code: "remove-unused-quarantine", errno: ENOTEMPTY)
+  let cleanupDisposition = ExecutionCleanupDisposition.gitWorktreeAttemptDirectory(
+    .bindingUnverified(failure: cleanupFailure)
+  )
+  let adapterResult = AdapterOperationResult(
+    outcome: .succeeded(detailCode: "git-worktree-quarantine-removed"),
+    mutationDisposition: .gitWorktree(.removed),
+    cleanupDisposition: cleanupDisposition
+  )
+  let events = RecordingEventSink()
+  let adapter = AttemptScopedRecordingMutationAdapter(
+    result: adapterResult,
+    postOutcome: .satisfied
+  )
+
+  let report = await BestEffortApplyCoordinator(
+    adapter: adapter,
+    eventSink: events,
+    auditSink: nil,
+    clock: { 202 }
+  ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
+
+  let step = report.unitOutcomes.first?.steps.first
+  #expect(step?.status == .partiallySucceeded)
+  #expect(step?.cleanupDisposition == cleanupDisposition)
+  #expect(step?.postVerification == .expectedResidual(cleanupFailure))
+  #expect(report.unitOutcomes.first?.status == .partiallyFailed)
+  #expect(
+    await events.events.contains {
+      guard case .execution(.stepFinished(let eventStep)) = $0 else { return false }
+      return eventStep.cleanupDisposition == cleanupDisposition
+    })
+}
+
+@Test
 func jitIdentityReplacementRejectsBeforeMutation() async throws {
   let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
   let replacement = ObjectIdentity(
@@ -1068,10 +1106,19 @@ private actor FirstMutationGateAdapter: ExecutionMutationAdapter {
 
 private actor AttemptScopedRecordingMutationAdapter: ExecutionMutationAdapter {
   let result: AdapterOperationResult
+  let postOutcome: PostVerificationOutcome
   private(set) var postverifiedResult: AdapterOperationResult?
 
-  init(result: AdapterOperationResult) {
+  init(
+    result: AdapterOperationResult,
+    postOutcome: PostVerificationOutcome = .failed(
+      ObservationFailure(
+        code: "attempt-scoped-recovery-disposition",
+        collector: "attempt-scoped-test-adapter"
+      ))
+  ) {
     self.result = result
+    self.postOutcome = postOutcome
   }
 
   func apply(
@@ -1097,11 +1144,7 @@ private actor AttemptScopedRecordingMutationAdapter: ExecutionMutationAdapter {
     result: AdapterOperationResult
   ) async -> PostVerificationOutcome {
     postverifiedResult = result
-    return .failed(
-      ObservationFailure(
-        code: "attempt-scoped-recovery-disposition",
-        collector: "attempt-scoped-test-adapter"
-      ))
+    return postOutcome
   }
 }
 

@@ -216,3 +216,16 @@ superseded_by:
   This prevents a retry from inheriting a stale locator or administrative residual from an earlier
   attempt. The current checkpoint passed local `swiftc -frontend -parse`, strict Swift formatting,
   and `git diff --check`; no local build or dynamic test was run.
+- Attempt-directory cleanup is now a separate typed result from the primary mutation. Every
+  post-`mkdirat` preparation exit attempts descriptor-relative cleanup of only the captured object;
+  successful deletion and automatic restore also remove the exact empty wrapper after held
+  source-parent, wrapper-seal, and slot-identity checks. A retained or unverified wrapper is visible
+  in the ordinary step/event/audit/report path, preserves cancellation and timeout, and makes an
+  otherwise successful step partial. Deterministic fixtures cover post-mkdir failure followed by a
+  clean retry, changed and replaced pre-rename wrappers, successful removal with a retained exact
+  wrapper, and report propagation.
+- Recovery-locator publication now proves the payload slot with descriptor-relative no-follow stat
+  rather than reopening the directory, so mode-`000` access drift can still publish a verified
+  manual-recovery locator. New commit-point fixtures mutate both the Git index and resolved loose
+  `HEAD`; a separate late-child fixture reaches a real `unlinkat(..., AT_REMOVEDIR)` `ENOTEMPTY`
+  failure instead of approximating recursive-delete failure through an earlier seal mismatch.

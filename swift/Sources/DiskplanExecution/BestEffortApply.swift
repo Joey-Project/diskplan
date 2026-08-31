@@ -346,10 +346,15 @@ public actor BestEffortApplyCoordinator {
           )
         )
         let adapterOutcome = adapterResult.outcome
-        let postVerification = await adapter.postverify(
+        var postVerification = await adapter.postverify(
           operation,
           result: adapterResult
         )
+        if case .satisfied = postVerification,
+          let cleanupFailure = cleanupFailure(adapterResult.cleanupDisposition)
+        {
+          postVerification = .expectedResidual(cleanupFailure)
+        }
         let stepStatus = stepStatus(
           adapterOutcome: adapterOutcome, postVerification: postVerification)
         let step = ExecutionStepOutcome(
@@ -357,6 +362,7 @@ public actor BestEffortApplyCoordinator {
           status: stepStatus,
           adapterOutcome: adapterOutcome,
           mutationDisposition: adapterResult.mutationDisposition,
+          cleanupDisposition: adapterResult.cleanupDisposition,
           postVerification: postVerification
         )
         stepOutcomes.append(step)
@@ -410,6 +416,15 @@ public actor BestEffortApplyCoordinator {
       unitOutcomes: outcomes,
       auditFailures: auditFailures
     )
+  }
+
+  private func cleanupFailure(
+    _ disposition: ExecutionCleanupDisposition?
+  ) -> ExecutionAdapterFailure? {
+    guard let disposition else { return nil }
+    switch disposition {
+    case .gitWorktreeAttemptDirectory(let value): return value.failure
+    }
   }
 
   private func collectJITReport(

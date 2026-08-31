@@ -98,7 +98,14 @@ unique, exclusive `0700` same-filesystem quarantine directory, and seals its obj
 access policy. Before the payload rename commits, every exit attempts to remove only the exact
 still-empty execution directory after descriptor-relative identity and seal revalidation. A
 changed or replaced directory is retained rather than deleted, while the unique next-attempt name
-prevents that retained object from permanently blocking a newly prepared retry. The held source
+prevents that retained object from permanently blocking a newly prepared retry. A failure before
+the directory can be fully sealed still compares the descriptor-relative slot with the identity
+captured immediately after `mkdirat`; inability to prove that binding is reported as an unverified
+cleanup residual and never authorizes deletion. Successful payload deletion and successful
+automatic restore also remove the now-empty exact wrapper only after rechecking the held directory
+seal, source-parent seal, and slot identity. Wrapper cleanup failure is orthogonal to the primary
+mutation outcome: cancellation/timeout stays cancellation/timeout, while a successful mutation is
+reported as partial with a typed retained locator or unverified binding. The held source
 parent receives the same runtime seal. UID/GID, mode, ACL, flags,
 device, `fstatfs` mount identity, missing state, unreadability, and collection failure are
 rechecked independently at rename/restore and before deletion. It
@@ -111,12 +118,18 @@ an ordinary file, a symbolic link, or a descendant directory is never auto-resto
 retains the quarantine for manual recovery and publishes a typed locator only after the same
 descriptor-bound namespace and payload revalidation. Restore collision and recursive-deletion
 failure use that same locator-publication gate; an unprovable binding reports an unverified
-recovery state without a pathname.
+recovery state without a pathname. Locator publication needs only a descriptor-relative
+`fstatat(..., AT_SYMLINK_NOFOLLOW)` identity proof for the payload slot, so a mode-`000` retained
+directory remains reportable without reopening or materializing it.
 
 Only after root deletion may the adapter delete administrative metadata, and it deletes only
 the descriptor-bound worktree registration whose full metadata coverage digest was frozen in
-the plan. Immediately before unlinking the registration root, the canonical raw leaf must still
-name the held administrative identity. It never runs repository-
+the plan. Immediately before both payload rename and recursive deletion, it rechecks that metadata
+coverage plus the held admin/worktrees/common directory seals and the exact `HEAD` resolution.
+The v1 executable subset supports detached `HEAD` or a canonical loose symbolic ref beneath the
+held common directory; a packed-ref-only symbolic resolution fails closed and stays report-only.
+Immediately before unlinking the registration root, the canonical raw leaf must still name the
+held administrative identity. It never runs repository-
 wide `git worktree prune`, so unrelated registered or stale worktrees remain untouched.
 Cancellation, deadline, or registration identity/coverage drift produces an explicit typed
 residual and a partially successful step without changing the root-deletion result.
@@ -158,6 +171,11 @@ the compound result partial or failed. The unit
 status is derived from all steps, preserving success, partial failure, failure, cancellation,
 prerequisite skip, JIT rejection, and epoch expiry. Target absence is the generic adapter's
 authoritative ordinary postcondition; free-space deltas are not used as success proof.
+
+Adapter recovery and cleanup dispositions are attempt-scoped values returned atomically with the
+primary outcome. Production post-verification never recovers them from an ActionID cache. The
+same values appear in the step outcome, shell/TUI event, optional audit event, and final report, so
+a retry cannot inherit a stale locator from an earlier attempt.
 
 An expected residual is distinct from an unsatisfied destructive postcondition. The adapter
 returns the successful root mutation separately, post-verification carries the typed residual
