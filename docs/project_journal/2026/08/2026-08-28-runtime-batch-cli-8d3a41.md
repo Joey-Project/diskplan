@@ -5,7 +5,7 @@ status: active
 created: 2026-08-28
 updated: 2026-08-29
 branch: wip/runtime-batch-cli
-pr:
+pr: 7
 supersedes: []
 superseded_by:
 ---
@@ -54,7 +54,7 @@ superseded_by:
   local staging with pending edits committed only after an engine overlay ack.
 - [x] Make `p` finalize the scanned prefix before building an immutable partial
   plan, and keep unsupported apply review typed and fail-closed.
-- [ ] Merge the protocol 1.5 preview extension and require its raw working
+- [x] Merge the protocol 1.5 preview extension and require its raw working
   directory/path-race binding before enabling mutation review.
 - [ ] Pass the focused Rust, Python, and mixed-transport dynamic gates.
 - [x] Run focused Rust and release-runner tests after the integration workstream
@@ -105,8 +105,14 @@ superseded_by:
 - The TUI maps only a strictly verified wire plan into its plan-first model.
   Stage/unstage keys enqueue engine edits; selection and revision change only
   after a sealed overlay acknowledgement. Dry-run is real. Apply review remains
-  a typed unavailable operation on protocol minor 1.4 and also fails closed on
-  1.5 until the raw working-directory/path-race preview receipt is present.
+  a typed unavailable operation: only exact negotiated protocol minor 1.5 plus
+  `execution-stream-v1` passes the transport preflight, and the frontend still
+  rejects the operation until the authoritative apply-review transport exists.
+- Plan projection decoding now receives the exact selected handshake minor. A
+  1.4 session therefore retains strict 1.4 canonical admission, while 1.5
+  requires the sealed raw working-directory and path-race preview bindings.
+  Batch continues to support non-mutating 1.4 dry-runs and rejects a missing
+  dry-run capability before starting a scan.
 - The Rust adapter additionally proves that every plan repeats the exact scan
   session, checkpoint, checkpoint-evidence, and final-evidence binding from its
   request. Interactive overlay acknowledgements must advance exactly one
@@ -173,6 +179,14 @@ superseded_by:
   narrowly permits the inline transport union, and adopts `matches!` without
   changing runtime behavior. No CI rerun was requested; the code-changing head
   requires naturally triggered current-head validation.
+- Signed commit `1de263d` statically closed those three Clippy blockers and a
+  fresh review found no findings. Signed non-rebase merge `b029ddb` then merged
+  Protocol 1.5 integration head `ecb29078d60f401174d7c6b7c8756b1ffbe713fc`
+  without conflicts. The follow-up passes the exact negotiated minor into the
+  canonical plan decoder, moves batch dry-run capability admission before scan,
+  and gives the TUI one version-aware `PlanCommand` transport preflight. Local
+  dynamic validation remains prohibited; the combined head requires the India
+  focused gate.
 
 - `cargo fmt --all -- --check` completed successfully.
 - Second-review-focused Rust tests passed all six batch cases, including
@@ -201,8 +215,11 @@ superseded_by:
 
 ## Handoff
 
-- Protocol owner: land the protocol 1.5 preview receipts without changing 1.4
-  canonical fixtures or enabling mutation on a downgraded session.
-- Integration owner: merge that boundary, run the focused tests, and replace
-  `status: active` with completed only after the authoritative adapter and exact
-  India-shape gate pass.
+- Phase 5/controller integration must add the positive Swift execution-stream
+  capability and handler, the intent-bound preview/confirmation/cancellation
+  receipt dispatcher, and midstream cancellation. It must preserve exact-minor
+  preview validation and consume only authoritative receipts; this Batch slice
+  must not fabricate a preview, confirmation, cancellation, or success.
+- Integration owner: run the focused tests on
+  `India-mac-mini-m4-hoteng` and replace `status: active` with completed only
+  after the authoritative adapter and exact India-shape gate pass.

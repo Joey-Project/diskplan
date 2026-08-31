@@ -8,6 +8,7 @@ use diskplan_proto::diskplan::v1::{
     DecisionOverlayEdit, Digest256, OpaqueIdentifier, PrepareDryRunRequest, ScanMachineState,
     StageActionEdit, decision_overlay_edit, engine_event, runtime_event,
 };
+use diskplan_proto::runtime::PROTOCOL15_MINOR;
 use diskplan_proto::sealed::RuntimeChainVerifier;
 
 use crate::runtime_client::{
@@ -24,6 +25,7 @@ use super::plan::{
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SEMANTIC_EVENT_CAPACITY: usize = 16;
+const EXECUTION_STREAM_CAPABILITY: &str = "execution-stream-v1";
 
 enum DriverCommand {
     Control(ControlCommand),
@@ -104,6 +106,7 @@ fn run_engine(
             "plan-projection-v1",
             "decision-overlay-v1",
             "dry-run-projection-v1",
+            EXECUTION_STREAM_CAPABILITY,
         ],
     )?;
     if !session
@@ -426,12 +429,17 @@ impl DriverRuntime {
                     .map_err(ClientError::Io)
             }
             PlanCommand::Prepare(PlanIntentKind::ApplyReview) => {
-                let reason = if self.selected_minor < 5 {
-                    "protocol minor 1.5 is required for mutation review"
-                } else {
-                    "the protocol 1.5 raw working-directory and path-race preview receipt is unavailable"
-                };
-                send_rejection(events, "apply review", reason)
+                if let Err(reason) = validate_apply_review_transport(
+                    self.selected_minor,
+                    self.has_capability(EXECUTION_STREAM_CAPABILITY),
+                ) {
+                    return send_rejection(events, "apply review", reason);
+                }
+                send_rejection(
+                    events,
+                    "apply review",
+                    "the authoritative apply-review transport is not implemented by this frontend",
+                )
             }
         }
     }
@@ -465,6 +473,19 @@ impl DriverRuntime {
             )),
         }
     }
+}
+
+fn validate_apply_review_transport(
+    selected_minor: u32,
+    has_execution_stream_capability: bool,
+) -> Result<(), &'static str> {
+    if selected_minor != PROTOCOL15_MINOR {
+        return Err("exact protocol minor 1.5 is required for mutation review");
+    }
+    if !has_execution_stream_capability {
+        return Err("execution-stream-v1 was not negotiated by the runtime controller");
+    }
+    Ok(())
 }
 
 fn send_rejection(
@@ -543,5 +564,25 @@ mod tests {
             kind: ScanControlKind::PauseScan,
         });
         assert!(matches!(control, DriverCommand::Control(_)));
+    }
+
+    #[test]
+    fn apply_review_transport_requires_exact_minor_and_execution_capability() {
+        assert_eq!(
+            validate_apply_review_transport(4, true),
+            Err("exact protocol minor 1.5 is required for mutation review")
+        );
+        assert_eq!(
+            validate_apply_review_transport(6, true),
+            Err("exact protocol minor 1.5 is required for mutation review")
+        );
+        assert_eq!(
+            validate_apply_review_transport(PROTOCOL15_MINOR, false),
+            Err("execution-stream-v1 was not negotiated by the runtime controller")
+        );
+        assert_eq!(
+            validate_apply_review_transport(PROTOCOL15_MINOR, true),
+            Ok(())
+        );
     }
 }

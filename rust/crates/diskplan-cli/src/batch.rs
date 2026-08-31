@@ -569,6 +569,7 @@ fn execute_protocol_batch(
     require_capability(session, RAW_PATH_CAPABILITY)?;
     require_capability(session, PLAN_CAPABILITY)?;
     require_capability(session, OVERLAY_CAPABILITY)?;
+    require_capability(session, DRY_RUN_CAPABILITY)?;
 
     session
         .send_start_scan_request(StartScanRequest {
@@ -625,7 +626,6 @@ fn execute_protocol_batch(
     .map_err(map_runtime_error)?;
     let overlay_summary = summarize_overlay(&plan, &overlay)?;
 
-    require_capability(session, DRY_RUN_CAPABILITY)?;
     let dry_run_receipt = prepare_dry_run(
         session,
         PrepareDryRunRequest {

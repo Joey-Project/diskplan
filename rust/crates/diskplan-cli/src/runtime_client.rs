@@ -99,8 +99,19 @@ pub fn receive_plan(
                 let manifest = projection
                     .manifest
                     .ok_or(RuntimeClientError::Unexpected("plan manifest"))?;
-                let verified =
-                    decode_and_verify_plan_projection(&chunks, &manifest.encode_to_vec())?;
+                let negotiated_protocol_minor = session
+                    .accepted()
+                    .selected_version
+                    .as_ref()
+                    .ok_or(RuntimeClientError::Binding(
+                        "accepted handshake omitted selected protocol version",
+                    ))?
+                    .minor;
+                let verified = decode_and_verify_plan_projection(
+                    negotiated_protocol_minor,
+                    &chunks,
+                    &manifest.encode_to_vec(),
+                )?;
                 verify_plan_scan_binding(verified.manifest(), expected_scan)?;
                 return Ok(RuntimePlanReceipt {
                     projection: verified,
