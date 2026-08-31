@@ -66,6 +66,12 @@ superseded_by:
   on the root, an ordinary file, a symbolic link, or a descendant directory requires manual
   recovery; missing, unreadable, collection failure, identity drift, and content drift keep their
   distinct failure paths.
+- Symlink coverage now opens the link object itself and binds its ACL through that descriptor.
+  Post-rename token comparison precedes cancellation and deadline handling, so an interruption
+  cannot auto-restore a tree whose access policy changed. Recursive deletion revalidates each
+  exact node's identity, content, and access policy immediately before `unlinkat`; directory
+  size/timestamp churn caused by deleting its already-verified children is not misclassified as
+  content drift, while a newly introduced child still makes directory removal fail closed.
 - A recursive-deletion failure no longer publishes the cached quarantine pathname. It first
   rebinds the raw root, every source parent, the quarantine namespace, and the payload identity;
   if that proof fails, the result is a typed unverified binding without a locator.
@@ -175,3 +181,12 @@ superseded_by:
   object. New fixtures cover cancellation cleanup followed by retry and a retained changed attempt
   followed by a successful unique retry. The replacement head requires static gates and a fresh
   closure review before India validation.
+- Fresh full-range closure review of signed checkpoint `023bca3` found three P1 gaps: recursive
+  deletion rechecked only identity after the last full snapshot, cancellation/deadline handling
+  preceded the post-quarantine token comparison, and symbolic-link ACLs were represented as an
+  empty digest. The follow-up moves interruption handling behind the protected-property comparison,
+  measures symlink ACLs through an `O_SYMLINK` descriptor, and performs per-node descriptor-bound
+  identity/content/access revalidation immediately before removal. New fixtures cover access
+  drift plus cancellation, same-inode content drift, mode drift, and symlink ACL drift. The exact
+  follow-up head still requires static gates, a fresh frozen-range closure review, and India
+  focused/full dynamic validation.

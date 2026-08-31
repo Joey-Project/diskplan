@@ -722,6 +722,39 @@ func postQuarantineFileModeDriftRequiresManualRecovery() async throws {
 }
 
 @Test
+func postQuarantineAccessDriftWinsOverCancellationAndRequiresManualRecovery() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    _ = fixture.quarantinedURL.appendingPathComponent("payload").path.withCString {
+      Darwin.chmod($0, 0o400)
+    }
+    withUnsafeCurrentTask { task in task?.cancel() }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let outcome = await Task {
+    await adapter.apply(fixture.removeOperation, context: gitTestContext())
+  }.value
+  guard case .failed(let failure) = outcome else {
+    Issue.record("post-quarantine access drift must not be auto-restored after cancellation")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantinedURL))
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("access drift plus cancellation must retain a typed recovery locator")
+    return
+  }
+  #expect(failureCode == "post-quarantine-protected-properties-mismatch-access-policy")
+}
+
+@Test
 func postQuarantineDirectoryModeDriftRequiresManualRecovery() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
@@ -781,6 +814,97 @@ func postQuarantineSymbolicLinkFlagDriftRequiresManualRecovery() async throws {
 }
 
 @Test
+func postQuarantineSymbolicLinkACLDriftRequiresManualRecovery() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let link = fixture.quarantinedURL.appendingPathComponent("outside-link")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    try! addEveryoneWriteACL(toSymbolicLink: link)
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("post-quarantine symlink ACL drift must reject")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("symlink ACL drift must retain a typed recovery locator")
+    return
+  }
+  #expect(failureCode == "post-quarantine-protected-properties-mismatch-access-policy")
+}
+
+@Test
+func recursiveDeleteCommitRejectsSameInodeContentDrift() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let payload = fixture.quarantinedURL.appendingPathComponent("payload")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteCommit = {
+    overwriteExistingFile(payload, with: Data("changed".utf8))
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("same-inode content drift must stop recursive deletion")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-residual")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantinedURL))
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("same-inode content drift must retain a typed recovery locator")
+    return
+  }
+  #expect(failureCode == "delete-commit-entry-content-mismatch")
+}
+
+@Test
+func recursiveDeleteCommitRejectsAccessPolicyDrift() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let payload = fixture.quarantinedURL.appendingPathComponent("payload")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteCommit = {
+    _ = payload.path.withCString { Darwin.chmod($0, 0o400) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("access-policy drift must stop recursive deletion")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-residual")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantinedURL))
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("access-policy drift must retain a typed recovery locator")
+    return
+  }
+  #expect(failureCode == "delete-commit-entry-access-policy-mismatch")
+}
+
+@Test
 func recursiveDeleteFailureRevalidatesRecoveryBindingBeforePublishingLocator() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
@@ -807,7 +931,9 @@ func recursiveDeleteFailureRevalidatesRecoveryBindingBeforePublishingLocator() a
   #expect(slotExists(fixture.quarantineDirectory))
   #expect(
     await adapter.disposition(for: fixture.action.id)
-      == .quarantineBindingUnverified(failureCode: "delete-verified-quarantine-entry")
+      == .quarantineBindingUnverified(
+        failureCode: "delete-commit-root-access-policy-mismatch"
+      )
   )
 }
 
@@ -1173,6 +1299,29 @@ private func addEveryoneWriteACL(to url: URL) throws {
   process.waitUntilExit()
   guard process.terminationReason == .exit, process.terminationStatus == 0 else {
     throw POSIXError(.EACCES)
+  }
+}
+
+private func addEveryoneWriteACL(toSymbolicLink url: URL) throws {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+  process.arguments = ["-h", "+a", "everyone allow write", url.path]
+  try process.run()
+  process.waitUntilExit()
+  guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+    throw POSIXError(.EACCES)
+  }
+}
+
+private func overwriteExistingFile(_ url: URL, with data: Data) {
+  let descriptor = url.path.withCString {
+    Darwin.open($0, O_WRONLY | O_TRUNC | O_CLOEXEC)
+  }
+  guard descriptor >= 0 else { return }
+  defer { _ = Darwin.close(descriptor) }
+  data.withUnsafeBytes { bytes in
+    guard let baseAddress = bytes.baseAddress else { return }
+    _ = Darwin.write(descriptor, baseAddress, bytes.count)
   }
 }
 

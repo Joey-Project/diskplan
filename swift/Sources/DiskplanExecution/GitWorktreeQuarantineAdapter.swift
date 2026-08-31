@@ -124,8 +124,17 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     let payloadDigest: Data
   }
 
+  private struct NodePath: Hashable {
+    let components: [Data]
+  }
+
   private struct FileMeasurement {
     let payloadDigest: Data
+    let aclDigest: Data
+  }
+
+  private struct SymbolicLinkMeasurement {
+    let target: Data
     let aclDigest: Data
   }
 
@@ -334,6 +343,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           expectedContent: contract.executionBaseline.contentProtection,
           expectedAccess: target.expectedTargetAccessPolicy
         )
+        try requireMatchingSnapshot(
+          preQuarantineToken,
+          actual: token,
+          mismatchCode: "post-quarantine-protected-properties-mismatch"
+        )
 
         if Task.isCancelled {
           return await restoreAfterInterruption(
@@ -353,12 +367,6 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
             failureCode: "deadline-after-quarantine"
           )
         }
-
-        try requireMatchingSnapshot(
-          preQuarantineToken,
-          actual: token,
-          mismatchCode: "post-quarantine-protected-properties-mismatch"
-        )
       } catch let verificationError as AdapterError {
         return await restoreAfterVerificationFailure(
           target: target,
@@ -1201,7 +1209,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       case .symbolicLink:
         guard remainingEntries > 0 else { throw failure("coverage-entry-budget-exhausted") }
         remainingEntries -= 1
-        let payload = try readSymbolicLink(
+        let measurement = try measureSymbolicLink(
           parentDescriptor: descriptor,
           name: name,
           expected: childStatus,
@@ -1209,7 +1217,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         )
         records.append(
           try record(
-            path: childPath, status: childStatus, payload: payload, aclDigest: Data()))
+            path: childPath,
+            status: childStatus,
+            payload: measurement.target,
+            aclDigest: measurement.aclDigest
+          ))
       }
     }
   }
@@ -1263,23 +1275,53 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     quarantineDescriptor: Int32,
     quarantineLeaf: Data
   ) throws {
+    guard let rootRecord = token.records.first, rootRecord.path.isEmpty else {
+      throw failure("invalid-coverage-token")
+    }
+    var recordsByPath: [NodePath: NodeRecord] = [:]
+    for record in token.records {
+      guard
+        recordsByPath.updateValue(
+          record,
+          forKey: NodePath(components: record.path)
+        ) == nil
+      else { throw failure("invalid-coverage-token") }
+    }
+    try requireDeletionDirectoryRecordStillCurrent(
+      rootRecord,
+      descriptor: rootDescriptor,
+      code: "delete-commit-root"
+    )
+
+    var remainingBytes = Self.maximumCoverageBytes
     for record in token.records.dropFirst().sorted(by: { lhs, rhs in
       if lhs.path.count != rhs.path.count { return lhs.path.count > rhs.path.count }
       return Self.comparePaths(rhs.path, lhs.path)
     }) {
       let parentPath = Array(record.path.dropLast())
       guard let leaf = record.path.last else { throw failure("invalid-coverage-token") }
-      let opened = try openRelativeDirectory(rootDescriptor, components: parentPath)
+      let opened = try openDeletionParentDirectory(
+        rootDescriptor,
+        components: parentPath,
+        recordsByPath: recordsByPath
+      )
       defer { Self.close(opened.dropFirst()) }
       let parent = opened.last ?? rootDescriptor
-      try requireSourceSlotIdentity(parentDescriptor: parent, leaf: leaf, expected: record.identity)
+      try requireDeletionRecordStillCurrent(
+        record,
+        parentDescriptor: parent,
+        leaf: leaf,
+        remainingBytes: &remainingBytes
+      )
       let flags = record.identity.type == .directory ? AT_REMOVEDIR : 0
       let result = try Self.withRawCString(leaf) { Darwin.unlinkat(parent, $0, flags) }
       guard result == 0 else { throw failure("delete-verified-quarantine-entry", errno) }
     }
-    guard let rootRecord = token.records.first, rootRecord.path.isEmpty else {
-      throw failure("invalid-coverage-token")
-    }
+    try requireDeletionDirectoryRecordStillCurrent(
+      rootRecord,
+      descriptor: rootDescriptor,
+      code: "delete-commit-root"
+    )
     try requireSourceSlotIdentity(
       parentDescriptor: quarantineDescriptor,
       leaf: quarantineLeaf,
@@ -1291,11 +1333,131 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     guard result == 0 else { throw failure("delete-verified-quarantine-root", errno) }
   }
 
-  private func openRelativeDirectory(
+  private func requireDeletionRecordStillCurrent(
+    _ record: NodeRecord,
+    parentDescriptor: Int32,
+    leaf: Data,
+    remainingBytes: inout UInt64
+  ) throws {
+    var current = stat()
+    let result = try Self.withRawCString(leaf) {
+      Darwin.fstatat(parentDescriptor, $0, &current, AT_SYMLINK_NOFOLLOW)
+    }
+    guard result == 0 else {
+      throw failure(
+        errno == ENOENT ? "delete-commit-entry-missing" : "delete-commit-entry-unreadable",
+        errno
+      )
+    }
+    try requireIdentity(
+      current,
+      expected: record.identity,
+      code: "delete-commit-entry-identity-mismatch"
+    )
+    try requireDeletionAccessPolicy(
+      record,
+      status: current,
+      aclDigest: nil,
+      code: "delete-commit-entry-access-policy-mismatch"
+    )
+
+    switch record.identity.type {
+    case .directory:
+      let descriptor = try openDirectory(
+        at: parentDescriptor,
+        name: leaf,
+        code: "open-delete-commit-directory"
+      )
+      defer { _ = Darwin.close(descriptor) }
+      try requireDeletionDirectoryRecordStillCurrent(
+        record,
+        descriptor: descriptor,
+        code: "delete-commit-entry"
+      )
+    case .regularFile:
+      let measurement = try digestRegularFile(
+        parentDescriptor: parentDescriptor,
+        name: leaf,
+        path: record.path,
+        expected: current,
+        remainingBytes: &remainingBytes
+      )
+      try requireDeletionAccessPolicy(
+        record,
+        status: current,
+        aclDigest: measurement.aclDigest,
+        code: "delete-commit-entry-access-policy-mismatch"
+      )
+      guard record.size == UInt64(max(current.st_size, 0)),
+        record.payloadDigest == measurement.payloadDigest
+      else { throw failure("delete-commit-entry-content-mismatch") }
+    case .symbolicLink:
+      let measurement = try measureSymbolicLink(
+        parentDescriptor: parentDescriptor,
+        name: leaf,
+        expected: current,
+        remainingBytes: &remainingBytes
+      )
+      try requireDeletionAccessPolicy(
+        record,
+        status: current,
+        aclDigest: measurement.aclDigest,
+        code: "delete-commit-entry-access-policy-mismatch"
+      )
+      guard record.size == UInt64(max(current.st_size, 0)),
+        record.payloadDigest == Data(SHA256.hash(data: measurement.target))
+      else { throw failure("delete-commit-entry-content-mismatch") }
+    }
+
+    try requireSourceSlotIdentity(
+      parentDescriptor: parentDescriptor,
+      leaf: leaf,
+      expected: record.identity
+    )
+  }
+
+  private func requireDeletionDirectoryRecordStillCurrent(
+    _ record: NodeRecord,
+    descriptor: Int32,
+    code: String
+  ) throws {
+    let current = try status(descriptor)
+    try requireIdentity(
+      current,
+      expected: record.identity,
+      code: "\(code)-identity-mismatch"
+    )
+    try requireDeletionAccessPolicy(
+      record,
+      status: current,
+      aclDigest: aclDigest(descriptor),
+      code: "\(code)-access-policy-mismatch"
+    )
+  }
+
+  private func requireDeletionAccessPolicy(
+    _ record: NodeRecord,
+    status current: stat,
+    aclDigest: Data?,
+    code: String
+  ) throws {
+    guard record.mode == UInt32(current.st_mode),
+      record.owner == UInt32(current.st_uid),
+      record.group == UInt32(current.st_gid),
+      record.flags == UInt32(current.st_flags)
+    else { throw accessPolicyFailure(code) }
+    if let aclDigest {
+      guard record.aclDigest == aclDigest else { throw accessPolicyFailure(code) }
+    }
+  }
+
+  private func openDeletionParentDirectory(
     _ root: Int32,
-    components: [Data]
+    components: [Data],
+    recordsByPath: [NodePath: NodeRecord]
   ) throws -> [Int32] {
     var descriptors = [root]
+    var path: [Data] = []
     do {
       for component in components {
         let next = try openDirectory(
@@ -1304,6 +1466,15 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           code: "open-delete-parent"
         )
         descriptors.append(next)
+        path.append(component)
+        guard let record = recordsByPath[NodePath(components: path)] else {
+          throw failure("invalid-coverage-token")
+        }
+        try requireDeletionDirectoryRecordStillCurrent(
+          record,
+          descriptor: next,
+          code: "delete-commit-parent"
+        )
       }
       return descriptors
     } catch {
@@ -1573,12 +1744,34 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     }
   }
 
-  private func readSymbolicLink(
+  private func measureSymbolicLink(
     parentDescriptor: Int32,
     name: Data,
     expected: stat,
     remainingBytes: inout UInt64
-  ) throws -> Data {
+  ) throws -> SymbolicLinkMeasurement {
+    let descriptor = try Self.withRawCString(name) { namePointer -> Int32 in
+      let value = Darwin.openat(
+        parentDescriptor,
+        namePointer,
+        O_RDONLY | O_SYMLINK | O_CLOEXEC
+      )
+      guard value >= 0 else { throw failure("open-coverage-symlink", errno) }
+      return value
+    }
+    defer { _ = Darwin.close(descriptor) }
+    let before = try status(descriptor)
+    guard Self.kind(before.st_mode) == .symbolicLink else {
+      throw failure("coverage-symlink-replaced")
+    }
+    try requireSameProtectedFileState(
+      expected,
+      before: before,
+      descriptor: descriptor,
+      expectedACLDigest: nil
+    )
+    let beforeACL = try aclDigest(descriptor)
+
     var capacity = max(Int(expected.st_size) + 1, 256)
     while capacity <= 1024 * 1024 {
       var buffer = [UInt8](repeating: 0, count: capacity)
@@ -1598,22 +1791,32 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           throw failure("coverage-byte-budget-exhausted")
         }
         remainingBytes -= UInt64(count)
-        var current = stat()
+        let after = try status(descriptor)
+        try requireSameProtectedFileState(
+          before,
+          before: after,
+          descriptor: descriptor,
+          expectedACLDigest: beforeACL
+        )
+        var slot = stat()
         let result = try Self.withRawCString(name) {
-          Darwin.fstatat(parentDescriptor, $0, &current, AT_SYMLINK_NOFOLLOW)
+          Darwin.fstatat(parentDescriptor, $0, &slot, AT_SYMLINK_NOFOLLOW)
         }
         guard result == 0 else {
           throw failure("coverage-symlink-unreadable", errno)
         }
-        guard Self.identity(current) == Self.identity(expected) else {
+        guard Self.identity(slot) == Self.identity(after) else {
           throw failure("coverage-symlink-replaced")
         }
-        guard current.st_mode == expected.st_mode,
-          current.st_uid == expected.st_uid,
-          current.st_gid == expected.st_gid,
-          current.st_flags == expected.st_flags
+        guard slot.st_mode == after.st_mode,
+          slot.st_uid == after.st_uid,
+          slot.st_gid == after.st_gid,
+          slot.st_flags == after.st_flags
         else { throw accessPolicyFailure("coverage-symlink-access-policy-raced") }
-        return Data(buffer.prefix(count))
+        return SymbolicLinkMeasurement(
+          target: Data(buffer.prefix(count)),
+          aclDigest: beforeACL
+        )
       }
       capacity *= 2
     }
