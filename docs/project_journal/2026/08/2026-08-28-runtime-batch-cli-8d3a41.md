@@ -3,7 +3,7 @@ id: 20260828-8d3a41
 title: Runtime Batch CLI
 status: active
 created: 2026-08-28
-updated: 2026-08-29
+updated: 2026-08-31
 branch: wip/runtime-batch-cli
 pr: 7
 supersedes: []
