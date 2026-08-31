@@ -39,6 +39,22 @@ public enum GitWorktreeAttemptCleanupDisposition: Equatable, Sendable {
   }
 }
 
+struct GitWorktreePostVerificationDirectoryBinding: Equatable, Sendable {
+  let identity: ObjectIdentity
+  let owner: UInt32
+  let group: UInt32
+  let mode: UInt32
+  let flags: UInt32
+  let device: UInt64
+  let aclDigest: Data
+  let mountIdentity: Data
+}
+
+struct GitWorktreePostVerificationNamespaceBinding: Equatable, Sendable {
+  let root: GitWorktreePostVerificationDirectoryBinding
+  let parents: [GitWorktreePostVerificationDirectoryBinding]
+}
+
 public enum GitWorktreeMutationDisposition: Equatable, Sendable {
   case removed
   case localChangesDiscarded
@@ -65,6 +81,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     var beforeQuarantine: @Sendable () -> Void = {}
     var beforePostQuarantineVerification: @Sendable () -> Void = {}
     var beforeRestore: @Sendable () -> Void = {}
+    var beforeRestoreCommit: @Sendable () -> Void = {}
+    var afterRestoreCommit: @Sendable () -> Void = {}
     var beforeRecursiveDelete: @Sendable () -> Void = {}
     var beforeRecursiveDeleteCommit: @Sendable () -> Void = {}
     var beforeRecursiveDeleteRootRemoval: @Sendable () -> Void = {}
@@ -81,10 +99,13 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     private struct AttemptValue {
       var mutation: GitWorktreeMutationDisposition?
       var cleanup: GitWorktreeAttemptCleanupDisposition?
+      var postVerificationBinding: GitWorktreePostVerificationNamespaceBinding?
     }
 
     private var attemptValues: [UUID: AttemptValue] = [:]
     private var legacyValues: [ActionID: GitWorktreeMutationDisposition] = [:]
+    private var legacyPostVerificationBindings:
+      [ActionID: GitWorktreePostVerificationNamespaceBinding] = [:]
 
     func set(_ value: GitWorktreeMutationDisposition, for actionID: ActionID) {
       if let attemptID = GitWorktreeQuarantineAdapter.currentAttemptID {
@@ -104,16 +125,35 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       attemptValues[attemptID] = attempt
     }
 
+    func setPostVerificationBinding(
+      _ value: GitWorktreePostVerificationNamespaceBinding,
+      for actionID: ActionID
+    ) {
+      if let attemptID = GitWorktreeQuarantineAdapter.currentAttemptID {
+        var attempt = attemptValues[attemptID] ?? AttemptValue()
+        attempt.postVerificationBinding = value
+        attemptValues[attemptID] = attempt
+      }
+      legacyPostVerificationBindings[actionID] = value
+    }
+
     func value(for actionID: ActionID) -> GitWorktreeMutationDisposition? {
       legacyValues[actionID]
     }
 
+    func postVerificationBinding(
+      for actionID: ActionID
+    ) -> GitWorktreePostVerificationNamespaceBinding? {
+      legacyPostVerificationBindings[actionID]
+    }
+
     func takeValue(for attemptID: UUID) -> (
       mutation: GitWorktreeMutationDisposition?,
-      cleanup: GitWorktreeAttemptCleanupDisposition?
+      cleanup: GitWorktreeAttemptCleanupDisposition?,
+      postVerificationBinding: GitWorktreePostVerificationNamespaceBinding?
     ) {
       let value = attemptValues.removeValue(forKey: attemptID)
-      return (value?.mutation, value?.cleanup)
+      return (value?.mutation, value?.cleanup, value?.postVerificationBinding)
     }
   }
 
@@ -267,7 +307,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       outcome: outcome,
       mutationDisposition: disposition.mutation.map(ExecutionMutationDisposition.gitWorktree),
       cleanupDisposition: disposition.cleanup.map(
-        ExecutionCleanupDisposition.gitWorktreeAttemptDirectory)
+        ExecutionCleanupDisposition.gitWorktreeAttemptDirectory),
+      gitWorktreePostVerificationBinding: disposition.postVerificationBinding
     )
   }
 
@@ -292,12 +333,15 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     -> PostVerificationOutcome
   {
     let disposition: GitWorktreeMutationDisposition?
+    let binding: GitWorktreePostVerificationNamespaceBinding?
     if case .gitWorktreeRemove(let target, _) = operation {
       disposition = await results.value(for: target.actionID)
+      binding = await results.postVerificationBinding(for: target.actionID)
     } else {
       disposition = nil
+      binding = nil
     }
-    return postverify(operation, disposition: disposition)
+    return postverify(operation, disposition: disposition, binding: binding)
   }
 
   public func postverify(
@@ -310,20 +354,27 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     } else {
       disposition = nil
     }
-    return postverify(operation, disposition: disposition)
+    return postverify(
+      operation,
+      disposition: disposition,
+      binding: result.gitWorktreePostVerificationBinding
+    )
   }
 
   private func postverify(
     _ operation: ExecutionAdapterOperation,
-    disposition: GitWorktreeMutationDisposition?
+    disposition: GitWorktreeMutationDisposition?,
+    binding: GitWorktreePostVerificationNamespaceBinding?
   ) -> PostVerificationOutcome {
     switch operation {
     case .gitWorktreeRemove(let target, _):
       if let disposition {
         switch disposition {
         case .removed:
-          return sourceIsAbsent(target)
+          return sourceIsAbsent(target, binding: binding)
         case .removedWithAdministrativeResidual(let residual):
+          let absence = sourceIsAbsent(target, binding: binding)
+          guard absence == .satisfied else { return absence }
           return .expectedResidual(residual.failure)
         case .quarantineRetained:
           return .notSatisfied(code: "verified-quarantine-retained")
@@ -559,7 +610,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           token,
           rootDescriptor: destinationDescriptor,
           quarantineDescriptor: quarantine.descriptor,
-          quarantineLeaf: quarantine.leaf
+          quarantineLeaf: quarantine.leaf,
+          expectedParentSeal: quarantine.seal
         )
       } catch let deletionError as AdapterError {
         let recovery = verifiedRecoveryDisposition(
@@ -584,6 +636,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
             errno: deletionError.failure.errno
           ))
       }
+
+      await results.setPostVerificationBinding(
+        postVerificationBinding(source),
+        for: target.actionID
+      )
 
       await recordUnusedQuarantineCleanup(
         target: target,
@@ -631,7 +688,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           administrative.coverage,
           rootDescriptor: administrative.administrativeDirectoryDescriptor,
           quarantineDescriptor: administrative.worktreesDirectoryDescriptor,
-          quarantineLeaf: administrative.administrativeLeaf
+          quarantineLeaf: administrative.administrativeLeaf,
+          expectedParentSeal: administrative.worktreesSeal
         )
       } catch let error as AdapterError {
         return await recordAdministrativeResidual(
@@ -667,6 +725,30 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     )
     await results.set(.removedWithAdministrativeResidual(residual), for: target.actionID)
     return .succeeded(detailCode: "git-worktree-removed-with-administrative-residual")
+  }
+
+  private func postVerificationBinding(
+    _ source: DescriptorBinding
+  ) -> GitWorktreePostVerificationNamespaceBinding {
+    GitWorktreePostVerificationNamespaceBinding(
+      root: postVerificationDirectoryBinding(source.rootSeal),
+      parents: source.parentNamespaceSeals.map(postVerificationDirectoryBinding)
+    )
+  }
+
+  private func postVerificationDirectoryBinding(
+    _ seal: QuarantineNamespaceSeal
+  ) -> GitWorktreePostVerificationDirectoryBinding {
+    GitWorktreePostVerificationDirectoryBinding(
+      identity: seal.identity,
+      owner: seal.owner,
+      group: seal.group,
+      mode: seal.mode,
+      flags: seal.flags,
+      device: seal.device,
+      aclDigest: seal.aclDigest,
+      mountIdentity: seal.mountIdentity
+    )
   }
 
   private func restoreAfterVerificationFailure(
@@ -736,11 +818,13 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         expectedSnapshot: restoreBaseline
       )
       defer { _ = Darwin.close(payload) }
+      hooks.beforeRestoreCommit()
       try requireRestoreCommitBinding(
         target: target,
         source: source,
         quarantine: quarantine,
-        payloadDescriptor: payload
+        payloadDescriptor: payload,
+        expectedSnapshot: restoreBaseline
       )
       try requireSourceSlotMissing(parentDescriptor: source.parentDescriptor, leaf: source.leaf)
       try renameExclusive(
@@ -750,11 +834,13 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         to: source.leaf,
         code: "restore-source-slot"
       )
+      hooks.afterRestoreCommit()
       try requireRestoredPayloadBinding(
         target: target,
         source: source,
         quarantine: quarantine,
-        payloadDescriptor: payload
+        payloadDescriptor: payload,
+        expectedSnapshot: restoreBaseline
       )
       await recordUnusedQuarantineCleanup(
         target: target,
@@ -814,11 +900,13 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         expectedSnapshot: expectedSnapshot
       )
       defer { _ = Darwin.close(payload) }
+      hooks.beforeRestoreCommit()
       try requireRestoreCommitBinding(
         target: target,
         source: source,
         quarantine: quarantine,
-        payloadDescriptor: payload
+        payloadDescriptor: payload,
+        expectedSnapshot: expectedSnapshot
       )
       try requireSourceSlotMissing(parentDescriptor: source.parentDescriptor, leaf: source.leaf)
       try renameExclusive(
@@ -828,11 +916,13 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         to: source.leaf,
         code: "restore-source-slot"
       )
+      hooks.afterRestoreCommit()
       try requireRestoredPayloadBinding(
         target: target,
         source: source,
         quarantine: quarantine,
-        payloadDescriptor: payload
+        payloadDescriptor: payload,
+        expectedSnapshot: expectedSnapshot
       )
       await recordUnusedQuarantineCleanup(
         target: target,
@@ -981,7 +1071,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     target: BoundMutationTarget,
     source: DescriptorBinding,
     quarantine: QuarantineBinding,
-    payloadDescriptor: Int32
+    payloadDescriptor: Int32,
+    expectedSnapshot: CoverageToken
   ) throws {
     try requireRecoveryNamespaceBinding(
       target: target,
@@ -998,6 +1089,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       destinationDescriptor: payloadDescriptor,
       expected: target.expectedIdentity
     )
+    try requireSnapshotStillCurrent(
+      expectedSnapshot,
+      rootDescriptor: payloadDescriptor,
+      mismatchCode: "restore-protected-properties-mismatch-at-commit"
+    )
     try requireSourceSlotIdentity(
       parentDescriptor: quarantine.descriptor,
       leaf: quarantine.leaf,
@@ -1009,7 +1105,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     target: BoundMutationTarget,
     source: DescriptorBinding,
     quarantine: QuarantineBinding,
-    payloadDescriptor: Int32
+    payloadDescriptor: Int32,
+    expectedSnapshot: CoverageToken
   ) throws {
     try requireSourceSlotMissing(
       parentDescriptor: quarantine.descriptor,
@@ -1030,6 +1127,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       restored,
       expected: source.sourceSeal,
       code: "restored-source-seal-mismatch"
+    )
+    try requireSnapshotStillCurrent(
+      expectedSnapshot,
+      rootDescriptor: restored,
+      mismatchCode: "restored-protected-properties-mismatch"
     )
   }
 
@@ -1791,13 +1893,14 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
 
   private func requireSnapshotStillCurrent(
     _ token: CoverageToken,
-    rootDescriptor: Int32
+    rootDescriptor: Int32,
+    mismatchCode: String = "verified-quarantine-changed-before-delete"
   ) throws {
     let current = try collectSnapshot(rootDescriptor: rootDescriptor)
     try requireMatchingSnapshot(
       token,
       actual: CoverageToken(records: current),
-      mismatchCode: "verified-quarantine-changed-before-delete"
+      mismatchCode: mismatchCode
     )
   }
 
@@ -1838,7 +1941,8 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     _ token: CoverageToken,
     rootDescriptor: Int32,
     quarantineDescriptor: Int32,
-    quarantineLeaf: Data
+    quarantineLeaf: Data,
+    expectedParentSeal: QuarantineNamespaceSeal
   ) throws {
     guard let rootRecord = token.records.first, rootRecord.path.isEmpty else {
       throw failure("invalid-coverage-token")
@@ -1883,6 +1987,11 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       guard result == 0 else { throw failure("delete-verified-quarantine-entry", errno) }
     }
     hooks.beforeRecursiveDeleteRootRemoval()
+    try requireDirectorySeal(
+      quarantineDescriptor,
+      expected: expectedParentSeal,
+      code: "delete-commit-parent-namespace-seal-mismatch"
+    )
     try requireDeletionDirectoryRecordStillCurrent(
       rootRecord,
       descriptor: rootDescriptor,
@@ -2049,21 +2158,39 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     }
   }
 
-  private func sourceIsAbsent(_ target: BoundMutationTarget) -> PostVerificationOutcome {
+  private func sourceIsAbsent(
+    _ target: BoundMutationTarget,
+    binding: GitWorktreePostVerificationNamespaceBinding?
+  ) -> PostVerificationOutcome {
     do {
       try validateRawPath(target)
+      guard let binding,
+        binding.root.identity == target.expectedRootIdentity,
+        binding.parents.map(\.identity) == target.expectedParentIdentities,
+        binding.parents.count == target.targetPath.components.dropLast().count
+      else { throw failure("postverify-namespace-binding-missing-or-invalid") }
       let root = try Self.withRawCString(target.rawRoot.absoluteBytes) { path -> Int32 in
         let descriptor = Darwin.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw failure("postverify-open-root", errno) }
         return descriptor
       }
       defer { _ = Darwin.close(root) }
+      try requirePostVerificationDirectoryBinding(
+        root,
+        expected: binding.root,
+        code: "postverify-root-binding-mismatch"
+      )
       var parent = root
       var opened: [Int32] = []
       defer { Self.close(opened) }
-      for component in target.targetPath.components.dropLast() {
+      for (index, component) in target.targetPath.components.dropLast().enumerated() {
         let next = try openDirectory(at: parent, name: component, code: "postverify-open-parent")
         opened.append(next)
+        try requirePostVerificationDirectoryBinding(
+          next,
+          expected: binding.parents[index],
+          code: "postverify-parent-binding-mismatch"
+        )
         parent = next
       }
       guard let leaf = target.targetPath.components.last else {
@@ -2076,9 +2203,21 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       }
       if result != 0, errno == ENOENT { return .satisfied }
       if result == 0 { return .notSatisfied(code: "worktree-root-still-present") }
+      if errno == EACCES || errno == EPERM {
+        return .unreadable(
+          ObservationFailure(
+            code: "postverify-stat-target",
+            collector: "git-worktree-postverify"
+          ))
+      }
       return .failed(
         ObservationFailure(code: "postverify-stat-target", collector: "git-worktree-postverify"))
     } catch let error as AdapterError {
+      if error.failure.errno == ENOENT { return .missing }
+      if error.failure.errno == EACCES || error.failure.errno == EPERM {
+        return .unreadable(
+          ObservationFailure(code: error.failure.code, collector: "git-worktree-postverify"))
+      }
       return .failed(
         ObservationFailure(code: error.failure.code, collector: "git-worktree-postverify"))
     } catch {
@@ -2086,6 +2225,27 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         ObservationFailure(
           code: String(reflecting: type(of: error)), collector: "git-worktree-postverify"))
     }
+  }
+
+  private func requirePostVerificationDirectoryBinding(
+    _ descriptor: Int32,
+    expected: GitWorktreePostVerificationDirectoryBinding,
+    code: String
+  ) throws {
+    try requireDirectorySeal(
+      descriptor,
+      expected: QuarantineNamespaceSeal(
+        identity: expected.identity,
+        owner: expected.owner,
+        group: expected.group,
+        mode: expected.mode,
+        flags: expected.flags,
+        device: expected.device,
+        aclDigest: expected.aclDigest,
+        mountIdentity: expected.mountIdentity
+      ),
+      code: code
+    )
   }
 
   static func measuredContentDigest(atRawPath path: Data) throws -> PolicyDigest {

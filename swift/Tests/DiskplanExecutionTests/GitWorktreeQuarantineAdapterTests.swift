@@ -22,6 +22,33 @@ func gitWorktreeQuarantineDeletesOnlyTheVerifiedTree() async throws {
 }
 
 @Test
+func postverifyRejectsAReplacedRawRootNamespace() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let displacedRoot = fixture.container.appendingPathComponent("displaced-scan-root")
+  let adapter = testAdapter()
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+  #expect(result.outcome == .succeeded(detailCode: "git-worktree-quarantine-removed"))
+
+  try FileManager.default.moveItem(at: fixture.root, to: displacedRoot)
+  try createPrivateDirectory(fixture.root)
+
+  guard
+    case .failed(let failure) = await adapter.postverify(
+      fixture.removeOperation,
+      result: result
+    )
+  else {
+    Issue.record("postverification must reject a replaced raw-root namespace")
+    return
+  }
+  #expect(failure.code == "postverify-root-binding-mismatch")
+}
+
+@Test
 func gitWorktreeQuarantineRejectsSourceReplacementBeforeRename() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
@@ -293,6 +320,76 @@ func gitWorktreeVerificationFailureRestoresTheExactSourceSlot() async throws {
     await adapter.disposition(for: fixture.action.id)
       == .restoredAfterVerificationFailure(code: "worktree-content-mismatch")
   )
+}
+
+@Test
+func restoreCommitRevalidatesDescendantAccessPolicy() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let descendant = fixture.quarantinedURL.appendingPathComponent("nested/keep")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    try? Data("new".utf8).write(
+      to: fixture.quarantinedURL.appendingPathComponent("new-local-data")
+    )
+  }
+  hooks.beforeRestoreCommit = {
+    _ = descendant.path.withCString { Darwin.chmod($0, 0o600) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
+    Issue.record("descendant access drift at restore commit must reject")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  guard
+    case .gitWorktree(.quarantineRetained(_, let failureCode))? = result.mutationDisposition
+  else {
+    Issue.record("restore-commit access drift must retain a typed locator")
+    return
+  }
+  #expect(failureCode == "restore-protected-properties-mismatch-at-commit-access-policy")
+}
+
+@Test
+func restoredPayloadPostcheckRevalidatesDescendantAccessPolicy() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let descendant = fixture.worktree.appendingPathComponent("nested/keep")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    try? Data("new".utf8).write(
+      to: fixture.quarantinedURL.appendingPathComponent("new-local-data")
+    )
+  }
+  hooks.afterRestoreCommit = {
+    _ = descendant.path.withCString { Darwin.chmod($0, 0o600) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
+    Issue.record("descendant access drift after restore commit must reject")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-unverified")
+  #expect(slotExists(fixture.worktree))
+  #expect(
+    result.mutationDisposition
+      == .gitWorktree(
+        .quarantineBindingUnverified(
+          failureCode: "restored-protected-properties-mismatch-access-policy"
+        )))
 }
 
 @Test
@@ -576,6 +673,36 @@ func gitAdministrativeMetadataDriftIsTypedResidualAfterRootDeletion() async thro
   #expect(
     residual.registrationID
       == fixture.registration.registrationID
+  )
+}
+
+@Test
+func administrativeResidualDoesNotHideARecreatedSourceSlot() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeAdministrativeCleanup = {
+    try? createPrivateDirectory(fixture.worktree)
+    withUnsafeCurrentTask { task in task?.cancel() }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await Task {
+    await adapter.applyResult(fixture.removeOperation, context: gitTestContext())
+  }.value
+
+  #expect(
+    result.outcome
+      == .succeeded(detailCode: "git-worktree-removed-with-administrative-residual"))
+  guard
+    case .gitWorktree(.removedWithAdministrativeResidual)? = result.mutationDisposition
+  else {
+    Issue.record("administrative cancellation must remain a typed residual")
+    return
+  }
+  #expect(
+    await adapter.postverify(fixture.removeOperation, result: result)
+      == .notSatisfied(code: "worktree-root-still-present")
   )
 }
 
@@ -1303,6 +1430,35 @@ func recursiveDeleteCommitRevalidatesTheQuarantineWrapperSeal() async throws {
     await adapter.disposition(for: fixture.action.id)
       == .quarantineBindingUnverified(failureCode: "quarantine-seal-mismatch")
   )
+}
+
+@Test
+func finalRootRemovalRevalidatesTheParentNamespaceSeal() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  defer { _ = fixture.quarantineDirectory.path.withCString { Darwin.chmod($0, 0o700) } }
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeRecursiveDeleteRootRemoval = {
+    _ = fixture.quarantineDirectory.path.withCString { Darwin.chmod($0, 0o750) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
+    Issue.record("parent namespace drift before final root unlink must reject")
+    return
+  }
+  #expect(failure.code == "verified-quarantine-deletion-binding-unverified")
+  #expect(
+    result.mutationDisposition
+      == .gitWorktree(
+        .quarantineBindingUnverified(
+          failureCode: "delete-commit-parent-namespace-seal-mismatch"
+        )))
 }
 
 @Test

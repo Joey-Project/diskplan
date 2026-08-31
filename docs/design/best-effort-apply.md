@@ -113,7 +113,9 @@ atomically moves the exact root into the fixed leaf, proves the held source and 
 descriptors name the same object, and repeats coverage before recursive native deletion.
 Verification compares the pre-quarantine and post-quarantine subtree snapshots by protected
 property. Object-identity and content-stability failures may attempt an exclusive restore only
-after rebinding the original namespace and payload identity. An access-policy change on the root,
+after rebinding the original namespace and payload identity. Restore repeats the complete subtree
+token immediately before the exclusive rename and again through the restored descriptor before it
+reports the source slot as restored. An access-policy change on the root,
 an ordinary file, a symbolic link, or a descendant directory is never auto-restored: the adapter
 retains the quarantine for manual recovery and publishes a typed locator only after the same
 descriptor-bound namespace and payload revalidation. Restore collision and recursive-deletion
@@ -129,7 +131,11 @@ coverage plus the held admin/worktrees/common directory seals and the exact `HEA
 The v1 executable subset supports detached `HEAD` or a canonical loose symbolic ref beneath the
 held common directory; a packed-ref-only symbolic resolution fails closed and stays report-only.
 Immediately before unlinking the registration root, the canonical raw leaf must still name the
-held administrative identity. It never runs repository-
+held administrative identity and its parent must still match the captured access/mount seal. The
+descriptor-relative final check followed by `unlinkat` is a point-in-time boundary under the
+accepted trusted-exclusive namespace contract; it does not claim to resist the malicious or
+otherwise unobservable same-UID namespace mutation that the v1 threat model explicitly excludes.
+It never runs repository-
 wide `git worktree prune`, so unrelated registered or stale worktrees remain untouched.
 Cancellation, deadline, or registration identity/coverage drift produces an explicit typed
 residual and a partially successful step without changing the root-deletion result.
@@ -176,6 +182,13 @@ Adapter recovery and cleanup dispositions are attempt-scoped values returned ato
 primary outcome. Production post-verification never recovers them from an ActionID cache. The
 same values appear in the step outcome, shell/TUI event, optional audit event, and final report, so
 a retry cannot inherit a stale locator from an earlier attempt.
+
+Successful Git removal also returns a private attempt-scoped post-verification binding captured
+from the held source root and parent descriptors. Post-verification reopens and matches every root
+and parent identity, ACL/access/flag seal, and mount identity before treating the missing target
+slot as success. A missing ancestor, unreadable namespace, binding mismatch, and present target
+remain distinct. An administrative residual is layered on top of that absence proof and cannot
+hide a concurrently recreated source slot.
 
 An expected residual is distinct from an unsatisfied destructive postcondition. The adapter
 returns the successful root mutation separately, post-verification carries the typed residual

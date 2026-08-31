@@ -224,6 +224,7 @@ public struct AdapterOperationResult: Equatable, Sendable {
   public let outcome: AdapterOperationOutcome
   public let mutationDisposition: ExecutionMutationDisposition?
   public let cleanupDisposition: ExecutionCleanupDisposition?
+  let gitWorktreePostVerificationBinding: GitWorktreePostVerificationNamespaceBinding?
 
   public init(
     outcome: AdapterOperationOutcome,
@@ -233,6 +234,19 @@ public struct AdapterOperationResult: Equatable, Sendable {
     self.outcome = outcome
     self.mutationDisposition = mutationDisposition
     self.cleanupDisposition = cleanupDisposition
+    self.gitWorktreePostVerificationBinding = nil
+  }
+
+  init(
+    outcome: AdapterOperationOutcome,
+    mutationDisposition: ExecutionMutationDisposition?,
+    cleanupDisposition: ExecutionCleanupDisposition?,
+    gitWorktreePostVerificationBinding: GitWorktreePostVerificationNamespaceBinding?
+  ) {
+    self.outcome = outcome
+    self.mutationDisposition = mutationDisposition
+    self.cleanupDisposition = cleanupDisposition
+    self.gitWorktreePostVerificationBinding = gitWorktreePostVerificationBinding
   }
 }
 

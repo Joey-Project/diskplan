@@ -229,3 +229,11 @@ superseded_by:
   manual-recovery locator. New commit-point fixtures mutate both the Git index and resolved loose
   `HEAD`; a separate late-child fixture reaches a real `unlinkat(..., AT_REMOVEDIR)` `ENOTEMPTY`
   failure instead of approximating recursive-delete failure through an earlier seal mismatch.
+- Fresh single review of signed head `9f798d7299b04e55361073411f5720053d00a77f`
+  found four in-scope binding gaps plus one point-in-time race already excluded by the accepted v1
+  same-UID threat model. The follow-up repeats the complete subtree token immediately before and
+  after automatic restore, rechecks the root-removal parent seal, and carries a private
+  attempt-scoped root/parent seal binding into Git post-verification. Administrative residual now
+  layers on top of that bound absence proof rather than bypassing it. Deterministic fixtures cover
+  descendant restore drift in both windows, final parent-seal drift, replaced raw-root
+  post-verification, and a recreated source slot accompanying an administrative residual.
