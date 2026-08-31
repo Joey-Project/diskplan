@@ -3,7 +3,7 @@ id: 20260828-a5d210
 title: Phase 5 Best-Effort Apply
 status: active
 created: 2026-08-28
-updated: 2026-08-31
+updated: 2026-09-01
 branch: wip/phase5-best-effort-apply
 pr:
 supersedes: []
@@ -72,6 +72,11 @@ superseded_by:
   exact node's identity, content, and access policy immediately before `unlinkat`; directory
   size/timestamp churn caused by deleting its already-verified children is not misclassified as
   content drift, while a newly introduced child still makes directory removal fail closed.
+- Automatic recovery now snapshots the exact descriptor-bound quarantine payload before invoking
+  the restore hook and compares identity, content, and access policy again immediately before the
+  no-clobber restore rename. Cancellation/deadline recovery uses the already verified token as
+  that baseline. Any access drift in either restore window remains typed as manual recovery and
+  publishes a locator only after the ordinary recovery namespace rebind succeeds.
 - A recursive-deletion failure no longer publishes the cached quarantine pathname. It first
   rebinds the raw root, every source parent, the quarantine namespace, and the payload identity;
   if that proof fails, the result is a typed unverified binding without a locator.
@@ -190,3 +195,10 @@ superseded_by:
   drift plus cancellation, same-inode content drift, mode drift, and symlink ACL drift. The exact
   follow-up head still requires static gates, a fresh frozen-range closure review, and India
   focused/full dynamic validation.
+- Fresh full-range review of signed checkpoint `8eac6da` found one remaining P1: both automatic
+  restore paths rechecked only root identity after the deterministic `beforeRestore` window, so a
+  same-object mode/ACL/flag change could still be renamed back into the source slot. The follow-up
+  takes a stable descriptor-bound recovery snapshot, rechecks identity/content/access immediately
+  before restore commit, and keeps access drift typed as manual recovery. Deterministic fixtures
+  cover both verification-failure recovery and cancellation recovery hooks. The successor head
+  requires static gates, signed append, fresh closure review, and India focused/full validation.

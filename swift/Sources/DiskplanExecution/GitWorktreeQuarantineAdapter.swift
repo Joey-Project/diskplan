@@ -354,6 +354,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
             target: target,
             source: source,
             quarantine: quarantine,
+            expectedSnapshot: preQuarantineToken,
             outcome: .cancelled,
             failureCode: "cancelled-after-quarantine"
           )
@@ -363,6 +364,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
             target: target,
             source: source,
             quarantine: quarantine,
+            expectedSnapshot: preQuarantineToken,
             outcome: .timedOut,
             failureCode: "deadline-after-quarantine"
           )
@@ -529,18 +531,42 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         }
       return .failed(ExecutionAdapterFailure(code: code))
     }
-    hooks.beforeRestore()
     do {
       try requireRecoveryNamespaceBinding(
         target: target,
         source: source,
         quarantine: quarantine
       )
-      try requireQuarantinePayloadIdentity(
+      let baselinePayload = try openQuarantinePayload(
         target: target,
         source: source,
         quarantine: quarantine
       )
+      let restoreBaseline: CoverageToken
+      do {
+        restoreBaseline = try stableSnapshot(
+          rootDescriptor: baselinePayload,
+          mismatchCode: "restore-baseline-raced"
+        )
+      } catch {
+        _ = Darwin.close(baselinePayload)
+        throw error
+      }
+      _ = Darwin.close(baselinePayload)
+
+      hooks.beforeRestore()
+      try requireRecoveryNamespaceBinding(
+        target: target,
+        source: source,
+        quarantine: quarantine
+      )
+      let payload = try openQuarantinePayloadForRestore(
+        target: target,
+        source: source,
+        quarantine: quarantine,
+        expectedSnapshot: restoreBaseline
+      )
+      defer { _ = Darwin.close(payload) }
       try requireSourceSlotMissing(parentDescriptor: source.parentDescriptor, leaf: source.leaf)
       try renameExclusive(
         fromDirectory: quarantine.descriptor,
@@ -559,11 +585,19 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
           errno: failure.errno
         ))
     } catch {
+      let recoveryFailureCode: String
+      if let restoreError = error as? AdapterError,
+        restoreError.recoverySafety == .manualRecoveryRequired
+      {
+        recoveryFailureCode = restoreError.failure.code
+      } else {
+        recoveryFailureCode = failure.code
+      }
       let recovery = verifiedRecoveryDisposition(
         target: target,
         source: source,
         quarantine: quarantine,
-        failureCode: failure.code
+        failureCode: recoveryFailureCode
       )
       await results.set(recovery, for: target.actionID)
       let code =
@@ -583,6 +617,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     target: BoundMutationTarget,
     source: DescriptorBinding,
     quarantine: QuarantineBinding,
+    expectedSnapshot: CoverageToken,
     outcome: AdapterOperationOutcome,
     failureCode: String
   ) async -> AdapterOperationOutcome {
@@ -593,11 +628,13 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         source: source,
         quarantine: quarantine
       )
-      try requireQuarantinePayloadIdentity(
+      let payload = try openQuarantinePayloadForRestore(
         target: target,
         source: source,
-        quarantine: quarantine
+        quarantine: quarantine,
+        expectedSnapshot: expectedSnapshot
       )
+      defer { _ = Darwin.close(payload) }
       try requireSourceSlotMissing(parentDescriptor: source.parentDescriptor, leaf: source.leaf)
       try renameExclusive(
         fromDirectory: quarantine.descriptor,
@@ -612,11 +649,19 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       )
       return outcome
     } catch {
+      let recoveryFailureCode: String
+      if let restoreError = error as? AdapterError,
+        restoreError.recoverySafety == .manualRecoveryRequired
+      {
+        recoveryFailureCode = restoreError.failure.code
+      } else {
+        recoveryFailureCode = failureCode
+      }
       let recovery = verifiedRecoveryDisposition(
         target: target,
         source: source,
         quarantine: quarantine,
-        failureCode: failureCode
+        failureCode: recoveryFailureCode
       )
       await results.set(recovery, for: target.actionID)
       let code =
@@ -648,6 +693,67 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       destinationDescriptor: payload,
       expected: target.expectedIdentity
     )
+  }
+
+  private func openQuarantinePayloadForRestore(
+    target: BoundMutationTarget,
+    source: DescriptorBinding,
+    quarantine: QuarantineBinding,
+    expectedSnapshot: CoverageToken
+  ) throws -> Int32 {
+    let payload = try openQuarantinePayload(
+      target: target,
+      source: source,
+      quarantine: quarantine
+    )
+    do {
+      let current = try stableSnapshot(
+        rootDescriptor: payload,
+        mismatchCode: "restore-coverage-raced"
+      )
+      try requireMatchingSnapshot(
+        expectedSnapshot,
+        actual: current,
+        mismatchCode: "restore-protected-properties-mismatch"
+      )
+      return payload
+    } catch {
+      _ = Darwin.close(payload)
+      throw error
+    }
+  }
+
+  private func openQuarantinePayload(
+    target: BoundMutationTarget,
+    source: DescriptorBinding,
+    quarantine: QuarantineBinding
+  ) throws -> Int32 {
+    let payload = try openDirectory(
+      at: quarantine.descriptor,
+      name: quarantine.leaf,
+      code: "open-quarantine-payload-before-restore"
+    )
+    do {
+      try requireSameIdentity(
+        sourceDescriptor: source.sourceDescriptor,
+        destinationDescriptor: payload,
+        expected: target.expectedIdentity
+      )
+      return payload
+    } catch {
+      _ = Darwin.close(payload)
+      throw error
+    }
+  }
+
+  private func stableSnapshot(
+    rootDescriptor: Int32,
+    mismatchCode: String
+  ) throws -> CoverageToken {
+    let first = CoverageToken(records: try collectSnapshot(rootDescriptor: rootDescriptor))
+    let second = CoverageToken(records: try collectSnapshot(rootDescriptor: rootDescriptor))
+    try requireMatchingSnapshot(first, actual: second, mismatchCode: mismatchCode)
+    return second
   }
 
   private func requireRecoveryNamespaceBinding(
@@ -1261,10 +1367,12 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       else {
         throw accessPolicyFailure("\(mismatchCode)-access-policy")
       }
-      guard expectedRecord.size == actualRecord.size,
-        expectedRecord.payloadDigest == actualRecord.payloadDigest
-      else {
-        throw failure("\(mismatchCode)-content")
+      if expectedRecord.identity.type != .directory {
+        guard expectedRecord.size == actualRecord.size,
+          expectedRecord.payloadDigest == actualRecord.payloadDigest
+        else {
+          throw failure("\(mismatchCode)-content")
+        }
       }
     }
   }
@@ -1566,7 +1674,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       }
       data.append(Data(record.identity.type.rawValue.utf8))
       data.append(0)
-      Self.append(record.size, to: &data)
+      Self.append(record.identity.type == .directory ? 0 : record.size, to: &data)
       Self.append(UInt64(record.payloadDigest.count), to: &data)
       data.append(record.payloadDigest)
     }
@@ -1599,7 +1707,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       Self.append(UInt64(record.flags), to: &data)
       Self.append(UInt64(record.aclDigest.count), to: &data)
       data.append(record.aclDigest)
-      Self.append(record.size, to: &data)
+      Self.append(record.identity.type == .directory ? 0 : record.size, to: &data)
       Self.append(UInt64(record.payloadDigest.count), to: &data)
       data.append(record.payloadDigest)
     }

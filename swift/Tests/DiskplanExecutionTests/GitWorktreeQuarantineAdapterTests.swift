@@ -181,6 +181,77 @@ func gitWorktreeVerificationFailureRestoresTheExactSourceSlot() async throws {
 }
 
 @Test
+func verificationRestoreAccessDriftRetainsQuarantine() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let quarantinedPayload = fixture.quarantinedURL.appendingPathComponent("payload")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    try? Data("unexpected".utf8).write(
+      to: fixture.quarantinedURL.appendingPathComponent("new-local-data")
+    )
+  }
+  hooks.beforeRestore = {
+    _ = quarantinedPayload.path.withCString { Darwin.chmod($0, 0o400) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  guard
+    case .failed(let failure) = await adapter.apply(
+      fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("access drift during verification restore must retain quarantine")
+    return
+  }
+  #expect(failure.code == "quarantine-verification-failed-retained")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantinedURL))
+  guard
+    case .some(.quarantineRetained(let locator, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("verification restore access drift must retain a typed locator")
+    return
+  }
+  #expect(locator.identity == fixture.action.prototype.targetIdentity)
+  #expect(failureCode == "restore-protected-properties-mismatch-access-policy")
+}
+
+@Test
+func interruptionRestoreAccessDriftRetainsQuarantine() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let quarantinedPayload = fixture.quarantinedURL.appendingPathComponent("payload")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforePostQuarantineVerification = {
+    withUnsafeCurrentTask { task in task?.cancel() }
+  }
+  hooks.beforeRestore = {
+    _ = quarantinedPayload.path.withCString { Darwin.chmod($0, 0o400) }
+  }
+  let adapter = testAdapter(hooks: hooks)
+
+  let outcome = await Task {
+    await adapter.apply(fixture.removeOperation, context: gitTestContext())
+  }.value
+  guard case .failed(let failure) = outcome else {
+    Issue.record("access drift during interruption restore must retain quarantine")
+    return
+  }
+  #expect(failure.code == "interrupted-quarantine-retained")
+  #expect(!slotExists(fixture.worktree))
+  #expect(slotExists(fixture.quarantinedURL))
+  guard
+    case .some(.quarantineRetained(_, let failureCode)) =
+      await adapter.disposition(for: fixture.action.id)
+  else {
+    Issue.record("interruption restore access drift must retain a typed locator")
+    return
+  }
+  #expect(failureCode == "restore-protected-properties-mismatch-access-policy")
+}
+
+@Test
 func gitWorktreeRestoreCollisionRetainsTypedRecoveryLocator() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
