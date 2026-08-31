@@ -69,6 +69,10 @@ superseded_by:
 - A recursive-deletion failure no longer publishes the cached quarantine pathname. It first
   rebinds the raw root, every source parent, the quarantine namespace, and the payload identity;
   if that proof fails, the result is a typed unverified binding without a locator.
+- Each apply attempt now receives a unique quarantine namespace. Before payload rename commits,
+  every exit best-effort removes only the exact still-empty directory after descriptor-relative
+  identity and access-seal revalidation. A changed or replaced attempt directory is retained, not
+  deleted, but cannot block a newly prepared retry because the next attempt uses a new name.
 - Shell/TUI events require no persistence. Optional audit failures, including `ENOSPC`, are
   reported but cannot stop cleanup.
 
@@ -164,3 +168,10 @@ superseded_by:
   `swift-format lint --strict`, `swiftc -frontend -parse`, and `git diff --check` pass locally; no
   local build or dynamic test was run, and the exact follow-up head still requires India focused
   and serial full gates.
+- Fresh full-range review of signed checkpoint `ed6f7ba` found one P2: the stable action-derived
+  quarantine directory name could leave a pre-rename failure marker that permanently rejected a
+  retry. The follow-up gives each execution a unique nonce, reclaims an unchanged exact empty
+  attempt directory through the held parent descriptor, and never removes a changed or replaced
+  object. New fixtures cover cancellation cleanup followed by retry and a retained changed attempt
+  followed by a successful unique retry. The replacement head requires static gates and a fresh
+  closure review before India validation.

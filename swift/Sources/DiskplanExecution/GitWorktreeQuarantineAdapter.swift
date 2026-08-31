@@ -51,6 +51,9 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
     var beforeRecursiveDeleteCommit: @Sendable () -> Void = {}
     var beforeAdministrativeCleanup: @Sendable () -> Void = {}
     var afterCoverageFileFirstRead: @Sendable (Int32, [Data]) -> Void = { _, _ in }
+    var quarantineNonce: @Sendable () -> Data = {
+      Data(UUID().uuidString.lowercased().utf8)
+    }
   }
 
   private actor ResultStore {
@@ -257,6 +260,15 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         sourceParentDescriptor: source.parentDescriptor
       )
       defer { _ = Darwin.close(quarantine.descriptor) }
+      var payloadCommitted = false
+      defer {
+        if !payloadCommitted {
+          try? removeUnusedQuarantine(
+            quarantine,
+            sourceParentDescriptor: source.parentDescriptor
+          )
+        }
+      }
 
       hooks.beforeQuarantine()
       try requireQuarantineSeal(quarantine)
@@ -285,6 +297,7 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
         to: quarantine.leaf,
         code: "quarantine-rename"
       )
+      payloadCommitted = true
 
       let token: CoverageToken
       var destinationDescriptor: Int32?
@@ -961,6 +974,16 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
   ) throws -> QuarantineBinding {
     var name = Self.quarantineDirectoryPrefix
     name.append(Data(target.actionID.hex.utf8))
+    let nonce = hooks.quarantineNonce()
+    guard !nonce.isEmpty,
+      nonce.count <= 128,
+      !nonce.contains(0),
+      !nonce.contains(UInt8(ascii: "/")),
+      nonce != Data(".".utf8),
+      nonce != Data("..".utf8)
+    else { throw failure("invalid-quarantine-nonce") }
+    name.append(UInt8(ascii: "-"))
+    name.append(nonce)
     let mkdirResult = try Self.withRawCString(name) {
       Darwin.mkdirat(sourceParentDescriptor, $0, 0o700)
     }
@@ -1001,6 +1024,22 @@ public final class GitWorktreeQuarantineAdapter: ExecutionMutationAdapter, @unch
       _ = Darwin.close(descriptor)
       throw error
     }
+  }
+
+  private func removeUnusedQuarantine(
+    _ quarantine: QuarantineBinding,
+    sourceParentDescriptor: Int32
+  ) throws {
+    try requireQuarantineSeal(quarantine)
+    try requireSourceSlotIdentity(
+      parentDescriptor: sourceParentDescriptor,
+      leaf: quarantine.locator.quarantineDirectoryName,
+      expected: quarantine.seal.identity
+    )
+    let result = try Self.withRawCString(quarantine.locator.quarantineDirectoryName) {
+      Darwin.unlinkat(sourceParentDescriptor, $0, AT_REMOVEDIR)
+    }
+    guard result == 0 else { throw failure("remove-unused-quarantine", errno) }
   }
 
   private func requireQuarantineSeal(_ quarantine: QuarantineBinding) throws {

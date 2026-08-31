@@ -96,6 +96,61 @@ func gitWorktreeQuarantineExecutionDirectoryIsExclusiveAndNoClobber() async thro
 }
 
 @Test
+func preRenameCancellationCleansAttemptNamespaceAndAllowsRetry() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let cancelledNamespace = fixture.quarantineDirectory(nonce: "cancelled-attempt")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeQuarantine = {
+    withUnsafeCurrentTask { task in task?.cancel() }
+  }
+  let first = testAdapter(hooks: hooks, quarantineNonce: "cancelled-attempt")
+
+  let firstOutcome = await Task {
+    await first.apply(fixture.removeOperation, context: gitTestContext())
+  }.value
+  #expect(firstOutcome == .cancelled)
+  #expect(slotExists(fixture.worktree))
+  #expect(!slotExists(cancelledNamespace))
+
+  #expect(
+    await testAdapter(quarantineNonce: "retry-attempt").apply(
+      fixture.removeOperation, context: gitTestContext())
+      == .succeeded(detailCode: "git-worktree-quarantine-removed")
+  )
+}
+
+@Test
+func changedPreRenameNamespaceDoesNotBlockAUniqueRetryAttempt() async throws {
+  let fixture = try GitQuarantineFixture()
+  defer { fixture.cleanup() }
+  let firstNamespace = fixture.quarantineDirectory(nonce: "changed-attempt")
+  var hooks = GitWorktreeQuarantineAdapter.Hooks()
+  hooks.beforeQuarantine = {
+    _ = firstNamespace.path.withCString { Darwin.chmod($0, 0o750) }
+  }
+
+  guard
+    case .failed(let failure) = await testAdapter(
+      hooks: hooks,
+      quarantineNonce: "changed-attempt"
+    ).apply(fixture.removeOperation, context: gitTestContext())
+  else {
+    Issue.record("changed pre-rename namespace must reject")
+    return
+  }
+  #expect(failure.code == "quarantine-seal-mismatch")
+  #expect(slotExists(fixture.worktree))
+  #expect(slotExists(firstNamespace))
+
+  #expect(
+    await testAdapter(quarantineNonce: "retry-after-change").apply(
+      fixture.removeOperation, context: gitTestContext())
+      == .succeeded(detailCode: "git-worktree-quarantine-removed")
+  )
+}
+
+@Test
 func gitWorktreeVerificationFailureRestoresTheExactSourceSlot() async throws {
   let fixture = try GitQuarantineFixture()
   defer { fixture.cleanup() }
@@ -820,7 +875,11 @@ private struct GitQuarantineFixture: @unchecked Sendable {
   }
 
   var quarantineDirectory: URL {
-    root.appendingPathComponent(".diskplan-quarantine-\(action.id.hex)")
+    quarantineDirectory(nonce: gitTestQuarantineNonce)
+  }
+
+  func quarantineDirectory(nonce: String) -> URL {
+    root.appendingPathComponent(".diskplan-quarantine-\(action.id.hex)-\(nonce)")
   }
 
   init(discardLocalChanges: Bool = false) throws {
@@ -1080,10 +1139,15 @@ private final class LockedOneShotMutation: @unchecked Sendable {
   }
 }
 
+private let gitTestQuarantineNonce = "test-attempt"
+
 private func testAdapter(
-  hooks: GitWorktreeQuarantineAdapter.Hooks = .init()
+  hooks: GitWorktreeQuarantineAdapter.Hooks = .init(),
+  quarantineNonce: String = gitTestQuarantineNonce
 ) -> GitWorktreeQuarantineAdapter {
-  GitWorktreeQuarantineAdapter(hooks: hooks)
+  var configuredHooks = hooks
+  configuredHooks.quarantineNonce = { Data(quarantineNonce.utf8) }
+  return GitWorktreeQuarantineAdapter(hooks: configuredHooks)
 }
 
 private func gitTestContext() -> MutationExecutionContext {

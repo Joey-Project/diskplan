@@ -94,8 +94,12 @@ normal exit status, terminating signal, cancellation, and timeout stay typed sep
 
 Git worktree removal uses a dedicated descriptor-bound quarantine adapter. It verifies the
 owner-private source namespace and complete raw-byte subtree coverage, creates a per-execution
-exclusive `0700` same-filesystem quarantine directory, and seals its object identity and access
-policy. The held source parent receives the same runtime seal. UID/GID, mode, ACL, flags,
+unique, exclusive `0700` same-filesystem quarantine directory, and seals its object identity and
+access policy. Before the payload rename commits, every exit attempts to remove only the exact
+still-empty execution directory after descriptor-relative identity and seal revalidation. A
+changed or replaced directory is retained rather than deleted, while the unique next-attempt name
+prevents that retained object from permanently blocking a newly prepared retry. The held source
+parent receives the same runtime seal. UID/GID, mode, ACL, flags,
 device, `fstatfs` mount identity, missing state, unreadability, and collection failure are
 rechecked independently at rename/restore and before deletion. It
 atomically moves the exact root into the fixed leaf, proves the held source and destination
