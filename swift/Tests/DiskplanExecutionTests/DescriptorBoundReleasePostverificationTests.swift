@@ -437,6 +437,20 @@ func engineExecutionCompositionUsesDescriptorBoundReleasePostverification() asyn
 }
 
 @Test
+func injectedClockCompositionRetainsDescriptorBoundReleasePostverification() async throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  let result = try await productionCompositionApply(
+    fixture: fixture,
+    clock: { 100 }
+  )
+
+  #expect(result.report.unitOutcomes.first?.status == .succeeded)
+  #expect(await result.probe.topologyCalls == 1)
+  #expect(await result.probe.legacyBooleanCalls == 0)
+}
+
+@Test
 func legacyReleaseBooleanCannotBypassMissingDescriptorBoundCollector() async throws {
   let fixture = try ReleasePostverificationFixture()
   defer { fixture.cleanUp() }
@@ -1025,7 +1039,7 @@ private actor ProductionReleaseCompositionProbe {
         componentID: request.componentID,
         epochID: request.epoch.epochID,
         oneShotNonce: request.oneShotNonce,
-        capturedAtSeconds: Int64(Date().timeIntervalSince1970.rounded(.down)),
+        capturedAtSeconds: request.epoch.issuedAtSeconds,
         groups: request.groups.map { group in
           CurrentReleaseTopologyGroup(
             allocationGroupID: group.allocationGroupID,
@@ -1052,7 +1066,8 @@ private func productionCompositionApply(
   fixture: ReleasePostverificationFixture,
   topologyMode: ProductionReleaseTopologyMode = .released,
   mutationPreflightFails: Bool = false,
-  beforeJITReturn: @escaping @Sendable () throws -> Void = {}
+  beforeJITReturn: @escaping @Sendable () throws -> Void = {},
+  clock: (@Sendable () -> Int64)? = nil
 ) async throws -> (
   report: BestEffortApplyReport,
   probe: ProductionReleaseCompositionProbe
@@ -1111,10 +1126,19 @@ private func productionCompositionApply(
       await probe.collectTopology(operation, mode: topologyMode)
     }
   )
-  let composition = EngineExecutionComposition(
-    collector: collector,
-    eventSink: NoOpExecutionEventSink()
-  )
+  let composition: EngineExecutionComposition
+  if let clock {
+    composition = EngineExecutionComposition(
+      collector: collector,
+      eventSink: NoOpExecutionEventSink(),
+      clock: clock
+    )
+  } else {
+    composition = EngineExecutionComposition(
+      collector: collector,
+      eventSink: NoOpExecutionEventSink()
+    )
+  }
   let preparation = try await composition.preparation.prepare(
     plan: fixture.plan,
     overlay: fixture.overlay,

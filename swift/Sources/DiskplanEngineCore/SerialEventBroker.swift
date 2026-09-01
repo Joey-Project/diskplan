@@ -1,6 +1,6 @@
+import Darwin
 import DiskplanCore
 import DiskplanProto
-import Darwin
 import Foundation
 import SwiftProtobuf
 

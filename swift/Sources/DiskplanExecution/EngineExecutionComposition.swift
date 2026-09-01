@@ -33,7 +33,10 @@ public final class EngineExecutionComposition: @unchecked Sendable {
       adapter: adapter,
       eventSink: eventSink,
       auditSink: auditSink,
-      releasePostverificationCore: Self.releasePostverificationCore(collector),
+      releasePostverificationCore: Self.releasePostverificationCore(
+        collector,
+        clock: Self.systemClock
+      ),
       clock: Self.systemClock
     )
   }
@@ -49,6 +52,7 @@ public final class EngineExecutionComposition: @unchecked Sendable {
       gitWorktree: GitWorktreeQuarantineAdapter()
     )
     self.adapter = adapter
+    self.collector = collector
     self.eventSink = eventSink
     self.auditSink = auditSink
     injectedClock = clock
@@ -57,6 +61,10 @@ public final class EngineExecutionComposition: @unchecked Sendable {
       adapter: adapter,
       eventSink: eventSink,
       auditSink: auditSink,
+      releasePostverificationCore: Self.releasePostverificationCore(
+        collector,
+        clock: clock
+      ),
       clock: clock
     )
   }
@@ -71,6 +79,10 @@ public final class EngineExecutionComposition: @unchecked Sendable {
         adapter: adapter,
         eventSink: TeeExecutionEventSink(primary: eventSink, observer: observer),
         auditSink: auditSink,
+        releasePostverificationCore: Self.releasePostverificationCore(
+          collector,
+          clock: injectedClock
+        ),
         clock: injectedClock
       )
     }
@@ -78,7 +90,10 @@ public final class EngineExecutionComposition: @unchecked Sendable {
       adapter: adapter,
       eventSink: TeeExecutionEventSink(primary: eventSink, observer: observer),
       auditSink: auditSink,
-      releasePostverificationCore: Self.releasePostverificationCore(collector),
+      releasePostverificationCore: Self.releasePostverificationCore(
+        collector,
+        clock: Self.systemClock
+      ),
       clock: Self.systemClock
     )
   }
@@ -88,10 +103,12 @@ public final class EngineExecutionComposition: @unchecked Sendable {
   }
 
   private static func releasePostverificationCore(
-    _ collector: EngineRevalidationCollector
+    _ collector: EngineRevalidationCollector,
+    clock: @escaping @Sendable () -> Int64
   ) -> DescriptorBoundReleasePostverificationCore {
     DescriptorBoundReleasePostverificationCore(
-      topologyCollector: collector.releaseTopologyCollector()
+      topologyCollector: collector.releaseTopologyCollector(),
+      nowSeconds: clock
     )
   }
 }

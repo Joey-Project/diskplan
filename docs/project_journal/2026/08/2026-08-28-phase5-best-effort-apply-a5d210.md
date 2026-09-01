@@ -393,3 +393,26 @@ superseded_by:
   passed with SHA-256 `7bc83929f79c8678737a5724da0d7fb69194a01ca52394499c61abcb93823e0b`,
   and strict Swift formatting passed. Every supervisor verified its process group and reported
   terminal quiescence.
+- The release-postverification branch now contains a signed no-fast-forward merge of production
+  runtime baseline `cd016f66a1233683abbc535e0544d2bff2090d58`. The merge preserves the strict
+  runtime projection and fixture behavior together with production descriptor-bound release
+  postverification. A semantic merge audit found that the baseline's injected-clock composition
+  initializer neither retained its collector nor passed the release topology core to its apply
+  coordinators. The successor stores the collector, injects the same descriptor-bound core in both
+  coordinator paths, and binds the core's freeze/freshness clock to the composition clock. A new
+  real-removal regression proves that the injected-clock path reaches typed topology C and never
+  consults the legacy boolean result. Swift formatter changes in three baseline files are purely
+  mechanical.
+- Post-merge India validation passed 27 descriptor-bound tests in 10.033 supervisor seconds with
+  9,560 output bytes and SHA-256
+  `eea8a670b222d1f36b9e5cfa50c7c792bad2d06f0abadb5327b7efb1b689e930`, 30 BestEffort tests
+  in 4.249 seconds with 12,192 bytes and SHA-256
+  `415783bfee10b039eebeac11327acd7b6e7247430b8c066c177e9777226ec73a`, and all 193
+  `DiskplanExecutionTests` in 4.495 seconds with 44,579 bytes and SHA-256
+  `250176134fe1d69782b11d2f6e2f807740d8c4567c62474362645365cbbc1956`. The release build
+  passed in 19.362 seconds with SHA-256
+  `0ada712ce5feb0310da194a3f074f92f03ef88e8733eba5f5faa86e4fadecee5`; the 18-test release
+  validator passed with SHA-256
+  `7bc83929f79c8678737a5724da0d7fb69194a01ca52394499c61abcb93823e0b`; and strict Swift
+  formatting passed. Every final supervisor verified its process group and reported terminal
+  quiescence.
