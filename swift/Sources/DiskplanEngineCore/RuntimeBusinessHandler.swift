@@ -325,6 +325,11 @@ private enum RuntimeAuthorityTransition {
     reviewBinding: Data,
     cancellationRequestID: UInt64?
   )
+  case executionFailed(
+    requestID: UInt64,
+    reviewBinding: Data,
+    cancellationRequestID: UInt64?
+  )
   case executionStartFailed(requestID: UInt64, reviewBinding: Data)
   case executionAborted(
     requestID: UInt64,
@@ -335,7 +340,7 @@ private enum RuntimeAuthorityTransition {
 
   var consumesExecutionClaim: Bool {
     switch self {
-    case .executionCompleted, .executionStartFailed, .executionAborted: true
+    case .executionCompleted, .executionFailed, .executionStartFailed, .executionAborted: true
     default: false
     }
   }
@@ -721,6 +726,85 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     }
   }
 
+  fileprivate func authorizeExecutionFailureTerminal(
+    _ failure: RuntimeExecutionTailFailure,
+    sentPrefix: [Diskplan_V1_ExecutionStreamEvent],
+    cancellationRequest: RuntimeBusinessRequest?,
+    cancellationSentPrefix: [Diskplan_V1_ExecutionStreamEvent]?,
+    for request: RuntimeBusinessRequest,
+    negotiatedProtocolMinor: UInt32
+  ) throws -> RuntimeAuthorityEmissionTransaction {
+    try withLock {
+      guard negotiatedProtocolMinor >= protocol16Minor,
+        case .confirmApply = request,
+        requestIsActive(request),
+        let plan,
+        let overlay,
+        let review,
+        let executionClaim,
+        let executionID = executionClaim.executionID,
+        executionClaim.phase == .registered,
+        !sentPrefix.isEmpty,
+        sentPrefix.allSatisfy({ $0.executionID.value == executionID })
+      else { throw invalidState("execution failure has no live registered predecessor") }
+      let cancellationRequestID: UInt64?
+      if let cancellationRequest, let cancellationSentPrefix {
+        guard case .cancelExecution = cancellationRequest,
+          requestIsActive(cancellationRequest),
+          cancellationSentPrefix == sentPrefix
+        else { throw invalidState("execution failure has no exact mirrored cancellation prefix") }
+        cancellationRequestID = cancellationRequest.requestID
+      } else {
+        guard cancellationRequest == nil, cancellationSentPrefix == nil else {
+          throw invalidState("execution failure cancellation tuple is incomplete")
+        }
+        guard activeCancellationRequestID == nil else {
+          throw RuntimeTerminalCommitError.pendingCancellation
+        }
+        cancellationRequestID = nil
+      }
+
+      var projection = Diskplan_V1_ExecutionStreamFailureProjection()
+      projection.kind = failure.wireKind
+      projection.executionID.value = executionID
+      projection.applyReviewID = review.applyReviewID
+      projection.reviewBindingSha256 = review.reviewBindingSha256
+      projection.mutationMayHaveOccurred = true
+      var terminal = Diskplan_V1_ExecutionStreamEvent()
+      terminal.executionID.value = executionID
+      terminal.body = .executionStreamFailure(projection)
+      let sealed = try SealedRuntimeWire.sealExecutionStream(
+        sentPrefix + [terminal],
+        requiredForceWarningActionIDs: review.forceWarningActionIds,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+      guard sealed.count == sentPrefix.count + 1,
+        Array(sealed.prefix(sentPrefix.count)) == sentPrefix,
+        case .executionStreamFailure? = sealed.last?.body
+      else { throw invalidState("execution failure differs from its transmitted prefix") }
+      try validateExecution(sealed, plan: plan, overlay: overlay, review: review)
+      self.executionClaim?.phase = .finishing
+      do {
+        return try beginEmission(
+          PreparedRuntimeEmission(
+            bodies: sealed.dropFirst(sentPrefix.count).map {
+              .executionStreamEvent($0)
+            },
+            transition: .executionFailed(
+              requestID: request.requestID,
+              reviewBinding: executionClaim.reviewBinding,
+              cancellationRequestID: cancellationRequestID
+            )
+          ),
+          request: request
+        )
+      } catch {
+        self.executionClaim?.phase = .registered
+        throw error
+      }
+    }
+  }
+
   fileprivate func authorizeApplyStartFailureTerminal(
     _ terminal: RuntimeApplyStartFailureTerminal,
     for request: RuntimeBusinessRequest,
@@ -868,6 +952,8 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         lock.broadcast()
       }
       if case .executionCompleted = transaction.prepared.transition {
+        executionClaim?.phase = .registered
+      } else if case .executionFailed = transaction.prepared.transition {
         executionClaim?.phase = .registered
       } else if case .executionStartFailed = transaction.prepared.transition {
         executionClaim?.phase = .unregistered
@@ -1141,6 +1227,15 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       review = nil
       executionClaim = nil
       if cancellationRequestID != nil { activeCancellationRequestID = nil }
+    case .executionFailed(let requestID, let reviewBinding, let cancellationRequestID):
+      guard executionClaim?.requestID == requestID,
+        executionClaim?.reviewBinding == reviewBinding,
+        cancellationRequestID == nil || activeCancellationRequestID == cancellationRequestID
+      else { return }
+      consumedReviewBindings.insert(reviewBinding)
+      review = nil
+      executionClaim = nil
+      if cancellationRequestID != nil { activeCancellationRequestID = nil }
     case .executionStartFailed(let requestID, let reviewBinding):
       guard executionClaim?.requestID == requestID,
         executionClaim?.reviewBinding == reviewBinding
@@ -1201,6 +1296,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     case .cancellationCompleted:
       activeCancellationRequestID == requestID
     case .executionCompleted(_, _, let cancellationRequestID),
+      .executionFailed(_, _, let cancellationRequestID),
       .executionAborted(_, _, let cancellationRequestID):
       activeRequestID == requestID
         && (cancellationRequestID == nil || activeCancellationRequestID == cancellationRequestID)
@@ -1672,6 +1768,49 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     }
     let transaction = try authority.authorizeExecutionTerminal(
       events,
+      sentPrefix: executionPrefix,
+      cancellationRequest: cancellationResponder?.request,
+      cancellationSentPrefix: cancellationResponder?.executionPrefix,
+      for: request,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
+    do {
+      if let cancellationResponder {
+        try cancellationResponder.sendPrepared(transaction.prepared)
+      }
+      try sendPrepared(transaction.prepared)
+      try authority.commit(transaction)
+      completed = true
+      cancellationResponder?.completed = true
+    } catch {
+      authority.abort(transaction)
+      throw error
+    }
+  }
+
+  func finishExecutionFailure(
+    _ failure: RuntimeExecutionTailFailure,
+    mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
+  ) throws {
+    responseLock.lock()
+    cancellationResponder?.responseLock.lock()
+    defer {
+      cancellationResponder?.responseLock.unlock()
+      responseLock.unlock()
+    }
+    guard !completed, cancellationResponder?.completed != true else {
+      throw RuntimeResponderError.alreadyTerminal
+    }
+    if let cancellationResponder {
+      guard broker === cancellationResponder.broker,
+        authority === cancellationResponder.authority,
+        case .confirmApply = request,
+        case .cancelExecution = cancellationResponder.request,
+        executionPrefix == cancellationResponder.executionPrefix
+      else { throw RuntimeResponderError.alreadyTerminal }
+    }
+    let transaction = try authority.authorizeExecutionFailureTerminal(
+      failure,
       sentPrefix: executionPrefix,
       cancellationRequest: cancellationResponder?.request,
       cancellationSentPrefix: cancellationResponder?.executionPrefix,

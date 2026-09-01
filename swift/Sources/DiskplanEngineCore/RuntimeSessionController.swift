@@ -1,4 +1,5 @@
 import CryptoKit
+import DiskplanCore
 import DiskplanPolicy
 import DiskplanProto
 import DiskplanScan
@@ -407,6 +408,14 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     _ request: Diskplan_V1_PrepareApplyReviewRequest,
     responder: RuntimeBusinessResponder
   ) throws {
+    guard responder.negotiatedProtocolMinor >= protocol16Minor else {
+      try responder.send(
+        try .rejected(
+          code: .capabilityNotNegotiated,
+          summary: "protocol 1.6 is required before preparing a mutation review"
+        ))
+      return
+    }
     guard let executionBackend else {
       try responder.send(
         try .rejected(
@@ -601,28 +610,35 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     }
 
     let outcome = await run.awaitTail()
-    guard case .sealed(let tail) = outcome else {
-      await abortFailedExecution(run: run, fallbackResponder: fallbackResponder)
-      return
-    }
-    while !Task.isCancelled {
-      do {
-        try finishExecution(run: run, tail: tail)
-        return
-      } catch RuntimeTerminalCommitError.pendingCancellation {
-        await Task.yield()
-      } catch {
-        run.cancel()
-        _ = await run.awaitTail()
-        return
+    switch outcome {
+    case .sealed(let tail):
+      while !Task.isCancelled {
+        do {
+          try finishExecution(run: run, tail: tail)
+          return
+        } catch RuntimeTerminalCommitError.pendingCancellation {
+          await Task.yield()
+        } catch {
+          run.cancel()
+          _ = await run.awaitTail()
+          return
+        }
       }
+    case .failed(let failure):
+      await finishFailedExecution(
+        run: run,
+        failure: failure,
+        fallbackResponder: fallbackResponder
+      )
+      return
     }
     run.cancel()
     _ = await run.awaitTail()
   }
 
-  private func abortFailedExecution(
+  private func finishFailedExecution(
     run: RuntimeExecutionRunHandle,
+    failure: RuntimeExecutionTailFailure,
     fallbackResponder: RuntimeBusinessResponder
   ) async {
     run.cancel()
@@ -630,7 +646,8 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     while !Task.isCancelled {
       let cancellationResponder = cancellationResponder(for: run)
       do {
-        try fallbackResponder.abortExecutionStreamWithoutEmission(
+        try fallbackResponder.finishExecutionFailure(
+          failure,
           mirroredTo: cancellationResponder
         )
         clearActiveExecution(run)

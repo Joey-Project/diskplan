@@ -64,10 +64,11 @@ superseded_by:
   terminal. A started stream whose bounded projection cannot be completed is retained as an
   EngineCore typed tail failure for the protocol 1.6 terminal mapper and is never projected as a
   generic runtime rejection.
-- Failed-tail abort now uses the same authority transaction discipline as a normal terminal. It
-  retains the active run, waits for any admitted cancellation responder, jointly consumes confirm
-  and cancel claims without wire output, and clears controller state only after the transaction
-  commits.
+- Protocol 1.6 started-stream failure now uses the same authority transaction discipline as a
+  normal terminal. EngineCore maps projection-limit, projection-validation, and backend-contract
+  outcomes to one sealed `execution_stream_failure` over the exact emitted prefix, mirrors it to
+  any admitted cancellation responder, and jointly consumes both claims. Protocol 1.4/1.5 apply
+  review fails closed before backend preparation while dry-run remains compatible.
 - Production `DiskplanEngineMain` intentionally does not inject the bridge yet. The repository does
   not expose a production revalidation collector factory, so production apply remains fail-closed
   rather than substituting a fixture collector or bypassing Phase 4 authority.
@@ -78,13 +79,23 @@ superseded_by:
 - After the concrete revalidation collector factory lands, construct an
   `EngineExecutionComposition` from the live collector and inject the existing backend bridge into
   production main.
-- Connect the EngineCore typed started-stream failure outcome to the protocol 1.6
-  `execution_stream_failure` terminal after that schema branch lands.
 
 ## Evidence
 
 - Base: `23718ae6c898a5bc42534bced9fec82ff54c033d`.
+- Protocol 1.6 integration merge: `4594e864a95712caf648252ec1cb593bf70e8128`, with exact
+  integration parent `b50dd50a9c6d63ef44ecf4ac406d901045d6723c`; signature verified good.
 - Static checks: strict Swift formatting, Swift parser validation, and `git diff --check`.
+- India Protocol 1.6 runtime gate passed 166 `DiskplanExecutionTests` in 11.939 seconds and 115
+  `DiskplanEngineCoreTests` in 16.330 seconds. Both 900-second supervised runs verified their
+  target process groups and post-run quiescence; retained output SHA-256 values were
+  `e6cb09b8f543ed612348bc61189743a26a4eae8eb126171666f5fb1fa274c05e` and
+  `a3716b60aa1fa74d88ecf9fd734e3a247465f131568206ff416a29f8963d1bc4`.
+- India `scripts/protocol16-fixtures.sh` passed after installing the missing Homebrew Rust 1.98.0
+  toolchain. The supervised fixture run completed in 8.631 seconds, verified process-group
+  quiescence, and confirmed that the Protocol 1.6 runtime fixtures match the Swift authority;
+  retained output SHA-256 was
+  `17349332d9176d53aeff4f82bc65e554462d6b3276be799f7edddbbf1468443d`.
 - India focused gate: `swift test --filter DiskplanEngineCoreTests` passed all 96 tests under the
   bounded supervisor in 13.793 seconds; process-group verification and quiescence both passed.
   Log: `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-enginecore-retry6.log`;

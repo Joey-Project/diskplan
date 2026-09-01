@@ -1,3 +1,4 @@
+import DiskplanCore
 import DiskplanPolicy
 import DiskplanProto
 import Foundation
@@ -88,6 +89,17 @@ package enum RuntimeExecutionTailFailure: Equatable, Sendable {
   case projectionLimitExceeded(observedEventCount: UInt64, observedEncodedBytes: UInt64)
   case projectionValidationFailed
   case backendContractViolation
+
+  package var wireKind: Diskplan_V1_ExecutionStreamFailureKind {
+    switch self {
+    case .projectionLimitExceeded:
+      .projectionLimitExceeded
+    case .projectionValidationFailed:
+      .validationFailed
+    case .backendContractViolation:
+      .backendContractViolation
+    }
+  }
 }
 
 /// A package-owned, semantically sealed tail for one already-started run.
@@ -240,7 +252,10 @@ package struct RuntimePreparedApplyAttempt: Sendable {
     confirmation: RuntimeApplyConfirmation,
     context: RuntimeExecutionPlanContext
   ) async throws -> RuntimeApplyLaunchResult {
-    try await starter(confirmation, context)
+    guard context.negotiatedProtocolMinor >= protocol16Minor else {
+      throw RuntimeExecutionBackendFailure.protocol16Required
+    }
+    return try await starter(confirmation, context)
   }
 }
 
@@ -275,4 +290,5 @@ package protocol RuntimeExecutionBackend: AnyObject, Sendable {
 
 package enum RuntimeExecutionBackendFailure: Error, Equatable {
   case revalidationFailed
+  case protocol16Required
 }

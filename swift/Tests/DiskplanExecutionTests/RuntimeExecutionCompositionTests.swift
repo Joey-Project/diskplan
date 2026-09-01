@@ -1,5 +1,4 @@
 import DiskplanCore
-@_spi(DiskplanEngine) @testable import DiskplanExecution
 import DiskplanPolicy
 import DiskplanProto
 import Foundation
@@ -7,6 +6,7 @@ import Testing
 
 @testable import DiskplanEngine
 @testable import DiskplanEngineCore
+@_spi(DiskplanEngine) @testable import DiskplanExecution
 
 @Test
 func runtimeCompositionProjectsCurrentDryRunFromAuthoritativePreparation() async throws {
@@ -14,7 +14,7 @@ func runtimeCompositionProjectsCurrentDryRunFromAuthoritativePreparation() async
   let backend = DiskplanRuntimeExecutionBackend(
     composition: productionTestComposition(fixture: fixture)
   )
-  let context = runtimeContext(fixture)
+  let context = runtimeContext(fixture, negotiatedProtocolMinor: protocol15Minor)
 
   let prepared = try await backend.prepareDryRun(context: context, lifetimeSeconds: 30)
   let sealed = try SealedRuntimeWire.sealDryRun(
@@ -36,11 +36,11 @@ func runtimeCompositionProjectsReviewAndSealedApplyTail() async throws {
   let backend = DiskplanRuntimeExecutionBackend(
     composition: productionTestComposition(fixture: fixture)
   )
-  let context = runtimeContext(fixture)
+  let context = runtimeContext(fixture, negotiatedProtocolMinor: protocol16Minor)
   let prepared = try await backend.prepareApplyReview(context: context, lifetimeSeconds: 30)
   let sealedReview = try SealedRuntimeWire.sealApplyReview(
     prepared.projection,
-    negotiatedProtocolMinor: protocol15Minor
+    negotiatedProtocolMinor: protocol16Minor
   )
 
   let launch = try await prepared.attempt.start(
@@ -73,11 +73,11 @@ func runtimeCompositionCancellationStopsCoordinatorAndReturnsSealedTail() async 
   let backend = DiskplanRuntimeExecutionBackend(
     composition: productionTestComposition(fixture: fixture, jitDelayNanoseconds: 30_000_000_000)
   )
-  let context = runtimeContext(fixture)
+  let context = runtimeContext(fixture, negotiatedProtocolMinor: protocol16Minor)
   let prepared = try await backend.prepareApplyReview(context: context, lifetimeSeconds: 60)
   let sealedReview = try SealedRuntimeWire.sealApplyReview(
     prepared.projection,
-    negotiatedProtocolMinor: protocol15Minor
+    negotiatedProtocolMinor: protocol16Minor
   )
   let launch = try await prepared.attempt.start(
     confirmation: RuntimeApplyConfirmation(
@@ -99,6 +99,28 @@ func runtimeCompositionCancellationStopsCoordinatorAndReturnsSealedTail() async 
   }
 
   #expect(hasCancelledUnit)
+}
+
+@Test
+func runtimePreparedApplyAttemptRejectsProtocol15BeforeStarterInvocation() async throws {
+  let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
+  let starterInvoked = RuntimeInvocationFlag()
+  let attempt = RuntimePreparedApplyAttempt { _, _ in
+    starterInvoked.set()
+    throw RuntimeCompositionTestError.unexpectedStarterInvocation
+  }
+  let context = runtimeContext(fixture, negotiatedProtocolMinor: protocol15Minor)
+
+  await #expect(throws: RuntimeExecutionBackendFailure.protocol16Required) {
+    try await attempt.start(
+      confirmation: RuntimeApplyConfirmation(
+        review: Diskplan_V1_ApplyReviewProjection(),
+        confirmedForceActionIDs: []
+      ),
+      context: context
+    )
+  }
+  #expect(!starterInvoked.value)
 }
 
 @Test
@@ -455,7 +477,10 @@ private func productionTestComposition(
   )
 }
 
-private func runtimeContext(_ fixture: Fixture) -> RuntimeExecutionPlanContext {
+private func runtimeContext(
+  _ fixture: Fixture,
+  negotiatedProtocolMinor: UInt32 = protocol15Minor
+) -> RuntimeExecutionPlanContext {
   let planDigest = fixture.plan.planHash.bytes
   let evidenceDigest = fixture.evidence.evidenceID.bytes
   var preview = Diskplan_V1_ActionExecutionPreviewProjection()
@@ -501,7 +526,7 @@ private func runtimeContext(_ fixture: Fixture) -> RuntimeExecutionPlanContext {
     releaseSetIDByAllocationGroup: [:],
     planManifest: manifest,
     overlayProjection: overlay,
-    negotiatedProtocolMinor: protocol15Minor
+    negotiatedProtocolMinor: negotiatedProtocolMinor
   )
 }
 
@@ -549,6 +574,20 @@ private func lowercaseHex(_ bytes: Data) -> Data {
 
 private enum RuntimeCompositionTestError: Error {
   case finalDescriptorUnavailable
+  case unexpectedStarterInvocation
+}
+
+private final class RuntimeInvocationFlag: @unchecked Sendable {
+  private let lock = NSLock()
+  private var invoked = false
+
+  var value: Bool {
+    lock.withLock { invoked }
+  }
+
+  func set() {
+    lock.withLock { invoked = true }
+  }
 }
 
 private final class RuntimeCountingExecutionProjector: RuntimeExecutionEventProjecting,
