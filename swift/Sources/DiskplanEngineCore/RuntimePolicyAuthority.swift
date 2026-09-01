@@ -105,6 +105,7 @@ public struct AuthorityCandidateRecord: Equatable, Sendable {
 public struct AuthorityEvidenceSnapshot: Equatable, Sendable {
   public let candidatesByPath: [RawPath: AuthorityCandidateRecord]
   public let sharedFileObservationsByPath: [RawPath: ScannedNode]
+  public let sharedFileAncestorsByPath: [RawPath: [ScannedNode]]
   public let issues: [ScanCorpusIssue]
   public let retention: AuthorityRetentionStatus
   public let topologyCoverageIncomplete: Bool
@@ -112,12 +113,14 @@ public struct AuthorityEvidenceSnapshot: Equatable, Sendable {
   fileprivate init(
     candidatesByPath: [RawPath: AuthorityCandidateRecord],
     sharedFileObservationsByPath: [RawPath: ScannedNode],
+    sharedFileAncestorsByPath: [RawPath: [ScannedNode]],
     issues: [ScanCorpusIssue],
     retention: AuthorityRetentionStatus,
     topologyCoverageIncomplete: Bool
   ) {
     self.candidatesByPath = candidatesByPath
     self.sharedFileObservationsByPath = sharedFileObservationsByPath
+    self.sharedFileAncestorsByPath = sharedFileAncestorsByPath
     self.issues = issues.sorted(by: scanCorpusIssuePrecedes)
     self.retention = retention
     self.topologyCoverageIncomplete = topologyCoverageIncomplete
@@ -131,6 +134,7 @@ public struct AuthorityEvidenceSnapshot: Equatable, Sendable {
     return Self(
       candidatesByPath: candidatesByPath,
       sharedFileObservationsByPath: sharedFileObservationsByPath,
+      sharedFileAncestorsByPath: sharedFileAncestorsByPath,
       issues: issues,
       retention: AuthorityRetentionStatus(
         candidateSummariesOmitted: retention.candidateSummariesOmitted,
@@ -187,6 +191,7 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
   private var candidateHeapPositions: [RawPath: Int] = [:]
   private var candidateBytes = 0
   private var sharedFileObservations: [RawPath: ScannedNode] = [:]
+  private var sharedFileAncestors: [RawPath: [ScannedNode]] = [:]
   private var sharedObjectKeys = Set<String>()
   private var sharedKeyBytes = 0
   private var ownerBytes = 0
@@ -311,6 +316,7 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
     return AuthorityEvidenceSnapshot(
       candidatesByPath: candidates,
       sharedFileObservationsByPath: sharedFileObservations,
+      sharedFileAncestorsByPath: sharedFileAncestors,
       issues: retainedIssues,
       retention: AuthorityRetentionStatus(
         candidateSummariesOmitted: candidateSummariesOmitted,
@@ -597,11 +603,16 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
       topologyCoverageIncomplete = true
       return
     }
+    let ancestors = ancestorNodes(for: node.path)
     if let previous = sharedFileObservations[node.path] {
-      if previous != node { retainIssue(.conflictingObservation(node.path)) }
+      if previous != node || sharedFileAncestors[node.path] != ancestors {
+        retainIssue(.conflictingObservation(node.path))
+      }
       return
     }
-    let ownerEstimate = estimatedNodeBytes(node)
+    let ownerEstimate = ancestors.reduce(estimatedNodeBytes(node)) {
+      saturatedSum($0, estimatedNodeBytes($1))
+    }
     guard sharedFileObservations.count < budget.maximumOwnerReferences,
       fitsWithinLimit(ownerBytes, ownerEstimate, limit: ownerByteBudget)
     else {
@@ -612,6 +623,7 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
     for key in unseenKeys { sharedObjectKeys.insert(key) }
     sharedKeyBytes += unseenKeyBytes
     sharedFileObservations[node.path] = node
+    sharedFileAncestors[node.path] = ancestors
     ownerBytes += ownerEstimate
   }
 
@@ -1193,12 +1205,14 @@ public struct RuntimeReleaseOwner: Equatable, Sendable {
   public let fileObjectID: String
   public let candidateID: String
   public let path: RawTargetPath
+  public let namespaceBinding: ProtectedNamespaceBinding
   public let linkCount: DiskplanPolicy.Observation<UInt32>
 }
 
 public struct RuntimeAllocationGroup: Equatable, Sendable {
   public let id: String
   public let fileObjectIDs: [String]
+  public let cloneIdentity: DiskplanPolicy.Observation<ReleaseCloneIdentity>
   public let cloneRefCount: DiskplanPolicy.Observation<UInt32>
   public let sharedBytes: DiskplanPolicy.Observation<UInt64>
 }
@@ -1799,12 +1813,20 @@ public struct RuntimePolicyAuthority: Sendable {
     candidate: RecognizedRuntimeCandidate,
     root: RootScanResult
   ) throws -> ProtectedNamespaceBinding {
+    try makeNamespaceBinding(node: candidate.node, ancestors: candidate.ancestors, root: root)
+  }
+
+  private func makeNamespaceBinding(
+    node: ScannedNode,
+    ancestors: [ScannedNode],
+    root: RootScanResult
+  ) throws -> ProtectedNamespaceBinding {
     guard let rootIdentity = mapIdentity(.known(root.binding.identity)).knownValue else {
-      throw RuntimePolicyAuthorityError.invalidObjectIdentity(candidate.node.path)
+      throw RuntimePolicyAuthorityError.invalidObjectIdentity(node.path)
     }
-    let targetPath = try RawTargetPath(components: candidate.node.path.components.map(\.bytes))
-    guard let targetIdentity = mapIdentity(candidate.node.identity).knownValue else {
-      throw RuntimePolicyAuthorityError.invalidObjectIdentity(candidate.node.path)
+    let targetPath = try RawTargetPath(components: node.path.components.map(\.bytes))
+    guard let targetIdentity = mapIdentity(node.identity).knownValue else {
+      throw RuntimePolicyAuthorityError.invalidObjectIdentity(node.path)
     }
     let rootSeal = NamespaceSealEvidence(
       trustedNamespace: .unverified,
@@ -1814,20 +1836,20 @@ public struct RuntimePolicyAuthority: Sendable {
       mountIdentity: .known("real-device:\(root.binding.identity.device)")
     )
     var parents: [ParentNamespaceBinding] = []
-    for node in candidate.ancestors {
-      let components = node.path.components
-      guard let identity = mapIdentity(node.identity).knownValue
-      else { throw RuntimePolicyAuthorityError.invalidObjectIdentity(node.path) }
+    for ancestor in ancestors {
+      let components = ancestor.path.components
+      guard let identity = mapIdentity(ancestor.identity).knownValue
+      else { throw RuntimePolicyAuthorityError.invalidObjectIdentity(ancestor.path) }
       parents.append(
         ParentNamespaceBinding(
           relativePath: try RawTargetPath(components: components.map(\.bytes)),
           identity: identity,
           seal: NamespaceSealEvidence(
             trustedNamespace: .unverified,
-            accessPolicy: mapAccessPolicy(node.accessPolicy),
+            accessPolicy: mapAccessPolicy(ancestor.accessPolicy),
             aclDigest: .unknown(.unavailableViaPublicAPI),
-            providerBoundary: mapProviderBoundary(node.providerBoundary),
-            mountIdentity: mapMountIdentity(node.identity)
+            providerBoundary: mapProviderBoundary(ancestor.providerBoundary),
+            mountIdentity: mapMountIdentity(ancestor.identity)
           )
         )
       )
@@ -1840,6 +1862,66 @@ public struct RuntimePolicyAuthority: Sendable {
       targetIdentity: targetIdentity,
       parentChain: parents
     )
+  }
+
+  private func makeOwnerNamespaceBinding(
+    node: ScannedNode,
+    observedAncestors: [ScannedNode],
+    candidate: RecognizedRuntimeCandidate,
+    candidateNamespace: ProtectedNamespaceBinding,
+    targetPath: RawTargetPath
+  ) throws -> ProtectedNamespaceBinding {
+    guard targetPath.isWithin(candidateNamespace.targetPath),
+      let targetIdentity = mapIdentity(node.identity).knownValue
+    else { throw RuntimePolicyAuthorityError.invalidObjectIdentity(node.path) }
+    var parents = candidateNamespace.parentChain
+    let candidateSeal = NamespaceSealEvidence(
+      trustedNamespace: candidateNamespace.trustedNamespace,
+      accessPolicy: mapAccessPolicy(candidate.node.accessPolicy),
+      aclDigest: .unknown(.unavailableViaPublicAPI),
+      providerBoundary: mapProviderBoundary(candidate.node.providerBoundary),
+      mountIdentity: mapMountIdentity(candidate.node.identity))
+    parents.append(
+      ParentNamespaceBinding(
+        relativePath: candidateNamespace.targetPath,
+        identity: candidateNamespace.targetIdentity,
+        seal: candidateSeal))
+    let intermediateCount =
+      targetPath.components.count - candidateNamespace.targetPath.components.count - 1
+    guard intermediateCount >= 0, observedAncestors.count >= intermediateCount else {
+      throw RuntimePolicyAuthorityError.invalidObjectIdentity(node.path)
+    }
+    let intermediateAncestors = observedAncestors.suffix(intermediateCount)
+    for (offset, ancestor) in intermediateAncestors.enumerated() {
+      let observedDepth = node.path.components.count - intermediateCount + offset
+      guard ancestor.path.rootID == node.path.rootID,
+        ancestor.path.components == Array(node.path.components.prefix(observedDepth))
+      else {
+        throw RuntimePolicyAuthorityError.invalidObjectIdentity(node.path)
+      }
+      guard let identity = mapIdentity(ancestor.identity).knownValue else {
+        throw RuntimePolicyAuthorityError.invalidObjectIdentity(ancestor.path)
+      }
+      let depth = candidateNamespace.targetPath.components.count + offset + 1
+      parents.append(
+        ParentNamespaceBinding(
+          relativePath: try RawTargetPath(
+            components: Array(targetPath.components.prefix(depth))),
+          identity: identity,
+          seal: NamespaceSealEvidence(
+            trustedNamespace: candidateNamespace.trustedNamespace,
+            accessPolicy: mapAccessPolicy(ancestor.accessPolicy),
+            aclDigest: .unknown(.unavailableViaPublicAPI),
+            providerBoundary: mapProviderBoundary(ancestor.providerBoundary),
+            mountIdentity: mapMountIdentity(ancestor.identity))))
+    }
+    return try ProtectedNamespaceBinding(
+      rawRoot: candidateNamespace.rawRoot,
+      rootIdentity: candidateNamespace.rootIdentity,
+      rootSeal: candidateNamespace.rootSeal,
+      targetPath: targetPath,
+      targetIdentity: targetIdentity,
+      parentChain: parents)
   }
 
   private func buildReleaseOwnerIndex(
@@ -1898,14 +1980,34 @@ public struct RuntimePolicyAuthority: Sendable {
           ownerPath: node.path,
           candidateID: candidateID,
           indexes: physicalIndexes
-        )
+        ),
+        let candidate = candidates.first(where: { $0.id == candidateID }),
+        let root = scanResult.roots.first(where: {
+          $0.binding.rootID == candidate.node.path.rootID
+        }),
+        let ancestors = evidence.sharedFileAncestorsByPath[node.path]
       else { continue }
+      let canonicalOwnerPath = try RawTargetPath(components: candidateRelativePath)
+      let candidateNamespace = try makeNamespaceBinding(candidate: candidate, root: root)
+      let namespaceBinding: ProtectedNamespaceBinding
+      do {
+        namespaceBinding = try makeOwnerNamespaceBinding(
+          node: node,
+          observedAncestors: ancestors,
+          candidate: candidate,
+          candidateNamespace: candidateNamespace,
+          targetPath: canonicalOwnerPath)
+      } catch {
+        dependencyCompleteByCandidate[candidateID] = false
+        continue
+      }
       assignedCandidateByPath[node.path] = candidateID
       owners.append(
         RuntimeReleaseOwner(
           fileObjectID: objectID,
           candidateID: candidateID,
-          path: try RawTargetPath(components: candidateRelativePath),
+          path: canonicalOwnerPath,
+          namespaceBinding: namespaceBinding,
           linkCount: mapUInt32Observation(node.storageTopology.linkCount)
         )
       )
@@ -1971,6 +2073,15 @@ public struct RuntimePolicyAuthority: Sendable {
       let fileIDs = Array(Set(members.compactMap { $0.identity.value.map(fileObjectID) })).sorted()
       let refCountValues = members.map { $0.storageTopology.cloneRefcount.value }
       let refCounts = Set(refCountValues.compactMap { $0 })
+      let cloneIdentities = Set(
+        members.compactMap { member -> ReleaseCloneIdentity? in
+          guard let identity = member.identity.value,
+            identity.device >= 0,
+            let cloneID = member.storageTopology.cloneID.value,
+            cloneID > 0
+          else { return nil }
+          return ReleaseCloneIdentity(device: UInt64(bitPattern: identity.device), cloneID: cloneID)
+        })
       // Clone release credit requires explicit positive sharing evidence. Unknown
       // or false flags cannot be upgraded from clone IDs/refcounts alone.
       let positiveCloneEvidence = members.allSatisfy {
@@ -1983,6 +2094,10 @@ public struct RuntimePolicyAuthority: Sendable {
           && refCountValues.allSatisfy({ $0 != nil }) && refCounts.count == 1
           && refCounts.first == UInt32(exactly: fileIDs.count)
         ? .known(refCounts.first!) : .unknown(.incompleteCoverage)
+      let cloneIdentity: DiskplanPolicy.Observation<ReleaseCloneIdentity> =
+        positiveCloneEvidence && everyObjectComplete
+          && cloneIdentities.count == 1 && fileIDs.count > 1
+        ? .known(cloneIdentities.first!) : .unknown(.incompleteCoverage)
       let exactByteValues = members.map { node -> UInt64? in
         if case .exact(let value) = node.storageTopology.conditionalGroupReclaim {
           return value
@@ -1998,6 +2113,7 @@ public struct RuntimePolicyAuthority: Sendable {
         RuntimeAllocationGroup(
           id: groupID,
           fileObjectIDs: fileIDs,
+          cloneIdentity: cloneIdentity,
           cloneRefCount: cloneRefCount,
           sharedBytes: sharedBytes
         )
@@ -2040,6 +2156,7 @@ public struct RuntimePolicyAuthority: Sendable {
         RuntimeAllocationGroup(
           id: "hardlink:\(fileID)",
           fileObjectIDs: [fileID],
+          cloneIdentity: .absent,
           cloneRefCount: .known(1),
           sharedBytes: sharedBytes
         )
@@ -2094,6 +2211,11 @@ public struct RuntimePolicyAuthority: Sendable {
         observedOwners: owners.map {
           FileOwnerLink(candidateID: $0.candidateID, path: $0.path)
         },
+        ownerNamespaces: owners.map {
+          FileOwnerNamespaceExpectation(
+            link: FileOwnerLink(candidateID: $0.candidateID, path: $0.path),
+            namespaceBinding: $0.namespaceBinding)
+        },
         linkCount: linkCount
       )
     }
@@ -2106,6 +2228,7 @@ public struct RuntimePolicyAuthority: Sendable {
         provenance: provenance,
         id: group.id,
         ownerFileObjectIDs: fileIDs,
+        cloneIdentity: group.cloneIdentity,
         cloneRefCount: group.cloneRefCount,
         sharedBytes: group.sharedBytes,
         snapshotBlocker: .unknown(.unavailableViaPublicAPI)
@@ -2514,6 +2637,9 @@ private func encodeCaptureDigest(
   encoder.array(sharedFilePaths) { encoder, path in
     let node = evidence.sharedFileObservationsByPath[path]!
     encodeNode(node, into: &encoder)
+    encoder.array(evidence.sharedFileAncestorsByPath[path] ?? []) { encoder, ancestor in
+      encodeNode(ancestor, into: &encoder)
+    }
   }
   encoder.array(evidence.issues) { encoder, issue in
     encodeIssue(issue, into: &encoder)

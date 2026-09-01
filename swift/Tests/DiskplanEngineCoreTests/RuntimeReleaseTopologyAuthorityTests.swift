@@ -351,6 +351,46 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   #expect(report.seal.fileObjects[0].providerLocal == .known(false))
 }
 
+@Test func collectPreservesTypedMissingWhenLeafDisappearsFromNamespace() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let setup = try hardlinkSetup(fixture: fixture)
+  let base = nonCloneKernel(snapshot: .known(false))
+  let missingLeaf = RuntimeReleaseTopologyKernel(
+    descriptorIdentity: base.descriptorIdentity,
+    item: { _, _, _, _ in
+      RuntimeReleaseKernelItem(
+        identity: .absent,
+        linkCount: .absent,
+        mayShareBlocks: .absent,
+        sharesAllBlocks: .absent,
+        cloneID: .absent,
+        cloneRefCount: .absent,
+        providerLocal: .absent)
+    },
+    snapshotBlocker: base.snapshotBlocker)
+  let authority = testAuthority(kernel: missingLeaf)
+  let lease = try authority.bind(
+    plan: setup.plan,
+    executionEpochNonce: UUID(),
+    validForNanoseconds: 100,
+    policy: policy,
+    owners: setup.descriptors,
+    volumes: [
+      BoundRuntimeReleaseVolumeDescriptor(
+        expectedDevice: fixture.rootIdentity.device,
+        rootFileDescriptor: fixture.rootDescriptor)
+    ])
+
+  let report = try authority.collect(lease)
+
+  #expect(report.collection == .absent)
+  #expect(report.topologyMatchesExpected == .absent)
+  #expect(report.seal.fileObjects[0].namespaceSlotsMatch == .absent)
+  #expect(report.seal.fileObjects[0].linkCount == .absent)
+  #expect(report.seal.fileObjects[0].ownerClosure == .absent)
+}
+
 @Test func livePolicyRaceStopsAfterMetadataAndBeforeParentOpen() throws {
   let policy = try materializationPolicy()
   let fixture = try RealReleaseTopologyFixture(policy: policy)
@@ -373,7 +413,8 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   let expectedParentIdentity = fixture.rootIdentity
 
   func bindFailure(
-    _ policyObservation: RuntimeReleaseTopologyObservation<Bool>
+    _ policyObservation: RuntimeReleaseTopologyObservation<Bool>,
+    itemIdentity: RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>? = nil
   ) -> (error: RuntimeReleaseTopologyAuthorityError?, events: [String]) {
     let recorder = PathAccessOrderRecorder()
     let live = RuntimeReleaseTopologyKernel.live
@@ -382,7 +423,7 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
       item: { _, _, _, _ in
         recorder.record("item")
         return RuntimeReleaseKernelItem(
-          identity: .known(expectedParentIdentity),
+          identity: itemIdentity ?? .known(expectedParentIdentity),
           linkCount: .known(1),
           mayShareBlocks: .known(false),
           sharesAllBlocks: .absent,
@@ -420,6 +461,22 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
       return (nil, recorder.events)
     }
   }
+
+  let metadataMissing = bindFailure(.known(true), itemIdentity: .absent)
+  #expect(metadataMissing.error == .namespaceChainMissing)
+  #expect(metadataMissing.events == ["item"])
+
+  let openMissing = bindFailure(.known(true))
+  #expect(openMissing.error == .namespaceChainMissing)
+  #expect(openMissing.events == ["item", "policy"])
+
+  let replacedParent = RuntimeReleaseFileObjectIdentity(
+    device: expectedParentIdentity.device,
+    fileID: expectedParentIdentity.fileID &+ 1,
+    objectType: .directory)
+  let replacementMismatch = bindFailure(.known(true), itemIdentity: .known(replacedParent))
+  #expect(replacementMismatch.error == .namespaceChainMismatch)
+  #expect(replacementMismatch.events == ["item"])
 
   let unavailable = bindFailure(.unknown(.unavailableViaPublicAPI))
   #expect(unavailable.error == .namespaceChainUnknown(.unavailableViaPublicAPI))
@@ -531,6 +588,7 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   let policyFixture = try releasePlanFixture(
     rootIdentity: fixture.rootIdentity,
     candidateIdentity: fixture.parentIdentity,
+    fileIdentity: fixture.fileIdentity,
     ownerPath: ["nested", "leaf"])
   let namespace = try RuntimeReleaseOwnerNamespaceBinding(
     link: FileOwnerLink(
@@ -539,7 +597,9 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
     actionID: policyFixture.ownerAction.id,
     rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
     rootIdentity: fixture.rootIdentity,
+    rootSeal: try topologyRootSeal(),
     parentChain: [fixture.parentIdentity],
+    parentSeals: [try topologyCandidateSeal()],
     targetIdentity: fixture.fileIdentity,
     inheritedProviderBoundaryByComponent: [false, false])
   let owner = RuntimeReleaseExpectedOwner(namespace: namespace)
@@ -598,7 +658,9 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
     actionID: action,
     rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
     rootIdentity: fixture.rootIdentity,
+    rootSeal: try topologyRootSeal(),
     parentChain: [fixture.parentIdentity],
+    parentSeals: [try topologyCandidateSeal()],
     targetIdentity: fixture.fileIdentity,
     inheritedProviderBoundaryByComponent: [false, false])
 
@@ -643,17 +705,21 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   let first = try releasePlanFixture(
     rootIdentity: fixture.rootIdentity,
     candidateIdentity: fixture.parentIdentity,
+    fileIdentity: fixture.fileIdentity,
     ownerPath: ["nested", "leaf"])
   let second = try releasePlanFixture(
     rootIdentity: fixture.rootIdentity,
     candidateIdentity: fixture.parentIdentity,
+    fileIdentity: fixture.fileIdentity,
     ownerPath: ["nested", "other"])
   let substitutedNamespace = try RuntimeReleaseOwnerNamespaceBinding(
     link: FileOwnerLink(candidateID: "cache", path: try rawTarget(["nested", "other"])),
     actionID: second.ownerAction.id,
     rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
     rootIdentity: fixture.rootIdentity,
+    rootSeal: try topologyRootSeal(),
     parentChain: [fixture.parentIdentity],
+    parentSeals: [try topologyCandidateSeal()],
     targetIdentity: fixture.fileIdentity,
     inheritedProviderBoundaryByComponent: [false, false])
 
@@ -689,13 +755,16 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   let first = try releasePlanFixture(
     rootIdentity: fixture.rootIdentity,
     candidateIdentity: fixture.parentIdentity,
+    fileIdentity: fixture.fileIdentity,
     ownerPath: ["nested", "leaf"])
   let substitutedNamespace = try RuntimeReleaseOwnerNamespaceBinding(
     link: FileOwnerLink(candidateID: "cache", path: try rawTarget(["nested", "other"])),
     actionID: first.ownerAction.id,
     rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
     rootIdentity: fixture.rootIdentity,
+    rootSeal: try topologyRootSeal(),
     parentChain: [fixture.parentIdentity],
+    parentSeals: [try topologyCandidateSeal()],
     targetIdentity: fixture.fileIdentity,
     inheritedProviderBoundaryByComponent: [false, false])
 
@@ -733,13 +802,16 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   let policyFixture = try releasePlanFixture(
     rootIdentity: fixture.rootIdentity,
     candidateIdentity: fixture.parentIdentity,
+    fileIdentity: fixture.fileIdentity,
     ownerPath: ["nested", "leaf"])
   let namespace = try RuntimeReleaseOwnerNamespaceBinding(
     link: FileOwnerLink(candidateID: "cache", path: try rawTarget(["nested", "leaf"])),
     actionID: policyFixture.ownerAction.id,
     rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
     rootIdentity: fixture.rootIdentity,
+    rootSeal: try topologyRootSeal(),
     parentChain: [fixture.parentIdentity],
+    parentSeals: [try topologyCandidateSeal()],
     targetIdentity: fixture.fileIdentity,
     inheritedProviderBoundaryByComponent: [false, false])
   let file = RuntimeReleaseExpectedFileObject(
@@ -788,6 +860,9 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
     rootIdentity: fixture.rootIdentity,
     candidateIdentity: fixture.parentIdentity,
     ownerPaths: ownerPaths,
+    fileIdentities: identities,
+    cloneIdentity: ReleaseCloneIdentity(
+      device: fixture.fileIdentity.device, cloneID: 700),
     cloneRefCount: 2)
   let clone = RuntimeReleaseCloneIdentity(device: fixture.fileIdentity.device, cloneID: 700)
   let cloneFiles = try planBoundRuntimeFiles(
@@ -860,6 +935,60 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
       volumeDevices: [fixture.rootIdentity.device])
   }
 
+  let substitutedCloneID = RuntimeReleaseCloneIdentity(
+    device: fixture.fileIdentity.device, cloneID: 701)
+  #expect(throws: RuntimeReleaseTopologyPlanError.releaseMembershipMismatch) {
+    try RuntimeReleaseTopologyExpectedPlan(
+      plan: policyFixture.plan,
+      validatedSelection: policyFixture.validatedSelection,
+      releaseStepActionID: policyFixture.releaseAction.id,
+      fileObjects: try planBoundRuntimeFiles(
+        graphFileIDs: graphFileIDs,
+        ownerPaths: ownerPaths,
+        actionID: policyFixture.ownerAction.id,
+        rootIdentity: fixture.rootIdentity,
+        candidateIdentity: fixture.parentIdentity,
+        fileIdentities: identities,
+        cloneIdentity: substitutedCloneID),
+      groups: [
+        RuntimeReleaseExpectedGroup(
+          allocationGroupID: "group",
+          ownerGraphFileObjectIDs: graphFileIDs,
+          ownerFileObjects: identities,
+          cloneIdentity: substitutedCloneID,
+          cloneRefCount: 2,
+          snapshotDevice: fixture.rootIdentity.device)
+      ],
+      volumeDevices: [fixture.rootIdentity.device])
+  }
+
+  let substitutedDeviceClone = RuntimeReleaseCloneIdentity(
+    device: fixture.fileIdentity.device &+ 1, cloneID: 700)
+  #expect(throws: RuntimeReleaseTopologyPlanError.invalidCloneBinding) {
+    try RuntimeReleaseTopologyExpectedPlan(
+      plan: policyFixture.plan,
+      validatedSelection: policyFixture.validatedSelection,
+      releaseStepActionID: policyFixture.releaseAction.id,
+      fileObjects: try planBoundRuntimeFiles(
+        graphFileIDs: graphFileIDs,
+        ownerPaths: ownerPaths,
+        actionID: policyFixture.ownerAction.id,
+        rootIdentity: fixture.rootIdentity,
+        candidateIdentity: fixture.parentIdentity,
+        fileIdentities: identities,
+        cloneIdentity: substitutedDeviceClone),
+      groups: [
+        RuntimeReleaseExpectedGroup(
+          allocationGroupID: "group",
+          ownerGraphFileObjectIDs: graphFileIDs,
+          ownerFileObjects: identities,
+          cloneIdentity: substitutedDeviceClone,
+          cloneRefCount: 2,
+          snapshotDevice: fixture.rootIdentity.device)
+      ],
+      volumeDevices: [fixture.rootIdentity.device])
+  }
+
   let valid = try RuntimeReleaseTopologyExpectedPlan(
     plan: policyFixture.plan,
     validatedSelection: policyFixture.validatedSelection,
@@ -884,6 +1013,7 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   let policyFixture = try releasePlanFixture(
     rootIdentity: fixture.rootIdentity,
     candidateIdentity: fixture.parentIdentity,
+    fileIdentity: fixture.fileIdentity,
     ownerPath: ["nested", "leaf"])
   let files = try planBoundRuntimeFiles(
     graphFileIDs: ["file"],
@@ -914,6 +1044,100 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   #expect(plan.groups.first?.cloneRefCount == nil)
 }
 
+@Test func planBoundDescendantNamespaceRejectsEveryCallerSuppliedSubstitution() throws {
+  let policy = try materializationPolicy()
+  let fixture = try NestedReleaseTopologyFixture(policy: policy)
+  let intermediate = RuntimeReleaseFileObjectIdentity(
+    device: fixture.parentIdentity.device,
+    fileID: fixture.parentIdentity.fileID &+ 100,
+    objectType: .directory)
+  let ownerPath = ["nested", "intermediate", "leaf"]
+  let policyFixture = try releasePlanFixture(
+    rootIdentity: fixture.rootIdentity,
+    candidateIdentity: fixture.parentIdentity,
+    ownerPaths: [ownerPath],
+    fileIdentities: [fixture.fileIdentity],
+    ownerParentChains: [[fixture.parentIdentity, intermediate]],
+    cloneIdentity: nil,
+    cloneRefCount: 1)
+
+  func expectedPlan(
+    graphFileID: String = "file",
+    intermediateIdentity: RuntimeReleaseFileObjectIdentity = intermediate,
+    intermediateSeal: NamespaceSealEvidence = topologyDescendantSeal(),
+    leafIdentity: RuntimeReleaseFileObjectIdentity = fixture.fileIdentity,
+    inheritedProviderBoundary: [Bool] = [false, false, false]
+  ) throws -> RuntimeReleaseTopologyExpectedPlan {
+    let files = try planBoundRuntimeFiles(
+      graphFileIDs: [graphFileID],
+      ownerPaths: [ownerPath],
+      actionID: policyFixture.ownerAction.id,
+      rootIdentity: fixture.rootIdentity,
+      candidateIdentity: fixture.parentIdentity,
+      fileIdentities: [leafIdentity],
+      cloneIdentity: nil,
+      ownerParentChains: [[fixture.parentIdentity, intermediateIdentity]],
+      ownerParentSeals: [[try topologyCandidateSeal(), intermediateSeal]],
+      inheritedProviderBoundaries: [inheritedProviderBoundary])
+    return try RuntimeReleaseTopologyExpectedPlan(
+      plan: policyFixture.plan,
+      validatedSelection: policyFixture.validatedSelection,
+      releaseStepActionID: policyFixture.releaseAction.id,
+      fileObjects: files,
+      groups: [
+        RuntimeReleaseExpectedGroup(
+          allocationGroupID: "group",
+          ownerGraphFileObjectIDs: [graphFileID],
+          ownerFileObjects: [leafIdentity],
+          cloneIdentity: nil,
+          cloneRefCount: nil,
+          snapshotDevice: fixture.rootIdentity.device)
+      ],
+      volumeDevices: [fixture.rootIdentity.device])
+  }
+
+  _ = try expectedPlan()
+
+  let replacedDescendant = RuntimeReleaseFileObjectIdentity(
+    device: intermediate.device,
+    fileID: intermediate.fileID &+ 1,
+    objectType: .directory)
+  #expect(throws: RuntimeReleaseTopologyPlanError.releaseMembershipMismatch) {
+    try expectedPlan(intermediateIdentity: replacedDescendant)
+  }
+
+  let insertedMount = RuntimeReleaseFileObjectIdentity(
+    device: intermediate.device &+ 1,
+    fileID: intermediate.fileID,
+    objectType: .directory)
+  #expect(throws: RuntimeReleaseTopologyPlanError.releaseMembershipMismatch) {
+    try expectedPlan(
+      intermediateIdentity: insertedMount,
+      intermediateSeal: topologyDescendantSeal(mountIdentity: .known("inserted-volume")))
+  }
+
+  #expect(throws: RuntimeReleaseTopologyPlanError.releaseMembershipMismatch) {
+    try expectedPlan(
+      intermediateSeal: topologyDescendantSeal(
+        providerBoundary: .known(.fileProviderManaged)),
+      inheritedProviderBoundary: [false, false, true])
+  }
+
+  #expect(throws: RuntimeReleaseTopologyPlanError.releaseMembershipMismatch) {
+    try expectedPlan(
+      intermediateSeal: topologyDescendantSeal(
+        accessPolicy: .known("owner-private-changed")))
+  }
+
+  let replacedLeaf = RuntimeReleaseFileObjectIdentity(
+    device: fixture.fileIdentity.device,
+    fileID: fixture.fileIdentity.fileID &+ 1,
+    objectType: .regularFile)
+  #expect(throws: RuntimeReleaseTopologyPlanError.releaseMembershipMismatch) {
+    try expectedPlan(graphFileID: "relabeled-file", leafIdentity: replacedLeaf)
+  }
+}
+
 @Test func malformedDescendantOwnerIdentityChainIsRejectedWithoutDeferredFailure() throws {
   let policy = try materializationPolicy()
   let fixture = try NestedReleaseTopologyFixture(policy: policy)
@@ -925,7 +1149,9 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
       actionID: try actionID(18),
       rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
       rootIdentity: fixture.fileIdentity,
+      rootSeal: try topologyRootSeal(),
       parentChain: [fixture.parentIdentity],
+      parentSeals: [try topologyCandidateSeal()],
       targetIdentity: fixture.fileIdentity,
       inheritedProviderBoundaryByComponent: [false, false])
   }
@@ -937,7 +1163,9 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
       actionID: try actionID(19),
       rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
       rootIdentity: fixture.rootIdentity,
+      rootSeal: try topologyRootSeal(),
       parentChain: [fixture.fileIdentity],
+      parentSeals: [try topologyCandidateSeal()],
       targetIdentity: fixture.fileIdentity,
       inheritedProviderBoundaryByComponent: [false, false])
   }
@@ -1838,12 +2066,16 @@ private struct ReleasePlanFixture {
 private func releasePlanFixture(
   rootIdentity: RuntimeReleaseFileObjectIdentity,
   candidateIdentity: RuntimeReleaseFileObjectIdentity,
+  fileIdentity: RuntimeReleaseFileObjectIdentity,
   ownerPath: [String]
 ) throws -> ReleasePlanFixture {
   try releasePlanFixture(
     rootIdentity: rootIdentity,
     candidateIdentity: candidateIdentity,
     ownerPaths: [ownerPath],
+    fileIdentities: [fileIdentity],
+    ownerParentChains: [[candidateIdentity]],
+    cloneIdentity: nil,
     cloneRefCount: 1)
 }
 
@@ -1851,6 +2083,9 @@ private func releasePlanFixture(
   rootIdentity: RuntimeReleaseFileObjectIdentity,
   candidateIdentity: RuntimeReleaseFileObjectIdentity,
   ownerPaths: [[String]],
+  fileIdentities: [RuntimeReleaseFileObjectIdentity],
+  ownerParentChains: [[RuntimeReleaseFileObjectIdentity]]? = nil,
+  cloneIdentity: ReleaseCloneIdentity?,
   cloneRefCount: UInt32
 ) throws -> ReleasePlanFixture {
   let rawRoot = try RawRootPath(absoluteBytes: Data("/fixture".utf8))
@@ -1928,18 +2163,52 @@ private func releasePlanFixture(
       canonicalRawPath: Data("nested".utf8)))
   let candidate = try StorageCandidate(
     id: "cache", evidence: evidence, immediatePrivateBytes: .known(1))
+  let candidateTargetSeal = NamespaceSealEvidence(
+    trustedNamespace: .ownerPrivate,
+    accessPolicy: evidence.accessPolicy,
+    aclDigest: evidence.aclDigest,
+    providerBoundary: evidence.providerState,
+    mountIdentity: evidence.targetMountIdentity)
+  let resolvedParentChains =
+    ownerParentChains
+    ?? Array(repeating: [candidateIdentity], count: ownerPaths.count)
+  guard ownerPaths.count == fileIdentities.count,
+    resolvedParentChains.count == ownerPaths.count
+  else { throw ReleaseTopologyTestError.identity }
   let graphFileIDs = ownerPaths.indices.map { index in
     ownerPaths.count == 1 ? "file" : "file-\(index)"
   }
   let graph = try StorageReleaseGraph(
     globalFacts: facts,
     candidates: [candidate],
-    fileObjects: try zip(graphFileIDs, ownerPaths).map { fileID, ownerPath in
-      FileObjectNode(
+    fileObjects: try zip(
+      zip(zip(graphFileIDs, ownerPaths), fileIdentities), resolvedParentChains
+    ).map {
+      value, parentChain in
+      let (pair, fileIdentity) = value
+      let (fileID, ownerPath) = pair
+      guard parentChain.count == ownerPath.count - 1,
+        parentChain.first == candidateIdentity
+      else { throw ReleaseTopologyTestError.identity }
+      let link = FileOwnerLink(candidateID: "cache", path: try rawTarget(ownerPath))
+      let ownerNamespace = try ProtectedNamespaceBinding(
+        rawRoot: rawRoot,
+        rootIdentity: policyIdentity(rootIdentity),
+        rootSeal: seal,
+        targetPath: try rawTarget(ownerPath),
+        targetIdentity: policyIdentity(fileIdentity),
+        parentChain: try parentChain.indices.map { parentIndex in
+          ParentNamespaceBinding(
+            relativePath: try rawTarget(Array(ownerPath.prefix(parentIndex + 1))),
+            identity: policyIdentity(parentChain[parentIndex]),
+            seal: parentIndex == 0 ? candidateTargetSeal : topologyDescendantSeal())
+        })
+      return FileObjectNode(
         provenance: GraphObservationProvenance(globalFacts: facts),
         id: fileID,
-        observedOwners: [
-          FileOwnerLink(candidateID: "cache", path: try rawTarget(ownerPath))
+        observedOwners: [link],
+        ownerNamespaces: [
+          FileOwnerNamespaceExpectation(link: link, namespaceBinding: ownerNamespace)
         ],
         linkCount: .known(1))
     },
@@ -1948,6 +2217,7 @@ private func releasePlanFixture(
         provenance: GraphObservationProvenance(globalFacts: facts),
         id: "group",
         ownerFileObjectIDs: graphFileIDs,
+        cloneIdentity: cloneIdentity.map(Observation.known) ?? .absent,
         cloneRefCount: .known(cloneRefCount),
         sharedBytes: .known(100),
         snapshotBlocker: .known(false))
@@ -2003,9 +2273,26 @@ private func planBoundRuntimeFiles(
   rootIdentity: RuntimeReleaseFileObjectIdentity,
   candidateIdentity: RuntimeReleaseFileObjectIdentity,
   fileIdentities: [RuntimeReleaseFileObjectIdentity],
-  cloneIdentity: RuntimeReleaseCloneIdentity?
+  cloneIdentity: RuntimeReleaseCloneIdentity?,
+  ownerParentChains: [[RuntimeReleaseFileObjectIdentity]]? = nil,
+  ownerParentSeals: [[NamespaceSealEvidence]]? = nil,
+  inheritedProviderBoundaries: [[Bool]]? = nil
 ) throws -> [RuntimeReleaseExpectedFileObject] {
-  guard graphFileIDs.count == ownerPaths.count, ownerPaths.count == fileIdentities.count else {
+  let resolvedParentChains =
+    ownerParentChains
+    ?? Array(repeating: [candidateIdentity], count: ownerPaths.count)
+  let defaultParentSeal = try topologyCandidateSeal()
+  let resolvedParentSeals =
+    ownerParentSeals
+    ?? Array(repeating: [defaultParentSeal], count: ownerPaths.count)
+  let resolvedProviderBoundaries =
+    inheritedProviderBoundaries
+    ?? ownerPaths.map { Array(repeating: false, count: $0.count) }
+  guard graphFileIDs.count == ownerPaths.count, ownerPaths.count == fileIdentities.count,
+    resolvedParentChains.count == ownerPaths.count,
+    resolvedParentSeals.count == ownerPaths.count,
+    resolvedProviderBoundaries.count == ownerPaths.count
+  else {
     throw ReleaseTopologyTestError.identity
   }
   return try graphFileIDs.indices.map { index in
@@ -2015,9 +2302,11 @@ private func planBoundRuntimeFiles(
       actionID: actionID,
       rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
       rootIdentity: rootIdentity,
-      parentChain: [candidateIdentity],
+      rootSeal: try topologyRootSeal(),
+      parentChain: resolvedParentChains[index],
+      parentSeals: resolvedParentSeals[index],
       targetIdentity: fileIdentities[index],
-      inheritedProviderBoundaryByComponent: [false, false])
+      inheritedProviderBoundaryByComponent: resolvedProviderBoundaries[index])
     return RuntimeReleaseExpectedFileObject(
       graphFileObjectID: graphFileIDs[index],
       identity: fileIdentities[index],
@@ -2036,6 +2325,37 @@ private func policyIdentity(
     generation: identity.generation.map(Observation.known)
       ?? .unknown(.unavailableViaPublicAPI),
     type: identity.objectType == .directory ? .directory : .regularFile)
+}
+
+private func topologyRootSeal() throws -> NamespaceSealEvidence {
+  NamespaceSealEvidence(
+    trustedNamespace: .ownerPrivate,
+    accessPolicy: .known("owner-private"),
+    aclDigest: .known(try digest(91)),
+    providerBoundary: .known(.local),
+    mountIdentity: .known("fixture-volume"))
+}
+
+private func topologyCandidateSeal() throws -> NamespaceSealEvidence {
+  NamespaceSealEvidence(
+    trustedNamespace: .ownerPrivate,
+    accessPolicy: .known("owner-private"),
+    aclDigest: .known(try digest(93)),
+    providerBoundary: .known(.local),
+    mountIdentity: .known("fixture-volume"))
+}
+
+private func topologyDescendantSeal(
+  accessPolicy: Observation<String> = .known("owner-private"),
+  providerBoundary: Observation<ProviderState> = .known(.local),
+  mountIdentity: Observation<String> = .known("fixture-volume")
+) -> NamespaceSealEvidence {
+  NamespaceSealEvidence(
+    trustedNamespace: .ownerPrivate,
+    accessPolicy: accessPolicy,
+    aclDigest: .unknown(.unavailableViaPublicAPI),
+    providerBoundary: providerBoundary,
+    mountIdentity: mountIdentity)
 }
 
 private func digest(_ byte: UInt8) throws -> PolicyDigest {

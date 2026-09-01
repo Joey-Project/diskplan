@@ -2990,6 +2990,34 @@ private func controllerEmitsSealedExecutionFailureForEveryTailFailure(
   #expect(plan.releaseOwnerIndex.owners[0].candidateID == deepestItem.candidateID)
 }
 
+@Test func missingIntermediateOwnerAncestorCannotBeRelabeledAsACompleteChain() throws {
+  let accumulator = BoundedAuthorityEvidenceAccumulator()
+  let candidate = authorityNode(path: ["cache"], object: 30, type: .directory)
+  let deeperAncestor = authorityNode(
+    path: ["cache", "missing", "present"], object: 32, type: .directory)
+  accumulator.receive(.observed(candidate))
+  accumulator.receive(.observed(deeperAncestor))
+  accumulator.receive(
+    .observed(
+      authorityNode(
+        path: ["cache", "missing", "present", "clone"],
+        object: 33,
+        type: .regular,
+        topology: cloneTopologyFixture()
+      )
+    )
+  )
+  accumulator.receive(.directoryClosed(deeperAncestor))
+  accumulator.receive(.directoryClosed(candidate))
+
+  let plan = try RuntimePolicyAuthority().makePlan(
+    scanResult: authorityScanResult(), evidence: accumulator.snapshot())
+  let candidateID = try #require(plan.items.first?.candidateID)
+
+  #expect(plan.releaseOwnerIndex.owners.isEmpty)
+  #expect(plan.releaseOwnerIndex.dependencyCompleteByCandidate[candidateID] == false)
+}
+
 @Test func contradictoryCloneAndNonCloneHardlinkAliasesFailTheWholeObjectClosed() throws {
   let plan = try hardlinkAliasPlan(
     topologies: [

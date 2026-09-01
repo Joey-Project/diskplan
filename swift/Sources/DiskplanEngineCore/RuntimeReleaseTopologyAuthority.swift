@@ -159,6 +159,13 @@ private struct RuntimeReleaseNamespaceAliasKey: Equatable, Hashable, Sendable {
   let rawBasename: Data
 }
 
+private let runtimeFixtureNamespaceSeal = NamespaceSealEvidence(
+  trustedNamespace: .unverified,
+  accessPolicy: .unknown(.unavailableViaPublicAPI),
+  aclDigest: .unknown(.unavailableViaPublicAPI),
+  providerBoundary: .known(.local),
+  mountIdentity: .unknown(.unavailableViaPublicAPI))
+
 public struct RuntimeReleaseCandidateActionBinding: Equatable, Sendable {
   public let candidateID: String
   public let actionID: ActionID
@@ -211,7 +218,9 @@ public struct RuntimeReleaseOwnerNamespaceBinding: Equatable, Sendable {
   public let rawRoot: RawRootPath
   public let targetPath: RawTargetPath
   public let rootIdentity: RuntimeReleaseFileObjectIdentity
+  public let rootSeal: NamespaceSealEvidence
   public let parentChain: [RuntimeReleaseFileObjectIdentity]
+  public let parentSeals: [NamespaceSealEvidence]
   public let targetIdentity: RuntimeReleaseFileObjectIdentity
   public let inheritedProviderBoundaryByComponent: [Bool]
   fileprivate let resolvedSlot: RuntimeReleaseNamespaceSlotIdentity
@@ -221,11 +230,14 @@ public struct RuntimeReleaseOwnerNamespaceBinding: Equatable, Sendable {
     actionID: ActionID,
     rawRoot: RawRootPath,
     rootIdentity: RuntimeReleaseFileObjectIdentity,
+    rootSeal: NamespaceSealEvidence,
     parentChain: [RuntimeReleaseFileObjectIdentity],
+    parentSeals: [NamespaceSealEvidence],
     targetIdentity: RuntimeReleaseFileObjectIdentity,
     inheritedProviderBoundaryByComponent: [Bool]
   ) throws {
     guard parentChain.count == link.path.components.count - 1,
+      parentSeals.count == parentChain.count,
       inheritedProviderBoundaryByComponent.count == link.path.components.count,
       rootIdentity.objectType == .directory,
       parentChain.allSatisfy({ $0.objectType == .directory }),
@@ -241,7 +253,9 @@ public struct RuntimeReleaseOwnerNamespaceBinding: Equatable, Sendable {
     self.rawRoot = rawRoot
     targetPath = link.path
     self.rootIdentity = rootIdentity
+    self.rootSeal = rootSeal
     self.parentChain = parentChain
+    self.parentSeals = parentSeals
     self.targetIdentity = targetIdentity
     self.inheritedProviderBoundaryByComponent = inheritedProviderBoundaryByComponent
     resolvedSlot = slot
@@ -278,7 +292,9 @@ public struct RuntimeReleaseExpectedOwner: Equatable, Sendable {
       actionID: actionID,
       rawRoot: rawRoot,
       rootIdentity: slot.rootIdentity,
+      rootSeal: runtimeFixtureNamespaceSeal,
       parentChain: resolvedParents,
+      parentSeals: Array(repeating: runtimeFixtureNamespaceSeal, count: resolvedParents.count),
       targetIdentity: slot.objectIdentity,
       inheritedProviderBoundaryByComponent: inheritedProviderBoundaryByComponent
         ?? Array(repeating: false, count: link.path.components.count))
@@ -662,10 +678,21 @@ private func validateReleaseMembership(
       case .known(let expectedLinkCount) = expected.linkCount,
       expectedLinkCount == runtime.linkCount,
       Set(expected.owners) == Set(runtime.owners.map(\.link)),
+      expected.ownerNamespaces.count == expected.owners.count,
+      Set(expected.ownerNamespaces.map(\.link)) == Set(expected.owners),
       runtime.owners.allSatisfy({ owner in
         actionByCandidate[Data(owner.link.candidateID.utf8)] == owner.actionID
       })
     else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+    let runtimeOwnerByLink = Dictionary(
+      uniqueKeysWithValues: runtime.owners.map { ($0.link, $0) })
+    for expectedOwner in expected.ownerNamespaces {
+      guard let runtimeOwner = runtimeOwnerByLink[expectedOwner.link],
+        let actionID = actionByCandidate[Data(expectedOwner.link.candidateID.utf8)],
+        runtimeOwner.namespace
+          == (try? runtimeOwnerNamespace(expectedOwner, actionID: actionID))
+      else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+    }
   }
 
   let identityByFileID = Dictionary(
@@ -687,15 +714,39 @@ private func validateReleaseMembership(
       Int(expectedRefCount) == expectedFileIDs.count
     else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
     if expectedRefCount == 1 {
-      guard runtime.cloneIdentity == nil, runtime.cloneRefCount == nil else {
+      guard releaseSet.topologyExpectation.cloneIdentity == .absent,
+        runtime.cloneIdentity == nil, runtime.cloneRefCount == nil
+      else {
         throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch
       }
     } else {
-      guard runtime.cloneIdentity != nil, runtime.cloneRefCount == expectedRefCount else {
+      guard case .known(let expectedClone) = releaseSet.topologyExpectation.cloneIdentity,
+        runtime.cloneIdentity
+          == RuntimeReleaseCloneIdentity(
+            device: expectedClone.device, cloneID: expectedClone.cloneID),
+        runtime.cloneRefCount == expectedRefCount
+      else {
         throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch
       }
     }
   }
+}
+
+private func runtimeOwnerNamespace(
+  _ expected: FileOwnerNamespaceExpectation,
+  actionID: ActionID
+) throws -> RuntimeReleaseOwnerNamespaceBinding {
+  let namespace = expected.namespaceBinding
+  return try RuntimeReleaseOwnerNamespaceBinding(
+    link: expected.link,
+    actionID: actionID,
+    rawRoot: namespace.rawRoot,
+    rootIdentity: runtimeIdentity(namespace.rootIdentity),
+    rootSeal: namespace.rootSeal,
+    parentChain: namespace.parentChain.map { runtimeIdentity($0.identity) },
+    parentSeals: namespace.parentChain.map(\.seal),
+    targetIdentity: runtimeIdentity(namespace.targetIdentity),
+    inheritedProviderBoundaryByComponent: inheritedProviderBoundaries(namespace))
 }
 
 private struct RuntimeReleaseFreshCaptureBinding: Sendable {
@@ -770,6 +821,7 @@ public enum RuntimeReleaseTopologyAuthorityError: Error, Equatable {
   case descriptorIdentityUnreadable(RuntimeReleaseTopologyFailure)
   case descriptorIdentityProbeFailed(RuntimeReleaseTopologyFailure)
   case namespaceChainMismatch
+  case namespaceChainMissing
   case namespaceChainUnknown(RuntimeReleaseTopologyUnknownReason)
   case namespaceChainUnreadable(RuntimeReleaseTopologyFailure)
   case namespaceChainProbeFailed(RuntimeReleaseTopologyFailure)
@@ -1337,8 +1389,10 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       policy: policy)
     {
     case .known(true): return
-    case .known(false), .absent:
+    case .known(false):
       throw RuntimeReleaseTopologyAuthorityError.namespaceChainMismatch
+    case .absent:
+      throw RuntimeReleaseTopologyAuthorityError.namespaceChainMissing
     case .unknown(let reason):
       throw RuntimeReleaseTopologyAuthorityError.namespaceChainUnknown(reason)
     case .unreadable(let failure):
@@ -1810,6 +1864,7 @@ private func capabilityObservation<Value: Equatable & Sendable>(
   _ capability: Capability<Value>
 ) -> RuntimeReleaseTopologyObservation<Value> {
   if let value = capability.value { return .known(value) }
+  if capability.errorCode == ENOENT { return .absent }
   switch capability.status {
   case .unsupported: return .unknown(.unsupported)
   case .unavailable: return .unknown(.unavailableViaPublicAPI)
@@ -1892,7 +1947,7 @@ private func providerRejectionObservation(
   case .rawNameUnavailable:
     return .unknown(.providerBoundary)
   case .missing:
-    return .unknown(.incompleteCoverage)
+    return .absent
   case .unreadable(_, let errorCode):
     return .unreadable(
       RuntimeReleaseTopologyFailure(
@@ -1922,6 +1977,7 @@ private func posixObservation<Value: Equatable & Sendable>(
 ) -> RuntimeReleaseTopologyObservation<Value> {
   let failure = RuntimeReleaseTopologyFailure(
     kind: .probeFailed, collector: collector, errorCode: code)
+  if code == ENOENT { return .absent }
   return code == EACCES || code == EPERM ? .unreadable(failure) : .failed(failure)
 }
 
@@ -1944,14 +2000,24 @@ private func allTrue(
   if let failed = observations.first(where: { $0.isFailed }) { return failed }
   if let unreadable = observations.first(where: { $0.isUnreadable }) { return unreadable }
   if let unknown = observations.first(where: { $0.isUnknown }) { return unknown }
-  if observations.contains(.absent) { return .unknown(.notObserved) }
+  if observations.contains(.absent) { return .absent }
   return .known(true)
 }
 
 private func allEqual<Value: Equatable & Sendable>(
   _ observations: [RuntimeReleaseTopologyObservation<Value>]
 ) -> RuntimeReleaseTopologyObservation<Bool> {
-  consensus(observations, collector: "release-identity-consensus").map { _ in true }
+  if let failed = observations.first(where: { $0.isFailed }) {
+    return failed.erased()
+  }
+  if let unreadable = observations.first(where: { $0.isUnreadable }) {
+    return unreadable.erased()
+  }
+  if let unknown = observations.first(where: { $0.isUnknown }) {
+    return unknown.erased()
+  }
+  if observations.contains(.absent) { return .absent }
+  return consensus(observations, collector: "release-identity-consensus").map { _ in true }
     .asBooleanFailure()
 }
 
@@ -1994,7 +2060,7 @@ extension RuntimeReleaseTopologyObservation {
 
   fileprivate func asBooleanFailure() -> RuntimeReleaseTopologyObservation<Bool> {
     switch self {
-    case .absent: .unknown(.notObserved)
+    case .absent: .absent
     case .known: .known(true)
     case .unknown(let reason): .unknown(reason)
     case .unreadable(let failure): .unreadable(failure)
@@ -2090,8 +2156,11 @@ private func releaseTopologyBindingHash(
       encoder.uint64(UInt64(owner.link.path.components.count))
       for component in owner.link.path.components { encoder.bytes(component) }
       encoder.bytes(owner.namespace.rawRoot.absoluteBytes)
+      encoder.bytes(owner.namespace.rootSeal.bindingBytes)
       encoder.uint64(UInt64(owner.namespace.parentChain.count))
       for parent in owner.namespace.parentChain { encoder.identity(parent) }
+      encoder.uint64(UInt64(owner.namespace.parentSeals.count))
+      for seal in owner.namespace.parentSeals { encoder.bytes(seal.bindingBytes) }
       encoder.uint64(UInt64(owner.namespace.inheritedProviderBoundaryByComponent.count))
       for inherited in owner.namespace.inheritedProviderBoundaryByComponent {
         encoder.uint64(inherited ? 1 : 0)
