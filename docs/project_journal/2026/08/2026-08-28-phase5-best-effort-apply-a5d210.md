@@ -110,8 +110,8 @@ superseded_by:
   best-effort continuation, optional audit output, provider evidence, and APFS allocation-owner
   closure requirements.
 - [x] Complete static review follow-up implementation and documentation updates.
-- [ ] Run the focused/full Swift follow-up gates on India-mac-mini-m4-hoteng after the shared
-  dynamic-test slot is released.
+- [ ] Run the focused/full Swift follow-up gates on India-mac-mini-m4-hoteng for the corrected
+  successor to `69542257`.
 - [ ] Run release integration, journal validation, and formatting for the follow-up head.
 - [ ] Complete frozen-range review and the signed landing commit.
 
@@ -237,3 +237,14 @@ superseded_by:
   layers on top of that bound absence proof rather than bypassing it. Deterministic fixtures cover
   descendant restore drift in both windows, final parent-seal drift, replaced raw-root
   post-verification, and a recreated source slot accompanying an administrative residual.
+- Fresh single frozen review of signed head `69542257d27bc94af225f369a0669f285fd27daf`
+  returned no findings. India then compiled and ran 117 focused execution tests: 10 tests failed
+  with 11 issues after 15.459 seconds, the supervisor exited 1, and the process group was
+  quiescent. Eight failures were superseded assertions: production now consumes attempt-scoped
+  recovery rather than the legacy ActionID test store, full-token or namespace-seal checks report
+  earlier and more precise protected-property codes, and dirty Git has no legacy waiver
+  predicate. The remaining two Git index hook fixtures did not mutate anything because their
+  administrative fixture had no index file. The successor adds a captured index to that fixture,
+  checks that both race-hook writes succeed, keeps the commit-point checks unchanged, and updates
+  the affected tests to assert the exact attempt result and typed post-verification outcome. The
+  serial full gate was not started.

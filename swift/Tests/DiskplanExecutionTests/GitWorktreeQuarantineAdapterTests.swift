@@ -524,12 +524,12 @@ func gitWorktreeRestoreCollisionRetainsTypedRecoveryLocator() async throws {
       }
     ))
 
-  guard
-    case .failed(let failure) = await adapter.apply(
-      fixture.removeOperation,
-      context: gitTestContext()
-    )
-  else {
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
     Issue.record("restore collision must retain the verified quarantine")
     return
   }
@@ -538,8 +538,8 @@ func gitWorktreeRestoreCollisionRetainsTypedRecoveryLocator() async throws {
   #expect(
     FileManager.default.fileExists(atPath: fixture.worktree.appendingPathComponent("keep").path))
   guard
-    case .some(.quarantineRetained(let locator, let failureCode)) =
-      await adapter.disposition(for: fixture.action.id)
+    case .gitWorktree(.quarantineRetained(let locator, let failureCode))? =
+      result.mutationDisposition
   else {
     Issue.record("missing typed recovery locator")
     return
@@ -548,7 +548,7 @@ func gitWorktreeRestoreCollisionRetainsTypedRecoveryLocator() async throws {
     locator.quarantineDirectoryName == Data(fixture.quarantineDirectory.lastPathComponent.utf8))
   #expect(locator.quarantineLeafName == Data("payload".utf8))
   #expect(locator.identity == fixture.action.prototype.targetIdentity)
-  #expect(failureCode == "worktree-content-mismatch")
+  #expect(failureCode == "source-slot-not-empty-after-quarantine")
 }
 
 @Test
@@ -573,12 +573,12 @@ func gitWorktreeRestoreRejectsReplacedQuarantinePayloadWithoutPublishingLocator(
       }
     ))
 
-  guard
-    case .failed(let failure) = await adapter.apply(
-      fixture.removeOperation,
-      context: gitTestContext()
-    )
-  else {
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
     Issue.record("a replaced quarantine payload must not be restored")
     return
   }
@@ -587,15 +587,22 @@ func gitWorktreeRestoreRejectsReplacedQuarantinePayloadWithoutPublishingLocator(
   #expect(slotExists(quarantined))
   #expect(slotExists(displaced))
   #expect(
-    await adapter.disposition(for: fixture.action.id)
-      == .quarantineBindingUnverified(failureCode: "worktree-content-mismatch")
+    result.mutationDisposition
+      == .gitWorktree(
+        .quarantineBindingUnverified(failureCode: "destination-identity-mismatch")
+      )
   )
-  guard case .failed(let postFailure) = await adapter.postverify(fixture.removeOperation) else {
+  guard
+    case .failed(let postFailure) = await adapter.postverify(
+      fixture.removeOperation,
+      result: result
+    )
+  else {
     Issue.record("an unverified recovery binding must remain a typed post-verification failure")
     return
   }
   #expect(
-    postFailure.code == "quarantine-binding-unverified-worktree-content-mismatch"
+    postFailure.code == "quarantine-binding-unverified-destination-identity-mismatch"
   )
 }
 
@@ -621,12 +628,12 @@ func gitWorktreeRestoreRejectsMovedRawRootWithoutPublishingLocator() async throw
       }
     ))
 
-  guard
-    case .failed(let failure) = await adapter.apply(
-      fixture.removeOperation,
-      context: gitTestContext()
-    )
-  else {
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
     Issue.record("a moved raw root must not receive a restore or publish a stale locator")
     return
   }
@@ -634,8 +641,10 @@ func gitWorktreeRestoreRejectsMovedRawRootWithoutPublishingLocator() async throw
   #expect(!slotExists(fixture.worktree))
   #expect(slotExists(displacedQuarantine))
   #expect(
-    await adapter.disposition(for: fixture.action.id)
-      == .quarantineBindingUnverified(failureCode: "worktree-content-mismatch")
+    result.mutationDisposition
+      == .gitWorktree(
+        .quarantineBindingUnverified(failureCode: "destination-identity-mismatch")
+      )
   )
 }
 
@@ -1002,9 +1011,11 @@ func gitIndexDriftBeforeRenameRetainsTheSource() async throws {
   defer { fixture.cleanup() }
   var hooks = GitWorktreeQuarantineAdapter.Hooks()
   hooks.beforeQuarantine = {
-    overwriteExistingFile(
-      fixture.administrative.appendingPathComponent("index"),
-      with: Data("changed-index".utf8)
+    #expect(
+      overwriteExistingFile(
+        fixture.administrative.appendingPathComponent("index"),
+        with: Data("changed-index".utf8)
+      )
     )
   }
 
@@ -1051,9 +1062,11 @@ func gitIndexDriftAtDeleteCommitRetainsTheQuarantinedSource() async throws {
   defer { fixture.cleanup() }
   var hooks = GitWorktreeQuarantineAdapter.Hooks()
   hooks.beforeRecursiveDeleteCommit = {
-    overwriteExistingFile(
-      fixture.administrative.appendingPathComponent("index"),
-      with: Data("changed-index".utf8)
+    #expect(
+      overwriteExistingFile(
+        fixture.administrative.appendingPathComponent("index"),
+        with: Data("changed-index".utf8)
+      )
     )
   }
   let adapter = testAdapter(hooks: hooks)
@@ -1354,10 +1367,12 @@ func recursiveDeleteCommitRejectsSameInodeContentDrift() async throws {
   }
   let adapter = testAdapter(hooks: hooks)
 
-  guard
-    case .failed(let failure) = await adapter.apply(
-      fixture.removeOperation, context: gitTestContext())
-  else {
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
     Issue.record("same-inode content drift must stop recursive deletion")
     return
   }
@@ -1365,13 +1380,13 @@ func recursiveDeleteCommitRejectsSameInodeContentDrift() async throws {
   #expect(!slotExists(fixture.worktree))
   #expect(slotExists(fixture.quarantinedURL))
   guard
-    case .some(.quarantineRetained(_, let failureCode)) =
-      await adapter.disposition(for: fixture.action.id)
+    case .gitWorktree(.quarantineRetained(_, let failureCode))? =
+      result.mutationDisposition
   else {
     Issue.record("same-inode content drift must retain a typed recovery locator")
     return
   }
-  #expect(failureCode == "delete-commit-entry-content-mismatch")
+  #expect(failureCode == "verified-quarantine-changed-before-delete-content")
 }
 
 @Test
@@ -1385,10 +1400,12 @@ func recursiveDeleteCommitRejectsAccessPolicyDrift() async throws {
   }
   let adapter = testAdapter(hooks: hooks)
 
-  guard
-    case .failed(let failure) = await adapter.apply(
-      fixture.removeOperation, context: gitTestContext())
-  else {
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
     Issue.record("access-policy drift must stop recursive deletion")
     return
   }
@@ -1396,13 +1413,13 @@ func recursiveDeleteCommitRejectsAccessPolicyDrift() async throws {
   #expect(!slotExists(fixture.worktree))
   #expect(slotExists(fixture.quarantinedURL))
   guard
-    case .some(.quarantineRetained(_, let failureCode)) =
-      await adapter.disposition(for: fixture.action.id)
+    case .gitWorktree(.quarantineRetained(_, let failureCode))? =
+      result.mutationDisposition
   else {
     Issue.record("access-policy drift must retain a typed recovery locator")
     return
   }
-  #expect(failureCode == "delete-commit-entry-access-policy-mismatch")
+  #expect(failureCode == "verified-quarantine-changed-before-delete-access-policy")
 }
 
 @Test
@@ -1523,7 +1540,7 @@ func modeZeroPayloadStillPublishesADescriptorRelativeRecoveryLocator() async thr
     return
   }
   #expect(locator.identity == fixture.action.prototype.targetIdentity)
-  #expect(failureCode == "delete-commit-root-access-policy-mismatch")
+  #expect(failureCode == "source-seal-mismatch-at-delete-commit")
 }
 
 @Test
@@ -1541,10 +1558,12 @@ func recursiveDeleteFailureRevalidatesRecoveryBindingBeforePublishingLocator() a
   }
   let adapter = testAdapter(hooks: hooks)
 
-  guard
-    case .failed(let failure) = await adapter.apply(
-      fixture.removeOperation, context: gitTestContext())
-  else {
+  let result = await adapter.applyResult(
+    fixture.removeOperation,
+    context: gitTestContext()
+  )
+
+  guard case .failed(let failure) = result.outcome else {
     Issue.record("recursive deletion failure must remain typed")
     return
   }
@@ -1552,9 +1571,11 @@ func recursiveDeleteFailureRevalidatesRecoveryBindingBeforePublishingLocator() a
   #expect(slotExists(displacedPayload))
   #expect(slotExists(fixture.quarantineDirectory))
   #expect(
-    await adapter.disposition(for: fixture.action.id)
-      == .quarantineBindingUnverified(
-        failureCode: "delete-commit-root-access-policy-mismatch"
+    result.mutationDisposition
+      == .gitWorktree(
+        .quarantineBindingUnverified(
+          failureCode: "source-seal-mismatch-at-delete-commit"
+        )
       )
   )
 }
@@ -1664,6 +1685,8 @@ private struct GitQuarantineFixture: @unchecked Sendable {
       .write(to: heads.appendingPathComponent("main"))
     try Data("ref: refs/heads/main\n".utf8)
       .write(to: administrative.appendingPathComponent("HEAD"))
+    try Data("index-state".utf8)
+      .write(to: administrative.appendingPathComponent("index"))
     try Data("[core]\n\tbare = false\n".utf8)
       .write(to: common.appendingPathComponent("config"))
     try Data("gitdir: \(administrative.path)\n".utf8)
@@ -1968,15 +1991,27 @@ private func addEveryoneWriteACL(toSymbolicLink url: URL) throws {
   }
 }
 
-private func overwriteExistingFile(_ url: URL, with data: Data) {
+@discardableResult
+private func overwriteExistingFile(_ url: URL, with data: Data) -> Bool {
   let descriptor = url.path.withCString {
     Darwin.open($0, O_WRONLY | O_TRUNC | O_CLOEXEC)
   }
-  guard descriptor >= 0 else { return }
+  guard descriptor >= 0 else { return false }
   defer { _ = Darwin.close(descriptor) }
-  data.withUnsafeBytes { bytes in
-    guard let baseAddress = bytes.baseAddress else { return }
-    _ = Darwin.write(descriptor, baseAddress, bytes.count)
+  return data.withUnsafeBytes { bytes in
+    guard let baseAddress = bytes.baseAddress else { return data.isEmpty }
+    var offset = 0
+    while offset < bytes.count {
+      let written = Darwin.write(
+        descriptor,
+        baseAddress.advanced(by: offset),
+        bytes.count - offset
+      )
+      if written < 0, errno == EINTR { continue }
+      guard written > 0 else { return false }
+      offset += written
+    }
+    return true
   }
 }
 

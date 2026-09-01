@@ -734,23 +734,6 @@ func dirtyDiscardRemovePreparationRemainsReportOnly() async throws {
   )
   #expect(discard.evaluation.stageability == .blocked)
   #expect(remove.evaluation.stageability == .blocked)
-  let recoverabilityVote = try #require(
-    discard.evaluation.votes.first { $0.dimension == .recoverability }
-  )
-  guard case .requiresWaiver(let legacyPredicates, _) = recoverabilityVote.result,
-    let legacyPredicate = legacyPredicates.first(where: {
-      $0.kind == .fullyObservedLocalGitWorkDiscard
-    })
-  else {
-    Issue.record("dirty Git evidence must retain the legacy explanatory predicate")
-    return
-  }
-  let legacyConsent = WaiverConsentCore.create(
-    action: discard,
-    predicate: legacyPredicate,
-    reason: "legacy exact dirty Git consent must remain non-executable",
-    consentEventID: "legacy-dirty-git-consent"
-  )
   let plan = try ImmutablePlan(
     policyVersion: "policy-1",
     schemaVersion: "schema-1",
@@ -762,7 +745,7 @@ func dirtyDiscardRemovePreparationRemainsReportOnly() async throws {
   let overlay = DecisionOverlay.create(
     plan: plan,
     selectedActionIDs: [discard.id, remove.id],
-    waiverConsents: [legacyConsent],
+    waiverConsents: [],
     userNotes: []
   )
   #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
