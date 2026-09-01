@@ -20,12 +20,14 @@ private struct RuntimeFixtureCase: Decodable {
   let includeAction: Bool
   let requiresForce: Bool
   let actionKind: String?
+  let executionFailureKind: String?
 
   enum CodingKeys: String, CodingKey {
     case name
     case includeAction = "include_action"
     case requiresForce = "requires_force"
     case actionKind = "action_kind"
+    case executionFailureKind = "execution_failure_kind"
   }
 }
 
@@ -80,10 +82,14 @@ private enum DiskplanProtocolFixtureGenerator {
     case "scan-stream-v1.3":
       let spec = try JSONDecoder().decode(FixtureSpec.self, from: source)
       generated = try spec.cases.map { ($0.name, try frames(for: $0)) }
-    case "runtime-v1.4", "runtime-v1.5":
+    case "runtime-v1.4", "runtime-v1.5", "runtime-v1.6":
       let spec = try JSONDecoder().decode(RuntimeFixtureSpec.self, from: source)
-      let negotiatedProtocolMinor =
-        header.schema == "runtime-v1.4" ? protocol14Minor : protocol15Minor
+      let negotiatedProtocolMinor: UInt32 =
+        switch header.schema {
+        case "runtime-v1.4": protocol14Minor
+        case "runtime-v1.5": protocol15Minor
+        default: protocol16Minor
+        }
       generated = try spec.cases.map {
         (
           $0.name,
@@ -256,6 +262,7 @@ private enum DiskplanProtocolFixtureGenerator {
       includeAction: fixture.includeAction,
       requiresForce: fixture.requiresForce,
       adapter: actionKind,
+      executionFailureKind: fixture.executionFailureKind,
       negotiatedProtocolMinor: negotiatedProtocolMinor
     )
     bodies.append(
@@ -573,6 +580,7 @@ private enum DiskplanProtocolFixtureGenerator {
     includeAction: Bool,
     requiresForce: Bool,
     adapter: Diskplan_V1_PlanActionKind,
+    executionFailureKind: String?,
     negotiatedProtocolMinor: UInt32
   ) throws -> [Diskplan_V1_ExecutionStreamEvent] {
     let executionID = opaque(Data("fixture-execution".utf8))
@@ -595,6 +603,23 @@ private enum DiskplanProtocolFixtureGenerator {
     started.scanCheckpointID = review.scanCheckpointID
     started.scanCheckpointEvidenceSha256 = review.scanCheckpointEvidenceSha256
     var events = [executionEvent(id: executionID, body: .applyStarted(started))]
+    if let executionFailureKind {
+      guard negotiatedProtocolMinor == protocol16Minor else {
+        throw GeneratorError.invalidSchema("execution failure requires runtime-v1.6")
+      }
+      var failure = Diskplan_V1_ExecutionStreamFailureProjection()
+      failure.kind = try runtimeExecutionFailureKind(executionFailureKind)
+      failure.executionID = executionID
+      failure.applyReviewID = review.applyReviewID
+      failure.reviewBindingSha256 = review.reviewBindingSha256
+      failure.mutationMayHaveOccurred = true
+      events.append(executionEvent(id: executionID, body: .executionStreamFailure(failure)))
+      return try SealedRuntimeWire.sealExecutionStream(
+        events,
+        requiredForceWarningActionIDs: review.forceWarningActionIds,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+    }
     if includeAction {
       if requiresForce {
         var warning = Diskplan_V1_ForceRequiredWarningProjection()
@@ -672,6 +697,17 @@ private enum DiskplanProtocolFixtureGenerator {
     case "codex_clean_temporary": .codexCleanTemporary
     case "versioned_artifact_remove": .versionedArtifactRemove
     case let value: throw GeneratorError.invalidRuntimeActionKind(value)
+    }
+  }
+
+  private static func runtimeExecutionFailureKind(
+    _ raw: String
+  ) throws -> Diskplan_V1_ExecutionStreamFailureKind {
+    switch raw {
+    case "projection_limit_exceeded": .projectionLimitExceeded
+    case "validation_failed": .validationFailed
+    case "backend_contract_violation": .backendContractViolation
+    default: throw GeneratorError.invalidSchema("unsupported execution failure kind: \(raw)")
     }
   }
 

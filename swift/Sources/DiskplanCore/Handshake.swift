@@ -3,7 +3,8 @@ import DiskplanProto
 public let protocolMajor: UInt32 = 1
 public let protocol14Minor: UInt32 = 4
 public let protocol15Minor: UInt32 = 5
-public let protocolMinor: UInt32 = protocol15Minor
+public let protocol16Minor: UInt32 = 6
+public let protocolMinor: UInt32 = protocol16Minor
 public let productVersion = "0.1.0"
 public let protocol14RuntimeCapabilities: Set<String> = [
   "decision-overlay-v1",

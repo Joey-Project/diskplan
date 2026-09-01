@@ -204,6 +204,7 @@ class CiScriptTests(unittest.TestCase):
             "scripts/protocol13-fixtures.sh": 1,
             "scripts/protocol14-fixtures.sh": 1,
             "scripts/protocol15-fixtures.sh": 1,
+            "scripts/protocol16-fixtures.sh": 1,
             "scripts/test-cross-language.sh": 2,
         }
         pattern = re.compile(r"\bswift\s+(?:build|run)\b")
@@ -255,7 +256,7 @@ class CiScriptTests(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             invocations = log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(6, len(invocations), invocations)
+            self.assertEqual(7, len(invocations), invocations)
             for invocation in invocations:
                 self.assertIn("--disable-automatic-resolution", invocation)
 
@@ -264,6 +265,7 @@ class CiScriptTests(unittest.TestCase):
         self.assertEqual(1, source.count("scripts/protocol13-fixtures.sh check"))
         self.assertEqual(1, source.count("scripts/protocol14-fixtures.sh check"))
         self.assertEqual(1, source.count("scripts/protocol15-fixtures.sh check"))
+        self.assertEqual(1, source.count("scripts/protocol16-fixtures.sh check"))
 
 
 if __name__ == "__main__":

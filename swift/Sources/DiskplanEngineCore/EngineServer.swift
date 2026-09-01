@@ -327,6 +327,19 @@ public enum EngineServer {
       )
       return
     }
+    guard
+      !request.requiresProtocol16MutationTransport
+        || negotiatedProtocolMinor >= protocol16Minor
+    else {
+      try rejectRuntime(
+        requestID: request.requestID,
+        runtimeSessionID: runtimeSessionID,
+        code: .capabilityNotNegotiated,
+        summary: "protocol 1.6 is required for mutation review and apply",
+        broker: broker
+      )
+      return
+    }
     guard let handler else {
       try rejectRuntime(
         requestID: request.requestID,

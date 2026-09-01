@@ -2424,6 +2424,52 @@ public nonisolated enum Diskplan_V1_ApplyStartFailureKind: SwiftProtobuf.Enum, S
 
 }
 
+/// Protocol 1.6: a fail-closed terminal emitted when the engine can no longer
+/// produce a trustworthy positive ApplyFinishedProjection after mutation may
+/// have begun. These reasons classify only the projection boundary; they do not
+/// reinterpret backend or policy outcomes.
+public nonisolated enum Diskplan_V1_ExecutionStreamFailureKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case projectionLimitExceeded // = 1
+  case validationFailed // = 2
+  case backendContractViolation // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .projectionLimitExceeded
+    case 2: self = .validationFailed
+    case 3: self = .backendContractViolation
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .projectionLimitExceeded: return 1
+    case .validationFailed: return 2
+    case .backendContractViolation: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ExecutionStreamFailureKind] = [
+    .unspecified,
+    .projectionLimitExceeded,
+    .validationFailed,
+    .backendContractViolation,
+  ]
+
+}
+
 public nonisolated enum Diskplan_V1_RuntimeRejectCode: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -7776,6 +7822,69 @@ public nonisolated struct Diskplan_V1_ApplyFinishedProjection: @unchecked Sendab
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
+public nonisolated struct Diskplan_V1_ExecutionStreamFailureProjection: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var kind: Diskplan_V1_ExecutionStreamFailureKind = .unspecified
+
+  public var executionID: Diskplan_V1_OpaqueIdentifier {
+    get {_executionID ?? Diskplan_V1_OpaqueIdentifier()}
+    set {_executionID = newValue}
+  }
+  /// Returns true if `executionID` has been explicitly set.
+  public var hasExecutionID: Bool {self._executionID != nil}
+  /// Clears the value of `executionID`. Subsequent reads from it will return its default value.
+  public mutating func clearExecutionID() {self._executionID = nil}
+
+  public var applyReviewID: Diskplan_V1_OpaqueIdentifier {
+    get {_applyReviewID ?? Diskplan_V1_OpaqueIdentifier()}
+    set {_applyReviewID = newValue}
+  }
+  /// Returns true if `applyReviewID` has been explicitly set.
+  public var hasApplyReviewID: Bool {self._applyReviewID != nil}
+  /// Clears the value of `applyReviewID`. Subsequent reads from it will return its default value.
+  public mutating func clearApplyReviewID() {self._applyReviewID = nil}
+
+  public var reviewBindingSha256: Diskplan_V1_Digest256 {
+    get {_reviewBindingSha256 ?? Diskplan_V1_Digest256()}
+    set {_reviewBindingSha256 = newValue}
+  }
+  /// Returns true if `reviewBindingSha256` has been explicitly set.
+  public var hasReviewBindingSha256: Bool {self._reviewBindingSha256 != nil}
+  /// Clears the value of `reviewBindingSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearReviewBindingSha256() {self._reviewBindingSha256 = nil}
+
+  public var mutationMayHaveOccurred: Bool = false
+
+  public var executionRecordSha256: Diskplan_V1_Digest256 {
+    get {_executionRecordSha256 ?? Diskplan_V1_Digest256()}
+    set {_executionRecordSha256 = newValue}
+  }
+  /// Returns true if `executionRecordSha256` has been explicitly set.
+  public var hasExecutionRecordSha256: Bool {self._executionRecordSha256 != nil}
+  /// Clears the value of `executionRecordSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearExecutionRecordSha256() {self._executionRecordSha256 = nil}
+
+  public var eventCount: UInt64 = 0
+
+  public var encodedEventBytes: UInt64 = 0
+
+  public var maximumEventCount: UInt64 = 0
+
+  public var maximumEncodedEventBytes: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _executionID: Diskplan_V1_OpaqueIdentifier? = nil
+  fileprivate var _applyReviewID: Diskplan_V1_OpaqueIdentifier? = nil
+  fileprivate var _reviewBindingSha256: Diskplan_V1_Digest256? = nil
+  fileprivate var _executionRecordSha256: Diskplan_V1_Digest256? = nil
+}
+
 public nonisolated struct Diskplan_V1_ExecutionStreamEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -7882,6 +7991,14 @@ public nonisolated struct Diskplan_V1_ExecutionStreamEvent: Sendable {
     set {body = .cancellationAcknowledged(newValue)}
   }
 
+  public var executionStreamFailure: Diskplan_V1_ExecutionStreamFailureProjection {
+    get {
+      if case .executionStreamFailure(let v)? = body {return v}
+      return Diskplan_V1_ExecutionStreamFailureProjection()
+    }
+    set {body = .executionStreamFailure(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
@@ -7896,6 +8013,7 @@ public nonisolated struct Diskplan_V1_ExecutionStreamEvent: Sendable {
     case unitJitRejected(Diskplan_V1_UnitJITRejectedProjection)
     case unitSkippedPrerequisite(Diskplan_V1_UnitSkippedPrerequisiteProjection)
     case cancellationAcknowledged(Diskplan_V1_ExecutionCancellationAcknowledgedProjection)
+    case executionStreamFailure(Diskplan_V1_ExecutionStreamFailureProjection)
 
   }
 
@@ -8542,6 +8660,10 @@ nonisolated extension Diskplan_V1_PostVerificationKind: SwiftProtobuf._ProtoName
 
 nonisolated extension Diskplan_V1_ApplyStartFailureKind: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0APPLY_START_FAILURE_KIND_UNSPECIFIED\0\u{1}APPLY_START_FAILURE_KIND_AUTHORIZATION_ALREADY_CLAIMED\0\u{1}APPLY_START_FAILURE_KIND_INVALID_OVERLAY\0\u{1}APPLY_START_FAILURE_KIND_MANIFEST_BINDING_MISMATCH\0\u{1}APPLY_START_FAILURE_KIND_EXPIRED\0\u{1}APPLY_START_FAILURE_KIND_INVALID_EXECUTION_GRAPH\0\u{1}APPLY_START_FAILURE_KIND_PREPARATION_SUPERSEDED\0\u{1}APPLY_START_FAILURE_KIND_FORCE_CONFIRMATION_BINDING_MISMATCH\0")
+}
+
+nonisolated extension Diskplan_V1_ExecutionStreamFailureKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0EXECUTION_STREAM_FAILURE_KIND_UNSPECIFIED\0\u{1}EXECUTION_STREAM_FAILURE_KIND_PROJECTION_LIMIT_EXCEEDED\0\u{1}EXECUTION_STREAM_FAILURE_KIND_VALIDATION_FAILED\0\u{1}EXECUTION_STREAM_FAILURE_KIND_BACKEND_CONTRACT_VIOLATION\0")
 }
 
 nonisolated extension Diskplan_V1_RuntimeRejectCode: SwiftProtobuf._ProtoNameProviding {
@@ -16855,9 +16977,88 @@ nonisolated extension Diskplan_V1_ApplyFinishedProjection: SwiftProtobuf.Message
   }
 }
 
+nonisolated extension Diskplan_V1_ExecutionStreamFailureProjection: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ExecutionStreamFailureProjection"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{3}execution_id\0\u{3}apply_review_id\0\u{3}review_binding_sha256\0\u{3}mutation_may_have_occurred\0\u{3}execution_record_sha256\0\u{3}event_count\0\u{3}encoded_event_bytes\0\u{3}maximum_event_count\0\u{3}maximum_encoded_event_bytes\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._executionID) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._applyReviewID) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._reviewBindingSha256) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.mutationMayHaveOccurred) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._executionRecordSha256) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.eventCount) }()
+      case 8: try { try decoder.decodeSingularUInt64Field(value: &self.encodedEventBytes) }()
+      case 9: try { try decoder.decodeSingularUInt64Field(value: &self.maximumEventCount) }()
+      case 10: try { try decoder.decodeSingularUInt64Field(value: &self.maximumEncodedEventBytes) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 1)
+    }
+    try { if let v = self._executionID {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try { if let v = self._applyReviewID {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._reviewBindingSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    if self.mutationMayHaveOccurred != false {
+      try visitor.visitSingularBoolField(value: self.mutationMayHaveOccurred, fieldNumber: 5)
+    }
+    try { if let v = self._executionRecordSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
+    if self.eventCount != 0 {
+      try visitor.visitSingularUInt64Field(value: self.eventCount, fieldNumber: 7)
+    }
+    if self.encodedEventBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.encodedEventBytes, fieldNumber: 8)
+    }
+    if self.maximumEventCount != 0 {
+      try visitor.visitSingularUInt64Field(value: self.maximumEventCount, fieldNumber: 9)
+    }
+    if self.maximumEncodedEventBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.maximumEncodedEventBytes, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ExecutionStreamFailureProjection, rhs: Diskplan_V1_ExecutionStreamFailureProjection) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs._executionID != rhs._executionID {return false}
+    if lhs._applyReviewID != rhs._applyReviewID {return false}
+    if lhs._reviewBindingSha256 != rhs._reviewBindingSha256 {return false}
+    if lhs.mutationMayHaveOccurred != rhs.mutationMayHaveOccurred {return false}
+    if lhs._executionRecordSha256 != rhs._executionRecordSha256 {return false}
+    if lhs.eventCount != rhs.eventCount {return false}
+    if lhs.encodedEventBytes != rhs.encodedEventBytes {return false}
+    if lhs.maximumEventCount != rhs.maximumEventCount {return false}
+    if lhs.maximumEncodedEventBytes != rhs.maximumEncodedEventBytes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Diskplan_V1_ExecutionStreamEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecutionStreamEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}execution_event_index\0\u{3}execution_id\0\u{4}\u{8}apply_started\0\u{3}unit_started\0\u{3}force_required_warning\0\u{3}step_finished\0\u{3}release_post_verification_finished\0\u{3}unit_finished\0\u{3}audit_write_failed\0\u{3}apply_finished\0\u{3}unit_jit_rejected\0\u{3}unit_skipped_prerequisite\0\u{3}cancellation_acknowledged\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}execution_event_index\0\u{3}execution_id\0\u{4}\u{8}apply_started\0\u{3}unit_started\0\u{3}force_required_warning\0\u{3}step_finished\0\u{3}release_post_verification_finished\0\u{3}unit_finished\0\u{3}audit_write_failed\0\u{3}apply_finished\0\u{3}unit_jit_rejected\0\u{3}unit_skipped_prerequisite\0\u{3}cancellation_acknowledged\0\u{3}execution_stream_failure\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -17010,6 +17211,19 @@ nonisolated extension Diskplan_V1_ExecutionStreamEvent: SwiftProtobuf.Message, S
           self.body = .cancellationAcknowledged(v)
         }
       }()
+      case 21: try {
+        var v: Diskplan_V1_ExecutionStreamFailureProjection?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .executionStreamFailure(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .executionStreamFailure(v)
+        }
+      }()
       default: break
       }
     }
@@ -17070,6 +17284,10 @@ nonisolated extension Diskplan_V1_ExecutionStreamEvent: SwiftProtobuf.Message, S
     case .cancellationAcknowledged?: try {
       guard case .cancellationAcknowledged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
+    }()
+    case .executionStreamFailure?: try {
+      guard case .executionStreamFailure(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
     }()
     case nil: break
     }

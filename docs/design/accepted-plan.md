@@ -260,6 +260,17 @@ diskplan-engine (Swift)
 
 Swift 使用 SwiftProtobuf，Rust 首版使用 `prost`。`.proto` 是权威 schema；生成代码和 cross-language golden frames 必须一起验证。
 
+Apply requires a negotiated Protocol 1.6 session. A successful execution stream
+still terminates with `apply_finished`. When mutation may already have started but
+the engine cannot safely construct that positive terminal, Protocol 1.6 instead
+emits exactly one `execution_stream_failure` terminal after a valid
+`apply_started`. The failure terminal is bound to the same execution ID, apply
+review ID, and review-binding digest, and its record digest and limits cover the
+actual emitted prefix plus the failure terminal. It reports only a closed
+projection-boundary failure kind and does not claim complete force-warning
+coverage or a successful unit summary. Older protocol minors reject this terminal
+and cannot enter apply.
+
 落盘 artifacts 仍使用可审计 JSON，不用 Protobuf 取代：
 
 - `evidence.json`
