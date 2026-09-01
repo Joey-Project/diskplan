@@ -2243,12 +2243,18 @@ private func consensus<Value: Equatable & Sendable>(
   _ observations: [RuntimeReleaseTopologyObservation<Value>],
   collector: String
 ) -> RuntimeReleaseTopologyObservation<Value> {
-  guard let first = observations.first else { return .unknown(.notObserved) }
-  guard observations.dropFirst().allSatisfy({ $0 == first }) else {
+  if let failed = observations.first(where: { $0.isFailed }) { return failed }
+  if let unreadable = observations.first(where: { $0.isUnreadable }) { return unreadable }
+  if let unknown = observations.first(where: { $0.isUnknown }) { return unknown }
+  if observations.contains(.absent) { return .absent }
+
+  let knownValues = observations.compactMap(\.knownValue)
+  guard let first = knownValues.first else { return .unknown(.notObserved) }
+  guard knownValues.dropFirst().allSatisfy({ $0 == first }) else {
     return .failed(
       RuntimeReleaseTopologyFailure(kind: .inconsistentEvidence, collector: collector))
   }
-  return first
+  return .known(first)
 }
 
 private func allTrue(

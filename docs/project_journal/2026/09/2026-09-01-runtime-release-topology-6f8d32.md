@@ -59,9 +59,14 @@ superseded_by:
   no-materialization checks, and brackets both identities. Descriptor provider drift now stops
   before the next child lookup; root drift performs no child access, while intermediate drift can
   resolve that intermediate but cannot touch its child.
+- The canonical filesystem root is handled as an exact descriptor-only namespace invariant. Its
+  held identity and live no-materialization policy are bracketed before reporting local-provider
+  state; no basename is fabricated and no path-based File Provider identity request is issued.
 - Topology aggregation preserves typed failed, unreadable, unknown, and missing observations ahead
-  of a known mismatch. Identity and access-policy mismatches are also retained as explicit issues,
-  so a concurrent replacement cannot hide a simultaneous collector or accessibility outcome.
+  of a known mismatch, including consensus across multiple owners. Only conflicting known values
+  become inconsistent evidence. Identity and access-policy mismatches are also retained as
+  explicit issues, so a concurrent replacement cannot hide a simultaneous collector or
+  accessibility outcome.
 
 ## Task List
 
@@ -89,6 +94,10 @@ superseded_by:
   stopping before child access on a same-inode provider transition.
 - [x] Preserve typed missing, unreadable, and failed evidence when it co-occurs with an explicit
   identity or access-policy mismatch at file, group, and report levels.
+- [x] Handle canonical `/` as descriptor-bound local-provider state without requiring a basename
+  or invoking the File Provider identity API.
+- [x] Preserve failed, unreadable, unknown, and absent owner observations before classifying
+  conflicting known consensus values as inconsistent evidence.
 - [x] Run targeted build, tests, and stress validation on the macOS 26 Apple Silicon release host.
 
 ## Evidence
@@ -155,3 +164,8 @@ superseded_by:
   Every command ran under the bounded process-group supervisor, which verified the target group
   and reported a quiescent successful exit. The merge did not change topology production source,
   so the earlier topology stress evidence remained applicable and was not rerun.
+- On `India-mac-mini-m4-hoteng`, the two canonical-root descriptor-provider regressions and the
+  typed consensus regression passed (three tests total) under the bounded process-group
+  supervisor in 24.244 seconds. The supervisor verified the process group, reported a quiescent
+  exit, and retained output SHA-256
+  `12946d8776327125b37d4a522152d6c11852216d1de5ec7427c7d6497b9ea71c`.

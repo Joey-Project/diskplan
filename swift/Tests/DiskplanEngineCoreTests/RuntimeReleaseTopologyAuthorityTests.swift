@@ -619,6 +619,64 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   }
 }
 
+@Test func consensusPreservesTypedEvidenceBeforeKnownValueConflicts() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let setup = try hardlinkSetup(fixture: fixture)
+  let unreadable = RuntimeReleaseTopologyFailure(
+    kind: .probeFailed, collector: "link-count-unreadable", errorCode: EACCES)
+  let failed = RuntimeReleaseTopologyFailure(
+    kind: .probeFailed, collector: "link-count-failed", errorCode: EIO)
+  let inconsistent = RuntimeReleaseTopologyFailure(
+    kind: .inconsistentEvidence, collector: "release-link-count")
+  let cases:
+    [(
+      RuntimeReleaseTopologyObservation<UInt32>,
+      RuntimeReleaseTopologyObservation<UInt32>
+    )] = [
+      (.absent, .absent),
+      (.unknown(.unsupported), .unknown(.unsupported)),
+      (.unreadable(unreadable), .unreadable(unreadable)),
+      (.failed(failed), .failed(failed)),
+      (.known(3), .failed(inconsistent)),
+    ]
+
+  for (secondObservation, expected) in cases {
+    let base = nonCloneKernel(snapshot: .known(false))
+    let kernel = RuntimeReleaseTopologyKernel(
+      descriptorIdentity: base.descriptorIdentity,
+      item: { parent, name, policy, inheritedProviderBoundary in
+        let item = base.item(parent, name, policy, inheritedProviderBoundary)
+        return RuntimeReleaseKernelItem(
+          identity: item.identity,
+          linkCount:
+            name == Data("first".utf8) ? .known(1) : secondObservation,
+          mayShareBlocks: item.mayShareBlocks,
+          sharesAllBlocks: item.sharesAllBlocks,
+          cloneID: item.cloneID,
+          cloneRefCount: item.cloneRefCount,
+          providerLocal: item.providerLocal)
+      },
+      snapshotBlocker: base.snapshotBlocker)
+    let authority = testAuthority(kernel: kernel)
+    let lease = try authority.bind(
+      plan: setup.plan,
+      executionEpochNonce: UUID(),
+      validForNanoseconds: 100,
+      policy: policy,
+      owners: setup.descriptors,
+      volumes: [
+        BoundRuntimeReleaseVolumeDescriptor(
+          expectedDevice: fixture.rootIdentity.device,
+          rootFileDescriptor: fixture.rootDescriptor)
+      ])
+
+    let report = try authority.collect(lease)
+
+    #expect(report.seal.fileObjects[0].linkCount == expected)
+  }
+}
+
 @Test func bindPreservesTypedDescriptorAccessPolicyFailures() throws {
   let policy = try materializationPolicy()
   let fixture = try RealReleaseTopologyFixture(policy: policy)

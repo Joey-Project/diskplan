@@ -891,6 +891,47 @@ public struct DescriptorFileProviderBoundaryProbe: Sendable {
     }
     let pathLength = rawPath.firstIndex(of: 0) ?? rawPath.count
     let path = rawPath.withUnsafeBytes { Data($0.prefix(pathLength)) }
+
+    if path == Data([UInt8(ascii: "/")]) {
+      let rootPostflightPolicy = policy.revalidateLive()
+      guard rootPostflightPolicy.value != nil else {
+        return .rejected(
+          .policyUnavailable(
+            status: rootPostflightPolicy.status,
+            detail: rootPostflightPolicy.detail,
+            errorCode: rootPostflightPolicy.errorCode))
+      }
+      let afterCapability = FileDescriptorIdentityProbe().probe(
+        fileDescriptor: fileDescriptor, policy: policy)
+      guard let after = afterCapability.value else {
+        return .rejected(
+          boundaryProbe.rejection(for: afterCapability, stage: .heldParentPostflight))
+      }
+      guard after == before else {
+        return .rejected(
+          .identityMismatch(stage: .heldParentPostflight, expected: before, observed: after))
+      }
+
+      // The canonical filesystem root has no parent slot and cannot itself be a File Provider
+      // item. Bind that namespace invariant to the held root descriptor instead of fabricating a
+      // basename or invoking a path-based File Provider API.
+      return .evidence(
+        FileProviderEvidence(
+          identity: .unavailable("canonical filesystem root is not a File Provider item"),
+          identityDisposition: .identifierAbsent,
+          providerCapabilities: .unavailable(
+            "canonical filesystem root has no File Provider domain"),
+          promisedMetadata: .unavailable(
+            "canonical filesystem root has no File Provider item metadata"),
+          traversal: .doNotDescendUnverifiedProviderOwnership,
+          handling: .reportOnly,
+          hiddenBackingBytes: .unavailable("unavailable via public API"),
+          controlledNonMaterializationAcceptance: .unavailable(
+            "canonical filesystem root requires no File Provider materialization probe")
+        )
+      )
+    }
+
     guard path.first == UInt8(ascii: "/"), path.count > 1,
       let separator = path.lastIndex(of: UInt8(ascii: "/")),
       separator < path.index(before: path.endIndex)
