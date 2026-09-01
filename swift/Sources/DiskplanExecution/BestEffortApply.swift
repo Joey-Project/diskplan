@@ -1,6 +1,10 @@
 import DiskplanPolicy
 import Foundation
 
+private enum ReleasePostverificationRuntimeError: Error {
+  case topologyCollectorUnavailable
+}
+
 public actor BestEffortApplyCoordinator {
   private struct AuditFailureAccumulator {
     let epochID: String
@@ -28,6 +32,10 @@ public actor BestEffortApplyCoordinator {
   private let auditSink: (any ExecutionAuditSink)?
   private let clock: @Sendable () -> Int64
   private let nonceGenerator: @Sendable () -> Data
+  private let releasePostverificationCore: DescriptorBoundReleasePostverificationCore
+  #if DEBUG
+    private let testingLegacyReleasePostverification: Bool
+  #endif
 
   @_spi(DiskplanEngine)
   public init(
@@ -38,6 +46,10 @@ public actor BestEffortApplyCoordinator {
     self.adapter = adapter
     self.eventSink = eventSink
     self.auditSink = auditSink
+    self.releasePostverificationCore = Self.failClosedReleasePostverificationCore()
+    #if DEBUG
+      self.testingLegacyReleasePostverification = false
+    #endif
     self.clock = { Int64(Date().timeIntervalSince1970.rounded(.down)) }
     self.nonceGenerator = {
       var generator = SystemRandomNumberGenerator()
@@ -49,6 +61,7 @@ public actor BestEffortApplyCoordinator {
     adapter: any ExecutionMutationAdapter,
     eventSink: any ExecutionEventSink,
     auditSink: (any ExecutionAuditSink)?,
+    releasePostverificationCore: DescriptorBoundReleasePostverificationCore? = nil,
     clock: @escaping @Sendable () -> Int64,
     nonceGenerator: @escaping @Sendable () -> Data = {
       var generator = SystemRandomNumberGenerator()
@@ -58,9 +71,41 @@ public actor BestEffortApplyCoordinator {
     self.adapter = adapter
     self.eventSink = eventSink
     self.auditSink = auditSink
+    self.releasePostverificationCore =
+      releasePostverificationCore ?? Self.failClosedReleasePostverificationCore()
+    #if DEBUG
+      self.testingLegacyReleasePostverification = false
+    #endif
     self.clock = clock
     self.nonceGenerator = nonceGenerator
   }
+
+  #if DEBUG
+    init(
+      adapter: any ExecutionMutationAdapter,
+      eventSink: any ExecutionEventSink,
+      auditSink: (any ExecutionAuditSink)?,
+      releasePostverificationCore: DescriptorBoundReleasePostverificationCore? = nil,
+      testingLegacyReleasePostverification: Bool,
+      clock: @escaping @Sendable () -> Int64,
+      nonceGenerator: @escaping @Sendable () -> Data = {
+        var generator = SystemRandomNumberGenerator()
+        return Data(
+          (0..<32).map {
+            _ in UInt8.random(in: .min ... .max, using: &generator)
+          })
+      }
+    ) {
+      self.adapter = adapter
+      self.eventSink = eventSink
+      self.auditSink = auditSink
+      self.releasePostverificationCore =
+        releasePostverificationCore ?? Self.failClosedReleasePostverificationCore()
+      self.testingLegacyReleasePostverification = testingLegacyReleasePostverification
+      self.clock = clock
+      self.nonceGenerator = nonceGenerator
+    }
+  #endif
 
   /// Claims one Phase 4 authorization and never accepts a dry-run report or serialized token.
   public func apply(
@@ -111,6 +156,19 @@ public actor BestEffortApplyCoordinator {
     ).sorted()
     guard forceWarningActionIDs == claimed.confirmedForceActionIDs else {
       return startFailure(.forceConfirmationBindingMismatch, manifest: manifest)
+    }
+    let releaseAuthority: EngineReleasePostverificationManifestAuthority?
+    if units.contains(where: { !$0.releaseGroupIDs.isEmpty }) {
+      do {
+        releaseAuthority = try EngineReleasePostverificationManifestAuthority(
+          claimedAuthorization: claimed,
+          plan: plan
+        )
+      } catch {
+        return startFailure(.manifestBindingMismatch, manifest: manifest)
+      }
+    } else {
+      releaseAuthority = nil
     }
 
     var auditFailures = AuditFailureAccumulator(epochID: manifest.epoch.epochID)
@@ -323,6 +381,80 @@ public actor BestEffortApplyCoordinator {
         )
         continue
       }
+      let frozenReleaseComponent: FrozenReleasePostverificationComponent?
+      #if DEBUG
+        var usesTestingLegacyReleasePostverification = false
+      #endif
+      if unit.releaseGroupIDs.isEmpty {
+        do {
+          try jitExecutionClaim.consumeForMutation(unitID: unit.id)
+          frozenReleaseComponent = nil
+        } catch {
+          jitReport = appendingJITFinding(
+            jitReport,
+            code: "jit-execution-claim-consumption-rejected"
+          )
+          let outcome = ExecutionUnitOutcome(
+            id: unit.id,
+            logicalActionIDs: unit.logicalActionIDs,
+            prerequisiteActionIDs: unit.prerequisiteActionIDs,
+            status: .jitRejected,
+            jitReport: jitReport,
+            steps: []
+          )
+          outcomes.append(outcome)
+          record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
+          await emit(
+            .unitFinished(outcome),
+            index: &eventIndex,
+            auditFailures: &auditFailures
+          )
+          continue
+        }
+      } else {
+        do {
+          #if DEBUG
+            if testingLegacyReleasePostverification {
+              try jitExecutionClaim.consumeForMutation(unitID: unit.id)
+              frozenReleaseComponent = nil
+              usesTestingLegacyReleasePostverification = true
+            } else {
+              frozenReleaseComponent = try freezeReleaseComponent(
+                authority: releaseAuthority,
+                jitClaim: jitExecutionClaim,
+                unit: unit
+              )
+            }
+          #else
+            frozenReleaseComponent = try freezeReleaseComponent(
+              authority: releaseAuthority,
+              jitClaim: jitExecutionClaim,
+              unit: unit
+            )
+          #endif
+        } catch {
+          jitReport = appendingJITFinding(
+            jitReport,
+            code: "release-postverification-freeze-rejected"
+          )
+          let outcome = ExecutionUnitOutcome(
+            id: unit.id,
+            logicalActionIDs: unit.logicalActionIDs,
+            prerequisiteActionIDs: unit.prerequisiteActionIDs,
+            status: .jitRejected,
+            jitReport: jitReport,
+            steps: []
+          )
+          outcomes.append(outcome)
+          record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
+          await emit(
+            .unitFinished(outcome),
+            index: &eventIndex,
+            auditFailures: &auditFailures
+          )
+          continue
+        }
+      }
 
       var stepOutcomes: [ExecutionStepOutcome] = []
       var stepStatusByActionID: [ActionID: ExecutionStepStatus] = [:]
@@ -434,15 +566,41 @@ public actor BestEffortApplyCoordinator {
         )
       }
 
-      let releasePostVerification = await collectReleasePostVerification(
-        groupIDs: unit.releaseGroupIDs,
-        plan: plan,
-        manifest: manifest,
-        collector: claimed.collector
-      )
-      // Keep the unit-bound single-consume claim alive through mutation and legacy
-      // postverification. Descriptor-bound composition consumes it when that adapter is wired.
-      _ = jitExecutionClaim
+      let releasePostVerification: [ReleasePostVerificationOutcome]
+      #if DEBUG
+        if usesTestingLegacyReleasePostverification {
+          releasePostVerification = await collectTestingReleasePostVerification(
+            groupIDs: unit.releaseGroupIDs,
+            plan: plan,
+            manifest: manifest,
+            collector: claimed.collector
+          )
+        } else if let frozenReleaseComponent {
+          releasePostVerification = await releasePostverificationCore.postverify(
+            frozenReleaseComponent
+          ).groups.map { group in
+            ReleasePostVerificationOutcome(
+              allocationGroupID: group.allocationGroupID,
+              outcome: releasePostVerificationOutcome(group.outcome)
+            )
+          }
+        } else {
+          releasePostVerification = []
+        }
+      #else
+        if let frozenReleaseComponent {
+          releasePostVerification = await releasePostverificationCore.postverify(
+            frozenReleaseComponent
+          ).groups.map { group in
+            ReleasePostVerificationOutcome(
+              allocationGroupID: group.allocationGroupID,
+              outcome: releasePostVerificationOutcome(group.outcome)
+            )
+          }
+        } else {
+          releasePostVerification = []
+        }
+      #endif
       for releaseOutcome in releasePostVerification {
         await emit(
           .releasePostVerificationFinished(releaseOutcome),
@@ -488,6 +646,21 @@ public actor BestEffortApplyCoordinator {
     switch disposition {
     case .gitWorktreeAttemptDirectory(let value): return value.failure
     }
+  }
+
+  private func freezeReleaseComponent(
+    authority: EngineReleasePostverificationManifestAuthority?,
+    jitClaim: EngineJITExecutionClaim,
+    unit: RuntimeUnit
+  ) throws -> FrozenReleasePostverificationComponent {
+    guard let authority else {
+      throw ReleasePostverificationLocatorError.operationMembershipMismatch
+    }
+    return try authority.authorizeAndFreeze(
+      jitClaim: jitClaim,
+      mutationOperations: unit.mutationSteps.map(\.operation),
+      core: releasePostverificationCore
+    )
   }
 
   private func collectJITReport(
@@ -561,82 +734,140 @@ public actor BestEffortApplyCoordinator {
     )
   }
 
-  private func collectReleasePostVerification(
-    groupIDs: [String],
-    plan: ImmutablePlan,
-    manifest: ExecutionManifest,
-    collector: EngineRevalidationCollector
-  ) async -> [ReleasePostVerificationOutcome] {
-    guard !groupIDs.isEmpty else { return [] }
-    do {
-      let observations = try await collector.collectReleasePostVerification(
-        for: ReleasePostVerificationRequest(
-          plan: plan,
-          manifest: manifest,
-          allocationGroupIDs: groupIDs
-        ))
-      let groups = Dictionary(grouping: observations) {
-        RawUTF8Key($0.allocationGroupID)
-      }
-      let expectedGroupKeys = Set(groupIDs.map(RawUTF8Key.init))
-      let hasUnexpected = groups.keys.contains { !expectedGroupKeys.contains($0) }
-      return groupIDs.map { groupID in
-        guard !hasUnexpected else {
-          return ReleasePostVerificationOutcome(
-            allocationGroupID: groupID,
-            outcome: .failed(
-              ObservationFailure(
-                code: "unexpected-release-postverification",
-                collector: "release-postverification-source"
-              ))
-          )
-        }
-        guard let matches = groups[RawUTF8Key(groupID)] else {
-          return ReleasePostVerificationOutcome(
-            allocationGroupID: groupID,
-            outcome: .missing
-          )
-        }
-        guard matches.count == 1, let observation = matches.first else {
-          return ReleasePostVerificationOutcome(
-            allocationGroupID: groupID,
-            outcome: .failed(
-              ObservationFailure(
-                code: "duplicate-release-postverification",
-                collector: "release-postverification-source"
-              ))
-          )
-        }
-        return ReleasePostVerificationOutcome(
-          allocationGroupID: groupID,
-          outcome: releasePostVerificationOutcome(observation.released)
-        )
-      }
-    } catch {
-      return groupIDs.map {
-        ReleasePostVerificationOutcome(
-          allocationGroupID: $0,
-          outcome: .failed(
-            ObservationFailure(
-              code: String(reflecting: type(of: error)),
-              collector: "release-postverification-source"
-            ))
-        )
+  private func releasePostVerificationOutcome(
+    _ outcome: DescriptorBoundAllocationGroupOutcome
+  ) -> PostVerificationOutcome {
+    switch outcome {
+    case .allocationGroupReleased: return .satisfied
+    case .rejected(let failure):
+      switch failure {
+      case .namespaceMissing, .topologyMissing:
+        return .missing
+      case .namespaceUnreadable(_, _, let value),
+        .ownerSlotUnreadable(_, let value),
+        .topologyUnreadable(let value):
+        return .unreadable(value)
+      case .namespaceUnknown(_, _, let reason),
+        .ownerSlotUnknown(_, let reason),
+        .topologyUnknown(let reason):
+        return .unknown(reason)
+      case .namespaceCollectionFailed(_, _, let value),
+        .ownerSlotCollectionFailed(_, let value),
+        .topologyCollectorFailed(let value):
+        return .failed(value)
+      case .leaseAlreadyConsumed:
+        return releasePostverificationFailure("lease-already-consumed")
+      case .namespaceIdentityMismatch:
+        return releasePostverificationMismatch("namespace-identity-mismatch")
+      case .namespaceAccessMismatch:
+        return releasePostverificationMismatch("namespace-access-mismatch")
+      case .namespaceContainmentMismatch:
+        return releasePostverificationMismatch("namespace-containment-mismatch")
+      case .ownerSlotStillReferencesExpectedObject:
+        return releasePostverificationMismatch("owner-slot-still-references-expected-object")
+      case .ownerSlotChangedAfterTopology:
+        return releasePostverificationMismatch("owner-slot-changed-after-topology")
+      case .topologyReceiptBindingMismatch:
+        return releasePostverificationMismatch("topology-receipt-binding-mismatch")
+      case .topologyReceiptNotFresh:
+        return releasePostverificationMismatch("topology-receipt-not-fresh")
+      case .topologyCaptureReused:
+        return releasePostverificationMismatch("topology-capture-reused")
+      case .allocationGroupStillAllocated:
+        return releasePostverificationMismatch("allocation-group-still-allocated")
+      case .invalidAllocationGroupReleaseEvidence:
+        return releasePostverificationMismatch("invalid-allocation-group-release-evidence")
       }
     }
   }
 
-  private func releasePostVerificationOutcome(
-    _ observation: Observation<Bool>
-  ) -> PostVerificationOutcome {
-    switch observation {
-    case .known(true): return .satisfied
-    case .known(false): return .notSatisfied(code: "allocation-group-not-released")
-    case .absent: return .missing
-    case .unknown(let reason): return .unknown(reason)
-    case .unreadable(let failure): return .unreadable(failure)
-    case .failed(let failure): return .failed(failure)
+  #if DEBUG
+    private func collectTestingReleasePostVerification(
+      groupIDs: [String],
+      plan: ImmutablePlan,
+      manifest: ExecutionManifest,
+      collector: EngineRevalidationCollector
+    ) async -> [ReleasePostVerificationOutcome] {
+      do {
+        let observations = try await collector.collectReleasePostVerification(
+          for: ReleasePostVerificationRequest(
+            plan: plan,
+            manifest: manifest,
+            allocationGroupIDs: groupIDs
+          ))
+        let groups = Dictionary(grouping: observations) {
+          RawUTF8Key($0.allocationGroupID)
+        }
+        let expectedGroupKeys = Set(groupIDs.map(RawUTF8Key.init))
+        let hasUnexpected = groups.keys.contains { !expectedGroupKeys.contains($0) }
+        return groupIDs.map { groupID in
+          guard !hasUnexpected else {
+            return ReleasePostVerificationOutcome(
+              allocationGroupID: groupID,
+              outcome: releasePostverificationFailure(
+                "unexpected-release-postverification"
+              ))
+          }
+          guard let matches = groups[RawUTF8Key(groupID)] else {
+            return ReleasePostVerificationOutcome(
+              allocationGroupID: groupID,
+              outcome: .missing
+            )
+          }
+          guard matches.count == 1, let observation = matches.first else {
+            return ReleasePostVerificationOutcome(
+              allocationGroupID: groupID,
+              outcome: releasePostverificationFailure(
+                "duplicate-release-postverification"
+              ))
+          }
+          let outcome: PostVerificationOutcome
+          switch observation.released {
+          case .known(true): outcome = .satisfied
+          case .known(false):
+            outcome = .notSatisfied(code: "allocation-group-not-released")
+          case .absent: outcome = .missing
+          case .unknown(let reason): outcome = .unknown(reason)
+          case .unreadable(let failure): outcome = .unreadable(failure)
+          case .failed(let failure): outcome = .failed(failure)
+          }
+          return ReleasePostVerificationOutcome(
+            allocationGroupID: groupID,
+            outcome: outcome
+          )
+        }
+      } catch {
+        return groupIDs.map {
+          ReleasePostVerificationOutcome(
+            allocationGroupID: $0,
+            outcome: releasePostverificationFailure(
+              String(reflecting: type(of: error))
+            ))
+        }
+      }
     }
+  #endif
+
+  private func releasePostverificationMismatch(_ code: String) -> PostVerificationOutcome {
+    .notSatisfied(code: code)
+  }
+
+  private func releasePostverificationFailure(_ code: String) -> PostVerificationOutcome {
+    .failed(
+      ObservationFailure(
+        code: code,
+        collector: "descriptor-bound-release-postverification"
+      ))
+  }
+
+  private static func failClosedReleasePostverificationCore()
+    -> DescriptorBoundReleasePostverificationCore
+  {
+    DescriptorBoundReleasePostverificationCore(
+      topologyCollector: EngineReleasePostverificationTopologyCollector {
+        _ in throw ReleasePostverificationRuntimeError.topologyCollectorUnavailable
+      }
+    )
   }
 
   private func emit(

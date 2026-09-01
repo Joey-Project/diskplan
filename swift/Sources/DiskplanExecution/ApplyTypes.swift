@@ -410,6 +410,19 @@ final class EngineJITExecutionClaim: @unchecked Sendable {
     self.record = nil
     return record
   }
+
+  func consumeForMutation(unitID: ExecutionUnitID) throws {
+    let record = try claim()
+    guard record.unit.unitID == unitID else {
+      throw EngineJITExecutionClaimError.unitBindingMismatch
+    }
+  }
+
+  func consumeOnFailure() {
+    lock.lock()
+    record = nil
+    lock.unlock()
+  }
 }
 
 public struct BoundMutationTarget: Equatable, Sendable {

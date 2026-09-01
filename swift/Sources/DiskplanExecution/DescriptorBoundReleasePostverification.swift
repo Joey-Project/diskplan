@@ -167,6 +167,16 @@ enum ReleasePostverificationManifestClaimError: Error, Equatable, Sendable {
   case descriptorLocatorBindingMismatch(ActionID)
 }
 
+enum ReleasePostverificationLocatorError: Error, Equatable, Sendable {
+  case operationMembershipMismatch
+  case namespaceOpenFailed(
+    ActionID, ReleasePostverificationNamespaceLocation, Int32
+  )
+  case namespaceSealUnavailable(
+    ActionID, ReleasePostverificationNamespaceLocation
+  )
+}
+
 /// Versioned, engine-internal schema. It is never serialized over IPC, so `ipc.proto` does not
 /// carry a duplicate representation; the shared compatibility fixture freezes these exact bytes.
 struct ReleasePostverificationComponentBindingV1: Equatable, Sendable {
@@ -351,6 +361,36 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
   private let lock = NSLock()
   private var authorizedUnits = Set<ExecutionUnitID>()
 
+  func authorizeAndFreeze(
+    jitClaim: EngineJITExecutionClaim,
+    mutationOperations: [ExecutionAdapterOperation],
+    core: DescriptorBoundReleasePostverificationCore
+  ) throws -> FrozenReleasePostverificationComponent {
+    let locators: [ReleasePostverificationOwnerLocator]
+    do {
+      locators = try descriptorLocators(for: mutationOperations)
+    } catch {
+      jitClaim.consumeOnFailure()
+      throw error
+    }
+    defer {
+      for locator in locators {
+        for component in locator.namespace.reversed() {
+          _ = Darwin.close(component.descriptor)
+        }
+      }
+    }
+    let handle = try authorizeTrusted(
+      jitClaim: jitClaim,
+      descriptorLocators: locators
+    )
+    return try core.freeze(
+      ReleasePostverificationComponentRequest(
+        componentHandle: handle,
+        owners: locators
+      ))
+  }
+
   convenience init(
     claimedAuthorization: ClaimedApplyAuthorization,
     plan: ImmutablePlan
@@ -411,7 +451,19 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
     self.registryGeneration = registryGeneration
   }
 
-  func authorize(
+  #if DEBUG
+    func authorize(
+      jitClaim: EngineJITExecutionClaim,
+      descriptorLocators: [ReleasePostverificationOwnerLocator]
+    ) throws -> EngineReleasePostverificationComponentHandle {
+      try authorizeTrusted(
+        jitClaim: jitClaim,
+        descriptorLocators: descriptorLocators
+      )
+    }
+  #endif
+
+  private func authorizeTrusted(
     jitClaim: EngineJITExecutionClaim,
     descriptorLocators: [ReleasePostverificationOwnerLocator]
   ) throws -> EngineReleasePostverificationComponentHandle {
@@ -574,6 +626,147 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
       else { return false }
     }
     return true
+  }
+
+  private func descriptorLocators(
+    for operations: [ExecutionAdapterOperation]
+  ) throws -> [ReleasePostverificationOwnerLocator] {
+    let planActions = Dictionary(uniqueKeysWithValues: plan.actions.map { ($0.id, $0) })
+    var operationsByActionID: [ActionID: ExecutionAdapterOperation] = [:]
+    for operation in operations {
+      guard operationsByActionID[operation.actionID] == nil,
+        let action = planActions[operation.actionID],
+        operation.target == BoundMutationTarget(action: action)
+      else { throw ReleasePostverificationLocatorError.operationMembershipMismatch }
+      operationsByActionID[operation.actionID] = operation
+    }
+    let ownersByActionID = Dictionary(grouping: plan.releaseSets.flatMap(\.owners), by: \.actionID)
+    var openedDescriptors: [Int32] = []
+    do {
+      let locators = try operationsByActionID.keys.sorted().map {
+        actionID -> ReleasePostverificationOwnerLocator in
+        guard let operation = operationsByActionID[actionID],
+          let matches = ownersByActionID[actionID],
+          let owner = matches.first,
+          matches.allSatisfy({ $0 == owner })
+        else { throw ReleasePostverificationLocatorError.operationMembershipMismatch }
+        let target = operation.target
+        guard target.targetPath.components == owner.target.components,
+          target.rawRoot == owner.namespaceBinding.rawRoot,
+          target.expectedIdentity == owner.targetIdentity,
+          target.targetPath.components.count
+            == owner.namespaceBinding.parentChain.count + 1
+        else { throw ReleasePostverificationLocatorError.operationMembershipMismatch }
+        var namespace: [AuthorizedReleaseNamespaceComponent] = []
+        let root = try Self.openDirectory(
+          path: target.rawRoot.absoluteBytes,
+          actionID: actionID,
+          location: .root
+        )
+        openedDescriptors.append(root)
+        namespace.append(
+          try Self.authorizedComponent(
+            rawNameFromParent: nil,
+            descriptor: root,
+            actionID: actionID,
+            location: .root
+          ))
+        var parent = root
+        for (index, rawName) in target.targetPath.components.dropLast().enumerated() {
+          let location = ReleasePostverificationNamespaceLocation.parentChain(index: index)
+          let descriptor = try Self.openDirectory(
+            at: parent,
+            rawName: rawName,
+            actionID: actionID,
+            location: location
+          )
+          openedDescriptors.append(descriptor)
+          namespace.append(
+            try Self.authorizedComponent(
+              rawNameFromParent: rawName,
+              descriptor: descriptor,
+              actionID: actionID,
+              location: location
+            ))
+          parent = descriptor
+        }
+        return ReleasePostverificationOwnerLocator(
+          actionID: actionID,
+          candidateID: owner.candidateID,
+          expectedIdentity: owner.targetIdentity,
+          namespace: namespace,
+          rawLeafName: target.targetPath.components.last!
+        )
+      }
+      openedDescriptors.removeAll(keepingCapacity: false)
+      return locators
+    } catch {
+      for descriptor in openedDescriptors.reversed() { _ = Darwin.close(descriptor) }
+      throw error
+    }
+  }
+
+  private static func authorizedComponent(
+    rawNameFromParent: Data?,
+    descriptor: Int32,
+    actionID: ActionID,
+    location: ReleasePostverificationNamespaceLocation
+  ) throws -> AuthorizedReleaseNamespaceComponent {
+    let probe = POSIXReleasePostverificationDescriptorProbe()
+    guard case .known(let seal) = probe.namespaceSeal(descriptor: descriptor) else {
+      throw ReleasePostverificationLocatorError.namespaceSealUnavailable(
+        actionID, location
+      )
+    }
+    return AuthorizedReleaseNamespaceComponent(
+      rawNameFromParent: rawNameFromParent,
+      descriptor: descriptor,
+      authorizedSeal: seal
+    )
+  }
+
+  private static func openDirectory(
+    path: Data,
+    actionID: ActionID,
+    location: ReleasePostverificationNamespaceLocation
+  ) throws -> Int32 {
+    let descriptor = withRawCString(path) {
+      Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    }
+    guard descriptor >= 0 else {
+      throw ReleasePostverificationLocatorError.namespaceOpenFailed(
+        actionID, location, errno
+      )
+    }
+    return descriptor
+  }
+
+  private static func openDirectory(
+    at parent: Int32,
+    rawName: Data,
+    actionID: ActionID,
+    location: ReleasePostverificationNamespaceLocation
+  ) throws -> Int32 {
+    let descriptor = withRawCString(rawName) {
+      Darwin.openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    }
+    guard descriptor >= 0 else {
+      throw ReleasePostverificationLocatorError.namespaceOpenFailed(
+        actionID, location, errno
+      )
+    }
+    return descriptor
+  }
+
+  private static func withRawCString<Result>(
+    _ bytes: Data,
+    _ body: (UnsafePointer<CChar>) -> Result
+  ) -> Result {
+    var terminated = [UInt8](bytes)
+    terminated.append(0)
+    return terminated.withUnsafeBufferPointer { buffer in
+      body(UnsafeRawPointer(buffer.baseAddress!).assumingMemoryBound(to: CChar.self))
+    }
   }
 
   private static func sealAccess(

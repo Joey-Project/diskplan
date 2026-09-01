@@ -130,6 +130,7 @@ protocol RevalidationEvidenceSource: Sendable {
   private let collectFinalDescriptors:
     @Sendable (FinalDescriptorPreflightRequest) async throws
       -> FinalDescriptorEvidenceSnapshot
+  private let collectReleaseTopology: EngineReleasePostverificationTopologyCollector.Collection
 
   init(
     collect:
@@ -143,6 +144,9 @@ protocol RevalidationEvidenceSource: Sendable {
     }
     self.collectFinalDescriptors = { _ in
       throw EngineCollectorError.finalDescriptorPreflightUnavailable
+    }
+    self.collectReleaseTopology = { _ in
+      throw EngineCollectorError.releaseTopologyUnavailable
     }
   }
 
@@ -158,12 +162,18 @@ protocol RevalidationEvidenceSource: Sendable {
       -> [CurrentReleasePostcondition],
     collectFinalDescriptors:
       @escaping @Sendable (FinalDescriptorPreflightRequest) async throws
-      -> FinalDescriptorEvidenceSnapshot
+      -> FinalDescriptorEvidenceSnapshot,
+    collectReleaseTopology:
+      EngineReleasePostverificationTopologyCollector.Collection? = nil
   ) {
     self.collectCurrent = collectCurrent
     self.collectJIT = collectJIT
     self.collectReleasePostconditions = collectReleasePostconditions
     self.collectFinalDescriptors = collectFinalDescriptors
+    self.collectReleaseTopology =
+      collectReleaseTopology ?? { _ in
+        throw EngineCollectorError.releaseTopologyUnavailable
+      }
   }
 
   init(
@@ -189,6 +199,9 @@ protocol RevalidationEvidenceSource: Sendable {
       }
       return try await jitSource.collectFinalDescriptorEvidence(for: request)
     }
+    self.collectReleaseTopology = { _ in
+      throw EngineCollectorError.releaseTopologyUnavailable
+    }
   }
 
   func collectCurrentEvidence(for request: RevalidationRequest) async throws
@@ -207,6 +220,12 @@ protocol RevalidationEvidenceSource: Sendable {
     for request: ReleasePostVerificationRequest
   ) async throws -> [CurrentReleasePostcondition] {
     try await collectReleasePostconditions(request)
+  }
+
+  func releaseTopologyCollector() -> EngineReleasePostverificationTopologyCollector {
+    EngineReleasePostverificationTopologyCollector(
+      engineOwnedCollection: collectReleaseTopology
+    )
   }
 
   func finalDescriptorPreflight(
@@ -314,6 +333,7 @@ extension EngineRevalidationCollector: RevalidationEvidenceSource {}
 private enum EngineCollectorError: Error {
   case jitUnavailable
   case releasePostVerificationUnavailable
+  case releaseTopologyUnavailable
   case finalDescriptorPreflightUnavailable
 }
 

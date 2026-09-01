@@ -1,8 +1,9 @@
 import Darwin
-@_spi(DiskplanEngine) @testable import DiskplanExecution
 import DiskplanPolicy
 import Foundation
 import Testing
+
+@_spi(DiskplanEngine) @testable import DiskplanExecution
 
 @Test
 func executionReleaseUnitIDsDoNotCollapseCanonicalEquivalentRawUTF8() {
@@ -290,6 +291,7 @@ func compoundReleaseExecutesEveryOwnerOnceAndReportsPartialFailure() async throw
     adapter: adapter,
     eventSink: RecordingEventSink(),
     auditSink: nil,
+    testingLegacyReleasePostverification: true,
     clock: { 202 }
   )
 
@@ -319,6 +321,7 @@ func compoundOwnerFailureSkipsOnlyItsDownstreamOwner() async throws {
     adapter: adapter,
     eventSink: RecordingEventSink(),
     auditSink: nil,
+    testingLegacyReleasePostverification: true,
     clock: { 202 }
   ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
 
@@ -482,6 +485,7 @@ func compoundCancellationAfterTheFirstOwnerDoesNotStartLaterOwners() async throw
     adapter: adapter,
     eventSink: RecordingEventSink(),
     auditSink: nil,
+    testingLegacyReleasePostverification: true,
     clock: { 202 }
   )
   let task = Task {
@@ -513,6 +517,7 @@ func compoundDeadlineAfterTheFirstOwnerDoesNotStartLaterOwners() async throws {
     adapter: adapter,
     eventSink: RecordingEventSink(),
     auditSink: nil,
+    testingLegacyReleasePostverification: true,
     clock: clock.now
   )
   let task = Task {
@@ -551,6 +556,7 @@ func compoundReleaseRequiresPositiveAllocationTopologyProof(
     adapter: RecordingMutationAdapter(),
     eventSink: RecordingEventSink(),
     auditSink: nil,
+    testingLegacyReleasePostverification: true,
     clock: { 202 }
   ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
 
@@ -573,6 +579,7 @@ func missingAndDuplicateReleasePostverificationFailClosed(duplicate: Bool) async
     adapter: RecordingMutationAdapter(),
     eventSink: RecordingEventSink(),
     auditSink: nil,
+    testingLegacyReleasePostverification: true,
     clock: { 202 }
   ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
 

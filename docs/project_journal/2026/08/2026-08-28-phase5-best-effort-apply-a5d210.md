@@ -370,3 +370,26 @@ superseded_by:
   tests with output SHA-256
   `7bc83929f79c8678737a5724da0d7fb69194a01ca52394499c61abcb93823e0b`, and strict Swift
   formatting passed on the macOS 26 release host.
+- Production execution now consumes the per-unit JIT claim through manifest authority before the
+  first release mutation. The authority derives descriptor locators from the exact engine-owned
+  adapter operations, opens and seals the root/parent chain, freezes the complete connected
+  owner/group component, and retains only duplicated close-on-exec descriptors across mutation.
+  Locator acquisition failure invalidates the claim, while authorization, freeze, cancellation,
+  mutation failure, and postverification all converge on one-shot claim and descriptor ownership.
+  The legacy boolean release result remains available only to DEBUG compatibility fixtures and is
+  never consulted by `EngineExecutionComposition`.
+- End-to-end production-composition fixtures prove successful P/A/B/C execution with a real POSIX
+  removal, reject missing and replaced namespace locators before mutation, reject JIT replay and
+  cross-unit splice attempts, keep mutation-preflight failure separate from topology collection,
+  and reject a false C allocation release even when the legacy source returns `.known(true)`.
+- Final India validation used the repository's bounded process-group supervisor. The descriptor-
+  bound targeted gate passed 26 tests in 9.400 supervisor seconds with 13,531 output bytes and
+  SHA-256 `712d647a2382a48f7bb920a0071e8d557376617c9fff236aa9c244732b63453d`;
+  the BestEffort targeted gate passed 30 tests in 2.791 seconds with 6,709 bytes and SHA-256
+  `be77910d4275d71b2a37469443daac562ead74b698c62475fcd64945d06cd35c`.
+  The complete `DiskplanExecutionTests` gate passed all 192 tests in 4.603 seconds with 44,380
+  bytes and SHA-256 `9960099a219dfa5146e88b2fe3dae1cd75e9bc813aa92dd83fdfc0769ed8e1f5`.
+  The incremental release build passed in 2.684 seconds, the 18-test release acceptance validator
+  passed with SHA-256 `7bc83929f79c8678737a5724da0d7fb69194a01ca52394499c61abcb93823e0b`,
+  and strict Swift formatting passed. Every supervisor verified its process group and reported
+  terminal quiescence.

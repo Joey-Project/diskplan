@@ -3,7 +3,7 @@ import DiskplanPolicy
 import Foundation
 import Testing
 
-@testable import DiskplanExecution
+@_spi(DiskplanEngine) @testable import DiskplanExecution
 
 @Test
 func descriptorBoundReleaseMintsEngineReceiptFromFreshCurrentCapture() async throws {
@@ -358,6 +358,145 @@ func manifestAuthorityRejectsEveryJITClaimBindingDimension() throws {
   try rejects(fixture.jitClaim(wholePlanCaptureID: testDigest(0x84)))
   try rejects(fixture.jitClaim(jitCaptureID: fixture.plan.globalFacts.captureID))
   try rejects(fixture.jitClaim(jitCaptureID: fixture.manifest.currentCaptureID))
+}
+
+@Test
+func productionLocatorSourceFreezesExactOperationsAndRejectsMissingOrReplacedChains() throws {
+  let success = try ReleasePostverificationFixture()
+  defer { success.cleanUp() }
+  let successAuthority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: success.manifest,
+    plan: success.plan
+  )
+  _ = try successAuthority.authorizeAndFreeze(
+    jitClaim: success.jitClaim(),
+    mutationOperations: [success.ownerOperation()],
+    core: testCore(RecordingReleaseTopologySource(mode: .released))
+  )
+
+  let missing = try ReleasePostverificationFixture()
+  defer { missing.cleanUp() }
+  try missing.removeOwner()
+  try FileManager.default.removeItem(at: missing.namespace)
+  let missingAuthority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: missing.manifest,
+    plan: missing.plan
+  )
+  let missingClaim = try missing.jitClaim()
+  #expect(
+    throws: ReleasePostverificationLocatorError.namespaceOpenFailed(
+      missing.actionID,
+      .parentChain(index: 0),
+      ENOENT
+    )
+  ) {
+    try missingAuthority.authorizeAndFreeze(
+      jitClaim: missingClaim,
+      mutationOperations: [missing.ownerOperation()],
+      core: testCore(RecordingReleaseTopologySource(mode: .released))
+    )
+  }
+  #expect(throws: EngineJITExecutionClaimError.claimUnknownOrReplayed) {
+    try missingClaim.claim()
+  }
+
+  let replaced = try ReleasePostverificationFixture()
+  defer { replaced.cleanUp() }
+  try replaced.replaceNamespaceWithEmptyDirectory()
+  let replacedAuthority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: replaced.manifest,
+    plan: replaced.plan
+  )
+  #expect(
+    throws: ReleasePostverificationManifestClaimError.descriptorLocatorBindingMismatch(
+      replaced.actionID
+    )
+  ) {
+    try replacedAuthority.authorizeAndFreeze(
+      jitClaim: replaced.jitClaim(),
+      mutationOperations: [replaced.ownerOperation()],
+      core: testCore(RecordingReleaseTopologySource(mode: .released))
+    )
+  }
+}
+
+@Test
+func engineExecutionCompositionUsesDescriptorBoundReleasePostverification() async throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  let result = try await productionCompositionApply(fixture: fixture)
+
+  #expect(result.report.unitOutcomes.first?.status == .succeeded)
+  #expect(
+    result.report.unitOutcomes.first?.releasePostVerification.first?.outcome
+      == .satisfied
+  )
+  #expect(!FileManager.default.fileExists(atPath: fixture.owner.path))
+  #expect(await result.probe.topologyCalls == 1)
+  #expect(await result.probe.legacyBooleanCalls == 0)
+}
+
+@Test
+func legacyReleaseBooleanCannotBypassMissingDescriptorBoundCollector() async throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  let result = try await productionCompositionApply(
+    fixture: fixture,
+    topologyMode: .collectorFailure
+  )
+
+  #expect(result.report.unitOutcomes.first?.status == .failed)
+  #expect(
+    result.report.unitOutcomes.first?.releasePostVerification.first?.outcome
+      != .satisfied
+  )
+  #expect(await result.probe.legacyBooleanCalls == 0)
+}
+
+@Test(arguments: [
+  ProductionReleaseCompositionFailure.missingLocator,
+  .replacedLocator,
+  .mutationPreflight,
+  .postverification,
+])
+private func engineExecutionCompositionFailsClosedAcrossReleaseBoundaries(
+  failure: ProductionReleaseCompositionFailure
+) async throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  let result = try await productionCompositionApply(
+    fixture: fixture,
+    topologyMode: failure == .postverification ? .stillAllocated : .released,
+    mutationPreflightFails: failure == .mutationPreflight,
+    beforeJITReturn: {
+      switch failure {
+      case .missingLocator:
+        try fixture.removeOwner()
+        try FileManager.default.removeItem(at: fixture.namespace)
+      case .replacedLocator:
+        try fixture.replaceNamespaceWithEmptyDirectory()
+      case .mutationPreflight, .postverification:
+        break
+      }
+    }
+  )
+
+  #expect(result.report.unitOutcomes.first?.status != .succeeded)
+  if failure == .missingLocator || failure == .replacedLocator {
+    #expect(result.report.unitOutcomes.first?.status == .jitRejected)
+    #expect(await result.probe.topologyCalls == 0)
+  }
+  if failure == .mutationPreflight {
+    #expect(result.report.unitOutcomes.first?.steps.first?.status == .failed)
+    #expect(await result.probe.topologyCalls == 0)
+  }
+  if failure == .postverification {
+    #expect(await result.probe.topologyCalls == 1)
+    #expect(
+      result.report.unitOutcomes.first?.releasePostVerification.first?.outcome
+        == .notSatisfied(code: "allocation-group-still-allocated")
+    )
+  }
 }
 
 @Test
@@ -837,6 +976,168 @@ extension Data {
   fileprivate var hex: String { map { String(format: "%02x", $0) }.joined() }
 }
 
+private enum ProductionReleaseTopologyMode: Equatable, Sendable {
+  case released
+  case stillAllocated
+  case collectorFailure
+}
+
+private enum ProductionReleaseCompositionFailure: Equatable, Sendable {
+  case missingLocator
+  case replacedLocator
+  case mutationPreflight
+  case postverification
+}
+
+private actor ProductionReleaseCompositionProbe {
+  private(set) var legacyBooleanCalls = 0
+  private(set) var topologyCalls = 0
+
+  func legacyBoolean(
+    _ request: ReleasePostVerificationRequest
+  ) -> [CurrentReleasePostcondition] {
+    legacyBooleanCalls += 1
+    return request.allocationGroupIDs.map {
+      CurrentReleasePostcondition(
+        allocationGroupID: $0,
+        released: .known(true)
+      )
+    }
+  }
+
+  func collectTopology(
+    _ operation: EngineReleaseTopologyCollectionOperation,
+    mode: ProductionReleaseTopologyMode
+  ) -> Observation<CurrentReleaseTopologyCapture> {
+    topologyCalls += 1
+    if mode == .collectorFailure {
+      return .failed(
+        ObservationFailure(
+          code: "simulated-descriptor-bound-topology-failure",
+          collector: "release-composition-test"
+        ))
+    }
+    let request = operation.request
+    return .known(
+      CurrentReleaseTopologyCapture(
+        captureID: testDigest(0xf0),
+        executionBindingHash: request.executionBindingHash,
+        componentID: request.componentID,
+        epochID: request.epoch.epochID,
+        oneShotNonce: request.oneShotNonce,
+        capturedAtSeconds: Int64(Date().timeIntervalSince1970.rounded(.down)),
+        groups: request.groups.map { group in
+          CurrentReleaseTopologyGroup(
+            allocationGroupID: group.allocationGroupID,
+            topology: mode == .stillAllocated
+              ? .allocationGroupStillAllocated
+              : .allocationGroupReleased(
+                AllocationGroupReleasedTopologyEvidence(
+                  allocationGroupID: group.allocationGroupID,
+                  allocationGroupPresent: false,
+                  fileObjects: group.topology.fileObjects.map {
+                    ReleasedFileObjectTopologyEvidence(
+                      fileObjectID: Data($0.fileObjectID.utf8),
+                      remainingOwnerCount: 0
+                    )
+                  }
+                ))
+          )
+        }
+      ))
+  }
+}
+
+private func productionCompositionApply(
+  fixture: ReleasePostverificationFixture,
+  topologyMode: ProductionReleaseTopologyMode = .released,
+  mutationPreflightFails: Bool = false,
+  beforeJITReturn: @escaping @Sendable () throws -> Void = {}
+) async throws -> (
+  report: BestEffortApplyReport,
+  probe: ProductionReleaseCompositionProbe
+) {
+  let probe = ProductionReleaseCompositionProbe()
+  let collector = EngineRevalidationCollector(
+    collectCurrent: { request in
+      fixture.currentSnapshot(
+        captureID: testDigest(2),
+        referenceTimeSeconds: request.epoch.semanticReferenceTimeSeconds
+      )
+    },
+    collectJIT: { request in
+      try beforeJITReturn()
+      return JITRevalidationSnapshot(
+        oneShotNonce: request.oneShotNonce,
+        authorizationCurrentBindingHash: request.authorizationCurrentBindingHash,
+        preparationGeneration: request.preparationGeneration,
+        epochID: request.epoch.epochID,
+        snapshot: fixture.currentSnapshot(
+          captureID: testDigest(4),
+          referenceTimeSeconds: request.epoch.semanticReferenceTimeSeconds,
+          actionIDs: request.actionIDs
+        )
+      )
+    },
+    collectReleasePostconditions: { request in
+      await probe.legacyBoolean(request)
+    },
+    collectFinalDescriptors: { request in
+      guard !mutationPreflightFails else {
+        let target = request.target
+        return FinalDescriptorEvidenceSnapshot(
+          targetIdentity: .absent,
+          targetAccessPolicy: .known(target.expectedTargetAccessPolicy),
+          targetContent: .known(target.expectedContent),
+          root: CurrentNamespaceComponent(
+            relativePath: nil,
+            identity: .known(target.expectedRootIdentity),
+            seal: .known(target.expectedRootSeal)
+          ),
+          parents: target.expectedParentIdentities.indices.map { index in
+            CurrentNamespaceComponent(
+              relativePath: try? RawTargetPath(
+                components: Array(target.targetPath.components.prefix(index + 1))
+              ),
+              identity: .known(target.expectedParentIdentities[index]),
+              seal: .known(target.expectedParentSeals[index])
+            )
+          }
+        )
+      }
+      return fixture.matchingFinalDescriptorEvidence(request)
+    },
+    collectReleaseTopology: { operation in
+      await probe.collectTopology(operation, mode: topologyMode)
+    }
+  )
+  let composition = EngineExecutionComposition(
+    collector: collector,
+    eventSink: NoOpExecutionEventSink()
+  )
+  let preparation = try await composition.preparation.prepare(
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    mode: .apply,
+    lifetimeSeconds: 300
+  )
+  guard case .applyReady(let ready, let capability) = preparation else {
+    throw ReleasePostverificationLocatorError.operationMembershipMismatch
+  }
+  let authorization = try await composition.preparation.authorizeApply(
+    capability,
+    ready: ready,
+    plan: fixture.plan,
+    overlay: fixture.overlay
+  )
+  let report = await composition.applyCoordinator.apply(
+    authorization: authorization,
+    plan: fixture.plan,
+    overlay: fixture.overlay
+  )
+  return (report, probe)
+}
+
 @Test
 func topologyCollectorReceivesOpaqueCLOEXECDescriptorCapabilities() async throws {
   let fixture = try ReleasePostverificationFixture()
@@ -857,6 +1158,26 @@ func topologyCollectorReceivesOpaqueCLOEXECDescriptorCapabilities() async throws
   #expect(await topology.descriptorCount(for: fixture.actionID) == 2)
   #expect(await topology.requests.first?.owners.first?.namespaceComponentCount == 2)
   for descriptor in componentDescriptors {
+    errno = 0
+    #expect(Darwin.fcntl(descriptor, F_GETFD) == -1)
+    #expect(errno == EBADF)
+  }
+}
+
+@Test
+func abandonedFrozenComponentClosesDescriptorsWithoutPostverification() throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  var descriptors: [Int32] = []
+  do {
+    let frozen = try testCore(
+      RecordingReleaseTopologySource(mode: .released)
+    ).freeze(fixture.request())
+    descriptors = frozen.ownedDescriptorValues
+    #expect(!descriptors.isEmpty)
+  }
+
+  for descriptor in descriptors {
     errno = 0
     #expect(Darwin.fcntl(descriptor, F_GETFD) == -1)
     #expect(errno == EBADF)
@@ -1152,6 +1473,7 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
   let authorizedParentSeal: ReleaseDescriptorNamespaceSeal
   let execution: ReleasePostverificationExecutionBinding
   let plan: ImmutablePlan
+  let overlay: DecisionOverlay
   let manifest: ExecutionManifest
   let unitID: ExecutionUnitID
 
@@ -1250,9 +1572,11 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       dependencyState: .known(.complete),
       semanticReviewFacts: [],
       accessPolicy: .known("owner-private"),
-      contentProtection: .known(.requiredDigest(testDigest(92))),
+      contentProtection: .known(.explicitlyNotApplicable(.metadataOnlyObject)),
       aclDigest: .known(testDigest(93)),
-      targetMountIdentity: .known("target-mount"),
+      targetMountIdentity: .known(
+        authorizedRootSeal.access.mountIdentity.base64EncodedString()
+      ),
       removalForceRequirement: .known(.notRequired),
       quarantineCapability: .known(true),
       gitWorktree: nil,
@@ -1326,6 +1650,12 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       releaseGraphBundle: releaseGraphBundle
     )
     plan = builtPlan
+    overlay = DecisionOverlay.create(
+      plan: builtPlan,
+      selectedActionIDs: builtPlan.actions.map(\.id),
+      waiverConsents: [],
+      userNotes: []
+    )
     let epoch = try ExecutionEpochContext(
       epochID: "epoch-release",
       semanticReferenceTimeSeconds: 100,
@@ -1555,6 +1885,157 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       },
       globalFindings: []
     )
+  }
+
+  func currentSnapshot(
+    captureID: PolicyDigest,
+    referenceTimeSeconds: Int64,
+    actionIDs: [ActionID]? = nil
+  ) -> CurrentRevalidationSnapshot {
+    let selected = actionIDs.map(Set.init)
+    return CurrentRevalidationSnapshot(
+      captureID: captureID,
+      actions: plan.actions.filter { selected?.contains($0.id) ?? true }.map {
+        currentEvidence(
+          $0,
+          captureID: captureID,
+          referenceTimeSeconds: referenceTimeSeconds
+        )
+      },
+      releaseTopologies: plan.releaseSets.map {
+        CurrentReleaseTopology(
+          allocationGroupID: $0.allocationGroupID,
+          topology: .known($0.topologyExpectation)
+        )
+      },
+      invariants: CurrentPlanInvariants(
+        duplicateSurvivorsPreserved: .known(true),
+        terminalNamespacesExclusive: .known(true)
+      )
+    )
+  }
+
+  func matchingFinalDescriptorEvidence(
+    _ request: FinalDescriptorPreflightRequest
+  ) -> FinalDescriptorEvidenceSnapshot {
+    let target = request.target
+    return FinalDescriptorEvidenceSnapshot(
+      targetIdentity: .known(target.expectedIdentity),
+      targetAccessPolicy: .known(target.expectedTargetAccessPolicy),
+      targetContent: .known(target.expectedContent),
+      root: CurrentNamespaceComponent(
+        relativePath: nil,
+        identity: .known(target.expectedRootIdentity),
+        seal: .known(target.expectedRootSeal)
+      ),
+      parents: target.expectedParentIdentities.indices.map { index in
+        CurrentNamespaceComponent(
+          relativePath: try? RawTargetPath(
+            components: Array(target.targetPath.components.prefix(index + 1))
+          ),
+          identity: .known(target.expectedParentIdentities[index]),
+          seal: .known(target.expectedParentSeals[index])
+        )
+      }
+    )
+  }
+
+  func ownerOperation() throws -> ExecutionAdapterOperation {
+    let action = try #require(plan.actions.first(where: { $0.id == self.actionID }))
+    guard case .genericRemove(let contract) = action.prototype.adapterContract else {
+      throw ReleasePostverificationLocatorError.operationMembershipMismatch
+    }
+    return .genericRemove(BoundMutationTarget(action: action), contract)
+  }
+
+  private func currentEvidence(
+    _ action: ActionDefinition,
+    captureID: PolicyDigest,
+    referenceTimeSeconds: Int64
+  ) -> CurrentActionEvidence {
+    let namespace = action.prototype.namespaceBinding
+    return CurrentActionEvidence(
+      actionID: action.id,
+      targetIdentity: .known(action.prototype.protectedProperties.identity.expectedIdentity),
+      targetContent: .known(action.prototype.protectedProperties.content.expectedBaseline),
+      targetAccessPolicy: .known(
+        action.prototype.protectedProperties.accessPolicy.requiredBaseline
+      ),
+      coverage: .known(action.evidence.coverage),
+      collectorStatus: action.evidence.collectorStatus,
+      activity: action.evidence.activity,
+      explicitProtection: action.evidence.explicitProtection,
+      providerState: action.evidence.providerState,
+      recoverability: action.evidence.recoverability,
+      dependencyState: action.evidence.dependencyState,
+      freshPolicyEvidence: .known(
+        retimedPolicyEvidence(
+          action,
+          captureID: captureID,
+          referenceTimeSeconds: referenceTimeSeconds
+        )),
+      root: CurrentNamespaceComponent(
+        relativePath: nil,
+        identity: .known(namespace.rootIdentity),
+        seal: .known(namespace.rootSeal)
+      ),
+      parents: namespace.parentChain.map {
+        CurrentNamespaceComponent(
+          relativePath: $0.relativePath,
+          identity: .known($0.identity),
+          seal: .known($0.seal)
+        )
+      },
+      gitWorktree: .absent
+    )
+  }
+
+  private func retimedPolicyEvidence(
+    _ action: ActionDefinition,
+    captureID: PolicyDigest,
+    referenceTimeSeconds: Int64
+  ) -> FreshPolicyEvidence {
+    let source = action.evidence
+    let planFacts = plan.globalFacts
+    let facts = FrozenGlobalFacts(
+      captureID: captureID,
+      profile: planFacts.profile,
+      configuration: planFacts.configuration,
+      coverage: planFacts.coverage,
+      semanticReferenceTimeSeconds: referenceTimeSeconds,
+      policyVersion: planFacts.policyVersion,
+      schemaVersion: planFacts.schemaVersion
+    )
+    let evidence = try! FrozenEvidenceSnapshot(
+      captureID: captureID,
+      globalFactsHash: facts.globalFactsHash,
+      candidateID: source.candidateID,
+      namespaceBinding: source.namespaceBinding,
+      identity: source.identity,
+      coverage: source.coverage,
+      collectorStatus: source.collectorStatus,
+      activity: source.activity,
+      explicitProtection: source.explicitProtection,
+      providerState: source.providerState,
+      recoverability: source.recoverability,
+      recoverabilityReviewFacts: source.recoverabilityReviewFacts,
+      dependencyState: source.dependencyState,
+      semanticReviewFacts: source.semanticReviewFacts,
+      accessPolicy: source.accessPolicy,
+      contentProtection: source.contentProtection,
+      aclDigest: source.aclDigest,
+      targetMountIdentity: source.targetMountIdentity,
+      removalForceRequirement: source.removalForceRequirement,
+      quarantineCapability: source.quarantineCapability,
+      gitWorktree: source.gitWorktree,
+      adapterScope: source.adapterScope,
+      additionalAdapterScopes: source.additionalAdapterScopes,
+      classificationClaims: source.classificationClaims,
+      semanticReferenceTimeSeconds: referenceTimeSeconds,
+      policyVersion: source.policyVersion,
+      schemaVersion: source.schemaVersion
+    )
+    return FreshPolicyEvidence(evidence: evidence, globalFacts: facts)
   }
 
   func removeOwner() throws {

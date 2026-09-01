@@ -9,6 +9,7 @@ public final class EngineExecutionComposition: @unchecked Sendable {
   public let applyCoordinator: BestEffortApplyCoordinator
 
   private let adapter: any ExecutionMutationAdapter
+  private let collector: EngineRevalidationCollector
   private let eventSink: any ExecutionEventSink
   private let auditSink: (any ExecutionAuditSink)?
 
@@ -22,13 +23,16 @@ public final class EngineExecutionComposition: @unchecked Sendable {
       gitWorktree: GitWorktreeQuarantineAdapter()
     )
     self.adapter = adapter
+    self.collector = collector
     self.eventSink = eventSink
     self.auditSink = auditSink
     preparation = ExecutionPreparationEngine(collector: collector)
     applyCoordinator = BestEffortApplyCoordinator(
       adapter: adapter,
       eventSink: eventSink,
-      auditSink: auditSink
+      auditSink: auditSink,
+      releasePostverificationCore: Self.releasePostverificationCore(collector),
+      clock: Self.systemClock
     )
   }
 
@@ -40,7 +44,21 @@ public final class EngineExecutionComposition: @unchecked Sendable {
     BestEffortApplyCoordinator(
       adapter: adapter,
       eventSink: TeeExecutionEventSink(primary: eventSink, observer: observer),
-      auditSink: auditSink
+      auditSink: auditSink,
+      releasePostverificationCore: Self.releasePostverificationCore(collector),
+      clock: Self.systemClock
+    )
+  }
+
+  private static var systemClock: @Sendable () -> Int64 {
+    { Int64(Date().timeIntervalSince1970.rounded(.down)) }
+  }
+
+  private static func releasePostverificationCore(
+    _ collector: EngineRevalidationCollector
+  ) -> DescriptorBoundReleasePostverificationCore {
+    DescriptorBoundReleasePostverificationCore(
+      topologyCollector: collector.releaseTopologyCollector()
     )
   }
 }
