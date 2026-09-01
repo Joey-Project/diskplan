@@ -195,8 +195,11 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
   }
 
   private let condition = NSCondition()
+  private let collectionGroup = DispatchGroup()
   private var lifecycle = Lifecycle.ready
   private var collectionInFlight = false
+  private var cancellationRequested = false
+  private var collectionCancellation: (@Sendable () -> Void)?
   private var receiptConsumed = false
 
   func beginCollection() throws {
@@ -204,16 +207,42 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
       guard case .ready = lifecycle else { throw RuntimeFreshScanError.captureRetired }
       lifecycle = .collecting
       collectionInFlight = true
+      collectionGroup.enter()
     }
+  }
+
+  func installCollectionCancellation(_ cancellation: @escaping @Sendable () -> Void) {
+    let cancelNow = condition.withLock { () -> Bool in
+      guard collectionInFlight, case .collecting = lifecycle else { return true }
+      collectionCancellation = cancellation
+      return cancellationRequested
+    }
+    if cancelNow { cancellation() }
+  }
+
+  func checkCancellation() throws {
+    let cancelled = condition.withLock { cancellationRequested || !collectionInFlight }
+    guard !cancelled else { throw CancellationError() }
+    try Task.checkCancellation()
+  }
+
+  func requestCancellation() {
+    let cancellation = condition.withLock { () -> (@Sendable () -> Void)? in
+      cancellationRequested = true
+      lifecycle = .retired
+      return collectionCancellation
+    }
+    cancellation?()
   }
 
   func publish(
     rootBindingDigest: EvidenceDigest,
     volumeBindingDigest: EvidenceDigest
   ) -> Bool {
-    condition.withLock {
+    let published = condition.withLock { () -> Bool in
       guard collectionInFlight, case .collecting = lifecycle else { return false }
       collectionInFlight = false
+      collectionCancellation = nil
       lifecycle = .published(
         rootBindingDigest: rootBindingDigest,
         volumeBindingDigest: volumeBindingDigest
@@ -221,14 +250,20 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
       condition.broadcast()
       return true
     }
+    if published { collectionGroup.leave() }
+    return published
   }
 
   func abortCollection() {
-    condition.withLock {
+    let aborted = condition.withLock { () -> Bool in
+      guard collectionInFlight else { return false }
       collectionInFlight = false
+      collectionCancellation = nil
       lifecycle = .retired
       condition.broadcast()
+      return true
     }
+    if aborted { collectionGroup.leave() }
   }
 
   func consumePublishedReceipt(
@@ -246,20 +281,31 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
     }
   }
 
-  func retireAndDrain() -> Bool {
-    condition.lock()
-    let wasRetired: Bool
-    if case .retired = lifecycle { wasRetired = true } else { wasRetired = false }
-    lifecycle = .retired
-    while collectionInFlight { condition.wait() }
-    condition.unlock()
-    return !wasRetired
+  func retireAndDrain(maximumWaitNanoseconds: UInt64) -> Bool {
+    let cancellation = condition.withLock { () -> (@Sendable () -> Void)? in
+      cancellationRequested = true
+      lifecycle = .retired
+      return collectionCancellation
+    }
+    cancellation?()
+    let boundedWait = Int(min(maximumWaitNanoseconds, UInt64(Int.max)))
+    return collectionGroup.wait(timeout: .now() + .nanoseconds(boundedWait)) == .success
+  }
+
+  var isRetiredAndDrained: Bool {
+    condition.withLock {
+      guard !collectionInFlight, case .retired = lifecycle else { return false }
+      return true
+    }
   }
 }
 
 /// One Scan-owned session has at most one live capture lease. Every fresh scan uses the concrete
 /// Darwin filesystem and production collector bundle selected by this module.
 package final class RuntimeEvidenceSession: @unchecked Sendable {
+  private static let maximumDrainNanoseconds: UInt64 = 250_000_000
+  private static let maximumCollectorDurationNanoseconds: UInt64 = 30_000_000_000
+
   private let lock = NSLock()
   private let policy: NoMaterializationPolicy
   private let collectorBundle: ProductionScanCollectorBundle
@@ -334,14 +380,26 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
       closed = true
       return activeLease
     }
-    _ = state?.retireAndDrain()
-    lock.withLock {
-      if activeLease === state { activeLease = nil }
+    let drained =
+      state?.retireAndDrain(maximumWaitNanoseconds: Self.maximumDrainNanoseconds) ?? true
+    if drained {
+      lock.withLock {
+        if activeLease === state { activeLease = nil }
+      }
     }
   }
 
   fileprivate func finish(_ state: RuntimeEvidenceLeaseState) {
-    _ = state.retireAndDrain()
+    let drained = state.retireAndDrain(maximumWaitNanoseconds: Self.maximumDrainNanoseconds)
+    if drained {
+      lock.withLock {
+        if activeLease === state { activeLease = nil }
+      }
+    }
+  }
+
+  fileprivate func collectionEnded(_ state: RuntimeEvidenceLeaseState) {
+    guard state.isRetiredAndDrained else { return }
     lock.withLock {
       if activeLease === state { activeLease = nil }
     }
@@ -368,7 +426,7 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
     }
 
     do {
-      try Task.checkCancellation()
+      try state.checkCancellation()
       let rootRequests = ownedDescriptors.roots.map {
         ScanRootRequest(rootID: $0.rootID, rawAbsolutePath: $0.rawAbsolutePath)
       }
@@ -390,13 +448,17 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
             maximumDurationNanoseconds: resolvedScope.maximumDurationNanoseconds
           )
         } ?? resolvedScope
+      let processDeadlineNanoseconds = runtimeBoundedCollectorDeadline(
+        requested: request.processDeadlineNanoseconds,
+        maximumDurationNanoseconds: Self.maximumCollectorDurationNanoseconds
+      )
       let collectors = await collectorBundle.collect(
-        processDeadlineNanoseconds: request.processDeadlineNanoseconds,
+        processDeadlineNanoseconds: processDeadlineNanoseconds,
         volumes: ownedDescriptors.volumes.map {
           RuntimeVolumeDescriptor(volumeID: $0.volumeID, fileDescriptor: $0.fileDescriptor)
         }
       )
-      try Task.checkCancellation()
+      try state.checkCancellation()
       let volumeValidation = ownedDescriptors.revalidateVolumes(collectors)
       let eventSink = RuntimeFreshEventCaptureSink(
         maximumEvents: runtimeFreshEventLimit(scope: scope)
@@ -409,15 +471,15 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
         processActivity: scanProcessActivity(volumeValidation.snapshot.processActivity),
         globalFacts: scanGlobalFacts(volumeValidation.snapshot.globalFacts),
         collectorConfiguration: collectorBundle.collectorConfiguration(
-          processDeadlineNanoseconds: request.processDeadlineNanoseconds
+          processDeadlineNanoseconds: processDeadlineNanoseconds
         )
       )
       var result = scanner.snapshot()
       while result.state == .ready || result.state == .scanning {
-        try Task.checkCancellation()
+        try state.checkCancellation()
         result = scanner.advance(maximumEntries: 512)
       }
-      try Task.checkCancellation()
+      try state.checkCancellation()
       let rootValidation = ownedDescriptors.validateRoots(scanResult: result)
       let requestDigest = runtimeRootRequestDigest(rootRequests)
       let volumeRequestDigest = runtimeVolumeRequestDigest(ownedDescriptors.volumeScopes)
@@ -463,7 +525,7 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
   private func requireActive(_ state: RuntimeEvidenceLeaseState) throws {
     let active = lock.withLock { !closed && activeLease === state }
     guard active else { throw RuntimeFreshScanError.captureRetired }
-    try Task.checkCancellation()
+    try state.checkCancellation()
   }
 
   private func publish(
@@ -526,13 +588,22 @@ package final class RuntimeEvidenceCaptureLease: @unchecked Sendable {
     _ request: RuntimeFreshScanRequest
   ) async throws -> RuntimeFreshScanReceipt {
     try state.beginCollection()
-    do {
-      return try await session.collectFreshScan(
+    defer { session.collectionEnded(state) }
+    let collection = Task {
+      try await session.collectFreshScan(
         request,
         captureID: captureID,
         kind: kind,
         state: state
       )
+    }
+    state.installCollectionCancellation { collection.cancel() }
+    do {
+      return try await withTaskCancellationHandler {
+        try await collection.value
+      } onCancel: {
+        state.requestCancellation()
+      }
     } catch {
       state.abortCollection()
       throw error
@@ -1095,15 +1166,15 @@ private func runtimeValidateDescriptorFlags(
   }
 }
 
-private func runtimeDescriptorFailure(
+func runtimeDescriptorFailure(
   _ code: Int32,
   operation: String
 ) -> Observation<String> {
   switch code {
-  case ENOENT, EBADF: return .absent(reason: "\(operation): descriptor is missing")
   case EACCES, EPERM:
     return .unreadable(reason: "\(operation): permission denied", errorCode: code)
-  default: return .failed(reason: "\(operation): POSIX failure", errorCode: code)
+  default:
+    return .failed(reason: "\(operation): held descriptor failure", errorCode: code)
   }
 }
 
@@ -1267,6 +1338,16 @@ private func appendInt64(_ value: Int64, to data: inout Data) {
 private func appendUInt64(_ value: UInt64, to data: inout Data) {
   var bigEndian = value.bigEndian
   withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+}
+
+private func runtimeBoundedCollectorDeadline(
+  requested: UInt64,
+  maximumDurationNanoseconds: UInt64
+) -> UInt64 {
+  let now = DispatchTime.now().uptimeNanoseconds
+  let maximum = now.addingReportingOverflow(maximumDurationNanoseconds)
+  let sessionDeadline = maximum.overflow ? UInt64.max : maximum.partialValue
+  return min(requested, sessionDeadline)
 }
 
 private func scanProcessActivity(

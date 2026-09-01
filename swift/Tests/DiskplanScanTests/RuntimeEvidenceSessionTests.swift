@@ -157,6 +157,38 @@ func cancellationBeforePublicationRetiresCaptureAndPublishesNoReceipt() async th
 }
 
 @Test
+func sessionCloseCancelsCollectionAndUsesABoundedDrain() async throws {
+  let gate = RuntimeFreshCollectorGate()
+  let session = try runtimeFreshSession(activity: BlockingActivityCollector(gate: gate))
+  let lease = try session.beginCapture(.wholePlan)
+  let collection = Task {
+    try await lease.collectFreshScan(
+      systemRootFreshRequest(descriptor: try openSystemRoot())
+    )
+  }
+  await gate.waitUntilEntered()
+
+  let started = DispatchTime.now().uptimeNanoseconds
+  session.close()
+  let elapsed = DispatchTime.now().uptimeNanoseconds - started
+  #expect(elapsed < 1_000_000_000)
+
+  await gate.release()
+  do {
+    _ = try await collection.value
+    Issue.record("collection published after its session was closed")
+  } catch is CancellationError {
+    // The Scan-owned task observed the session cancellation after the blocking collector returned.
+  } catch {
+    Issue.record("session cancellation lost its typed classification: \(error)")
+  }
+  #expect(throws: RuntimeFreshScanError.closed) {
+    try session.beginCapture(.wholePlan)
+  }
+  lease.finish()
+}
+
+@Test
 func rootPathReplacementCannotRelabelAnotherDirectoryAsTheBoundRoot() async throws {
   let bound = try RuntimeFreshRootFixture()
   defer { bound.remove() }
@@ -395,6 +427,49 @@ func volumeRevalidationClassifiesDescriptorReplacementAsIdentityChange() async t
     return
   }
   #expect(snapshotCode == ESTALE)
+}
+
+@Test
+func invalidatedHeldVolumeDescriptorIsFailedNotAbsent() async throws {
+  let session = try runtimeFreshSession(snapshotLister: try NonReadOnlySnapshotLister())
+  let lease = try session.beginCapture(.wholePlan)
+  defer { lease.finish() }
+  let receipt = try await lease.collectFreshScan(
+    systemRootAndVolumeFreshRequest(
+      rootDescriptor: try openSystemRoot(),
+      volumeDescriptor: try openSystemRoot()
+    )
+  )
+  let payload = try lease.consumeFreshScanReceipt(
+    receipt,
+    expectedKind: .wholePlan,
+    expectedRoots: [systemRootRequest],
+    expectedVolumes: [systemVolumeScope],
+    expectedCaptureID: lease.captureID
+  )
+
+  #expect(
+    payload.volumeBindingValidation
+      == .failed(
+        reason: "fresh scan descriptor is not read-only", errorCode: EACCES)
+  )
+  #expect(
+    payload.collectors.globalFacts.apfsSnapshotsByVolume[systemVolumeScope.volumeID]
+      == .failed(
+        reason: "fresh scan descriptor is not read-only", errorCode: EACCES)
+  )
+}
+
+@Test
+func descriptorOnlyFailuresNeverClaimAuthoritativeAbsence() {
+  #expect(
+    runtimeDescriptorFailure(EBADF, operation: "fixture")
+      == .failed(reason: "fixture: held descriptor failure", errorCode: EBADF)
+  )
+  #expect(
+    runtimeDescriptorFailure(ENOENT, operation: "fixture")
+      == .failed(reason: "fixture: held descriptor failure", errorCode: ENOENT)
+  )
 }
 
 @Test
@@ -668,6 +743,31 @@ private final class IdentityReplacingSnapshotLister: APFSSnapshotListing, @unche
   func list(volumeFileDescriptor: Int32, maximumEntries: Int) -> Observation<[Data]> {
     guard Darwin.dup2(replacementDescriptor, volumeFileDescriptor) >= 0 else {
       return .failed(reason: "test identity replacement failed", errorCode: errno)
+    }
+    guard Darwin.fcntl(volumeFileDescriptor, F_SETFD, FD_CLOEXEC) >= 0 else {
+      return .failed(reason: "test close-on-exec restoration failed", errorCode: errno)
+    }
+    return .known([])
+  }
+}
+
+private final class NonReadOnlySnapshotLister: APFSSnapshotListing, @unchecked Sendable {
+  private let writeDescriptor: Int32
+
+  init() throws {
+    var descriptors = [Int32](repeating: -1, count: 2)
+    guard Darwin.pipe(&descriptors) == 0 else {
+      throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    Darwin.close(descriptors[0])
+    writeDescriptor = descriptors[1]
+  }
+
+  deinit { Darwin.close(writeDescriptor) }
+
+  func list(volumeFileDescriptor: Int32, maximumEntries: Int) -> Observation<[Data]> {
+    guard Darwin.dup2(writeDescriptor, volumeFileDescriptor) >= 0 else {
+      return .failed(reason: "test descriptor replacement failed", errorCode: errno)
     }
     guard Darwin.fcntl(volumeFileDescriptor, F_SETFD, FD_CLOEXEC) >= 0 else {
       return .failed(reason: "test close-on-exec restoration failed", errorCode: errno)
