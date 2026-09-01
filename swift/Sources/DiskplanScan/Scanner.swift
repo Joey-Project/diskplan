@@ -69,6 +69,7 @@ public final class DeterministicScanner {
   private let accessPolicyEpochSink: any AccessPolicyEpochSink
   private let accessPolicyEpochLedger = AccessPolicyEpochLedger()
   private let processActivity: Observation<[ProcessActivityRecord]>
+  private let globalFacts: GlobalScanFacts
   private let reference: ScanReference
   private var state: ScanMachineState = .ready
   private var nextRootIndex = 0
@@ -92,6 +93,7 @@ public final class DeterministicScanner {
     accessPolicyEpochSink: any AccessPolicyEpochSink = DiscardingAccessPolicyEpochSink(),
     processActivity: Observation<[ProcessActivityRecord]> = .unknown(
       reason: "process activity snapshot not supplied"),
+    globalFacts: GlobalScanFacts = .publicEvidenceUnavailable,
     collectorConfiguration: ScanCollectorConfiguration = .precollectedOrUnavailable
   ) {
     self.filesystem = filesystem
@@ -100,6 +102,7 @@ public final class DeterministicScanner {
     self.nodeSink = nodeSink
     self.accessPolicyEpochSink = accessPolicyEpochSink
     self.processActivity = processActivity
+    self.globalFacts = globalFacts
     let wallClock = clock.wallClockNow()
     let monotonic = clock.monotonicNowNanoseconds()
     reference = ScanReference(
@@ -799,7 +802,7 @@ public final class DeterministicScanner {
         retainedNodes: finalizedRetainedNodes
       ),
       coverage: allCoverage,
-      globalFacts: .publicEvidenceUnavailable,
+      globalFacts: globalFacts,
       processActivity: processActivity
     )
   }
