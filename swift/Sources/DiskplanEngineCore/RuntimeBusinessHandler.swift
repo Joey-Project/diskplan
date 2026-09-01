@@ -380,7 +380,7 @@ private struct PreparedRuntimeEmission {
 
 private final class RuntimeAuthorityEmissionToken: @unchecked Sendable {}
 
-private struct RuntimeAuthorityEmissionTransaction {
+private struct RuntimeAuthorityEmissionTransaction: @unchecked Sendable {
   let requestID: UInt64
   let token: RuntimeAuthorityEmissionToken
   let prepared: PreparedRuntimeEmission
@@ -1702,6 +1702,8 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   /// runtime session. Handlers use it to author the closed preview shape.
   public let negotiatedProtocolMinor: UInt32
 
+  var eventBroker: SerialEventBroker { broker }
+
   init(
     broker: SerialEventBroker,
     request: RuntimeBusinessRequest,
@@ -1744,20 +1746,28 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     try transmit(transaction)
   }
 
+  func sendAsync(_ emission: RuntimeBusinessEmission) async throws {
+    try await runtimeResponderBlockingOperation(broker: broker) {
+      try self.send(emission)
+    }
+  }
+
   /// Publishes an apply review only after its controller-owned one-shot box
   /// has been installed. A transport or authority commit failure rolls back
   /// that exact box before the error escapes.
   func sendApplyReview(
     _ emission: RuntimeBusinessEmission,
-    install: () -> Bool,
-    rollback: () -> Void
+    install: @escaping @Sendable () -> Bool,
+    rollback: @escaping @Sendable () -> Void
   ) async throws -> Bool {
     guard
-      let transaction = try beginApplyReview(
-        emission,
-        install: install,
-        rollback: rollback
-      )
+      let transaction = try await runtimeResponderBlockingOperation(broker: broker, {
+        try self.beginApplyReview(
+          emission,
+          install: install,
+          rollback: rollback
+        )
+      })
     else { return false }
     do {
       try await authority.commitReview(transaction)
@@ -1854,6 +1864,14 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       bufferedExecutionStream: true
     )
     executionPrefix = sealed
+  }
+
+  func sendExecutionPrefixAsync(
+    _ candidate: [Diskplan_V1_ExecutionStreamEvent]
+  ) async throws {
+    try await runtimeResponderBlockingOperation(broker: broker) {
+      try self.sendExecutionPrefix(candidate)
+    }
   }
 
   func sendExecutionPrefix(
@@ -2002,6 +2020,24 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     cancellationResponder?.completed = true
   }
 
+  func finishExecutionAsync(
+    _ events: [Diskplan_V1_ExecutionStreamEvent],
+    mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
+  ) async throws(RuntimeExecutionTerminalError) {
+    do {
+      try await runtimeResponderBlockingOperation(broker: broker) {
+        try self.finishExecution(events, mirroredTo: cancellationResponder)
+      }
+    } catch let error as RuntimeExecutionTerminalError {
+      throw error
+    } catch {
+      throw .transportOrCommitFailure(
+        boundary: .enqueueOrWrite,
+        summary: "unexpected asynchronous responder bridge failure: \(error)"
+      )
+    }
+  }
+
   func finishExecutionFailure(
     _ failure: RuntimeExecutionTailFailure,
     mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
@@ -2095,6 +2131,24 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     cancellationResponder?.completed = true
   }
 
+  func finishExecutionFailureAsync(
+    _ failure: RuntimeExecutionTailFailure,
+    mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
+  ) async throws(RuntimeExecutionTerminalError) {
+    do {
+      try await runtimeResponderBlockingOperation(broker: broker) {
+        try self.finishExecutionFailure(failure, mirroredTo: cancellationResponder)
+      }
+    } catch let error as RuntimeExecutionTerminalError {
+      throw error
+    } catch {
+      throw .transportOrCommitFailure(
+        boundary: .enqueueOrWrite,
+        summary: "unexpected asynchronous responder bridge failure: \(error)"
+      )
+    }
+  }
+
   func finishApplyStartFailure(_ terminal: RuntimeApplyStartFailureTerminal) throws {
     responseLock.lock()
     defer { responseLock.unlock() }
@@ -2107,6 +2161,12 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       negotiatedProtocolMinor: negotiatedProtocolMinor
     )
     try transmit(transaction)
+  }
+
+  func finishApplyStartFailureAsync(_ terminal: RuntimeApplyStartFailureTerminal) async throws {
+    try await runtimeResponderBlockingOperation(broker: broker) {
+      try self.finishApplyStartFailure(terminal)
+    }
   }
 
   func abortExecutionStreamWithoutEmission(
@@ -2137,6 +2197,14 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     }
   }
 
+  func abortExecutionStreamWithoutEmissionAsync(
+    mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
+  ) async throws {
+    try await runtimeResponderBlockingOperation(broker: broker) {
+      try self.abortExecutionStreamWithoutEmission(mirroredTo: cancellationResponder)
+    }
+  }
+
   func rejectHandlerFailure() throws {
     responseLock.lock()
     defer { responseLock.unlock() }
@@ -2151,6 +2219,12 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       for: request
     )
     try transmit(transaction)
+  }
+
+  func rejectHandlerFailureAsync() async throws {
+    try await runtimeResponderBlockingOperation(broker: broker) {
+      try self.rejectHandlerFailure()
+    }
   }
 
   private func transmit(_ transaction: RuntimeAuthorityEmissionTransaction) throws {
@@ -2310,4 +2384,11 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       )
     }
   }
+}
+
+private func runtimeResponderBlockingOperation<Value: Sendable>(
+  broker: SerialEventBroker,
+  _ operation: @escaping @Sendable () throws -> Value
+) async throws -> Value {
+  try await broker.performRuntimeResponderOperation(operation)
 }
