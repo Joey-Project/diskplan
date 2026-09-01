@@ -124,6 +124,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
   private var livePlan: LivePlan?
   private var preparedApply: PreparedApply?
   private var activeExecution: ActiveExecution?
+  private var responderBrokers: [ObjectIdentifier: SerialEventBroker] = [:]
   private var ownedTasks: [UUID: RuntimeOwnedTask] = [:]
   private var stopping = false
 
@@ -152,6 +153,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     _ request: RuntimeBusinessRequest,
     responder: RuntimeBusinessResponder
   ) throws {
+    registerResponderBroker(responder.eventBroker)
     switch request {
     case .buildPlan(let build):
       try handleBuildPlan(build, responder: responder)
@@ -373,33 +375,34 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
       return
     }
     startTask { [weak self] in
+      guard let self else { return }
       do {
         let prepared = try await executionBackend.prepareDryRun(
           context: context,
           lifetimeSeconds: 300
         )
-        guard self?.contextIsCurrent(context) == true else {
-          try responder.send(
+        guard self.contextIsCurrent(context) else {
+          try await responder.sendAsync(
             try .rejected(
               code: .staleBinding,
               summary: "plan or overlay changed during dry-run preparation"
             ))
           return
         }
-        try responder.send(
+        try await responder.sendAsync(
           try .dryRun(
             payload: prepared.payload,
             manifest: prepared.manifest,
             negotiatedProtocolMinor: responder.negotiatedProtocolMinor
           ))
       } catch RuntimeExecutionBackendFailure.revalidationFailed {
-        try? responder.send(
+        try? await responder.sendAsync(
           try .rejected(
             code: .revalidationFailed,
             summary: "current evidence no longer matches the prepared plan"
           ))
       } catch {
-        try? responder.rejectHandlerFailure()
+        try? await responder.rejectHandlerFailureAsync()
       }
     }
   }
@@ -438,6 +441,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
       return
     }
     startTask { [weak self] in
+      guard let self else { return }
       do {
         let prepared = try await executionBackend.prepareApplyReview(
           context: context,
@@ -447,8 +451,8 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
           prepared.projection,
           negotiatedProtocolMinor: responder.negotiatedProtocolMinor
         )
-        guard self?.contextIsCurrent(context) == true else {
-          try responder.send(
+        guard self.contextIsCurrent(context) else {
+          try await responder.sendAsync(
             try .rejected(
               code: .staleBinding,
               summary: "plan or overlay changed during apply-review preparation"
@@ -467,12 +471,12 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
             sealed,
             negotiatedProtocolMinor: responder.negotiatedProtocolMinor
           ),
-          install: { self?.installPreparedApplyIfCurrent(publication) == true },
-          rollback: { self?.rollbackPreparedApply(publication) }
+          install: { self.installPreparedApplyIfCurrent(publication) },
+          rollback: { self.rollbackPreparedApply(publication) }
         )
         guard installed else {
           authority.invalidate()
-          try responder.send(
+          try await responder.sendAsync(
             try .rejected(
               code: .staleBinding,
               summary: "plan or overlay changed during apply-review publication"
@@ -481,13 +485,13 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
         }
         publication.previous?.authority.invalidate()
       } catch RuntimeExecutionBackendFailure.revalidationFailed {
-        try? responder.send(
+        try? await responder.sendAsync(
           try .rejected(
             code: .revalidationFailed,
             summary: "current evidence no longer matches the prepared plan"
           ))
       } catch {
-        try? responder.rejectHandlerFailure()
+        try? await responder.rejectHandlerFailureAsync()
       }
     }
   }
@@ -496,7 +500,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     _ request: Diskplan_V1_ConfirmApplyRequest,
     responder: RuntimeBusinessResponder
   ) throws {
-    guard let executionBackend else {
+    guard executionBackend != nil else {
       try responder.send(
         try .rejected(
           code: .businessUnsupported,
@@ -527,9 +531,9 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
         guard case .started(let run) = launch else {
           if case .startFailed(let terminal) = launch {
             do {
-              try responder.finishApplyStartFailure(terminal)
+              try await responder.finishApplyStartFailureAsync(terminal)
             } catch {
-              try? responder.abortExecutionStreamWithoutEmission()
+              try? await responder.abortExecutionStreamWithoutEmissionAsync()
             }
           }
           return
@@ -547,12 +551,12 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
         else {
           run.cancel()
           _ = await run.awaitTail()
-          try? responder.rejectHandlerFailure()
+          try? await responder.rejectHandlerFailureAsync()
           return
         }
         await driveStartedExecution(run: run, fallbackResponder: responder)
       } catch {
-        try? responder.rejectHandlerFailure()
+        try? await responder.rejectHandlerFailureAsync()
       }
     }
   }
@@ -604,7 +608,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
         throw RuntimeSessionControllerError.staleReceipt
       }
       try fallbackResponder.registerExecution(run.executionID)
-      try fallbackResponder.sendExecutionPrefix([run.applyStarted])
+      try await fallbackResponder.sendExecutionPrefixAsync([run.applyStarted])
       markExecutionPrefixSent(run)
     } catch {
       await abortStartedExecutionBeforePrefix(run, fallbackResponder: fallbackResponder)
@@ -616,7 +620,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     case .sealed(let tail):
       while !Task.isCancelled {
         do {
-          try finishExecution(run: run, tail: tail)
+          try await finishExecution(run: run, tail: tail)
           return
         } catch let error {
           switch error {
@@ -658,7 +662,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     while !Task.isCancelled {
       let cancellationResponder = cancellationResponder(for: run)
       do {
-        try fallbackResponder.finishExecutionFailure(
+        try await fallbackResponder.finishExecutionFailureAsync(
           failure,
           mirroredTo: cancellationResponder
         )
@@ -686,7 +690,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     run.cancel()
     _ = await run.awaitTail()
     clearActiveExecution(run)
-    try? fallbackResponder.rejectHandlerFailure()
+    try? await fallbackResponder.rejectHandlerFailureAsync()
   }
 
   private func clearActiveExecution(_ run: RuntimeExecutionRunHandle) {
@@ -707,24 +711,26 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
   private func finishExecution(
     run: RuntimeExecutionRunHandle,
     tail: RuntimeExecutionTail
-  ) throws(RuntimeExecutionTerminalError) {
-    lock.lock()
-    guard var active = activeExecution, active.run === run
-    else {
-      lock.unlock()
-      return
-    }
-    active.finishing = true
-    activeExecution = active
-    lock.unlock()
+  ) async throws(RuntimeExecutionTerminalError) {
+    guard let active = activeExecutionForFinishing(run) else { return }
     let events = active.events + tail.events
-    try active.confirmationResponder.finishExecution(
+    try await active.confirmationResponder.finishExecutionAsync(
       events,
       mirroredTo: active.cancellationResponder
     )
+    clearActiveExecution(run)
+  }
+
+  private func activeExecutionForFinishing(
+    _ run: RuntimeExecutionRunHandle
+  ) -> ActiveExecution? {
     lock.lock()
-    if activeExecution?.run === run { activeExecution = nil }
-    lock.unlock()
+    defer { lock.unlock() }
+    guard var active = activeExecution, active.run === run
+    else { return nil }
+    active.finishing = true
+    activeExecution = active
+    return active
   }
 
   private func executionContext(
@@ -853,6 +859,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     lock.lock()
     stopping = true
     let run = activeExecution?.run
+    let brokers = Array(responderBrokers.values)
     taskCondition.lock()
     let tasks = Array(ownedTasks.values)
     taskCondition.unlock()
@@ -860,6 +867,9 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
 
     run?.cancel()
     for task in tasks { task.cancel() }
+    for broker in brokers {
+      broker.stopRuntimeResponderOperationsAndWait(interruptingInFlightWriter: true)
+    }
 
     taskCondition.lock()
     while !ownedTasks.isEmpty { taskCondition.wait() }
@@ -868,6 +878,16 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     lock.lock()
     activeExecution = nil
     lock.unlock()
+  }
+
+  private func registerResponderBroker(_ broker: SerialEventBroker) {
+    lock.lock()
+    responderBrokers[ObjectIdentifier(broker)] = broker
+    let shouldStop = stopping
+    lock.unlock()
+    if shouldStop {
+      broker.stopRuntimeResponderOperationsAndWait(interruptingInFlightWriter: true)
+    }
   }
 
   @discardableResult
