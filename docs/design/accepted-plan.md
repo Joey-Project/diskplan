@@ -339,10 +339,9 @@ explicit protection/type hint 同样受这个边界约束：protection 可以直
 - Agent-assisted classification.
 - Task-semantic completion.
 - Duplicate survivor choice.
-- Fully observed local Git work discard.
 - Normal keep policy.
 
-dirty/untracked Git 内容必须使用专门的 `discard-local-work` action，不得伪装成普通删除。
+v1 的 dirty/untracked Git 内容及其 dependent remove chain 固定为 report-only：plan 可保留专门的 `discard-local-work` action、完整证据和 successor baseline 用于解释，但该 action 不可 stage、不可 waiver，apply preparation 不得为它签发 capability。只有 clean worktree 的 descriptor-bound quarantine remove 可执行。
 
 duplicate-survivor fact 的声明者就是该 duplicate group 的成员；唯一 survivor 必须是成员，
 不能由全局存在但未声明该 group 的无关 candidate 冒充。survivor 的受保护属性是整个绑定
@@ -413,11 +412,11 @@ directory child-entry churn、directory size/link-count/mtime 变化只有在 ac
 
 首版专用 adapter 只执行 linked-worktree 的 `.git` gitdir-file 布局：linkage 中的 registration ID 必须精确匹配 registration evidence，administrative directory 和 common directory 必须是两个不同的已绑定 object，并保留两者的精确 identity、registration/metadata digest 和 raw registration binding。执行时再从 no-follow 打开的 `.git` 文件固定 administrative directory，并通过 descriptor-relative parent traversal 证明它位于 common Git directory 的 `worktrees` namespace 下。ordinary worktree 的 in-root common `.git` directory 不属于当前 adapter 的删除模型，因此保持 report-only；不能用伪造的 admin/common identity 相等来绕过此边界。
 
-只有满足上述 coverage 的 action 才能使用 `Fully observed local Git work discard` waiver；否则只能 report-only。adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。
+上述 coverage 在 v1 只用于解释 dirty worktree、冻结 future adapter contract 与拒绝理由；它不启用 destructive waiver。所有 dirty discard/remove action 都是 report-only，adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。未来若引入可执行 discard，必须作为新的专用 adapter/waiver 版本重新验收，不能复用当前 plan 或 consent。
 
 point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use。mutation 前必须证明 source parent chain 是 owner-private、无 group/other writer、无 provider/mount boundary，并且 activity snapshot 没有其他 process reference；adapter 将它标记为 `trusted-exclusive-namespace`。同一用户的恶意或不可观测并发 namespace mutation不在首版可安全执行的 threat model 内；无法满足该 trust precondition 时必须 report-only，不能先移动后判断。
 
-满足 trust precondition 后，revalidation 通过已验证 parent descriptor no-follow 打开 root 并固定 object identity，再用 exclusive/no-clobber `renameatx_np` 将 exact slot 原子移入同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace。quarantine 后必须从 held descriptor 与 destination descriptor 双向确认是同一 object，并在受控 namespace 中重新完成 no-follow subtree coverage；identity/content/access/coverage 任一差异都禁止删除，尽力原子恢复原 slot，否则保留 quarantine 并在 event stream 报告可恢复 locator。只有确认后的绑定对象可递归删除，再 best-effort 清理 Git administrative state。overlay 必须显示 namespace trust、quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
+满足 trust precondition 后，revalidation 通过已验证 parent descriptor no-follow 打开 root 并固定 object identity，再用 exclusive/no-clobber `renameatx_np` 将 exact slot 原子移入同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace。quarantine 后必须从 held descriptor 与 destination descriptor 双向确认是同一 object，并在受控 namespace 中重新完成 no-follow subtree coverage；token 分别绑定每个目录、普通文件和 symlink 的 identity、content 与 access policy（含 descriptor-bound ACL）。pre/post token 必须在任何 post-rename 取消或超时恢复之前比较。任一受保护属性差异都禁止删除；只有 typed recovery policy 明确允许的验证失败才可尽力原子恢复原 slot，且恢复路径必须先为当前 quarantine 建立稳定 descriptor-bound snapshot，再在 recovery hook/准备完成后、`renameatx_np` 提交前完整复验 identity、content 与 access policy。access-policy drift 必须保留 quarantine 供人工恢复，否则在 event stream 报告可恢复 locator 或 unverified binding。递归删除在每次 `unlinkat` 前重新以 descriptor-relative 方式验证该 exact node 的 identity、content 与 access policy；子节点已按 token 删除后不把目录 size/mtime churn 当作目录 content drift，新出现的 child 则由 non-empty removal fail closed。每次实际 mutation commit 还必须复验 descriptor-bound Git administrative coverage、admin/worktrees/common directory access seal 和 exact `HEAD` resolution；v1 无法绑定的 symbolic/packed-ref 形式只能 report-only。每次 attempt 的 outer quarantine directory 在 pre-rename exit、成功删除或成功 auto-restore 后只可按 held parent、directory seal 和 slot identity 清理；清理失败不得覆盖 primary outcome，而要作为 attempt-scoped retained locator 或 unverified binding 进入普通 step/event/report。之后再 best-effort 清理 Git administrative state。overlay 必须显示 namespace trust、quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
 
 默认输出为 shell/TUI event stream。history、plan、audit、execution record 和 spill 均可选；`ENOSPC`、只读目录或日志失败不能阻止清理。
 

@@ -62,11 +62,23 @@ struct ReleasePostVerificationRequest: Equatable, Sendable {
   let plan: ImmutablePlan
   let manifest: ExecutionManifest
   let allocationGroupIDs: [String]
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.plan == rhs.plan
+      && lhs.manifest == rhs.manifest
+      && lhs.allocationGroupIDs.map(RawUTF8Key.init)
+        == rhs.allocationGroupIDs.map(RawUTF8Key.init)
+  }
 }
 
 struct CurrentReleasePostcondition: Equatable, Sendable {
   let allocationGroupID: String
   let released: Observation<Bool>
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    RawUTF8Key(lhs.allocationGroupID) == RawUTF8Key(rhs.allocationGroupID)
+      && lhs.released == rhs.released
+  }
 }
 
 public struct JITRevalidationReport: Equatable, Sendable {
@@ -95,6 +107,29 @@ public struct JITRevalidationReport: Equatable, Sendable {
 public enum ExecutionUnitID: Equatable, Hashable, Sendable {
   case action(ActionID)
   case compoundRelease([String])
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    switch (lhs, rhs) {
+    case (.action(let left), .action(let right)):
+      left == right
+    case (.compoundRelease(let left), .compoundRelease(let right)):
+      left.map(RawUTF8Key.init) == right.map(RawUTF8Key.init)
+    default:
+      false
+    }
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    switch self {
+    case .action(let actionID):
+      hasher.combine(0 as UInt8)
+      hasher.combine(actionID)
+    case .compoundRelease(let groupIDs):
+      hasher.combine(1 as UInt8)
+      hasher.combine(groupIDs.count)
+      for groupID in groupIDs { hasher.combine(RawUTF8Key(groupID)) }
+    }
+  }
 }
 
 public struct BoundMutationTarget: Equatable, Sendable {
@@ -183,6 +218,48 @@ public enum AdapterOperationOutcome: Equatable, Sendable {
   case notStarted(ExecutionNotStartedReason)
 }
 
+/// One adapter invocation's mutation result. The disposition belongs to this exact invocation;
+/// callers must not recover it later through an action-keyed cache.
+public struct AdapterOperationResult: Equatable, Sendable {
+  public let outcome: AdapterOperationOutcome
+  public let mutationDisposition: ExecutionMutationDisposition?
+  public let cleanupDisposition: ExecutionCleanupDisposition?
+  let gitWorktreePostVerificationBinding: GitWorktreePostVerificationNamespaceBinding?
+
+  public init(
+    outcome: AdapterOperationOutcome,
+    mutationDisposition: ExecutionMutationDisposition? = nil,
+    cleanupDisposition: ExecutionCleanupDisposition? = nil
+  ) {
+    self.outcome = outcome
+    self.mutationDisposition = mutationDisposition
+    self.cleanupDisposition = cleanupDisposition
+    self.gitWorktreePostVerificationBinding = nil
+  }
+
+  init(
+    outcome: AdapterOperationOutcome,
+    mutationDisposition: ExecutionMutationDisposition?,
+    cleanupDisposition: ExecutionCleanupDisposition?,
+    gitWorktreePostVerificationBinding: GitWorktreePostVerificationNamespaceBinding?
+  ) {
+    self.outcome = outcome
+    self.mutationDisposition = mutationDisposition
+    self.cleanupDisposition = cleanupDisposition
+    self.gitWorktreePostVerificationBinding = gitWorktreePostVerificationBinding
+  }
+}
+
+/// Adapter-specific recovery information surfaced through the ordinary step/event/report path.
+public enum ExecutionMutationDisposition: Equatable, Sendable {
+  case gitWorktree(GitWorktreeMutationDisposition)
+}
+
+/// Cleanup information that is orthogonal to the mutation's primary outcome.
+public enum ExecutionCleanupDisposition: Equatable, Sendable {
+  case gitWorktreeAttemptDirectory(GitWorktreeAttemptCleanupDisposition)
+}
+
 public enum ExecutionNotStartedReason: String, Equatable, Sendable {
   case taskCancelled
   case epochExpired
@@ -255,6 +332,34 @@ public protocol ExecutionMutationAdapter: Sendable {
     context: MutationExecutionContext
   ) async -> AdapterOperationOutcome
   func postverify(_ operation: ExecutionAdapterOperation) async -> PostVerificationOutcome
+
+  /// Returns the outcome and any recovery disposition as one attempt-scoped value.
+  func applyResult(
+    _ operation: ExecutionAdapterOperation,
+    context: MutationExecutionContext
+  ) async -> AdapterOperationResult
+
+  /// Post-verifies against the result of the exact adapter invocation being reported.
+  func postverify(
+    _ operation: ExecutionAdapterOperation,
+    result: AdapterOperationResult
+  ) async -> PostVerificationOutcome
+}
+
+extension ExecutionMutationAdapter {
+  public func applyResult(
+    _ operation: ExecutionAdapterOperation,
+    context: MutationExecutionContext
+  ) async -> AdapterOperationResult {
+    AdapterOperationResult(outcome: await apply(operation, context: context))
+  }
+
+  public func postverify(
+    _ operation: ExecutionAdapterOperation,
+    result _: AdapterOperationResult
+  ) async -> PostVerificationOutcome {
+    await postverify(operation)
+  }
 }
 
 public enum ExecutionStepStatus: String, Equatable, Sendable {
@@ -271,17 +376,23 @@ public struct ExecutionStepOutcome: Equatable, Sendable {
   public let actionID: ActionID
   public let status: ExecutionStepStatus
   public let adapterOutcome: AdapterOperationOutcome
+  public let mutationDisposition: ExecutionMutationDisposition?
+  public let cleanupDisposition: ExecutionCleanupDisposition?
   public let postVerification: PostVerificationOutcome
 
   public init(
     actionID: ActionID,
     status: ExecutionStepStatus,
     adapterOutcome: AdapterOperationOutcome,
+    mutationDisposition: ExecutionMutationDisposition? = nil,
+    cleanupDisposition: ExecutionCleanupDisposition? = nil,
     postVerification: PostVerificationOutcome
   ) {
     self.actionID = actionID
     self.status = status
     self.adapterOutcome = adapterOutcome
+    self.mutationDisposition = mutationDisposition
+    self.cleanupDisposition = cleanupDisposition
     self.postVerification = postVerification
   }
 }
@@ -332,6 +443,11 @@ public struct ReleasePostVerificationOutcome: Equatable, Sendable {
   public init(allocationGroupID: String, outcome: PostVerificationOutcome) {
     self.allocationGroupID = allocationGroupID
     self.outcome = outcome
+  }
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    RawUTF8Key(lhs.allocationGroupID) == RawUTF8Key(rhs.allocationGroupID)
+      && lhs.outcome == rhs.outcome
   }
 }
 
@@ -429,7 +545,7 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
       return "force-required action=\(actionID.hex)"
     case .stepFinished(let outcome):
       return
-        "step-finished action=\(outcome.actionID.hex) status=\(outcome.status.rawValue) adapter=\(adapterLabel(outcome.adapterOutcome)) postverify=\(postverifyLabel(outcome.postVerification))"
+        "step-finished action=\(outcome.actionID.hex) status=\(outcome.status.rawValue) adapter=\(adapterLabel(outcome.adapterOutcome)) disposition=\(dispositionLabel(outcome.mutationDisposition)) cleanup=\(cleanupDispositionLabel(outcome.cleanupDisposition)) postverify=\(postverifyLabel(outcome.postVerification))"
     case .releasePostVerificationFinished(let outcome):
       return
         "release-postverify group=\(outcome.allocationGroupID) outcome=\(postverifyLabel(outcome.outcome))"
@@ -458,6 +574,40 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
     case .cancelled: return "cancelled"
     case .timedOut: return "timed-out"
     case .notStarted(let reason): return "not-started:\(reason.rawValue)"
+    }
+  }
+
+  private static func dispositionLabel(_ disposition: ExecutionMutationDisposition?) -> String {
+    guard let disposition else { return "none" }
+    switch disposition {
+    case .gitWorktree(let disposition):
+      switch disposition {
+      case .removed: return "git-worktree:removed"
+      case .localChangesDiscarded: return "git-worktree:local-changes-discarded"
+      case .restoredAfterVerificationFailure(let code):
+        return "git-worktree:restored:\(code)"
+      case .quarantineRetained(_, let failureCode):
+        return "git-worktree:quarantine-retained:\(failureCode)"
+      case .quarantineBindingUnverified(let failureCode):
+        return "git-worktree:quarantine-binding-unverified:\(failureCode)"
+      case .removedWithAdministrativeResidual(let residual):
+        return "git-worktree:administrative-residual:\(residual.failure.code)"
+      }
+    }
+  }
+
+  private static func cleanupDispositionLabel(
+    _ disposition: ExecutionCleanupDisposition?
+  ) -> String {
+    guard let disposition else { return "none" }
+    switch disposition {
+    case .gitWorktreeAttemptDirectory(let value):
+      switch value {
+      case .retained(_, let failure):
+        return "git-worktree:attempt-directory-retained:\(failure.code)"
+      case .bindingUnverified(let failure):
+        return "git-worktree:attempt-directory-binding-unverified:\(failure.code)"
+      }
     }
   }
 

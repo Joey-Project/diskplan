@@ -234,19 +234,18 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
           )
       case .known(.irrecoverable):
         boundRecoverability = .rejected(reasons: recoverabilityReasons + [evidenceReason])
-      case .unknown:
-        recoverabilityPredicates.append(
-          WaiverPredicate(
-            kind: .unknownRebuildCost,
-            predicate: "recoverability-unknown",
-            valueBucket: "unknown",
-            semanticEvidenceHash: evidence.evidenceID
+      case .unknown(let reason):
+        switch reason {
+        case .unsupported, .unavailableViaPublicAPI:
+          boundRecoverability = .requiresWaiver(
+            predicates: recoverabilityPredicates,
+            reasons: recoverabilityReasons + [evidenceReason]
           )
-        )
-        boundRecoverability = .requiresWaiver(
-          predicates: recoverabilityPredicates,
-          reasons: recoverabilityReasons + [evidenceReason]
-        )
+        case .notRequested, .budgetExhausted, .timedOut, .incompleteCoverage:
+          boundRecoverability = .rejected(
+            reasons: recoverabilityReasons + [evidenceReason]
+          )
+        }
       case .absent, .unreadable, .failed:
         boundRecoverability = .rejected(reasons: recoverabilityReasons + [evidenceReason])
       }
@@ -414,6 +413,13 @@ extension RecoverabilityReviewFact {
         predicate: "unknown-rebuild-cost",
         valueBucket: valueBucket,
         semanticEvidenceHash: evidenceHash
+      )
+    case .unknownRecoverability(let evidence):
+      WaiverPredicate(
+        kind: .unknownRebuildCost,
+        predicate: "recoverability-unknown",
+        valueBucket: evidence.kind.rawValue,
+        semanticEvidenceHash: evidence.semanticHash
       )
     }
   }

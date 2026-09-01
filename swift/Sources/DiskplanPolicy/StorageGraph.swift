@@ -242,6 +242,12 @@ public struct FileTopologyExpectation: Equatable, Sendable {
   public let fileObjectID: String
   public let owners: [FileOwnerLink]
   public let linkCount: Observation<UInt32>
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    Data(lhs.fileObjectID.utf8) == Data(rhs.fileObjectID.utf8)
+      && lhs.owners == rhs.owners
+      && lhs.linkCount == rhs.linkCount
+  }
 }
 
 public struct ReleaseTopologyExpectation: Equatable, Sendable {
@@ -250,6 +256,14 @@ public struct ReleaseTopologyExpectation: Equatable, Sendable {
   public let cloneRefCount: Observation<UInt32>
   public let sharedBytes: Observation<UInt64>
   public let snapshotBlocker: Observation<Bool>
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    Data(lhs.allocationGroupID.utf8) == Data(rhs.allocationGroupID.utf8)
+      && lhs.fileObjects == rhs.fileObjects
+      && lhs.cloneRefCount == rhs.cloneRefCount
+      && lhs.sharedBytes == rhs.sharedBytes
+      && lhs.snapshotBlocker == rhs.snapshotBlocker
+  }
 }
 
 public struct EvaluatedReleaseOwner: Equatable, Sendable {

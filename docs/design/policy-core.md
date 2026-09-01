@@ -187,12 +187,13 @@ evidence, lineage, action, and plan hashes. The execution adapter separately pro
 gitdir-file target and its descriptor-relative administrative-to-common directory relationship.
 Ordinary worktrees, enabled sparse checkout, a linkage-ID mismatch, equal administrative/common
 identity, and any absent, unknown, unreadable, failed, or target-mismatched registration fact
-remain report-only. Dirty local work is
-represented by a separate discard-local-changes action and exact waiver. Its typed
-postcondition seals a clean successor HEAD/index/content baseline, preserves HEAD identity,
-and becomes the dependent remove action's JIT baseline. The remove's action-aware evaluation
-records that the exact discard prerequisite discharges the local-work predicate, rather than
-silently changing consent requirements during overlay validation. Cleanup
+remain report-only. All such typed facts remain in evidence, lineage, action, and plan hashes.
+Dirty local work is represented by a separate discard-local-changes action for evidence-rich
+explanation only. In v1 both that action and its dependent remove chain are unconditionally
+report-only: no exact waiver can stage them and preparation cannot mint apply authority. Its
+typed postcondition still freezes the proposed clean successor HEAD/index/content baseline so a
+future separately versioned adapter can be reviewed without weakening the current boundary.
+Cleanup
 scope and artifact kind/version must be non-empty, match a canonical evidence-frozen adapter
 scope by raw UTF-8 bytes, and produce the matching typed postcondition. Production filesystem
 binding remains outside this pure target.

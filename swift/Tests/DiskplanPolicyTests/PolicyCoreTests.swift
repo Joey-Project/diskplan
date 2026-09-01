@@ -416,6 +416,137 @@ func typedFactAndGatePayloadPermutationsCanonicalizeBeforeHashing() throws {
 }
 
 @Test
+func unknownRecoverabilityUsesStableTypedSemanticsAcrossFreshCaptures() throws {
+  let semantic = try UnknownRecoverabilitySemanticEvidence(
+    reason: .unsupported,
+    kind: .rebuildCostUnknown,
+    sourceBindingHash: digest(59)
+  )
+  let firstFacts = globalFacts(
+    configuration: Data("first-capture".utf8),
+    semanticReferenceTimeSeconds: 100
+  )
+  let secondFacts = FrozenGlobalFacts(
+    captureID: digest(90),
+    profile: "standard",
+    configuration: Data("second-capture".utf8),
+    coverage: firstFacts.coverage,
+    semanticReferenceTimeSeconds: 200,
+    policyVersion: firstFacts.policyVersion,
+    schemaVersion: firstFacts.schemaVersion
+  )
+  let first = snapshot(
+    candidateID: "unknown", path: "unknown", object: 71,
+    recoverability: .unknown(.unsupported),
+    recoverabilityReviewFacts: [.unknownRecoverability(semantic)],
+    globalFactsOverride: firstFacts
+  )
+  let second = snapshot(
+    candidateID: "unknown", path: "unknown", object: 71,
+    recoverability: .unknown(.unsupported),
+    recoverabilityReviewFacts: [.unknownRecoverability(semantic)],
+    semanticReferenceTimeSeconds: 200,
+    globalFactsOverride: secondFacts
+  )
+  #expect(first.evidenceID != second.evidenceID)
+
+  let firstEvaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(evidence: first, globalFacts: firstFacts))
+  let secondEvaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(evidence: second, globalFacts: secondFacts))
+  let firstVote = try #require(
+    firstEvaluation.votes.first { $0.dimension == .recoverability })
+  let secondVote = try #require(
+    secondEvaluation.votes.first { $0.dimension == .recoverability })
+  guard case .requiresWaiver(let firstPredicates, _) = firstVote.result,
+    case .requiresWaiver(let secondPredicates, _) = secondVote.result
+  else {
+    Issue.record("typed unknown recoverability must require an explicit waiver")
+    return
+  }
+  #expect(firstPredicates == secondPredicates)
+  #expect(firstPredicates.map(\.predicate) == ["recoverability-unknown"])
+}
+
+@Test
+func unknownRecoverabilitySemanticProofIsStructurallyRequiredAndFailClosed() throws {
+  #expect(throws: PolicyModelError.invalidGateSet) {
+    try UnknownRecoverabilitySemanticEvidence(
+      reason: .timedOut,
+      kind: .rebuildCostUnknown,
+      sourceBindingHash: digest(60)
+    )
+  }
+  let known = snapshot(candidateID: "known", path: "known", object: 72)
+  let semantic = try UnknownRecoverabilitySemanticEvidence(
+    reason: .unavailableViaPublicAPI,
+    kind: .rebuildCostUnknown,
+    sourceBindingHash: digest(61)
+  )
+  #expect(throws: PolicyModelError.invalidGateSet) {
+    try refreeze(
+      known,
+      recoverability: .unknown(.unavailableViaPublicAPI),
+      recoverabilityReviewFacts: []
+    )
+  }
+  #expect(throws: PolicyModelError.invalidGateSet) {
+    try refreeze(
+      known,
+      recoverability: .known(.recoverable),
+      recoverabilityReviewFacts: [.unknownRecoverability(semantic)]
+    )
+  }
+  #expect(throws: PolicyModelError.invalidGateSet) {
+    try refreeze(
+      known,
+      recoverability: .unknown(.unsupported),
+      recoverabilityReviewFacts: [.unknownRecoverability(semantic)]
+    )
+  }
+
+  let operationalUnknown = try refreeze(
+    known,
+    recoverability: .unknown(.incompleteCoverage),
+    recoverabilityReviewFacts: []
+  )
+  let operationalEvaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(
+      evidence: operationalUnknown,
+      globalFacts: globalFacts()
+    )
+  )
+  let recoverabilityVote = try #require(
+    operationalEvaluation.votes.first { $0.dimension == .recoverability }
+  )
+  guard case .rejected = recoverabilityVote.result else {
+    Issue.record("operationally unknown recoverability must remain report-only")
+    return
+  }
+
+  let operationalUnknownWithUnrelatedFact = try refreeze(
+    known,
+    recoverability: .unknown(.incompleteCoverage),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(62))
+    ]
+  )
+  let unrelatedFactEvaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(
+      evidence: operationalUnknownWithUnrelatedFact,
+      globalFacts: globalFacts()
+    )
+  )
+  let unrelatedFactVote = try #require(
+    unrelatedFactEvaluation.votes.first { $0.dimension == .recoverability }
+  )
+  guard case .rejected = unrelatedFactVote.result else {
+    Issue.record("an unrelated review fact must not make operational unknowns waivable")
+    return
+  }
+}
+
+@Test
 func storageGraphRejectsEmptyOwnersImpossibleCountsAndEscapedPaths() throws {
   let candidate = storageCandidate("a", ["a"], 1)
   let owner = FileOwnerLink(candidateID: "a", path: candidate.target)
@@ -544,6 +675,42 @@ func storageGraphRejectsEmptyOwnersImpossibleCountsAndEscapedPaths() throws {
       allocationGroups: []
     )
   }
+}
+
+@Test
+func releaseTopologyUsesRawUTF8IdentityForGroupAndFileIDs() {
+  let nfc = "\u{00e9}"
+  let nfd = "e\u{0301}"
+  let owner = FileOwnerLink(
+    candidateID: "owner",
+    path: try! RawTargetPath(components: [Data("owner".utf8)]))
+  let first = ReleaseTopologyExpectation(
+    allocationGroupID: nfc,
+    fileObjects: [
+      FileTopologyExpectation(fileObjectID: nfc, owners: [owner], linkCount: .known(1))
+    ],
+    cloneRefCount: .known(1),
+    sharedBytes: .known(1),
+    snapshotBlocker: .known(false)
+  )
+  let differentGroup = ReleaseTopologyExpectation(
+    allocationGroupID: nfd,
+    fileObjects: first.fileObjects,
+    cloneRefCount: first.cloneRefCount,
+    sharedBytes: first.sharedBytes,
+    snapshotBlocker: first.snapshotBlocker
+  )
+  let differentFile = ReleaseTopologyExpectation(
+    allocationGroupID: nfc,
+    fileObjects: [
+      FileTopologyExpectation(fileObjectID: nfd, owners: [owner], linkCount: .known(1))
+    ],
+    cloneRefCount: first.cloneRefCount,
+    sharedBytes: first.sharedBytes,
+    snapshotBlocker: first.snapshotBlocker
+  )
+  #expect(first != differentGroup)
+  #expect(first != differentFile)
 }
 
 @Test
@@ -751,7 +918,7 @@ func genericRemoveContractRequiresExplicitPathRaceResidualAndForceState() throws
 }
 
 @Test
-func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() throws {
+func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
   let worktree = gitWorktreeEvidence(
     localChanges: .present(changeSetDigest: digest(60))
   )
@@ -764,12 +931,11 @@ func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() t
     evidence: evidence,
     request: .gitWorktreeDiscardLocalChanges
   )
-  let unsequencedRemove = try makeAction(
-    evidence: evidence,
-    request: .gitWorktreeRemove
-  )
   #expect(throws: PolicyModelError.invalidActionContract) {
-    try makePlan(actions: [unsequencedRemove], evidence: [evidence])
+    try makeAction(
+      evidence: evidence,
+      request: .gitWorktreeRemove
+    )
   }
 
   let remove = try makeAction(
@@ -804,31 +970,17 @@ func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() t
       == discardContract.successorBaseline.contentProtection
   )
 
-  let discardPredicate: WaiverPredicate
-  guard case .requiresConsents(let predicates) = discard.evaluation.stageability,
-    let exactPredicate = predicates.first(where: {
-      $0.kind == .fullyObservedLocalGitWorkDiscard
-    })
-  else {
-    Issue.record("expected exact local-work discard predicate")
-    return
-  }
-  discardPredicate = exactPredicate
-  let consent = WaiverConsentCore.create(
-    action: discard,
-    predicate: discardPredicate,
-    reason: "discard observed local changes",
-    consentEventID: "discard-event"
-  )
+  #expect(discard.evaluation.stageability == .blocked)
+  #expect(remove.evaluation.stageability == .blocked)
   let overlay = DecisionOverlay.create(
     plan: plan,
     selectedActionIDs: [remove.id, discard.id],
-    waiverConsents: [consent],
+    waiverConsents: [],
     userNotes: []
   )
-  let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
-  #expect(validated.executionSteps.map(\.action.id) == [discard.id, remove.id])
-  #expect(validated.epochRequirements.count == 1)
+  #expect(throws: PolicyModelError.actionNotStageable(remove.id)) {
+    try DecisionOverlayValidator.validate(overlay, against: plan)
+  }
 
   let mismatchedWorktree = gitWorktreeEvidence(
     indexDigest: .known(digest(99)),
@@ -843,78 +995,14 @@ func gitWorktreeContractsBindCompleteEvidenceAndRequireSeparateDiscardAction() t
     evidence: mismatchedEvidence,
     request: .gitWorktreeDiscardLocalChanges
   )
-  let removeWithMismatchedPrerequisite = try makeAction(
-    evidence: evidence,
-    prerequisites: [mismatchedDiscard],
-    request: .gitWorktreeRemove
-  )
-  guard
-    case .requiresConsents(let mismatchedPredicates) =
-      removeWithMismatchedPrerequisite.evaluation.stageability
-  else {
-    Issue.record("mismatched Git evidence must not discharge local-work consent")
-    return
-  }
-  #expect(mismatchedPredicates.contains { $0.kind == .fullyObservedLocalGitWorkDiscard })
-
-  let twoDiscardPlan = try makePlan(
-    actions: [discard, mismatchedDiscard],
-    evidence: [evidence, mismatchedEvidence]
-  )
-  let singleDiscardOverlay = DecisionOverlay.create(
-    plan: twoDiscardPlan,
-    selectedActionIDs: [discard.id],
-    waiverConsents: [consent],
-    userNotes: []
-  )
   #expect(throws: PolicyModelError.invalidActionContract) {
-    try DecisionOverlayValidator.validate(singleDiscardOverlay, against: twoDiscardPlan)
-  }
-  let blockedDescendant = snapshot(
-    candidateID: "blocked-worktree-child", path: "worktree/blocked", object: 101,
-    explicitProtection: .known(.protected)
-  )
-  let discardWithBlockedDescendantPlan = try makePlan(
-    actions: [discard],
-    evidence: [evidence, blockedDescendant]
-  )
-  let discardWithBlockedDescendantOverlay = DecisionOverlay.create(
-    plan: discardWithBlockedDescendantPlan,
-    selectedActionIDs: [discard.id],
-    waiverConsents: [consent],
-    userNotes: []
-  )
-  #expect(throws: PolicyModelError.invalidActionContract) {
-    try DecisionOverlayValidator.validate(
-      discardWithBlockedDescendantOverlay,
-      against: discardWithBlockedDescendantPlan
+    try makeAction(
+      evidence: evidence,
+      prerequisites: [mismatchedDiscard],
+      request: .gitWorktreeRemove
     )
   }
-  guard
-    case .requiresConsents(let secondPredicates) =
-      mismatchedDiscard.evaluation.stageability,
-    let secondPredicate = secondPredicates.first(where: {
-      $0.kind == .fullyObservedLocalGitWorkDiscard
-    })
-  else {
-    Issue.record("expected second exact local-work discard predicate")
-    return
-  }
-  let secondConsent = WaiverConsentCore.create(
-    action: mismatchedDiscard,
-    predicate: secondPredicate,
-    reason: "discard second observed local changes",
-    consentEventID: "discard-event-2"
-  )
-  let twoDiscardOverlay = DecisionOverlay.create(
-    plan: twoDiscardPlan,
-    selectedActionIDs: [discard.id, mismatchedDiscard.id],
-    waiverConsents: [consent, secondConsent],
-    userNotes: []
-  )
-  #expect(throws: PolicyModelError.invalidActionContract) {
-    try DecisionOverlayValidator.validate(twoDiscardOverlay, against: twoDiscardPlan)
-  }
+  #expect(mismatchedDiscard.evaluation.stageability == .blocked)
 
   let invalidEvidence = [
     gitWorktreeEvidence(
@@ -1008,7 +1096,8 @@ func gitWorktreeRegistrationTopologyAndSparseFactsFailClosed() throws {
     commonDirectoryIdentity: ObjectIdentity(
       device: 1, object: 703, generation: .known(1), type: .directory),
     registrationID: digest(75),
-    metadataDigest: digest(77)
+    metadataDigest: digest(77),
+    headResolutionDigest: digest(78)
   )
   let changedEvidence = snapshot(
     candidateID: "linked", path: "linked", object: 1,
@@ -1032,7 +1121,8 @@ func gitWorktreeRegistrationTopologyAndSparseFactsFailClosed() throws {
     commonDirectoryIdentity: ObjectIdentity(
       device: 1, object: 700, generation: .known(1), type: .directory),
     registrationID: digest(75),
-    metadataDigest: digest(74)
+    metadataDigest: digest(74),
+    headResolutionDigest: digest(77)
   )
   let topologyMatrix: [(String, GitWorktreeEvidence)] = [
     (
@@ -3377,7 +3467,8 @@ private func gitWorktreeEvidence(
       type: .directory
     ),
     registrationID: digest(75),
-    metadataDigest: digest(74)
+    metadataDigest: digest(74),
+    headResolutionDigest: digest(77)
   )
   return GitWorktreeEvidence(
     noFollowTraversalComplete: noFollowTraversalComplete,
@@ -3509,7 +3600,9 @@ private func refreeze(
   additionalAdapterScopes: [AdapterScopeEvidence]? = nil,
   classificationClaims: [ClassificationClaim]? = nil,
   semanticReviewFacts: [SemanticReviewFact]? = nil,
-  gitWorktreeOverride: GitWorktreeEvidence? = nil
+  gitWorktreeOverride: GitWorktreeEvidence? = nil,
+  recoverability: Observation<RecoverabilityState>? = nil,
+  recoverabilityReviewFacts: [RecoverabilityReviewFact]? = nil
 ) throws -> FrozenEvidenceSnapshot {
   try FrozenEvidenceSnapshot(
     captureID: source.captureID,
@@ -3522,8 +3615,9 @@ private func refreeze(
     activity: source.activity,
     explicitProtection: source.explicitProtection,
     providerState: source.providerState,
-    recoverability: source.recoverability,
-    recoverabilityReviewFacts: source.recoverabilityReviewFacts,
+    recoverability: recoverability ?? source.recoverability,
+    recoverabilityReviewFacts:
+      recoverabilityReviewFacts ?? source.recoverabilityReviewFacts,
     dependencyState: source.dependencyState,
     semanticReviewFacts: semanticReviewFacts ?? source.semanticReviewFacts,
     accessPolicy: source.accessPolicy,

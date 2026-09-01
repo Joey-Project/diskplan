@@ -14,10 +14,19 @@ public actor ExecutionPreparationEngine {
     let manifest: ExecutionManifest
   }
 
+  private struct AuthorizationRecord: Sendable {
+    let manifest: ExecutionManifest
+    let collector: EngineRevalidationCollector
+    let generation: UInt64
+    let deadlineSeconds: Int64
+    let confirmedForceActionIDs: [ActionID]
+  }
+
   private let collector: EngineRevalidationCollector
   private let randomBytes: @Sendable (Int) throws -> Data
   private let clock: @Sendable () -> Int64
   private var capabilities: [Data: CapabilityRecord] = [:]
+  private var authorizations: [Data: AuthorizationRecord] = [:]
   private var preparationGeneration: UInt64 = 0
   private var preparationGenerationExhausted = false
 
@@ -245,14 +254,65 @@ public actor ExecutionPreparationEngine {
       else { throw ExecutionPreparationError.forceConfirmationMismatch }
     }
     let authorizedGeneration = record.generation
-    return ApplyAuthorization(
+    var authorizationKey: Data?
+    for _ in 0..<8 {
+      let candidate = try entropy(count: 32)
+      if authorizations[candidate] == nil {
+        authorizationKey = candidate
+        break
+      }
+    }
+    guard let authorizationKey else { throw ExecutionPreparationError.entropyFailure }
+    authorizations[authorizationKey] = AuthorizationRecord(
       manifest: record.manifest,
       collector: collector,
       generation: authorizedGeneration,
-      confirmedForceActionIDs: record.forceWarningActionIDs,
-      generationIsCurrent: { [self] in
-        return await self.generationIsCurrent(authorizedGeneration)
-      }
+      deadlineSeconds: record.deadlineSeconds,
+      confirmedForceActionIDs: record.forceWarningActionIDs
+    )
+    let expectedManifest = record.manifest
+    let expectedDeadline = record.deadlineSeconds
+    return ApplyAuthorization(claim: { [self] in
+      await claimApplyAuthorization(
+        key: authorizationKey,
+        expectedGeneration: authorizedGeneration,
+        expectedDeadlineSeconds: expectedDeadline,
+        expectedManifest: expectedManifest
+      )
+    })
+  }
+
+  private func claimApplyAuthorization(
+    key: Data,
+    expectedGeneration: UInt64,
+    expectedDeadlineSeconds: Int64,
+    expectedManifest: ExecutionManifest
+  ) -> ApplyAuthorizationClaimResult {
+    guard let record = authorizations.removeValue(forKey: key) else {
+      return generationIsCurrent(expectedGeneration) ? .replayed : .superseded
+    }
+    guard record.generation == expectedGeneration,
+      record.deadlineSeconds == expectedDeadlineSeconds,
+      record.manifest == expectedManifest
+    else {
+      return .bindingMismatch
+    }
+    guard generationIsCurrent(record.generation) else {
+      return .superseded
+    }
+    guard clock() < record.deadlineSeconds else {
+      return .expired
+    }
+    return .claimed(
+      ClaimedApplyAuthorization(
+        manifest: record.manifest,
+        collector: record.collector,
+        generation: record.generation,
+        confirmedForceActionIDs: record.confirmedForceActionIDs,
+        generationIsCurrent: { [self] in
+          await generationIsCurrent(record.generation)
+        }
+      )
     )
   }
 
@@ -275,7 +335,10 @@ public actor ExecutionPreparationEngine {
     return try! PolicyDigest(bytes: Data(SHA256.hash(data: bytes)))
   }
 
-  private func invalidateAllCapabilities() { capabilities.removeAll(keepingCapacity: true) }
+  private func invalidateAllCapabilities() {
+    capabilities.removeAll(keepingCapacity: true)
+    authorizations.removeAll(keepingCapacity: true)
+  }
 
   private func generationIsCurrent(_ generation: UInt64) -> Bool {
     !preparationGenerationExhausted && generation == preparationGeneration
@@ -287,6 +350,11 @@ public actor ExecutionPreparationEngine {
 }
 
 enum Revalidator {
+  private enum Stage: Equatable {
+    case beforePrerequisites
+    case jitAfterPrerequisites
+  }
+
   private struct WaiverRequirementKey: Hashable {
     let actionID: ActionID
     let consentHash: PolicyDigest
@@ -317,11 +385,12 @@ enum Revalidator {
           ]
         )
       }
-      var outcome = evaluateAction(action, current: current)
+      var outcome = evaluateAction(action, current: current, stage: .beforePrerequisites)
       let policy = evaluateFreshPolicy(
         action,
         current: current,
-        request: request
+        request: request,
+        stage: .beforePrerequisites
       )
       outcome = ActionRevalidationOutcome(
         actionID: outcome.actionID,
@@ -380,18 +449,24 @@ enum Revalidator {
 
     let units = compoundUnits(request.plan.releaseSets)
     let selectedReleaseGroupIDs = Set(
-      request.validatedOverlay.executionSteps.compactMap { $0.releaseSet?.allocationGroupID })
-    let observedReleaseGroupIDs = snapshot.releaseTopologies.map(\.allocationGroupID)
-    for groupID in Set(observedReleaseGroupIDs) where !selectedReleaseGroupIDs.contains(groupID) {
+      request.validatedOverlay.executionSteps.compactMap {
+        $0.releaseSet.map { RawUTF8Key($0.allocationGroupID) }
+      })
+    for topology in snapshot.releaseTopologies
+    where !selectedReleaseGroupIDs.contains(RawUTF8Key(topology.allocationGroupID)) {
       globalFindings.append(
         RevalidationFinding(
           actionID: nil,
-          subject: .releaseTopology(groupID),
+          subject: .releaseTopology(topology.allocationGroupID),
           kind: .unexpectedObservation
         ))
     }
-    for unit in units where !selectedReleaseGroupIDs.isDisjoint(with: unit.allocationGroupIDs) {
-      guard Set(unit.allocationGroupIDs).isSubset(of: selectedReleaseGroupIDs) else {
+    for unit in units
+    where !selectedReleaseGroupIDs.isDisjoint(with: unit.allocationGroupIDs.map(RawUTF8Key.init)) {
+      guard
+        Set(unit.allocationGroupIDs.map(RawUTF8Key.init)).isSubset(
+          of: selectedReleaseGroupIDs)
+      else {
         globalFindings.append(
           RevalidationFinding(
             actionID: nil,
@@ -401,12 +476,15 @@ enum Revalidator {
         continue
       }
       for groupID in unit.allocationGroupIDs {
+        let groupKey = RawUTF8Key(groupID)
         guard
           let expected = request.plan.releaseSets.first(where: {
-            $0.allocationGroupID == groupID
+            RawUTF8Key($0.allocationGroupID) == groupKey
           })?.topologyExpectation
         else { continue }
-        let matches = snapshot.releaseTopologies.filter { $0.allocationGroupID == groupID }
+        let matches = snapshot.releaseTopologies.filter {
+          RawUTF8Key($0.allocationGroupID) == groupKey
+        }
         if matches.count != 1 {
           globalFindings.append(
             RevalidationFinding(
@@ -450,7 +528,7 @@ enum Revalidator {
         executionActionIDs: actionIDs,
         jitRevalidationActionIDs: jit,
         compoundReleaseUnits: units.filter {
-          !selectedReleaseGroupIDs.isDisjoint(with: $0.allocationGroupIDs)
+          !selectedReleaseGroupIDs.isDisjoint(with: $0.allocationGroupIDs.map(RawUTF8Key.init))
         },
         currentPolicyBindings: policyBindings,
         consentRequirements: consentRequirements,
@@ -526,11 +604,13 @@ enum Revalidator {
             RevalidationFinding(actionID: actionID, subject: .collector, kind: .missing)
           ])
       }
-      let actionOutcome = evaluateAction(expected, current: current)
+      let actionOutcome = evaluateAction(
+        expected, current: current, stage: .jitAfterPrerequisites)
       let policy = evaluateFreshPolicy(
         expected,
         current: current,
-        request: policyRequest
+        request: policyRequest,
+        stage: .jitAfterPrerequisites
       )
       if let binding = policy.binding { policyBindings.append(binding) }
       consentRequirements.append(contentsOf: policy.consentRequirements)
@@ -548,6 +628,8 @@ enum Revalidator {
       || policyBindings.count != expectedIDs.count
       || authorizedBindings.count != expectedIDs.count
       || policyBindings.contains(where: { $0.captureID != snapshot.captureID })
+      || Set(policyBindings.map(\.captureID)).count != (policyBindings.isEmpty ? 0 : 1)
+      || Set(policyBindings.map(\.globalFactsHash)).count != (policyBindings.isEmpty ? 0 : 1)
       || !policyBindings.allSatisfy({ current in
         authorizedBindings.contains(where: {
           $0.actionID == current.actionID && $0.requiredWaivers == current.requiredWaivers
@@ -590,21 +672,24 @@ enum Revalidator {
         violation: .terminalNamespaceInvariantViolated
       ))
 
-    let expectedGroups = Set(request.releaseGroupIDs)
-    let observedGroups = snapshot.releaseTopologies.map(\.allocationGroupID)
-    for groupID in Set(observedGroups) where !expectedGroups.contains(groupID) {
+    let expectedGroups = Set(request.releaseGroupIDs.map(RawUTF8Key.init))
+    for topology in snapshot.releaseTopologies
+    where !expectedGroups.contains(RawUTF8Key(topology.allocationGroupID)) {
       globalFindings.append(
         RevalidationFinding(
           actionID: nil,
-          subject: .releaseTopology(groupID),
+          subject: .releaseTopology(topology.allocationGroupID),
           kind: .unexpectedObservation
         ))
     }
     for groupID in request.releaseGroupIDs {
-      let matches = snapshot.releaseTopologies.filter { $0.allocationGroupID == groupID }
+      let groupKey = RawUTF8Key(groupID)
+      let matches = snapshot.releaseTopologies.filter {
+        RawUTF8Key($0.allocationGroupID) == groupKey
+      }
       guard
         let expected = request.plan.releaseSets.first(where: {
-          $0.allocationGroupID == groupID
+          RawUTF8Key($0.allocationGroupID) == groupKey
         })?.topologyExpectation
       else {
         globalFindings.append(
@@ -681,7 +766,8 @@ enum Revalidator {
 
   private static func evaluateAction(
     _ action: ActionDefinition,
-    current: CurrentActionEvidence
+    current: CurrentActionEvidence,
+    stage: Stage
   ) -> ActionRevalidationOutcome {
     var findings: [RevalidationFinding] = []
     findings += compareObservation(
@@ -691,10 +777,11 @@ enum Revalidator {
       subject: .targetIdentity,
       mismatch: .identityMismatch
     )
-    if case .requiredDigest = action.prototype.protectedProperties.content.expectedBaseline {
+    let expectedContent = contentBaseline(action, stage: stage)
+    if case .requiredDigest = expectedContent {
       findings += compareObservation(
         current.targetContent,
-        expected: action.prototype.protectedProperties.content.expectedBaseline,
+        expected: expectedContent,
         actionID: action.id,
         subject: .targetContent,
         mismatch: .contentMismatch
@@ -742,12 +829,11 @@ enum Revalidator {
       subject: .providerState,
       mismatch: .providerMismatch
     )
-    findings += compareFrozenObservation(
+    findings += compareRecoverabilityObservation(
       current.recoverability,
       expected: action.evidence.recoverability,
       actionID: action.id,
-      subject: .recoverability,
-      mismatch: .recoverabilityMismatch
+      subject: .recoverability
     )
     findings += compareFrozenObservation(
       current.dependencyState,
@@ -813,7 +899,11 @@ enum Revalidator {
 
     let expectedGit: GitWorktreeEvidence?
     switch action.prototype.adapterContract {
-    case .gitWorktreeRemove(let contract): expectedGit = contract.verifiedEvidence
+    case .gitWorktreeRemove(let contract):
+      expectedGit =
+        stage == .jitAfterPrerequisites
+        ? postPrerequisiteGitEvidence(contract)
+        : contract.verifiedEvidence
     case .gitWorktreeDiscardLocalChanges(let contract): expectedGit = contract.verifiedEvidence
     default: expectedGit = nil
     }
@@ -830,6 +920,45 @@ enum Revalidator {
     return ActionRevalidationOutcome(actionID: action.id, findings: findings)
   }
 
+  /// Whole-plan preparation protects the dirty baseline. A remove unit is JIT-revalidated only
+  /// after its discard prerequisite, so that stage protects the typed clean successor baseline.
+  private static func contentBaseline(
+    _ action: ActionDefinition,
+    stage: Stage
+  ) -> ContentProtectionBaseline {
+    guard
+      case .gitWorktreeRemove(let contract) = action.prototype.adapterContract,
+      contract.requiresDiscardLocalChanges,
+      stage == .beforePrerequisites,
+      case .known(let currentContent) = action.evidence.contentProtection
+    else {
+      return action.prototype.protectedProperties.content.expectedBaseline
+    }
+    return currentContent
+  }
+
+  private static func postPrerequisiteGitEvidence(
+    _ contract: GitWorktreeRemoveContract
+  ) -> GitWorktreeEvidence {
+    guard contract.requiresDiscardLocalChanges else { return contract.verifiedEvidence }
+    let source = contract.verifiedEvidence
+    let successor = contract.executionBaseline
+    return GitWorktreeEvidence(
+      noFollowTraversalComplete: source.noFollowTraversalComplete,
+      headIdentity: .known(successor.headIdentity),
+      indexDigest: .known(successor.indexDigest),
+      localChanges: .known(.clean),
+      registration: source.registration,
+      linkage: source.linkage,
+      sparseCheckout: source.sparseCheckout,
+      nestedRepositories: source.nestedRepositories,
+      submodules: source.submodules,
+      trustedExclusiveNamespace: source.trustedExclusiveNamespace,
+      postQuarantineCoverage: source.postQuarantineCoverage,
+      postDiscardSuccessor: .absent
+    )
+  }
+
   private struct FreshPolicyResult {
     let findings: [RevalidationFinding]
     let binding: CurrentPolicyBinding?
@@ -839,7 +968,8 @@ enum Revalidator {
   private static func evaluateFreshPolicy(
     _ action: ActionDefinition,
     current: CurrentActionEvidence,
-    request: RevalidationRequest
+    request: RevalidationRequest,
+    stage: Stage
   ) -> FreshPolicyResult {
     let unavailable:
       (RevalidationFailureKind, ObservationFailure?, UnknownReason?) ->
@@ -898,7 +1028,7 @@ enum Revalidator {
         request: adapterRequest(for: action.prototype.adapterContract),
         evidence: evidence
       )
-      guard prototype == action.prototype else {
+      guard prototypeMatches(action, current: prototype, stage: stage) else {
         return unavailable(.policyEvidenceMismatch, nil, nil)
       }
       let evaluation = try OneVotePolicy.evaluate(
@@ -984,6 +1114,27 @@ enum Revalidator {
         nil
       )
     }
+  }
+
+  private static func prototypeMatches(
+    _ action: ActionDefinition,
+    current: ActionPrototype,
+    stage: Stage
+  ) -> Bool {
+    guard stage == .jitAfterPrerequisites,
+      case .gitWorktreeRemove(let expectedContract) = action.prototype.adapterContract,
+      expectedContract.requiresDiscardLocalChanges,
+      case .gitWorktreeRemove(let currentContract) = current.adapterContract
+    else { return current == action.prototype }
+    return !currentContract.requiresDiscardLocalChanges
+      && currentContract.executionBaseline == expectedContract.executionBaseline
+      && currentContract.verifiedEvidence == postPrerequisiteGitEvidence(expectedContract)
+      && current.policyVersion == action.prototype.policyVersion
+      && current.schemaVersion == action.prototype.schemaVersion
+      && current.targetIdentity == action.prototype.targetIdentity
+      && current.namespaceBinding == action.prototype.namespaceBinding
+      && current.protectedProperties == action.prototype.protectedProperties
+      && current.postcondition == action.prototype.postcondition
   }
 
   private static func adapterRequest(
@@ -1104,6 +1255,63 @@ enum Revalidator {
     )
   }
 
+  private static func compareRecoverabilityObservation(
+    _ current: Observation<RecoverabilityState>,
+    expected: Observation<RecoverabilityState>,
+    actionID: ActionID,
+    subject: RevalidationSubject
+  ) -> [RevalidationFinding] {
+    switch expected {
+    case .known(let expectedValue):
+      return compareObservation(
+        current,
+        expected: expectedValue,
+        actionID: actionID,
+        subject: subject,
+        mismatch: .recoverabilityMismatch
+      )
+    case .unknown(let expectedReason):
+      switch current {
+      case .unknown(let currentReason):
+        return currentReason == expectedReason
+          ? []
+          : [
+            RevalidationFinding(
+              actionID: actionID, subject: subject, kind: .recoverabilityMismatch)
+          ]
+      case .known:
+        return [
+          RevalidationFinding(
+            actionID: actionID, subject: subject, kind: .recoverabilityMismatch)
+        ]
+      case .absent:
+        return [RevalidationFinding(actionID: actionID, subject: subject, kind: .missing)]
+      case .unreadable(let failure):
+        return [
+          RevalidationFinding(
+            actionID: actionID, subject: subject, kind: .unreadable,
+            observationFailure: failure)
+        ]
+      case .failed(let failure):
+        return [
+          RevalidationFinding(
+            actionID: actionID, subject: subject, kind: .collectionFailed,
+            observationFailure: failure)
+        ]
+      }
+    case .absent, .unreadable, .failed:
+      return [
+        RevalidationFinding(
+          actionID: actionID,
+          subject: subject,
+          kind: .collectionFailed,
+          observationFailure: ObservationFailure(
+            code: "non-current-frozen-baseline", collector: "immutable-plan")
+        )
+      ]
+    }
+  }
+
   private static func evaluateInvariant(
     _ observation: Observation<Bool>,
     subject: RevalidationSubject,
@@ -1129,11 +1337,16 @@ enum Revalidator {
       remaining.remove(seed)
       while let index = frontier.popLast() {
         let ownerIDs = Set(releaseSets[index].ownerActionIDs)
-        let fileIDs = Set(releaseSets[index].topologyExpectation.fileObjects.map(\.fileObjectID))
+        let fileIDs = Set(
+          releaseSets[index].topologyExpectation.fileObjects.map {
+            RawUTF8Key($0.fileObjectID)
+          })
         let connected = remaining.filter { candidate in
           !ownerIDs.isDisjoint(with: releaseSets[candidate].ownerActionIDs)
             || !fileIDs.isDisjoint(
-              with: releaseSets[candidate].topologyExpectation.fileObjects.map(\.fileObjectID))
+              with: releaseSets[candidate].topologyExpectation.fileObjects.map {
+                RawUTF8Key($0.fileObjectID)
+              })
         }
         for candidate in connected {
           component.insert(candidate)
@@ -1146,9 +1359,8 @@ enum Revalidator {
       result.append(CompoundReleaseUnit(allocationGroupIDs: groups, ownerActionIDs: owners))
     }
     return result.sorted {
-      rawUTF8Precedes(
-        $0.allocationGroupIDs.joined(separator: "\u{0}"),
-        $1.allocationGroupIDs.joined(separator: "\u{0}"))
+      $0.allocationGroupIDs.map(RawUTF8Key.init).lexicographicallyPrecedes(
+        $1.allocationGroupIDs.map(RawUTF8Key.init))
     }
   }
 

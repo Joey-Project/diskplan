@@ -5,6 +5,25 @@ import Foundation
 import Testing
 
 @Test
+func executionReleaseUnitIDsDoNotCollapseCanonicalEquivalentRawUTF8() {
+  let nfc = "\u{00e9}"
+  let nfd = "e\u{0301}"
+  #expect(ExecutionUnitID.compoundRelease([nfc]) != .compoundRelease([nfd]))
+  #expect(
+    CompoundReleaseUnit(allocationGroupIDs: [nfc], ownerActionIDs: [])
+      != CompoundReleaseUnit(allocationGroupIDs: [nfd], ownerActionIDs: []))
+  #expect(
+    Set([ExecutionUnitID.compoundRelease([nfc]), .compoundRelease([nfd])]).count == 2)
+  #expect(RevalidationSubject.releaseTopology(nfc) != .releaseTopology(nfd))
+  #expect(
+    RevalidationSubject.compoundReleaseUnit([nfc])
+      != .compoundReleaseUnit([nfd]))
+  #expect(
+    ReleasePostVerificationOutcome(allocationGroupID: nfc, outcome: .satisfied)
+      != ReleasePostVerificationOutcome(allocationGroupID: nfd, outcome: .satisfied))
+}
+
+@Test
 func bestEffortContinuesIndependentUnitsAndSkipsDependents() async throws {
   let fixture = try MultiActionFixture(includeDependency: true)
   let authorization = try await makeAuthorization(plan: fixture.plan, overlay: fixture.overlay)
@@ -75,6 +94,81 @@ func expectedAdministrativeResidualProducesTypedPartialUnit() async throws {
 }
 
 @Test
+func adapterDispositionRemainsBoundToTheReportedExecutionAttempt() async throws {
+  let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
+  let authorization = try await makeAuthorization(plan: fixture.plan, overlay: fixture.overlay)
+  let adapterFailure = ExecutionAdapterFailure(
+    code: "quarantine-verification-failed-unverified",
+    errno: EIO
+  )
+  let disposition = ExecutionMutationDisposition.gitWorktree(
+    .quarantineBindingUnverified(
+      failureCode: "recovery-namespace-binding-unreadable"))
+  let adapterResult = AdapterOperationResult(
+    outcome: .failed(adapterFailure),
+    mutationDisposition: disposition
+  )
+  let events = RecordingEventSink()
+  let adapter = AttemptScopedRecordingMutationAdapter(result: adapterResult)
+
+  let report = await BestEffortApplyCoordinator(
+    adapter: adapter,
+    eventSink: events,
+    auditSink: nil,
+    clock: { 202 }
+  ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
+
+  let steps = report.unitOutcomes.flatMap(\.steps)
+  #expect(steps.count == 1)
+  #expect(steps.first?.adapterOutcome == .failed(adapterFailure))
+  #expect(steps.first?.mutationDisposition == disposition)
+  #expect(await adapter.postverifiedResult == adapterResult)
+  #expect(
+    await events.events.contains {
+      guard case .execution(.stepFinished(let step)) = $0 else { return false }
+      return step.mutationDisposition == disposition
+    })
+}
+
+@Test
+func attemptCleanupResidualIsVisibleAndMakesSuccessfulMutationPartial() async throws {
+  let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
+  let authorization = try await makeAuthorization(plan: fixture.plan, overlay: fixture.overlay)
+  let cleanupFailure = ExecutionAdapterFailure(code: "remove-unused-quarantine", errno: ENOTEMPTY)
+  let cleanupDisposition = ExecutionCleanupDisposition.gitWorktreeAttemptDirectory(
+    .bindingUnverified(failure: cleanupFailure)
+  )
+  let adapterResult = AdapterOperationResult(
+    outcome: .succeeded(detailCode: "git-worktree-quarantine-removed"),
+    mutationDisposition: .gitWorktree(.removed),
+    cleanupDisposition: cleanupDisposition
+  )
+  let events = RecordingEventSink()
+  let adapter = AttemptScopedRecordingMutationAdapter(
+    result: adapterResult,
+    postOutcome: .satisfied
+  )
+
+  let report = await BestEffortApplyCoordinator(
+    adapter: adapter,
+    eventSink: events,
+    auditSink: nil,
+    clock: { 202 }
+  ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
+
+  let step = report.unitOutcomes.first?.steps.first
+  #expect(step?.status == .partiallySucceeded)
+  #expect(step?.cleanupDisposition == cleanupDisposition)
+  #expect(step?.postVerification == .expectedResidual(cleanupFailure))
+  #expect(report.unitOutcomes.first?.status == .partiallyFailed)
+  #expect(
+    await events.events.contains {
+      guard case .execution(.stepFinished(let eventStep)) = $0 else { return false }
+      return eventStep.cleanupDisposition == cleanupDisposition
+    })
+}
+
+@Test
 func jitIdentityReplacementRejectsBeforeMutation() async throws {
   let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
   let replacement = ObjectIdentity(
@@ -105,6 +199,36 @@ func jitIdentityReplacementRejectsBeforeMutation() async throws {
   #expect(
     report.unitOutcomes.first?.jitReport?.actionOutcomes.first?.findings.map(\.kind)
       .contains(.identityMismatch) == true)
+  #expect(await adapter.appliedActionIDs.isEmpty)
+}
+
+@Test
+func jitRejectsMixedGlobalFactsAcrossOneSnapshot() async throws {
+  let fixture = try ReleaseFixture(
+    content: .explicitlyNotApplicable(.metadataOnlyObject)
+  )
+  let mixedActionID = fixture.ownerActions[0].id
+  let authorization = try await makeAuthorization(
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    jitSource: LiveJITSource(
+      globalFactsConfigurationOverrides: [
+        mixedActionID: Data("different-runtime-configuration".utf8)
+      ]
+    )
+  )
+  let adapter = RecordingMutationAdapter()
+  let report = await BestEffortApplyCoordinator(
+    adapter: adapter,
+    eventSink: RecordingEventSink(),
+    auditSink: nil,
+    clock: { 202 }
+  ).apply(authorization: authorization, plan: fixture.plan, overlay: fixture.overlay)
+
+  #expect(report.unitOutcomes.first?.status == .jitRejected)
+  #expect(
+    report.unitOutcomes.first?.jitReport?.globalFindings.map(\.kind)
+      .contains(.policyEvidenceMismatch) == true)
   #expect(await adapter.appliedActionIDs.isEmpty)
 }
 
@@ -777,12 +901,14 @@ private actor PreparationSnapshotSource: RevalidationEvidenceSource {
         .flatMap(\.jitRevalidationActions).map { ($0.id, $0) }
     ).values.map { currentEvidence($0) }
     let groups = Set(
-      request.validatedOverlay.executionSteps.compactMap { $0.releaseSet?.allocationGroupID })
+      request.validatedOverlay.executionSteps.compactMap {
+        $0.releaseSet.map { RawUTF8Key($0.allocationGroupID) }
+      })
     return CurrentRevalidationSnapshot(
       captureID: digest(90),
       actions: actions,
       releaseTopologies: request.plan.releaseSets.filter {
-        groups.contains($0.allocationGroupID)
+        groups.contains(RawUTF8Key($0.allocationGroupID))
       }.map {
         CurrentReleaseTopology(
           allocationGroupID: $0.allocationGroupID,
@@ -797,6 +923,7 @@ private actor PreparationSnapshotSource: RevalidationEvidenceSource {
 private actor LiveJITSource: JITRevalidationEvidenceSource {
   let identityOverrides: [ActionID: Observation<ObjectIdentity>]
   let freshPolicyOverrides: [ActionID: Observation<FreshPolicyEvidence>]
+  let globalFactsConfigurationOverrides: [ActionID: Data]
   let releaseOutcome: Observation<Bool>
   let fixedCaptureByte: UInt8?
   let nonceOverride: Data?
@@ -810,6 +937,7 @@ private actor LiveJITSource: JITRevalidationEvidenceSource {
   init(
     identityOverrides: [ActionID: Observation<ObjectIdentity>] = [:],
     freshPolicyOverrides: [ActionID: Observation<FreshPolicyEvidence>] = [:],
+    globalFactsConfigurationOverrides: [ActionID: Data] = [:],
     releaseOutcome: Observation<Bool> = .known(true),
     initialCaptureByte: UInt8 = 91,
     fixedCaptureByte: UInt8? = nil,
@@ -820,6 +948,7 @@ private actor LiveJITSource: JITRevalidationEvidenceSource {
   ) {
     self.identityOverrides = identityOverrides
     self.freshPolicyOverrides = freshPolicyOverrides
+    self.globalFactsConfigurationOverrides = globalFactsConfigurationOverrides
     self.releaseOutcome = releaseOutcome
     self.fixedCaptureByte = fixedCaptureByte
     self.nonceOverride = nonceOverride
@@ -850,18 +979,29 @@ private actor LiveJITSource: JITRevalidationEvidenceSource {
       snapshot: CurrentRevalidationSnapshot(
         captureID: captureID,
         actions: request.actionIDs.compactMap { actionID in
-          byID[actionID].map {
-            currentEvidence(
-              $0,
-              identity: identityOverrides[actionID],
-              executionReferenceTimeSeconds: request.epoch.semanticReferenceTimeSeconds,
-              freshCaptureID: captureID,
-              freshPolicyEvidence: freshPolicyOverrides[actionID]
-            )
+          guard let action = byID[actionID] else { return nil }
+          let mixedFacts = globalFactsConfigurationOverrides[actionID].map { configuration in
+            Observation.known(
+              retimedJITPolicyEvidence(
+                action,
+                referenceTimeSeconds: request.epoch.semanticReferenceTimeSeconds,
+                captureID: captureID,
+                configuration: configuration
+              ))
           }
+          return currentEvidence(
+            action,
+            identity: identityOverrides[actionID],
+            executionReferenceTimeSeconds: request.epoch.semanticReferenceTimeSeconds,
+            freshCaptureID: captureID,
+            freshPolicyEvidence: freshPolicyOverrides[actionID] ?? mixedFacts
+          )
         },
         releaseTopologies: request.releaseGroupIDs.compactMap { groupID in
-          request.plan.releaseSets.first(where: { $0.allocationGroupID == groupID }).map {
+          let groupKey = RawUTF8Key(groupID)
+          return request.plan.releaseSets.first(where: {
+            RawUTF8Key($0.allocationGroupID) == groupKey
+          }).map {
             CurrentReleaseTopology(
               allocationGroupID: groupID, topology: .known($0.topologyExpectation))
           }
@@ -966,6 +1106,50 @@ private actor FirstMutationGateAdapter: ExecutionMutationAdapter {
   }
 }
 
+private actor AttemptScopedRecordingMutationAdapter: ExecutionMutationAdapter {
+  let result: AdapterOperationResult
+  let postOutcome: PostVerificationOutcome
+  private(set) var postverifiedResult: AdapterOperationResult?
+
+  init(
+    result: AdapterOperationResult,
+    postOutcome: PostVerificationOutcome = .failed(
+      ObservationFailure(
+        code: "attempt-scoped-recovery-disposition",
+        collector: "attempt-scoped-test-adapter"
+      ))
+  ) {
+    self.result = result
+    self.postOutcome = postOutcome
+  }
+
+  func apply(
+    _: ExecutionAdapterOperation,
+    context _: MutationExecutionContext
+  ) async -> AdapterOperationOutcome {
+    result.outcome
+  }
+
+  func applyResult(
+    _: ExecutionAdapterOperation,
+    context _: MutationExecutionContext
+  ) async -> AdapterOperationResult {
+    result
+  }
+
+  func postverify(_: ExecutionAdapterOperation) async -> PostVerificationOutcome {
+    .unknown(.notRequested)
+  }
+
+  func postverify(
+    _: ExecutionAdapterOperation,
+    result: AdapterOperationResult
+  ) async -> PostVerificationOutcome {
+    postverifiedResult = result
+    return postOutcome
+  }
+}
+
 private final class LockedTestClock: @unchecked Sendable {
   private let lock = NSLock()
   private var value: Int64
@@ -1009,7 +1193,8 @@ private func makeAuthorization(
   let engine = ExecutionPreparationEngine(
     evidenceSource: PreparationSnapshotSource(),
     jitEvidenceSource: jitSource,
-    randomBytes: deterministicEntropy
+    randomBytes: deterministicEntropy,
+    clock: { 201 }
   )
   let prepared = try await engine.prepare(
     plan: plan,
@@ -1117,6 +1302,54 @@ private func matchingFinalDescriptorEvidence(
       )
     }
   )
+}
+
+private func retimedJITPolicyEvidence(
+  _ action: ActionDefinition,
+  referenceTimeSeconds: Int64,
+  captureID: PolicyDigest,
+  configuration: Data
+) -> FreshPolicyEvidence {
+  let source = action.evidence
+  let facts = FrozenGlobalFacts(
+    captureID: captureID,
+    profile: "standard",
+    configuration: configuration,
+    coverage: globalFacts().coverage,
+    semanticReferenceTimeSeconds: referenceTimeSeconds,
+    policyVersion: source.policyVersion,
+    schemaVersion: source.schemaVersion
+  )
+  let evidence = try! FrozenEvidenceSnapshot(
+    captureID: facts.captureID,
+    globalFactsHash: facts.globalFactsHash,
+    candidateID: source.candidateID,
+    namespaceBinding: source.namespaceBinding,
+    identity: source.identity,
+    coverage: source.coverage,
+    collectorStatus: source.collectorStatus,
+    activity: source.activity,
+    explicitProtection: source.explicitProtection,
+    providerState: source.providerState,
+    recoverability: source.recoverability,
+    recoverabilityReviewFacts: source.recoverabilityReviewFacts,
+    dependencyState: source.dependencyState,
+    semanticReviewFacts: source.semanticReviewFacts,
+    accessPolicy: source.accessPolicy,
+    contentProtection: source.contentProtection,
+    aclDigest: source.aclDigest,
+    targetMountIdentity: source.targetMountIdentity,
+    removalForceRequirement: source.removalForceRequirement,
+    quarantineCapability: source.quarantineCapability,
+    gitWorktree: source.gitWorktree,
+    adapterScope: source.adapterScope,
+    additionalAdapterScopes: source.additionalAdapterScopes,
+    classificationClaims: source.classificationClaims,
+    semanticReferenceTimeSeconds: referenceTimeSeconds,
+    policyVersion: source.policyVersion,
+    schemaVersion: source.schemaVersion
+  )
+  return FreshPolicyEvidence(evidence: evidence, globalFacts: facts)
 }
 
 private struct TemporaryRemovalRoot {

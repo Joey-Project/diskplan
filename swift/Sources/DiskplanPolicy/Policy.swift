@@ -314,34 +314,34 @@ public struct PolicyEvaluation: Equatable, Sendable {
     return GateVote(dimension: vote.dimension, result: result)
   }
 
-  func dischargingFullyObservedLocalGitWork(_ changeSetDigest: PolicyDigest) throws -> Self {
-    var discharged = false
-    let votes = votes.map { vote -> GateVote in
-      guard vote.dimension == .recoverability,
-        case .requiresWaiver(let predicates, let reasons) = vote.result
-      else { return vote }
-      let remaining = predicates.filter { predicate in
-        let matches =
-          predicate.kind == .fullyObservedLocalGitWorkDiscard
-          && predicate.semanticEvidenceHash == changeSetDigest
-        discharged = discharged || matches
-        return !matches
-      }
-      let result: GateResult =
-        remaining.isEmpty
-        ? .satisfied(reasons: reasons)
-        : .requiresWaiver(predicates: remaining, reasons: reasons)
-      return GateVote(dimension: vote.dimension, result: result)
-    }
-    guard discharged else { throw PolicyModelError.invalidActionContract }
-    let providerBound = recommendation == .managedByProvider
-    let classificationConflict = recommendation == .classificationConflict
-    return try Self.init(
+  func replacingVotesPreservingContext(_ votes: [GateVote]) throws -> Self {
+    try Self.init(
       votes: votes,
-      providerBound: providerBound,
-      classificationConflict: classificationConflict,
+      providerBound: recommendation == .managedByProvider,
+      classificationConflict: recommendation == .classificationConflict,
       sourceBinding: sourceBinding
     )
+  }
+
+  func blockingUnsupportedGitDiscard(_ changeSetDigest: PolicyDigest) throws -> Self {
+    var blocked = false
+    let votes = votes.map { vote -> GateVote in
+      guard vote.dimension == .recoverability else { return vote }
+      blocked = true
+      return GateVote(
+        dimension: vote.dimension,
+        result: .rejected(
+          reasons: vote.result.reasons + [
+            GateReason(
+              code: "git-worktree-dirty-report-only",
+              semanticEvidenceHash: changeSetDigest
+            )
+          ]
+        )
+      )
+    }
+    guard blocked else { throw PolicyModelError.invalidActionContract }
+    return try replacingVotesPreservingContext(votes)
   }
 
   #if DEBUG
@@ -383,6 +383,15 @@ extension GateResult {
   fileprivate var conditions: [RevalidationCondition] {
     guard case .unmetCondition(let conditions, _) = self else { return [] }
     return conditions
+  }
+
+  fileprivate var reasons: [GateReason] {
+    switch self {
+    case .satisfied(let reasons), .notApplicable(let reasons),
+      .requiresWaiver(_, let reasons), .unmetCondition(_, let reasons),
+      .rejected(let reasons):
+      return reasons
+    }
   }
 }
 

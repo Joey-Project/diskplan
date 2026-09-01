@@ -10,6 +10,9 @@ The coordinator reconstructs the validated overlay DAG and verifies that its exe
 JIT action IDs exactly match the authorized manifest. Ordinary execution steps become one
 unit each. Selected release actions whose APFS release sets share owner ActionIDs or file
 objects are represented by the connected compound units already frozen in the manifest.
+Allocation-group and file-object identities are keyed by raw UTF-8 bytes throughout topology
+lookup, runtime-unit construction, and post-verification; canonically equivalent Swift strings
+do not collapse distinct filesystem identifiers.
 
 A compound unit:
 
@@ -51,7 +54,8 @@ Each JIT request binds the authorization's current binding hash, preparation gen
 epoch/reference time, exact unit actions, exact allocation groups, and a random 32-byte
 one-shot nonce. The collector must echo that envelope and return a complete fresh policy
 snapshot from a capture distinct from both the immutable plan and whole-plan preparation.
-Absent, failed, stale, or reused captures and nonces fail closed. A newer preparation also
+Every action in that snapshot must also bind the same global-facts hash. Absent, failed, stale,
+mixed-global-facts, or reused captures and nonces fail closed. A newer preparation also
 revokes any older authorization that has not yet been claimed.
 
 ## Typed adapters and generic remove
@@ -89,16 +93,67 @@ expiry supervises it with `TERM`, a bounded grace interval, `KILL`, and reap; PO
 normal exit status, terminating signal, cancellation, and timeout stay typed separately.
 
 Git worktree removal uses a dedicated descriptor-bound quarantine adapter. It verifies the
-owner-private source namespace and complete raw-byte subtree coverage, atomically moves the
-exact root into an exclusive same-filesystem quarantine slot, proves the held source and
-destination descriptors name the same object, and repeats coverage before recursive native
-deletion. Verification failure attempts an exclusive restore; restore collision or deletion
-failure retains a typed recovery locator. Only after root deletion may Git prune administrative
-metadata. Cancellation and deadline are checked again before that follow-up starts; a skipped
-or failed cleanup produces an explicit typed residual and a partially successful step without
-changing the root-deletion result. Dirty-worktree discard uses only its dedicated typed Git
-reset/clean operation and verifies the authorized clean successor. Neither Git operation can
-route to generic removal.
+owner-private source namespace and complete raw-byte subtree coverage, creates a per-execution
+unique, exclusive `0700` same-filesystem quarantine directory, and seals its object identity and
+access policy. Before the payload rename commits, every exit attempts to remove only the exact
+still-empty execution directory after descriptor-relative identity and seal revalidation. A
+changed or replaced directory is retained rather than deleted, while the unique next-attempt name
+prevents that retained object from permanently blocking a newly prepared retry. A failure before
+the directory can be fully sealed still compares the descriptor-relative slot with the identity
+captured immediately after `mkdirat`; inability to prove that binding is reported as an unverified
+cleanup residual and never authorizes deletion. Successful payload deletion and successful
+automatic restore also remove the now-empty exact wrapper only after rechecking the held directory
+seal, source-parent seal, and slot identity. Wrapper cleanup failure is orthogonal to the primary
+mutation outcome: cancellation/timeout stays cancellation/timeout, while a successful mutation is
+reported as partial with a typed retained locator or unverified binding. The held source
+parent receives the same runtime seal. UID/GID, mode, ACL, flags,
+device, `fstatfs` mount identity, missing state, unreadability, and collection failure are
+rechecked independently at rename/restore and before deletion. It
+atomically moves the exact root into the fixed leaf, proves the held source and destination
+descriptors name the same object, and repeats coverage before recursive native deletion.
+Verification compares the pre-quarantine and post-quarantine subtree snapshots by protected
+property. Object-identity and content-stability failures may attempt an exclusive restore only
+after rebinding the original namespace and payload identity. Restore repeats the complete subtree
+token immediately before the exclusive rename and again through the restored descriptor before it
+reports the source slot as restored. An access-policy change on the root,
+an ordinary file, a symbolic link, or a descendant directory is never auto-restored: the adapter
+retains the quarantine for manual recovery and publishes a typed locator only after the same
+descriptor-bound namespace and payload revalidation. Restore collision and recursive-deletion
+failure use that same locator-publication gate; an unprovable binding reports an unverified
+recovery state without a pathname. Locator publication needs only a descriptor-relative
+`fstatat(..., AT_SYMLINK_NOFOLLOW)` identity proof for the payload slot, so a mode-`000` retained
+directory remains reportable without reopening or materializing it.
+
+Only after root deletion may the adapter delete administrative metadata, and it deletes only
+the descriptor-bound worktree registration whose full metadata coverage digest was frozen in
+the plan. Immediately before both payload rename and recursive deletion, it rechecks that metadata
+coverage plus the held admin/worktrees/common directory seals and the exact `HEAD` resolution.
+The v1 executable subset supports detached `HEAD` or a canonical loose symbolic ref beneath the
+held common directory; a packed-ref-only symbolic resolution fails closed and stays report-only.
+Immediately before unlinking the registration root, the canonical raw leaf must still name the
+held administrative identity and its parent must still match the captured access/mount seal. The
+descriptor-relative final check followed by `unlinkat` is a point-in-time boundary under the
+accepted trusted-exclusive namespace contract; it does not claim to resist the malicious or
+otherwise unobservable same-UID namespace mutation that the v1 threat model explicitly excludes.
+It never runs repository-
+wide `git worktree prune`, so unrelated registered or stale worktrees remain untouched.
+Cancellation, deadline, or registration identity/coverage drift produces an explicit typed
+residual and a partially successful step without changing the root-deletion result.
+
+Dirty worktrees and every remove chain that requires discarding local changes are report-only in
+v1. The immutable plan retains their observed change set and clean-successor evidence for
+explanation, but policy marks both the discard and dependent remove actions blocked. A waiver
+cannot stage them, apply preparation cannot mint a capability for them, and both the production
+router and quarantine adapter reject them before any Git process starts. Clean descriptor-bound
+quarantine removal remains executable. No Git worktree operation can route to generic removal.
+
+Raw subtree coverage protects three independent properties. Device/inode/type/generation protect
+object identity; owner/group/mode/ACL/flags protect access policy; and size plus digest protect
+content stability. Access fields are excluded from the content digest, so a stable ACL/flag
+change reports an access-policy failure rather than a content mismatch. `mtime`/`ctime` changes only trigger one bounded reread within the same byte
+budget. Matching bytes and identity after that reread are accepted, while byte drift rejects
+even if the file identity is unchanged. Missing, unreadable, failed collection, and each
+property mismatch remain typed separately.
 
 `EngineExecutionComposition` is the production Phase 4/5 factory. It binds one sealed collector
 to the preparation engine, final descriptor verification, JIT/release verification, and a typed
@@ -122,6 +177,18 @@ the compound result partial or failed. The unit
 status is derived from all steps, preserving success, partial failure, failure, cancellation,
 prerequisite skip, JIT rejection, and epoch expiry. Target absence is the generic adapter's
 authoritative ordinary postcondition; free-space deltas are not used as success proof.
+
+Adapter recovery and cleanup dispositions are attempt-scoped values returned atomically with the
+primary outcome. Production post-verification never recovers them from an ActionID cache. The
+same values appear in the step outcome, shell/TUI event, optional audit event, and final report, so
+a retry cannot inherit a stale locator from an earlier attempt.
+
+Successful Git removal also returns a private attempt-scoped post-verification binding captured
+from the held source root and parent descriptors. Post-verification reopens and matches every root
+and parent identity, ACL/access/flag seal, and mount identity before treating the missing target
+slot as success. A missing ancestor, unreadable namespace, binding mismatch, and present target
+remain distinct. An administrative residual is layered on top of that absence proof and cannot
+hide a concurrently recreated source slot.
 
 An expected residual is distinct from an unsatisfied destructive postcondition. The adapter
 returns the successful root mutation separately, post-verification carries the typed residual
