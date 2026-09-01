@@ -416,3 +416,28 @@ superseded_by:
   `7bc83929f79c8678737a5724da0d7fb69194a01ca52394499c61abcb93823e0b`; and strict Swift
   formatting passed. Every final supervisor verified its process group and reported terminal
   quiescence.
+- The branch now contains a signed no-fast-forward merge of production head
+  `381ab8c14a383662a9f0f20945c7dc421c76e9bb`, which adds Scan-owned one-shot fresh-evidence
+  receipts and EngineCore fresh survivor/terminal invariant validation. The merge was conflict-free
+  and does not alter descriptor-bound release composition. Its exact release-composite ownership
+  model remains compatible with the postverification connected-component authority: only an exact
+  owner namespace/identity binding can authorize a composite terminal replacement, while all
+  unrelated aliases and namespace drift remain reject votes.
+- India targeted validation passed all 15 fresh Scan receipt tests in 26.270 supervisor seconds
+  with SHA-256 `5a790f290de787d27af63e79be254c692470204008f188db243054363115fffc`
+  and all 12 fresh invariant tests in 4.318 seconds with SHA-256
+  `3657322419d084d7783a6dc733e09641273f13b823c5d2093feb68d90d33d26d`.
+  The complete Scan suite passed 127 tests in 3.253 seconds with SHA-256
+  `4539baf61b3de1636119116baa954e203164d20f4556b8da51fb9bac0e9fc4b6`. The first parallel
+  EngineCore full run produced eight failures at the same pre-existing asynchronous review-
+  publication assertion; the isolated representative passed, and the authoritative serial full
+  gate then passed all 141 tests in 9.760 seconds with SHA-256
+  `9efc8a91723fd47cfe144ed57f9042bc3c7fa87fd70405058505781cef7f76c6`.
+  Serial full Execution passed all 193 tests in 3.585 seconds with SHA-256
+  `07f7962768bb36a6fd3bbcb4db330dccc79462e44d47330fe0d36e40889139c9`.
+- The India release build passed in 55.940 seconds with SHA-256
+  `4ff0767598517dbca2a9e4eb7f0a7f0c5dee0ae1ad33d7cd873e32072a82ebbc`; the 18-test release
+  validator passed with SHA-256
+  `5b2b5ea9111172196c7541126fdb8c4583ebf35f00bf4dd969e57faa405b1c13`; and strict formatting
+  passed for every newly added or modified Swift source and fixture. Every final supervisor
+  verified its process group and reported terminal quiescence.
