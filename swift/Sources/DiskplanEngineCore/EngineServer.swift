@@ -125,7 +125,7 @@ public enum EngineServer {
     defer {
       coordinator.stopAndWait()
       runtimeLifecycle?.stopAndWait()
-      try? broker.finish()
+      try? broker.finishForLifecycleTeardown()
     }
 
     while let payload = try FrameCodec.read(from: input) {
@@ -288,7 +288,7 @@ public enum EngineServer {
     }
     coordinator.stopAndWait()
     runtimeLifecycle?.stopAndWait()
-    try broker.finish()
+    try broker.finishForLifecycleTeardown()
   }
 
   private static func dispatchRuntime(

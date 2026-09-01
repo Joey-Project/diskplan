@@ -1,5 +1,6 @@
 import DiskplanCore
 import DiskplanProto
+import Darwin
 import Foundation
 import SwiftProtobuf
 
@@ -89,8 +90,7 @@ enum RuntimeResponderWorkerError: Error, Equatable {
 }
 
 private protocol RuntimeResponderQueuedOperation: AnyObject, Sendable {
-  var isCompleted: Bool { get }
-  func execute()
+  func execute() -> () -> Void
   func cancelBeforeExecution(_ error: any Error)
 }
 
@@ -109,20 +109,17 @@ private final class RuntimeResponderOperation<Value: Sendable>: RuntimeResponder
     self.continuation = continuation
   }
 
-  var isCompleted: Bool {
-    lock.withLock { continuation == nil }
-  }
-
-  func execute() {
+  func execute() -> () -> Void {
     let operation: (@Sendable () throws -> Value)? = lock.withLock {
       defer { self.operation = nil }
       return self.operation
     }
-    guard let operation else { return }
+    guard let operation else { return {} }
     do {
-      complete(.success(try operation()))
+      let result = try operation()
+      return { self.complete(.success(result)) }
     } catch {
-      complete(.failure(error))
+      return { self.complete(.failure(error)) }
     }
   }
 
@@ -173,6 +170,7 @@ private enum RuntimeResponderCancellationOutcome {
 private final class RuntimeResponderWorker: @unchecked Sendable {
   private let condition = NSCondition()
   private let maximumPending: Int
+  private let beforeCompletionResumeForTesting: (@Sendable () -> Void)?
   private var pending: [any RuntimeResponderQueuedOperation] = []
   private var active: (any RuntimeResponderQueuedOperation)?
   private var accepting = true
@@ -180,9 +178,13 @@ private final class RuntimeResponderWorker: @unchecked Sendable {
   private var threadStartCount = 0
   private var maximumObservedActiveCount = 0
 
-  init(maximumPending: Int) {
+  init(
+    maximumPending: Int,
+    beforeCompletionResumeForTesting: (@Sendable () -> Void)? = nil
+  ) {
     precondition(maximumPending > 0)
     self.maximumPending = maximumPending
+    self.beforeCompletionResumeForTesting = beforeCompletionResumeForTesting
     let thread = Thread { [self] in drain() }
     thread.name = "diskplan-runtime-responder-worker"
     condition.lock()
@@ -253,6 +255,10 @@ private final class RuntimeResponderWorker: @unchecked Sendable {
     condition.withLock { pending.count }
   }
 
+  var isAcceptingForTesting: Bool {
+    condition.withLock { accepting }
+  }
+
   private func enqueue(_ item: any RuntimeResponderQueuedOperation) {
     condition.lock()
     if !accepting {
@@ -282,7 +288,7 @@ private final class RuntimeResponderWorker: @unchecked Sendable {
       cancelled.cancelBeforeExecution(CancellationError())
       return .cancelledBeforeExecution
     }
-    if active === item, !item.isCompleted {
+    if active === item {
       condition.unlock()
       return .executing
     }
@@ -305,13 +311,119 @@ private final class RuntimeResponderWorker: @unchecked Sendable {
       maximumObservedActiveCount = max(maximumObservedActiveCount, 1)
       condition.unlock()
 
-      item.execute()
+      let complete = item.execute()
 
       condition.lock()
       if active === item { active = nil }
       condition.broadcast()
       condition.unlock()
+
+      beforeCompletionResumeForTesting?()
+      complete()
     }
+  }
+}
+
+private enum InterruptibleFrameWriterError: Error, CustomStringConvertible {
+  case setupFailed(Int32)
+  case interrupted
+  case writeFailed(Int32)
+
+  var description: String {
+    switch self {
+    case .setupFailed(let code):
+      "could not configure nonblocking engine output: errno \(code)"
+    case .interrupted:
+      "engine output was interrupted during lifecycle teardown"
+    case .writeFailed(let code):
+      "engine output write failed: errno \(code)"
+    }
+  }
+}
+
+/// The production stdout writer never enters a blocking write syscall. When
+/// pipe capacity is exhausted it waits on this condition in short readiness
+/// probes, so lifecycle interruption wakes it without closing a FileHandle
+/// concurrently with Foundation I/O.
+private final class InterruptibleFrameWriter: @unchecked Sendable {
+  private let condition = NSCondition()
+  private let fileDescriptor: Int32
+  private let setupError: Int32?
+  private var interrupted = false
+  private var waitingForCapacity = false
+
+  init(output: FileHandle) {
+    fileDescriptor = output.fileDescriptor
+    let flags = fcntl(fileDescriptor, F_GETFL)
+    if flags == -1 || fcntl(fileDescriptor, F_SETFL, flags | O_NONBLOCK) == -1
+      || fcntl(fileDescriptor, F_SETNOSIGPIPE, 1) == -1
+    {
+      setupError = errno
+    } else {
+      setupError = nil
+    }
+  }
+
+  func write(_ payload: Data) throws {
+    if let setupError { throw InterruptibleFrameWriterError.setupFailed(setupError) }
+    guard payload.count <= maximumFrameLength else {
+      throw FrameError.oversized(length: payload.count, maximum: maximumFrameLength)
+    }
+    var length = UInt32(payload.count).bigEndian
+    try Swift.withUnsafeBytes(of: &length) { bytes in
+      try writeAll(bytes)
+    }
+    try payload.withUnsafeBytes { bytes in
+      try writeAll(bytes)
+    }
+  }
+
+  func interrupt() {
+    condition.lock()
+    interrupted = true
+    condition.broadcast()
+    condition.unlock()
+  }
+
+  var isBlocked: Bool {
+    condition.withLock { waitingForCapacity }
+  }
+
+  private func writeAll(_ bytes: UnsafeRawBufferPointer) throws {
+    var offset = 0
+    while offset < bytes.count {
+      try checkInterrupted()
+      let count = Darwin.write(
+        fileDescriptor,
+        bytes.baseAddress!.advanced(by: offset),
+        bytes.count - offset
+      )
+      if count > 0 {
+        offset += count
+        continue
+      }
+      if count == -1, errno == EINTR { continue }
+      if count == -1, errno == EAGAIN || errno == EWOULDBLOCK {
+        condition.lock()
+        waitingForCapacity = true
+        if !interrupted {
+          _ = condition.wait(until: Date(timeIntervalSinceNow: 0.01))
+        }
+        waitingForCapacity = false
+        let wasInterrupted = interrupted
+        condition.unlock()
+        if wasInterrupted { throw InterruptibleFrameWriterError.interrupted }
+        continue
+      }
+      throw InterruptibleFrameWriterError.writeFailed(errno)
+    }
+  }
+
+  private func checkInterrupted() throws {
+    condition.lock()
+    let wasInterrupted = interrupted
+    condition.unlock()
+    if wasInterrupted { throw InterruptibleFrameWriterError.interrupted }
   }
 }
 
@@ -324,7 +436,8 @@ final class SerialEventBroker: @unchecked Sendable {
   private let semanticCapacity: Int
   private let writer: Writer
   private let interruptWriter: @Sendable () -> Void
-  private let runtimeResponderWorker = RuntimeResponderWorker(maximumPending: 128)
+  private let writerIsBlocked: @Sendable () -> Bool
+  private let runtimeResponderWorker: RuntimeResponderWorker
   private var pending: [PendingOutput] = []
   private var semanticCount = 0
   private var inFlightCount = 0
@@ -340,12 +453,19 @@ final class SerialEventBroker: @unchecked Sendable {
   init(
     semanticCapacity: Int = 128,
     writer: @escaping Writer,
-    interruptWriter: @escaping @Sendable () -> Void = {}
+    interruptWriter: @escaping @Sendable () -> Void = {},
+    writerIsBlocked: @escaping @Sendable () -> Bool = { false },
+    responderCompletionHookForTesting: (@Sendable () -> Void)? = nil
   ) {
     precondition(semanticCapacity > 0)
     self.semanticCapacity = semanticCapacity
     self.writer = writer
     self.interruptWriter = interruptWriter
+    self.writerIsBlocked = writerIsBlocked
+    runtimeResponderWorker = RuntimeResponderWorker(
+      maximumPending: 128,
+      beforeCompletionResumeForTesting: responderCompletionHookForTesting
+    )
     Thread { [self] in drain() }.start()
   }
 
@@ -353,13 +473,17 @@ final class SerialEventBroker: @unchecked Sendable {
     output: FileHandle,
     semanticCapacity: Int = 128
   ) {
+    let outputWriter = InterruptibleFrameWriter(output: output)
     self.init(
       semanticCapacity: semanticCapacity,
       writer: { data in
-        try FrameCodec.write(data, to: output)
+        try outputWriter.write(data)
       },
       interruptWriter: {
-        try? output.close()
+        outputWriter.interrupt()
+      },
+      writerIsBlocked: {
+        outputWriter.isBlocked
       }
     )
   }
@@ -381,13 +505,18 @@ final class SerialEventBroker: @unchecked Sendable {
   /// already executing, the transport is failed closed and its writer is
   /// interrupted before joining the worker so lifecycle shutdown cannot wait
   /// behind an unread stdout pipe.
-  func stopRuntimeResponderOperationsAndWait() {
+  func stopRuntimeResponderOperationsAndWait(
+    interruptingInFlightWriter: Bool = false
+  ) {
     let hadActiveOperation = runtimeResponderWorker.beginStop()
-    if hadActiveOperation {
+    let hadInFlightWriter = condition.withLock { inFlightCount != 0 }
+    let hadBlockedWriter = hadInFlightWriter && writerIsBlocked()
+    let shouldInterrupt = hadActiveOperation || (interruptingInFlightWriter && hadBlockedWriter)
+    if shouldInterrupt {
       failAndInterrupt("runtime responder lifecycle stopped during transport")
     }
     runtimeResponderWorker.waitUntilStopped()
-    if hadActiveOperation { waitUntilFinished() }
+    if shouldInterrupt { waitUntilFinished() }
   }
 
   func runtimeResponderWorkerThreadStartCountForTesting() -> Int {
@@ -400,6 +529,10 @@ final class SerialEventBroker: @unchecked Sendable {
 
   func runtimeResponderPendingCountForTesting() -> Int {
     runtimeResponderWorker.pendingCountForTesting
+  }
+
+  func runtimeResponderIsAcceptingForTesting() -> Bool {
+    runtimeResponderWorker.isAcceptingForTesting
   }
 
   func sendEnvelope(
@@ -559,6 +692,32 @@ final class SerialEventBroker: @unchecked Sendable {
     let failure = failure
     condition.unlock()
     if let failure { throw failure }
+  }
+
+  /// Hard lifecycle teardown used after the input side reaches EOF or fails.
+  /// A healthy writer drains normally. A writer waiting on transport capacity
+  /// is failed closed and interrupted so teardown never waits behind a peer
+  /// that no longer reads the transport.
+  func finishForLifecycleTeardown() throws {
+    stopRuntimeResponderOperationsAndWait(interruptingInFlightWriter: true)
+    condition.lock()
+    closing = true
+    condition.broadcast()
+    condition.unlock()
+    while true {
+      condition.lock()
+      if finished {
+        condition.unlock()
+        break
+      }
+      _ = condition.wait(until: Date(timeIntervalSinceNow: 0.01))
+      condition.unlock()
+      if writerIsBlocked() {
+        failAndInterrupt("broker lifecycle stopped with blocked output")
+      }
+    }
+    let terminalFailure: EventBrokerError? = condition.withLock { self.failure }
+    if let terminalFailure { throw terminalFailure }
   }
 
   func failClosed(_ summary: String) {

@@ -692,6 +692,62 @@ import Testing
   try broker.finish()
 }
 
+@Test func runtimeResponderCompletionClearsItsWorkerSlotBeforeSuccessIsVisible() async throws {
+  let beforeResume = RuntimePositiveOneShotSignal()
+  let allowResume = AuthorityTestGate()
+  let writer = RuntimePositiveWriter()
+  let executions = RuntimePositiveCounter()
+  let broker = SerialEventBroker(
+    writer: { _ in },
+    interruptWriter: { writer.interrupt() },
+    responderCompletionHookForTesting: {
+      beforeResume.signal()
+      allowResume.wait()
+    }
+  )
+  let operation = Task {
+    try await broker.performRuntimeResponderOperation {
+      executions.increment()
+      return 7
+    }
+  }
+  try #require(await beforeResume.wait())
+  let finish = runtimePositiveBlockingTask { try broker.finish() }
+  try #require(
+    await runtimeEventually {
+      !broker.runtimeResponderIsAcceptingForTesting()
+    })
+
+  #expect(writer.interruptCount == 0)
+  allowResume.open()
+  #expect(try await operation.value == 7)
+  try await finish.value
+  #expect(executions.value == 1)
+  #expect(writer.interruptCount == 0)
+}
+
+@Test func brokerLifecycleFinishInterruptsBlockedPlainEnvelopeWithoutRuntimeActivity() async throws {
+  let writer = RuntimePositiveWriter()
+  let broker = SerialEventBroker(
+    writer: { try writer.write($0) },
+    interruptWriter: { writer.interrupt() },
+    writerIsBlocked: { writer.isBlocked }
+  )
+  writer.blockNextWrite()
+  try broker.sendEnvelope(
+    sequence: 1,
+    body: .helloRejected(Handshake.rejection(.malformedEnvelope, detail: "fixture"))
+  )
+  try #require(await writer.waitUntilBlocked())
+  #expect(broker.runtimeResponderMaximumActiveCountForTesting() == 0)
+
+  let finish = runtimePositiveBlockingTask { try broker.finishForLifecycleTeardown() }
+  await #expect(throws: (any Error).self) {
+    try await finish.value
+  }
+  #expect(writer.interruptCount == 1)
+}
+
 @Test func runtimeBatchReservationPreventsLaterSemanticProducerOvertaking() async throws {
   let writer = RuntimePositiveWriter()
   writer.block(at: .applyStarted)
@@ -1853,6 +1909,26 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
   #expect(writer.interruptCount == 1)
   #expect(fixture.broker.runtimeResponderPendingCountForTesting() == 0)
   #expect(throws: (any Error).self) { try fixture.broker.finish() }
+}
+
+@Test func controllerStopInterruptsBlockedPlainBrokerOutputWithResponderIdle() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: false)
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  writer.blockNextWrite()
+  try fixture.broker.sendEnvelope(
+    sequence: 99,
+    body: .helloRejected(Handshake.rejection(.malformedEnvelope, detail: "fixture"))
+  )
+  try #require(await writer.waitUntilBlocked())
+  #expect(fixture.broker.runtimeResponderMaximumActiveCountForTesting() == 0)
+
+  try await runtimePositiveBlockingTask {
+    fixture.controller.stopAndWait()
+  }.value
+
+  #expect(writer.interruptCount == 1)
+  #expect(throws: (any Error).self) { try fixture.broker.finishForLifecycleTeardown() }
 }
 
 @Test func controllerCancelsAndAwaitsInvalidStartedRun() async throws {
@@ -3570,6 +3646,19 @@ private final class AuthorityTestFlag: @unchecked Sendable {
   }
 }
 
+private final class RuntimePositiveCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+
+  func increment() {
+    lock.withLock { count += 1 }
+  }
+
+  var value: Int {
+    lock.withLock { count }
+  }
+}
+
 private final class RuntimePositiveGate: @unchecked Sendable {
   private let enteredSignal = RuntimePositiveOneShotSignal()
   private let openedSignal = RuntimePositiveOneShotSignal()
@@ -3827,6 +3916,8 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
   private var observeReviewInstallation = false
   private var observedInstalledReview = false
   private var interruptions = 0
+  private var blockNext = false
+  private var blocked = false
 
   func observeInstalledReview() {
     condition.lock()
@@ -3845,6 +3936,13 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
   func block(at point: RuntimePositiveWritePoint) {
     condition.lock()
     blockingPoint = point
+    condition.unlock()
+  }
+
+  func blockNextWrite() {
+    condition.lock()
+    blockNext = true
+    released = false
     condition.unlock()
   }
 
@@ -3871,6 +3969,10 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
     condition.withLock { interruptions }
   }
 
+  var isBlocked: Bool {
+    condition.withLock { blocked }
+  }
+
   var sawInstalledReview: Bool {
     condition.lock()
     defer { condition.unlock() }
@@ -3886,14 +3988,18 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
   func write(_ data: Data) throws {
     let point = Self.writePoint(data)
     condition.lock()
+    let shouldBlockNext = blockNext
+    if shouldBlockNext { blockNext = false }
     if let point { writeCounts[point, default: 0] += 1 }
     if point == .applyReview, observeReviewInstallation {
       observedInstalledReview = controller?.preparedApplyReviewIDForTesting() != nil
     }
-    if let blockingPoint, point == blockingPoint {
+    if shouldBlockNext || blockingPoint.map({ point == $0 }) == true {
+      blocked = true
       condition.broadcast()
       blockedSignal.signal()
       while !released { condition.wait() }
+      blocked = false
     }
     let shouldFail =
       failurePoint.map {
@@ -3953,6 +4059,9 @@ private func runtimePositiveFixture(
     },
     interruptWriter: {
       writer?.interrupt()
+    },
+    writerIsBlocked: {
+      writer?.isBlocked ?? false
     }
   )
   let gateHook: (@Sendable () async throws -> Void)? = reviewCommitGate.map { gate in

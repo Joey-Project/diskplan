@@ -867,7 +867,9 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
 
     run?.cancel()
     for task in tasks { task.cancel() }
-    for broker in brokers { broker.stopRuntimeResponderOperationsAndWait() }
+    for broker in brokers {
+      broker.stopRuntimeResponderOperationsAndWait(interruptingInFlightWriter: true)
+    }
 
     taskCondition.lock()
     while !ownedTasks.isEmpty { taskCondition.wait() }
@@ -883,7 +885,9 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     responderBrokers[ObjectIdentifier(broker)] = broker
     let shouldStop = stopping
     lock.unlock()
-    if shouldStop { broker.stopRuntimeResponderOperationsAndWait() }
+    if shouldStop {
+      broker.stopRuntimeResponderOperationsAndWait(interruptingInFlightWriter: true)
+    }
   }
 
   @discardableResult

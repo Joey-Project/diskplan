@@ -44,6 +44,13 @@ superseded_by:
   fails closed plus interrupts the transport when an operation is already executing. In-flight
   batch acknowledgements are resolved exactly once, the writer and worker are joined before EOF
   teardown returns, and broker finish remains idempotent.
+- Worker completion clears the active slot under the worker condition before exposing its result
+  through the checked continuation. A concurrent stop therefore cannot reinterpret an already
+  acknowledged success as active transport and cannot trigger a spurious writer interruption.
+- Production broker output uses one nonblocking POSIX frame writer with `F_SETNOSIGPIPE`. A full
+  pipe waits on an interruptible condition instead of inside Foundation I/O; orderly finish drains
+  a healthy writer, while controller stop and EOF hard teardown detect actual blocked-writer state,
+  fail closed, wake the writer, and join it without closing a `FileHandle` from another thread.
 - The registered execution ID becomes visible through an early `apply_started` prefix. One exact
   cancellation mirrors the same prefix, appends one typed acknowledgement, cancels the retained
   run, and gives both pending requests the same sealed terminal stream.
@@ -251,6 +258,19 @@ superseded_by:
   and `7f6025d469e80d362f5461f1cd7814a95f0ea31b07e7e9d6a9d9333eee52e47a`. After the final
   capacity and completed-operation cancellation-race assertions, all 641 tests passed once more
   with output SHA-256 `6aad600df636890d29818dfc3e4674573b399327e58217f0aa3c992bf1a3b2a9`.
+- A second frozen review found that shutdown still keyed writer interruption only to responder
+  activity and that continuation resume preceded active-slot clearance. The final strict set now
+  includes deterministic completion-before-resume, blocked plain-envelope EOF, and blocked plain
+  output with an idle responder worker. All 12 tests passed with supervisor output SHA-256
+  `2514e862a67a4c8f0d95574a9bdddbd0df79c7f8142fa3fce81b036009ff3a0a`.
+- The final exact build passed with output SHA-256
+  `d130417fe4621812a2e7be00dcdf03367c9806180380b5b2707db4feeba86913`. Two full Foundation runs
+  passed all 644 tests before the final no-SIGPIPE hardening, with output SHA-256 values
+  `05843c5e038dd0496596d3896d262bf3a10b8d37469c5c34f0e437f4cf15bea1` and
+  `5b5e0900070df7437259dd5c706e45708026c76ee4b07c470d403e70f5563e6b`; the final source then
+  passed all 644 tests with output SHA-256
+  `6f4c80dd07056f19431717c67bd7c4d2d8335b22e4445a57b586dddd32a9c301`. Every successful
+  supervisor verified its process group and ended quiescent.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races. Bridge
