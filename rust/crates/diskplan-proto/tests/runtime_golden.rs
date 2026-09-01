@@ -3,11 +3,12 @@ use std::path::PathBuf;
 
 use diskplan_proto::decode_canonical_envelope;
 use diskplan_proto::diskplan::v1::{
-    Digest256, ExecutionStreamEvent, envelope, execution_stream_event, runtime_event,
+    Digest256, ExecutionStreamEvent, ExecutionStreamFailureKind, envelope, execution_stream_event,
+    runtime_event,
 };
 use diskplan_proto::runtime::{
     MAXIMUM_PLAN_PROJECTION_MANIFEST_BYTES, MAXIMUM_PLAN_PROJECTION_RAW_CHUNK_BYTES,
-    MAXIMUM_PLAN_PROJECTION_RECORD_COUNT, PROTOCOL14_MINOR, PROTOCOL15_MINOR,
+    MAXIMUM_PLAN_PROJECTION_RECORD_COUNT, PROTOCOL14_MINOR, PROTOCOL15_MINOR, PROTOCOL16_MINOR,
     decode_and_verify_plan_projection, escape_raw_working_directory,
 };
 use diskplan_proto::sealed::{
@@ -27,7 +28,9 @@ fn swift_runtime_vectors_are_canonical_and_strictly_verified() {
         "version-survivor-action",
     ] {
         verify_fixture("runtime-v1.5", PROTOCOL15_MINOR, name);
+        verify_fixture("runtime-v1.6", PROTOCOL16_MINOR, name);
     }
+    verify_fixture("runtime-v1.6", PROTOCOL16_MINOR, "execution-stream-failure");
 
     let accepted = fixture_chain_artifacts("runtime-v1.5", PROTOCOL15_MINOR, "empty-batch-dry-run");
     let foreign =
@@ -43,6 +46,93 @@ fn swift_runtime_vectors_are_canonical_and_strictly_verified() {
             .verify_execution_stream(&foreign.execution_events)
             .is_err()
     );
+}
+
+#[test]
+fn protocol16_failure_terminal_rejects_old_minors_and_tampering() {
+    let artifacts =
+        fixture_chain_artifacts("runtime-v1.6", PROTOCOL16_MINOR, "execution-stream-failure");
+    decode_and_verify_execution_stream(PROTOCOL16_MINOR, &artifacts.execution_events).unwrap();
+    assert!(
+        decode_and_verify_execution_stream(PROTOCOL15_MINOR, &artifacts.execution_events).is_err()
+    );
+    assert!(
+        decode_and_verify_execution_stream(PROTOCOL14_MINOR, &artifacts.execution_events).is_err()
+    );
+
+    let mutate_terminal =
+        |mutator: fn(&mut diskplan_proto::diskplan::v1::ExecutionStreamFailureProjection)| {
+            let mut events = artifacts.execution_events.clone();
+            let mut terminal =
+                ExecutionStreamEvent::decode(events.last().unwrap().as_slice()).unwrap();
+            let Some(execution_stream_event::Body::ExecutionStreamFailure(failure)) =
+                terminal.body.as_mut()
+            else {
+                panic!("failure fixture omitted its failure terminal")
+            };
+            mutator(failure);
+            *events.last_mut().unwrap() = terminal.encode_to_vec();
+            reseal_execution_stream(&mut events);
+            events
+        };
+
+    let mutation_false = mutate_terminal(|failure| failure.mutation_may_have_occurred = false);
+    assert!(decode_and_verify_execution_stream(PROTOCOL16_MINOR, &mutation_false).is_err());
+
+    let unspecified = mutate_terminal(|failure| {
+        failure.kind = ExecutionStreamFailureKind::Unspecified as i32;
+    });
+    assert!(decode_and_verify_execution_stream(PROTOCOL16_MINOR, &unspecified).is_err());
+
+    let foreign_execution = mutate_terminal(|failure| {
+        failure.execution_id.as_mut().unwrap().value = b"foreign-execution".to_vec();
+    });
+    assert!(decode_and_verify_execution_stream(PROTOCOL16_MINOR, &foreign_execution).is_err());
+
+    let foreign_review = mutate_terminal(|failure| {
+        failure.apply_review_id.as_mut().unwrap().value = b"foreign-review".to_vec();
+    });
+    assert!(decode_and_verify_execution_stream(PROTOCOL16_MINOR, &foreign_review).is_err());
+
+    let foreign_binding = mutate_terminal(|failure| {
+        failure.review_binding_sha256.as_mut().unwrap().value[0] ^= 1;
+    });
+    assert!(decode_and_verify_execution_stream(PROTOCOL16_MINOR, &foreign_binding).is_err());
+
+    let mut missing_started = artifacts.execution_events.clone();
+    missing_started.remove(0);
+    reseal_execution_stream(&mut missing_started);
+    assert!(decode_and_verify_execution_stream(PROTOCOL16_MINOR, &missing_started).is_err());
+
+    for mutator in [
+        |failure: &mut diskplan_proto::diskplan::v1::ExecutionStreamFailureProjection| {
+            failure.event_count += 1;
+        },
+        |failure: &mut diskplan_proto::diskplan::v1::ExecutionStreamFailureProjection| {
+            failure.encoded_event_bytes += 1;
+        },
+        |failure: &mut diskplan_proto::diskplan::v1::ExecutionStreamFailureProjection| {
+            failure.maximum_event_count -= 1;
+        },
+        |failure: &mut diskplan_proto::diskplan::v1::ExecutionStreamFailureProjection| {
+            failure.maximum_encoded_event_bytes -= 1;
+        },
+    ] {
+        let mut events = artifacts.execution_events.clone();
+        let mut terminal = ExecutionStreamEvent::decode(events.last().unwrap().as_slice()).unwrap();
+        let Some(execution_stream_event::Body::ExecutionStreamFailure(failure)) =
+            terminal.body.as_mut()
+        else {
+            unreachable!()
+        };
+        mutator(failure);
+        *events.last_mut().unwrap() = terminal.encode_to_vec();
+        assert!(decode_and_verify_execution_stream(PROTOCOL16_MINOR, &events).is_err());
+    }
+
+    let mut digest = artifacts.execution_events.clone();
+    *digest.last_mut().unwrap().last_mut().unwrap() ^= 1;
+    assert!(decode_and_verify_execution_stream(PROTOCOL16_MINOR, &digest).is_err());
 }
 
 #[test]
@@ -375,6 +465,8 @@ fn verify_fixture(schema: &str, protocol_minor: u32, name: &str) {
                     Some(
                         diskplan_proto::diskplan::v1::execution_stream_event::Body::ApplyFinished(
                             _
+                        ) | diskplan_proto::diskplan::v1::execution_stream_event::Body::ExecutionStreamFailure(
+                            _
                         )
                     )
                 ) {
@@ -519,24 +611,32 @@ fn reseal_execution_stream(canonical_events: &mut Vec<Vec<u8>>) {
     }
     let terminal_index = events.len() - 1;
     let event_count = events.len() as u64;
-    let Some(execution_stream_event::Body::ApplyFinished(terminal)) =
-        events[terminal_index].body.as_mut()
-    else {
-        panic!("fixture execution stream omitted terminal")
+    match events[terminal_index].body.as_mut() {
+        Some(execution_stream_event::Body::ApplyFinished(terminal)) => {
+            terminal.event_count = event_count;
+            terminal.execution_record_sha256 = None;
+        }
+        Some(execution_stream_event::Body::ExecutionStreamFailure(terminal)) => {
+            terminal.event_count = event_count;
+            terminal.execution_record_sha256 = None;
+        }
+        _ => panic!("fixture execution stream omitted terminal"),
     };
-    terminal.event_count = event_count;
-    terminal.execution_record_sha256 = None;
 
     let mut candidate = 0_u64;
     let mut stable_canonical = None;
     for _ in 0..10 {
-        let Some(execution_stream_event::Body::ApplyFinished(terminal)) =
-            events[terminal_index].body.as_mut()
-        else {
-            unreachable!()
+        match events[terminal_index].body.as_mut() {
+            Some(execution_stream_event::Body::ApplyFinished(terminal)) => {
+                terminal.encoded_event_bytes = candidate;
+                terminal.execution_record_sha256 = None;
+            }
+            Some(execution_stream_event::Body::ExecutionStreamFailure(terminal)) => {
+                terminal.encoded_event_bytes = candidate;
+                terminal.execution_record_sha256 = None;
+            }
+            _ => unreachable!(),
         };
-        terminal.encoded_event_bytes = candidate;
-        terminal.execution_record_sha256 = None;
         let bytes = canonical_execution_bytes(&events);
         let next = bytes.len() as u64;
         if next == candidate {
@@ -553,14 +653,19 @@ fn reseal_execution_stream(canonical_events: &mut Vec<Vec<u8>>) {
         ]
         .concat(),
     );
-    let Some(execution_stream_event::Body::ApplyFinished(terminal)) =
-        events[terminal_index].body.as_mut()
-    else {
-        unreachable!()
+    match events[terminal_index].body.as_mut() {
+        Some(execution_stream_event::Body::ApplyFinished(terminal)) => {
+            terminal.execution_record_sha256 = Some(Digest256 {
+                value: digest.to_vec(),
+            });
+        }
+        Some(execution_stream_event::Body::ExecutionStreamFailure(terminal)) => {
+            terminal.execution_record_sha256 = Some(Digest256 {
+                value: digest.to_vec(),
+            });
+        }
+        _ => unreachable!(),
     };
-    terminal.execution_record_sha256 = Some(Digest256 {
-        value: digest.to_vec(),
-    });
     *canonical_events = events
         .into_iter()
         .map(|event| event.encode_to_vec())
@@ -572,11 +677,15 @@ fn canonical_execution_bytes(events: &[ExecutionStreamEvent]) -> Vec<u8> {
     for (index, event) in events.iter().enumerate() {
         let mut event = event.clone();
         if index + 1 == events.len() {
-            let Some(execution_stream_event::Body::ApplyFinished(terminal)) = event.body.as_mut()
-            else {
-                panic!("fixture execution stream omitted terminal")
+            match event.body.as_mut() {
+                Some(execution_stream_event::Body::ApplyFinished(terminal)) => {
+                    terminal.execution_record_sha256 = None;
+                }
+                Some(execution_stream_event::Body::ExecutionStreamFailure(terminal)) => {
+                    terminal.execution_record_sha256 = None;
+                }
+                _ => panic!("fixture execution stream omitted terminal"),
             };
-            terminal.execution_record_sha256 = None;
         }
         let bytes = event.encode_to_vec();
         output.extend_from_slice(&(bytes.len() as u32).to_be_bytes());

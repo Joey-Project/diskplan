@@ -8,7 +8,7 @@ use diskplan_proto::diskplan::v1::{
     DecisionOverlayEdit, Digest256, OpaqueIdentifier, PrepareDryRunRequest, ScanMachineState,
     StageActionEdit, decision_overlay_edit, engine_event, runtime_event,
 };
-use diskplan_proto::runtime::PROTOCOL15_MINOR;
+use diskplan_proto::runtime::PROTOCOL16_MINOR;
 use diskplan_proto::sealed::RuntimeChainVerifier;
 
 use crate::runtime_client::{
@@ -479,8 +479,8 @@ fn validate_apply_review_transport(
     selected_minor: u32,
     has_execution_stream_capability: bool,
 ) -> Result<(), &'static str> {
-    if selected_minor != PROTOCOL15_MINOR {
-        return Err("exact protocol minor 1.5 is required for mutation review");
+    if selected_minor != PROTOCOL16_MINOR {
+        return Err("exact protocol minor 1.6 is required for mutation review");
     }
     if !has_execution_stream_capability {
         return Err("execution-stream-v1 was not negotiated by the runtime controller");
@@ -570,18 +570,18 @@ mod tests {
     fn apply_review_transport_requires_exact_minor_and_execution_capability() {
         assert_eq!(
             validate_apply_review_transport(4, true),
-            Err("exact protocol minor 1.5 is required for mutation review")
+            Err("exact protocol minor 1.6 is required for mutation review")
         );
         assert_eq!(
             validate_apply_review_transport(6, true),
-            Err("exact protocol minor 1.5 is required for mutation review")
+            Err("exact protocol minor 1.6 is required for mutation review")
         );
         assert_eq!(
-            validate_apply_review_transport(PROTOCOL15_MINOR, false),
+            validate_apply_review_transport(PROTOCOL16_MINOR, false),
             Err("execution-stream-v1 was not negotiated by the runtime controller")
         );
         assert_eq!(
-            validate_apply_review_transport(PROTOCOL15_MINOR, true),
+            validate_apply_review_transport(PROTOCOL16_MINOR, true),
             Ok(())
         );
     }

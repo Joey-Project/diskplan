@@ -245,7 +245,7 @@ class VersionMetadataTests(unittest.TestCase):
             protocol_contract_fixture.rewrite_contract(
                 source,
                 output,
-                "1.5",
+                "1.6",
                 "2.4",
             )
             self.assertEqual(output.read_bytes(), expected_bytes)
@@ -270,7 +270,7 @@ class VersionMetadataTests(unittest.TestCase):
             )
             by_path = {item["bundle_path"]: item for item in contract["artifacts"]}
             by_path["protocol.json"]["compatibility_version"] = "local-install-v1"
-            by_path["release-common.sh"]["compatibility_version"] = "protocol-1.5"
+            by_path["release-common.sh"]["compatibility_version"] = "protocol-1.6"
             source.write_bytes(packager.canonical_compact_json(contract))
             with self.assertRaisesRegex(
                 ValueError,
@@ -279,7 +279,7 @@ class VersionMetadataTests(unittest.TestCase):
                 protocol_contract_fixture.rewrite_contract(
                     source,
                     output,
-                    "1.5",
+                    "1.6",
                     "2.4",
                 )
             self.assertFalse(output.exists())
@@ -307,7 +307,7 @@ class VersionMetadataTests(unittest.TestCase):
                 protocol_contract_fixture.rewrite_contract(
                     source,
                     output,
-                    "1.5",
+                    "1.6",
                     "2.4",
                 )
             self.assertFalse(output.exists())
@@ -919,6 +919,150 @@ class StagedFileTests(unittest.TestCase):
             finally:
                 staged.close()
 
+    def test_source_revalidation_distinguishes_missing_and_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                source.unlink()
+                with self.assertRaisesRegex(ValueError, "source file is missing"):
+                    staged.assert_source_stable()
+                source.write_bytes(b"stable\n")
+
+                def reject_open(*_args, **_kwargs):
+                    try:
+                        raise OSError(errno.EACCES, "synthetic unreadable source")
+                    except OSError as error:
+                        raise ValueError("cannot safely open regular file") from error
+
+                with mock.patch.object(
+                    packager,
+                    "open_regular_at",
+                    side_effect=reject_open,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "source file became unreadable",
+                    ):
+                        staged.assert_source_stable()
+            finally:
+                staged.close()
+
+    def test_source_snapshot_rejects_identity_and_access_policy_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            source.chmod(0o644)
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                source.unlink()
+                source.write_bytes(b"stable\n")
+                source.chmod(0o644)
+                with self.assertRaisesRegex(ValueError, "source object identity changed"):
+                    staged.assert_source_stable()
+            finally:
+                staged.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            source.chmod(0o644)
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                source.chmod(0o600)
+                with self.assertRaisesRegex(ValueError, "source access policy changed"):
+                    staged.assert_source_stable()
+            finally:
+                staged.close()
+
+    def test_staged_snapshot_rejects_identity_content_and_access_policy_changes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                staged.path.unlink()
+                staged.path.write_bytes(b"stable\n")
+                staged.path.chmod(0o644)
+                with self.assertRaisesRegex(ValueError, "staged object identity changed"):
+                    staged.assert_staged_stable()
+            finally:
+                staged.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                original = staged.path.stat()
+                staged.path.write_bytes(b"changed\n")
+                os.utime(
+                    staged.path,
+                    ns=(original.st_atime_ns, original.st_mtime_ns),
+                )
+                with self.assertRaisesRegex(ValueError, "staged content changed"):
+                    staged.assert_staged_stable()
+            finally:
+                staged.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                staged.path.chmod(0o600)
+                with self.assertRaisesRegex(ValueError, "staged access policy changed"):
+                    staged.assert_staged_stable()
+            finally:
+                staged.close()
+
+    def test_staged_snapshot_distinguishes_missing_and_accepts_timestamp_churn(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                metadata = staged.path.stat()
+                os.utime(
+                    staged.path,
+                    ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000),
+                )
+                staged.assert_staged_stable()
+
+                def reject_open(*_args, **_kwargs):
+                    try:
+                        raise OSError(errno.EACCES, "synthetic unreadable staged file")
+                    except OSError as error:
+                        raise ValueError("cannot safely open regular file") from error
+
+                with mock.patch.object(
+                    packager,
+                    "open_regular_at",
+                    side_effect=reject_open,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "staged file became unreadable",
+                    ):
+                        staged.assert_staged_stable()
+                staged.path.unlink()
+                with self.assertRaisesRegex(ValueError, "staged file is missing"):
+                    staged.assert_staged_stable()
+            finally:
+                staged.close()
+
     def test_hash_regular_rejects_content_drift_after_lstat(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "source.txt"
@@ -1322,14 +1466,14 @@ class PackagingAssetsTests(unittest.TestCase):
                     "component": component,
                     "product_version": "0.1.0",
                     "protocol_major": 1,
-                    "protocol_minor": 5,
+                    "protocol_minor": 6,
                 }
 
             helper = {
                 "component": "diskplan-fs-helper",
                 "product_version": "0.1.0",
                 "protocol_major": 1,
-                "protocol_minor": 5,
+                "protocol_minor": 6,
                 "helper_abi": 1,
             }
             with (
@@ -1339,7 +1483,11 @@ class PackagingAssetsTests(unittest.TestCase):
                 mock.patch.object(packager, "helper_identity", return_value=helper),
                 mock.patch("builtins.print"),
             ):
-                self.assertEqual(packager.main(), 0)
+                peak = run_with_descriptor_budget(
+                    lambda: self.assertEqual(packager.main(), 0),
+                    budget=64,
+                )
+                self.assertLess(peak, 64)
 
             archive = output / "diskplan-0.1.0-macos-arm64.tar.gz"
             with tarfile.open(archive, "r:gz") as bundled:
@@ -1373,6 +1521,14 @@ class PackagingAssetsTests(unittest.TestCase):
                 "proto/fixtures/runtime-v1.5/force-action-execution.frames.hex",
                 "proto/fixtures/runtime-v1.5/git-evidence-action.frames.hex",
                 "proto/fixtures/runtime-v1.5/version-survivor-action.frames.hex",
+                "proto/fixtures/runtime-v1.6/README.md",
+                "proto/fixtures/runtime-v1.6/codex-scope-action.frames.hex",
+                "proto/fixtures/runtime-v1.6/empty-batch-dry-run.frames.hex",
+                "proto/fixtures/runtime-v1.6/execution-stream-failure.frames.hex",
+                "proto/fixtures/runtime-v1.6/fixtures.json",
+                "proto/fixtures/runtime-v1.6/force-action-execution.frames.hex",
+                "proto/fixtures/runtime-v1.6/git-evidence-action.frames.hex",
+                "proto/fixtures/runtime-v1.6/version-survivor-action.frames.hex",
             }
             self.assertTrue(runtime_fixture_paths.issubset(artifact_paths))
             self.assertEqual(
@@ -1391,8 +1547,16 @@ class PackagingAssetsTests(unittest.TestCase):
                 },
                 {"runtime-v1.5"},
             )
+            self.assertEqual(
+                {
+                    artifact_compatibility[path]
+                    for path in runtime_fixture_paths
+                    if "/runtime-v1.6/" in path
+                },
+                {"runtime-v1.6"},
+            )
             self.assertIn("runtime-capabilities.json", artifact_paths)
-            self.assertEqual(manifest["protocol_minor"], 5)
+            self.assertEqual(manifest["protocol_minor"], 6)
             self.assertEqual(
                 manifest["optional_capabilities"],
                 [

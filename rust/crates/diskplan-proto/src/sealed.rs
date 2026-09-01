@@ -8,9 +8,9 @@ use crate::diskplan::v1::{
     ActionExecutionPreviewProjection, AdapterOutcomeKind, ApplyReviewProjection,
     ApplyStartFailureKind, DecisionOverlayAcknowledged, Digest256, DryRunProjection,
     DryRunProjectionManifest, DryRunProjectionPayload, ExecutionStepStatus, ExecutionStreamEvent,
-    ExecutionUnitProjection, ExecutionUnitStatus, OpaqueIdentifier, PlanActionProjection,
-    PlanProjectionManifest, PlanStageability, PostVerificationKind, RevalidationFailureKind,
-    RevalidationProjectionPayload, RevalidationSubject, RuntimeRejectCode,
+    ExecutionStreamFailureKind, ExecutionUnitProjection, ExecutionUnitStatus, OpaqueIdentifier,
+    PlanActionProjection, PlanProjectionManifest, PlanStageability, PostVerificationKind,
+    RevalidationFailureKind, RevalidationProjectionPayload, RevalidationSubject, RuntimeRejectCode,
     adapter_outcome_projection, envelope, execution_stream_event, execution_unit_projection,
     plan_projection_record, post_verification_projection, revalidation_finding_projection,
     runtime_event,
@@ -577,30 +577,67 @@ fn validate_execution_predecessor(
     review: &ApplyReviewProjection,
     events: &[ExecutionStreamEvent],
 ) -> Result<(), RuntimeProjectionError> {
-    let terminal = match events.last().and_then(|event| event.body.as_ref()) {
-        Some(execution_stream_event::Body::ApplyFinished(terminal)) => terminal,
-        _ => unreachable!("intrinsic execution verification requires a terminal"),
-    };
-    if opaque_value(
-        terminal.apply_review_id.as_ref(),
-        "terminal apply_review_id",
-    )? != opaque_value(review.apply_review_id.as_ref(), "expected apply_review_id")?
-        || digest_value(
-            terminal.review_binding_sha256.as_ref(),
-            "terminal review_binding_sha256",
-        )? != digest_value(
-            review.review_binding_sha256.as_ref(),
-            "expected review_binding_sha256",
-        )?
+    let (terminal_apply_review_id, terminal_review_binding, requires_apply_started, is_failure) =
+        match events.last().and_then(|event| event.body.as_ref()) {
+            Some(execution_stream_event::Body::ApplyFinished(terminal)) => {
+                let start_failure = ApplyStartFailureKind::try_from(terminal.start_failure)
+                    .map_err(|_| {
+                        RuntimeProjectionError::InvalidManifest("unknown apply start failure")
+                    })?;
+                (
+                    opaque_value(
+                        terminal.apply_review_id.as_ref(),
+                        "terminal apply_review_id",
+                    )?,
+                    digest_value(
+                        terminal.review_binding_sha256.as_ref(),
+                        "terminal review_binding_sha256",
+                    )?,
+                    start_failure == ApplyStartFailureKind::Unspecified,
+                    false,
+                )
+            }
+            Some(execution_stream_event::Body::ExecutionStreamFailure(terminal)) => (
+                opaque_value(terminal.apply_review_id.as_ref(), "failure apply_review_id")?,
+                digest_value(
+                    terminal.review_binding_sha256.as_ref(),
+                    "failure review_binding_sha256",
+                )?,
+                true,
+                true,
+            ),
+            _ => unreachable!("intrinsic execution verification requires a terminal"),
+        };
+    if terminal_apply_review_id
+        != opaque_value(review.apply_review_id.as_ref(), "expected apply_review_id")?
+        || terminal_review_binding
+            != digest_value(
+                review.review_binding_sha256.as_ref(),
+                "expected review_binding_sha256",
+            )?
     {
         return Err(RuntimeProjectionError::InvalidManifest(
             "execution terminal differs from accepted apply review",
         ));
     }
 
-    let start_failure = ApplyStartFailureKind::try_from(terminal.start_failure)
-        .map_err(|_| RuntimeProjectionError::InvalidManifest("unknown apply start failure"))?;
-    if start_failure == ApplyStartFailureKind::Unspecified {
+    if is_failure {
+        let stream_execution_id = opaque_value(events[0].execution_id.as_ref(), "execution_id")?;
+        let Some(execution_stream_event::Body::ExecutionStreamFailure(failure)) =
+            events.last().and_then(|event| event.body.as_ref())
+        else {
+            unreachable!("the terminal kind was retained")
+        };
+        if opaque_value(failure.execution_id.as_ref(), "failure execution_id")?
+            != stream_execution_id
+        {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "failure terminal execution ID differs from its stream",
+            ));
+        }
+    };
+
+    if requires_apply_started {
         let Some(execution_stream_event::Body::ApplyStarted(started)) =
             events.first().and_then(|event| event.body.as_ref())
         else {
@@ -787,7 +824,7 @@ fn validate_execution_predecessor(
             _ => {}
         }
     }
-    if observed_force_warnings != expected_force_warnings {
+    if !is_failure && observed_force_warnings != expected_force_warnings {
         return Err(RuntimeProjectionError::InvalidManifest(
             "execution force warnings differ from apply review",
         ));
@@ -1165,7 +1202,10 @@ pub fn decode_and_verify_execution_stream(
             || (offset + 1 != events.len()
                 && matches!(
                     event.body.as_ref(),
-                    Some(execution_stream_event::Body::ApplyFinished(_))
+                    Some(
+                        execution_stream_event::Body::ApplyFinished(_)
+                            | execution_stream_event::Body::ExecutionStreamFailure(_)
+                    )
                 ))
         {
             return Err(RuntimeProjectionError::InvalidRecord {
@@ -1175,33 +1215,70 @@ pub fn decode_and_verify_execution_stream(
         }
         validate_execution_event_body(negotiated_protocol_minor, offset, event.body.as_ref())?;
     }
-    let Some(execution_stream_event::Body::ApplyFinished(terminal)) =
-        events.last().and_then(|e| e.body.as_ref())
-    else {
-        return Err(RuntimeProjectionError::InvalidManifest(
-            "execution stream has no terminal",
-        ));
-    };
-    validate_execution_summary(&events, terminal)?;
+    let (record_digest, event_count, encoded_event_bytes, maximum_event_count, maximum_bytes) =
+        match events.last().and_then(|event| event.body.as_ref()) {
+            Some(execution_stream_event::Body::ApplyFinished(terminal)) => {
+                validate_execution_summary(&events, terminal)?;
+                (
+                    digest_value(
+                        terminal.execution_record_sha256.as_ref(),
+                        "execution_record_sha256",
+                    )?
+                    .to_vec(),
+                    terminal.event_count,
+                    terminal.encoded_event_bytes,
+                    terminal.maximum_event_count,
+                    terminal.maximum_encoded_event_bytes,
+                )
+            }
+            Some(execution_stream_event::Body::ExecutionStreamFailure(terminal)) => {
+                if negotiated_protocol_minor != crate::runtime::PROTOCOL16_MINOR {
+                    return Err(RuntimeProjectionError::InvalidManifest(
+                        "execution-stream failure requires protocol 1.6",
+                    ));
+                }
+                validate_execution_failure_terminal(&events, terminal, execution_id)?;
+                (
+                    digest_value(
+                        terminal.execution_record_sha256.as_ref(),
+                        "failure execution_record_sha256",
+                    )?
+                    .to_vec(),
+                    terminal.event_count,
+                    terminal.encoded_event_bytes,
+                    terminal.maximum_event_count,
+                    terminal.maximum_encoded_event_bytes,
+                )
+            }
+            _ => {
+                return Err(RuntimeProjectionError::InvalidManifest(
+                    "execution stream has no terminal",
+                ));
+            }
+        };
 
     let mut canonical = Vec::new();
     for (index, bytes) in canonical_events.iter().enumerate() {
         if index + 1 == canonical_events.len() {
             let mut terminal_event = events[index].clone();
-            let Some(execution_stream_event::Body::ApplyFinished(finished)) =
-                terminal_event.body.as_mut()
-            else {
-                unreachable!("the last event was validated as apply-finished")
+            match terminal_event.body.as_mut() {
+                Some(execution_stream_event::Body::ApplyFinished(finished)) => {
+                    finished.execution_record_sha256 = None;
+                }
+                Some(execution_stream_event::Body::ExecutionStreamFailure(failure)) => {
+                    failure.execution_record_sha256 = None;
+                }
+                _ => unreachable!("the last event was validated as a terminal"),
             };
-            finished.execution_record_sha256 = None;
             append_framed(&terminal_event.encode_to_vec(), &mut canonical)?;
         } else {
             append_framed(bytes, &mut canonical)?;
         }
     }
-    if canonical.len() as u64 != terminal.encoded_event_bytes
-        || terminal.maximum_event_count != MAXIMUM_EXECUTION_EVENT_COUNT
-        || terminal.maximum_encoded_event_bytes != MAXIMUM_EXECUTION_ENCODED_BYTES
+    if event_count != events.len() as u64
+        || canonical.len() as u64 != encoded_event_bytes
+        || maximum_event_count != MAXIMUM_EXECUTION_EVENT_COUNT
+        || maximum_bytes != MAXIMUM_EXECUTION_ENCODED_BYTES
         || canonical.len() as u64 > MAXIMUM_EXECUTION_ENCODED_BYTES
     {
         return Err(RuntimeProjectionError::InvalidManifest(
@@ -1209,11 +1286,7 @@ pub fn decode_and_verify_execution_stream(
         ));
     }
     let digest = Sha256::digest([EXECUTION_RECORD_DOMAIN, canonical.as_slice()].concat());
-    if digest_value(
-        terminal.execution_record_sha256.as_ref(),
-        "execution_record_sha256",
-    )? != digest.as_slice()
-    {
+    if record_digest.as_slice() != digest.as_slice() {
         return Err(RuntimeProjectionError::InvalidManifest(
             "execution record digest mismatch",
         ));
@@ -1232,6 +1305,30 @@ fn validate_execution_event_body(
         ),
         Some(execution_stream_event::Body::ApplyStarted(_))
         | Some(execution_stream_event::Body::ApplyFinished(_)) => Ok(()),
+        Some(execution_stream_event::Body::ExecutionStreamFailure(failure)) => {
+            if negotiated_protocol_minor != crate::runtime::PROTOCOL16_MINOR {
+                return Err(RuntimeProjectionError::InvalidManifest(
+                    "execution-stream failure requires protocol 1.6",
+                ));
+            }
+            let kind = ExecutionStreamFailureKind::try_from(failure.kind).map_err(|_| {
+                RuntimeProjectionError::InvalidManifest("unknown execution-stream failure kind")
+            })?;
+            if kind == ExecutionStreamFailureKind::Unspecified
+                || !failure.mutation_may_have_occurred
+            {
+                return Err(RuntimeProjectionError::InvalidManifest(
+                    "execution-stream failure is not fail-closed",
+                ));
+            }
+            opaque_value(failure.execution_id.as_ref(), "failure execution_id")?;
+            opaque_value(failure.apply_review_id.as_ref(), "failure apply_review_id")?;
+            digest_value(
+                failure.review_binding_sha256.as_ref(),
+                "failure review_binding_sha256",
+            )?;
+            Ok(())
+        }
         Some(execution_stream_event::Body::UnitStarted(started)) => {
             validate_unit(started.unit.as_ref())
         }
@@ -1256,7 +1353,16 @@ fn validate_execution_event_body(
             validate_post_verification(release.outcome.as_ref())
         }
         Some(execution_stream_event::Body::UnitFinished(finished)) => {
-            validate_unit(finished.unit.as_ref())
+            validate_unit(finished.unit.as_ref())?;
+            let status = ExecutionUnitStatus::try_from(finished.status).map_err(|_| {
+                RuntimeProjectionError::InvalidManifest("unknown execution unit status")
+            })?;
+            if status == ExecutionUnitStatus::Unspecified {
+                return Err(RuntimeProjectionError::InvalidManifest(
+                    "unspecified execution unit status",
+                ));
+            }
+            Ok(())
         }
         Some(execution_stream_event::Body::AuditWriteFailed(failure)) => {
             if failure.code.is_empty() {
@@ -1644,6 +1750,101 @@ fn validate_finding(
                 "revalidation finding has unexpected detail",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_execution_failure_terminal(
+    events: &[ExecutionStreamEvent],
+    terminal: &crate::diskplan::v1::ExecutionStreamFailureProjection,
+    stream_execution_id: &[u8],
+) -> Result<(), RuntimeProjectionError> {
+    let kind = ExecutionStreamFailureKind::try_from(terminal.kind).map_err(|_| {
+        RuntimeProjectionError::InvalidManifest("unknown execution-stream failure kind")
+    })?;
+    if kind == ExecutionStreamFailureKind::Unspecified || !terminal.mutation_may_have_occurred {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "execution-stream failure is not fail-closed",
+        ));
+    }
+    if opaque_value(terminal.execution_id.as_ref(), "failure execution_id")? != stream_execution_id
+    {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "failure terminal execution ID differs from its stream",
+        ));
+    }
+    let terminal_apply_review_id =
+        opaque_value(terminal.apply_review_id.as_ref(), "failure apply_review_id")?;
+    let terminal_review_binding = digest_value(
+        terminal.review_binding_sha256.as_ref(),
+        "failure review_binding_sha256",
+    )?;
+    let Some(execution_stream_event::Body::ApplyStarted(started)) =
+        events.first().and_then(|event| event.body.as_ref())
+    else {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "failure stream has no apply-started event",
+        ));
+    };
+    let mut cancellation_count = 0_u64;
+    let mut force_warning_ids = BTreeSet::new();
+    for event in &events[..events.len() - 1] {
+        match event.body.as_ref() {
+            Some(execution_stream_event::Body::CancellationAcknowledged(_)) => {
+                cancellation_count += 1;
+            }
+            Some(execution_stream_event::Body::ForceRequiredWarning(warning)) => {
+                let action_id = digest_opaque(warning.action_id.as_ref(), "force action_id")?;
+                if !force_warning_ids.insert(action_id.to_vec()) {
+                    return Err(RuntimeProjectionError::DuplicateIdentifier(
+                        "execution force action_id",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    if cancellation_count > 1 {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "execution has duplicate cancellation acknowledgements",
+        ));
+    }
+    validate_epoch(started.epoch.as_ref())?;
+    opaque_value(started.apply_review_id.as_ref(), "apply_review_id")?;
+    opaque_value(started.projection_id.as_ref(), "projection_id")?;
+    opaque_value(started.overlay_id.as_ref(), "overlay_id")?;
+    digest_value(started.overlay_sha256.as_ref(), "overlay_sha256")?;
+    digest_value(
+        started.review_binding_sha256.as_ref(),
+        "review_binding_sha256",
+    )?;
+    digest_value(
+        started.current_binding_sha256.as_ref(),
+        "current_binding_sha256",
+    )?;
+    digest_value(started.revalidation_sha256.as_ref(), "revalidation_sha256")?;
+    validate_plan_evidence_binding(
+        started.plan_id.as_ref(),
+        started.plan_sha256.as_ref(),
+        started.evidence_id.as_ref(),
+        started.evidence_sha256.as_ref(),
+    )?;
+    validate_scan_binding(
+        started.scan_session_id.as_ref(),
+        started.scan_checkpoint_id.as_ref(),
+        started.scan_checkpoint_evidence_sha256.as_ref(),
+        started.evidence_sha256.as_ref(),
+    )?;
+    if opaque_value(started.apply_review_id.as_ref(), "apply_review_id")?
+        != terminal_apply_review_id
+        || digest_value(
+            started.review_binding_sha256.as_ref(),
+            "review_binding_sha256",
+        )? != terminal_review_binding
+    {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "failure terminal apply authority mismatch",
+        ));
     }
     Ok(())
 }

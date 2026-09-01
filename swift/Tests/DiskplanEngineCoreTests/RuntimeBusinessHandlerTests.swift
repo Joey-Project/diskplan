@@ -36,7 +36,7 @@ import Testing
   #expect(accepted.negotiatedCapabilities.contains("plan-projection-v1"))
   #expect(!accepted.negotiatedCapabilities.contains("decision-overlay-v1"))
   #expect(handler.requestIDs == [2])
-  #expect(handler.negotiatedProtocolMinors == [protocol15Minor])
+  #expect(handler.negotiatedProtocolMinors == [protocol16Minor])
   guard case .runtimeEvent(let event) = envelopes[1].body,
     case .runtimeRejected(let rejected) = event.body
   else {
@@ -406,6 +406,132 @@ import Testing
       requiredForceWarningActionIDs: fixture.required
     )
   }
+}
+
+@Test func protocol16FailureTerminalSealsTheActualPrefixWithoutPositiveClaims() throws {
+  let fixture = executionFailureFixture()
+  let sealed = try SealedRuntimeWire.sealExecutionStream(
+    fixture.events,
+    requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+    negotiatedProtocolMinor: protocol16Minor
+  )
+  #expect(sealed.count == 2)
+  guard case .executionStreamFailure(let terminal)? = sealed.last?.body else {
+    Issue.record("expected execution-stream failure terminal")
+    return
+  }
+  #expect(terminal.kind == .backendContractViolation)
+  #expect(terminal.mutationMayHaveOccurred)
+  #expect(terminal.executionID == sealed.last?.executionID)
+  #expect(terminal.eventCount == UInt64(sealed.count))
+  #expect(terminal.encodedEventBytes > 0)
+  #expect(terminal.maximumEventCount == SealedRuntimeWire.maximumExecutionEventCount)
+  #expect(terminal.maximumEncodedEventBytes == SealedRuntimeWire.maximumExecutionBytes)
+  #expect(terminal.executionRecordSha256.value.count == 32)
+  #expect(
+    !sealed.contains(where: {
+      if case .forceRequiredWarning? = $0.body { return true }
+      return false
+    })
+  )
+}
+
+@Test func executionFailureTerminalIsStrictlyProtocol16AndFailClosed() throws {
+  let fixture = executionFailureFixture()
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      fixture.events,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol15Minor
+    )
+  }
+
+  var notFailClosed = fixture.events
+  guard case .executionStreamFailure(var terminal)? = notFailClosed.last?.body else {
+    Issue.record("expected execution-stream failure terminal")
+    return
+  }
+  terminal.mutationMayHaveOccurred = false
+  notFailClosed[notFailClosed.index(before: notFailClosed.endIndex)].body =
+    .executionStreamFailure(terminal)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      notFailClosed,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+
+  terminal = fixture.failure
+  terminal.kind = .unspecified
+  var unspecified = fixture.events
+  unspecified[unspecified.index(before: unspecified.endIndex)].body =
+    .executionStreamFailure(terminal)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      unspecified,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+}
+
+@Test func executionFailureTerminalRejectsMalformedAuthorityAndRewritesRecordFields() throws {
+  let fixture = executionFailureFixture()
+  var malformed = fixture.events
+  var failure = fixture.failure
+  failure.executionID.value = Data("foreign-execution".utf8)
+  malformed[malformed.index(before: malformed.endIndex)].body = .executionStreamFailure(failure)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      malformed,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+
+  malformed = fixture.events
+  failure = fixture.failure
+  failure.applyReviewID.value = Data("foreign-review".utf8)
+  malformed[malformed.index(before: malformed.endIndex)].body = .executionStreamFailure(failure)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      malformed,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      [fixture.events.last!],
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+
+  var unsealed = fixture.events
+  failure = fixture.failure
+  failure.executionRecordSha256.value = Data(repeating: 0xff, count: 32)
+  failure.eventCount = UInt64.max
+  failure.encodedEventBytes = UInt64.max
+  failure.maximumEventCount = 1
+  failure.maximumEncodedEventBytes = 1
+  unsealed[unsealed.index(before: unsealed.endIndex)].body = .executionStreamFailure(failure)
+  let sealed = try SealedRuntimeWire.sealExecutionStream(
+    unsealed,
+    requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+    negotiatedProtocolMinor: protocol16Minor
+  )
+  guard case .executionStreamFailure(let rewritten)? = sealed.last?.body else {
+    Issue.record("expected execution-stream failure terminal")
+    return
+  }
+  #expect(rewritten.executionRecordSha256.value != Data(repeating: 0xff, count: 32))
+  #expect(rewritten.eventCount == UInt64(sealed.count))
+  #expect(rewritten.encodedEventBytes < UInt64.max)
+  #expect(rewritten.maximumEventCount == SealedRuntimeWire.maximumExecutionEventCount)
+  #expect(rewritten.maximumEncodedEventBytes == SealedRuntimeWire.maximumExecutionBytes)
 }
 
 @Test func responderRejectsAnOversizedRuntimeEnvelopeBeforeEnqueue() throws {
@@ -981,4 +1107,61 @@ private func forceExecutionFixture() throws -> (
     }
   }
   return (events, required)
+}
+
+private struct ExecutionFailureFixture {
+  let events: [Diskplan_V1_ExecutionStreamEvent]
+  let failure: Diskplan_V1_ExecutionStreamFailureProjection
+  let requiredForceActionIDs: [Diskplan_V1_OpaqueIdentifier]
+}
+
+private func executionFailureFixture() -> ExecutionFailureFixture {
+  let executionID = Data("fixture-execution".utf8)
+  let applyReviewID = Data("fixture-apply-review".utf8)
+  let planDigest = Data(repeating: 0xa1, count: 32)
+  let evidenceDigest = Data(repeating: 0xe1, count: 32)
+  let reviewBinding = Data(repeating: 0xd1, count: 32)
+
+  var started = Diskplan_V1_ApplyStartedProjection()
+  started.epoch.epochID.value = Data("fixture-epoch".utf8)
+  started.epoch.semanticReferenceTimeSeconds = 1
+  started.epoch.issuedAtSeconds = 2
+  started.epoch.deadlineSeconds = 3
+  started.applyReviewID.value = applyReviewID
+  started.projectionID.value = Data("fixture-projection".utf8)
+  started.planSha256.value = planDigest
+  started.overlayID.value = Data("fixture-overlay".utf8)
+  started.overlaySha256.value = Data(repeating: 0xb1, count: 32)
+  started.reviewBindingSha256.value = reviewBinding
+  started.planID.value = planDigest
+  started.evidenceID.value = evidenceDigest
+  started.evidenceSha256.value = evidenceDigest
+  started.currentBindingSha256.value = Data(repeating: 0xc1, count: 32)
+  started.revalidationSha256.value = Data(repeating: 0xc2, count: 32)
+  started.scanSessionID.value = Data("fixture-scan-session".utf8)
+  started.scanCheckpointID.value = Data(
+    evidenceDigest.map { String(format: "%02x", $0) }.joined().utf8
+  )
+  started.scanCheckpointEvidenceSha256.value = Data(repeating: 0xe2, count: 32)
+
+  var failure = Diskplan_V1_ExecutionStreamFailureProjection()
+  failure.kind = .backendContractViolation
+  failure.executionID.value = executionID
+  failure.applyReviewID.value = applyReviewID
+  failure.reviewBindingSha256.value = reviewBinding
+  failure.mutationMayHaveOccurred = true
+
+  var startEvent = Diskplan_V1_ExecutionStreamEvent()
+  startEvent.executionID.value = executionID
+  startEvent.body = .applyStarted(started)
+  var failureEvent = Diskplan_V1_ExecutionStreamEvent()
+  failureEvent.executionID.value = executionID
+  failureEvent.body = .executionStreamFailure(failure)
+  var forceActionID = Diskplan_V1_OpaqueIdentifier()
+  forceActionID.value = Data(repeating: 0x11, count: 32)
+  return ExecutionFailureFixture(
+    events: [startEvent, failureEvent],
+    failure: failure,
+    requiredForceActionIDs: [forceActionID]
+  )
 }

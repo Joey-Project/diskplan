@@ -30,7 +30,7 @@ package enum SealedRuntimeWire {
   package static let maximumOpaqueIdentifierBytes = 256
 
   package static func requireSupportedProtocolMinor(_ minor: UInt32) throws {
-    guard minor == protocol14Minor || minor == protocol15Minor else {
+    guard minor == protocol14Minor || minor == protocol15Minor || minor == protocol16Minor else {
       throw SealedRuntimeWireError.invalid(field: "negotiated protocol minor")
     }
   }
@@ -343,15 +343,75 @@ package enum SealedRuntimeWire {
       guard events[index].body != nil else {
         throw SealedRuntimeWireError.invalid(field: "execution event body")
       }
-      if index != events.index(before: events.endIndex),
-        case .applyFinished? = events[index].body
-      {
-        throw SealedRuntimeWireError.invalid(field: "nonterminal apply_finished")
+      if index != events.index(before: events.endIndex) {
+        switch events[index].body {
+        case .applyFinished?:
+          throw SealedRuntimeWireError.invalid(field: "nonterminal apply_finished")
+        case .executionStreamFailure?:
+          throw SealedRuntimeWireError.invalid(field: "nonterminal execution_stream_failure")
+        default:
+          break
+        }
       }
     }
-    guard case .applyFinished(var terminal)? = events[events.index(before: events.endIndex)].body
-    else {
-      throw SealedRuntimeWireError.invalid(field: "missing apply_finished")
+    let terminalIndex = events.index(before: events.endIndex)
+    if case .executionStreamFailure(var failure)? = events[terminalIndex].body {
+      guard negotiatedProtocolMinor == protocol16Minor else {
+        throw SealedRuntimeWireError.invalid(field: "execution_stream_failure protocol minor")
+      }
+      guard validExecutionStreamFailure(failure.kind), failure.mutationMayHaveOccurred else {
+        throw SealedRuntimeWireError.invalid(field: "execution_stream_failure kind")
+      }
+      guard failure.executionID.value == executionID else {
+        throw SealedRuntimeWireError.invalid(field: "failure execution_id")
+      }
+      try requireNonempty(failure.applyReviewID.value, field: "failure apply_review_id")
+      try requireDigest(
+        failure.reviewBindingSha256.value,
+        field: "failure review_binding_sha256"
+      )
+      let prefix = events.dropLast()
+      _ = try executionSummary(prefix, negotiatedProtocolMinor: negotiatedProtocolMinor)
+      let observedForceWarnings = prefix.compactMap { event -> Data? in
+        guard case .forceRequiredWarning(let warning)? = event.body else { return nil }
+        return warning.actionID.value
+      }
+      try requireUniqueDigests(
+        observedForceWarnings,
+        field: "execution force warning action_id"
+      )
+      let applyStartedCount = prefix.reduce(0) {
+        if case .applyStarted? = $1.body { $0 + 1 } else { $0 }
+      }
+      guard applyStartedCount == 1,
+        case .applyStarted(let started)? = events.first?.body
+      else {
+        throw SealedRuntimeWireError.invalid(field: "failure apply_started")
+      }
+      try requireApplyStarted(started)
+      guard failure.applyReviewID == started.applyReviewID,
+        failure.reviewBindingSha256 == started.reviewBindingSha256
+      else {
+        throw SealedRuntimeWireError.invalid(field: "failure apply authority")
+      }
+      failure.eventCount = UInt64(events.count)
+      failure.maximumEventCount = maximumExecutionEventCount
+      failure.maximumEncodedEventBytes = maximumExecutionBytes
+      failure.clearExecutionRecordSha256()
+      events[terminalIndex].body = .executionStreamFailure(failure)
+      failure.encodedEventBytes = try stableExecutionByteCount(events)
+      events[terminalIndex].body = .executionStreamFailure(failure)
+      let canonical = try canonicalExecutionBytes(events)
+      guard UInt64(canonical.count) == failure.encodedEventBytes else {
+        throw SealedRuntimeWireError.invalid(field: "failure encoded_event_bytes")
+      }
+      try requireMaximumBytes(UInt64(canonical.count), maximum: maximumExecutionBytes)
+      failure.executionRecordSha256 = digestMessage(digest(executionRecordDomain + canonical))
+      events[terminalIndex].body = .executionStreamFailure(failure)
+      return events
+    }
+    guard case .applyFinished(var terminal)? = events[terminalIndex].body else {
+      throw SealedRuntimeWireError.invalid(field: "missing execution terminal")
     }
     try requireNonempty(terminal.applyReviewID.value, field: "terminal apply_review_id")
     try requireDigest(
@@ -412,7 +472,6 @@ package enum SealedRuntimeWire {
     terminal.maximumEncodedEventBytes = maximumExecutionBytes
     terminal.clearExecutionRecordSha256()
 
-    let terminalIndex = events.index(before: events.endIndex)
     events[terminalIndex].body = .applyFinished(terminal)
     terminal.encodedEventBytes = try stableExecutionByteCount(events)
     events[terminalIndex].body = .applyFinished(terminal)
@@ -569,6 +628,8 @@ package enum SealedRuntimeWire {
         throw SealedRuntimeWireError.invalid(field: "duplicate apply_started")
       case .applyStarted, .applyFinished, nil:
         break
+      case .executionStreamFailure:
+        break
       }
     }
     return summary
@@ -581,12 +642,18 @@ package enum SealedRuntimeWire {
     for _ in 0..<10 {
       var adjusted = events
       let terminalIndex = adjusted.index(before: adjusted.endIndex)
-      guard case .applyFinished(var terminal)? = adjusted[terminalIndex].body else {
-        throw SealedRuntimeWireError.invalid(field: "missing apply_finished")
+      switch adjusted[terminalIndex].body {
+      case .applyFinished(var terminal)?:
+        terminal.encodedEventBytes = candidate
+        terminal.clearExecutionRecordSha256()
+        adjusted[terminalIndex].body = .applyFinished(terminal)
+      case .executionStreamFailure(var failure)?:
+        failure.encodedEventBytes = candidate
+        failure.clearExecutionRecordSha256()
+        adjusted[terminalIndex].body = .executionStreamFailure(failure)
+      default:
+        throw SealedRuntimeWireError.invalid(field: "missing execution terminal")
       }
-      terminal.encodedEventBytes = candidate
-      terminal.clearExecutionRecordSha256()
-      adjusted[terminalIndex].body = .applyFinished(terminal)
       let next = UInt64(try canonicalExecutionBytes(adjusted).count)
       if next == candidate { return next }
       candidate = next
@@ -605,6 +672,11 @@ package enum SealedRuntimeWire {
       {
         terminal.clearExecutionRecordSha256()
         event.body = .applyFinished(terminal)
+      } else if index == events.index(before: events.endIndex),
+        case .executionStreamFailure(var failure)? = event.body
+      {
+        failure.clearExecutionRecordSha256()
+        event.body = .executionStreamFailure(failure)
       }
       let encoded = try event.serializedData()
       guard let count = UInt32(exactly: encoded.count) else {
@@ -938,6 +1010,17 @@ package enum SealedRuntimeWire {
       .invalidExecutionGraph, .preparationSuperseded, .forceConfirmationBindingMismatch:
       true
     case .unspecified, .UNRECOGNIZED: false
+    }
+  }
+
+  private static func validExecutionStreamFailure(
+    _ value: Diskplan_V1_ExecutionStreamFailureKind
+  ) -> Bool {
+    switch value {
+    case .projectionLimitExceeded, .validationFailed, .backendContractViolation:
+      true
+    case .unspecified, .UNRECOGNIZED:
+      false
     }
   }
 

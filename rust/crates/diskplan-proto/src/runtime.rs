@@ -38,6 +38,7 @@ pub const MAXIMUM_VERSIONED_ARTIFACT_COUNT: u64 = 4_096;
 pub const MAXIMUM_RAW_SELECTOR_TARGET_BYTES: usize = 4_096;
 pub const PROTOCOL14_MINOR: u32 = 4;
 pub const PROTOCOL15_MINOR: u32 = 5;
+pub const PROTOCOL16_MINOR: u32 = 6;
 
 const CHUNK_ID_DOMAIN: &[u8] = b"diskplan/plan-projection-chunk-id/v1\0";
 const FINAL_DIGEST_DOMAIN: &[u8] = b"diskplan/plan-projection-final/v1\0";
@@ -625,7 +626,7 @@ pub(crate) fn validate_runtime_protocol_minor(
 ) -> Result<(), RuntimeProjectionError> {
     if matches!(
         negotiated_protocol_minor,
-        PROTOCOL14_MINOR | PROTOCOL15_MINOR
+        PROTOCOL14_MINOR | PROTOCOL15_MINOR | PROTOCOL16_MINOR
     ) {
         Ok(())
     } else {
@@ -666,10 +667,10 @@ pub(crate) fn validate_execution_preview(
                 ));
             }
         }
-        PROTOCOL15_MINOR => {
+        PROTOCOL15_MINOR | PROTOCOL16_MINOR => {
             let working_directory = preview.raw_working_directory.as_deref().ok_or(
                 RuntimeProjectionError::InvalidManifest(
-                    "protocol 1.5 preview omits raw working directory",
+                    "protocol 1.5+ preview omits raw working directory",
                 ),
             )?;
             if PathRaceProjection::try_from(preview.path_race).is_err()
@@ -679,7 +680,7 @@ pub(crate) fn validate_execution_preview(
                 || (!preview.mutation_supported && !working_directory.is_empty())
             {
                 return Err(RuntimeProjectionError::InvalidManifest(
-                    "protocol 1.5 execution preview is incomplete",
+                    "protocol 1.5+ execution preview is incomplete",
                 ));
             }
         }

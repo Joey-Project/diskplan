@@ -3,7 +3,7 @@
   "bundle_format": 1,
   "deployment_target_macos": "14.0",
   "protocol_major": 1,
-  "protocol_minor": 5,
+  "protocol_minor": 6,
   "release_gate_macos": "26.0",
   "required_capabilities": [
     "framing-v1"

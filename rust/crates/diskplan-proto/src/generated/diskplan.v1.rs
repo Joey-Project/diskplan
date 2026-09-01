@@ -1831,6 +1831,29 @@ pub struct ApplyFinishedProjection {
     #[prost(message, optional, tag = "18")]
     pub review_binding_sha256: ::core::option::Option<Digest256>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutionStreamFailureProjection {
+    #[prost(enumeration = "ExecutionStreamFailureKind", tag = "1")]
+    pub kind: i32,
+    #[prost(message, optional, tag = "2")]
+    pub execution_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub apply_review_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "4")]
+    pub review_binding_sha256: ::core::option::Option<Digest256>,
+    #[prost(bool, tag = "5")]
+    pub mutation_may_have_occurred: bool,
+    #[prost(message, optional, tag = "6")]
+    pub execution_record_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint64, tag = "7")]
+    pub event_count: u64,
+    #[prost(uint64, tag = "8")]
+    pub encoded_event_bytes: u64,
+    #[prost(uint64, tag = "9")]
+    pub maximum_event_count: u64,
+    #[prost(uint64, tag = "10")]
+    pub maximum_encoded_event_bytes: u64,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExecutionStreamEvent {
     #[prost(uint64, tag = "1")]
@@ -1839,7 +1862,7 @@ pub struct ExecutionStreamEvent {
     pub execution_id: ::core::option::Option<OpaqueIdentifier>,
     #[prost(
         oneof = "execution_stream_event::Body",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21"
     )]
     pub body: ::core::option::Option<execution_stream_event::Body>,
 }
@@ -1870,6 +1893,8 @@ pub mod execution_stream_event {
         UnitSkippedPrerequisite(super::UnitSkippedPrerequisiteProjection),
         #[prost(message, tag = "20")]
         CancellationAcknowledged(super::ExecutionCancellationAcknowledgedProjection),
+        #[prost(message, tag = "21")]
+        ExecutionStreamFailure(super::ExecutionStreamFailureProjection),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -4140,6 +4165,52 @@ impl ApplyStartFailureKind {
             }
             "APPLY_START_FAILURE_KIND_FORCE_CONFIRMATION_BINDING_MISMATCH" => {
                 Some(Self::ForceConfirmationBindingMismatch)
+            }
+            _ => None,
+        }
+    }
+}
+/// Protocol 1.6: a fail-closed terminal emitted when the engine can no longer
+/// produce a trustworthy positive ApplyFinishedProjection after mutation may
+/// have begun. These reasons classify only the projection boundary; they do not
+/// reinterpret backend or policy outcomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ExecutionStreamFailureKind {
+    Unspecified = 0,
+    ProjectionLimitExceeded = 1,
+    ValidationFailed = 2,
+    BackendContractViolation = 3,
+}
+impl ExecutionStreamFailureKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EXECUTION_STREAM_FAILURE_KIND_UNSPECIFIED",
+            Self::ProjectionLimitExceeded => {
+                "EXECUTION_STREAM_FAILURE_KIND_PROJECTION_LIMIT_EXCEEDED"
+            }
+            Self::ValidationFailed => "EXECUTION_STREAM_FAILURE_KIND_VALIDATION_FAILED",
+            Self::BackendContractViolation => {
+                "EXECUTION_STREAM_FAILURE_KIND_BACKEND_CONTRACT_VIOLATION"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EXECUTION_STREAM_FAILURE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "EXECUTION_STREAM_FAILURE_KIND_PROJECTION_LIMIT_EXCEEDED" => {
+                Some(Self::ProjectionLimitExceeded)
+            }
+            "EXECUTION_STREAM_FAILURE_KIND_VALIDATION_FAILED" => {
+                Some(Self::ValidationFailed)
+            }
+            "EXECUTION_STREAM_FAILURE_KIND_BACKEND_CONTRACT_VIOLATION" => {
+                Some(Self::BackendContractViolation)
             }
             _ => None,
         }

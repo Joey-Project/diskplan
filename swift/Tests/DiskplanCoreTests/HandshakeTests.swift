@@ -22,8 +22,8 @@ func handshakeSelectsMinorAndSortedIntersection() throws {
 }
 
 @Test
-func protocol15EndpointNegotiatesProtocol14WithoutChangingTheCurrentMinor() throws {
-  #expect(protocolMinor == protocol15Minor)
+func protocol16EndpointNegotiatesProtocol14WithoutChangingTheCurrentMinor() throws {
+  #expect(protocolMinor == protocol16Minor)
   var peer = Handshake.swiftEngineHello(runtimeCapabilities: protocol14RuntimeCapabilities)
   peer.version.minor = protocol14Minor
   guard

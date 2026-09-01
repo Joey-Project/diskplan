@@ -232,70 +232,119 @@ class FileState:
 
 @dataclass
 class StagedFile:
+    """A descriptor-bounded source/staging snapshot.
+
+    Device/inode/generation protect object identity, SHA-256 protects content,
+    and the retained root plus exact modes protect namespace and access policy.
+    Timestamp-only churn is intentionally not a protected property.
+    """
+
     source: Path
     path: Path
-    bound_source: BoundSource
-    staged_fd: int
+    source_root: BoundDirectory
+    source_relative: str
+    source_directory_states: dict[str, FileState]
+    source_directory_modes: dict[str, int]
+    source_root_mode: int
     source_state: FileState
+    source_mode: int
+    staged_root: BoundDirectory
+    staged_relative: str
+    staged_root_mode: int
     staged_state: FileState
+    staged_mode: int
     sha256: str
     maximum: int
-
-    @property
-    def source_fd(self) -> int:
-        return self.bound_source.file_fd
+    owns_source_root: bool
+    owns_staged_root: bool
 
     def assert_source_stable(self) -> None:
-        self.bound_source.assert_stable()
-        current = regular_file_state(self.source_fd, self.source, self.maximum)
-        if not self.source_state.same_object(current):
-            raise ValueError(f"source object identity changed: {self.source}")
-        if self.source_state.size != current.size or digest_fd(
-            self.source_fd, self.maximum
-        ) != self.sha256:
-            raise ValueError(f"source content changed: {self.source}")
-        reopened = open_regular_at(
-            self.bound_source.parent_fd,
-            self.bound_source.leaf_name,
-            self.source,
+        self.source_root.assert_stable()
+        if stat.S_IMODE(os.fstat(self.source_root.fd).st_mode) != self.source_root_mode:
+            raise ValueError(f"source root access policy changed: {self.source}")
+        rebound = bind_relative_source(
+            self.source_root,
+            self.source_relative,
             self.maximum,
+            self.source_directory_states,
+            self.source_directory_modes,
+            failure_subject="source",
         )
         try:
-            path_state = FileState.from_stat(os.fstat(reopened))
-            path_digest = digest_fd(reopened, self.maximum)
+            metadata = os.fstat(rebound.file_fd)
+            current = FileState.from_stat(metadata)
+            if not self.source_state.same_object(current):
+                raise ValueError(f"source object identity changed: {self.source}")
+            if stat.S_IMODE(metadata.st_mode) != self.source_mode:
+                raise ValueError(f"source access policy changed: {self.source}")
+            if self.source_state.size != current.size or digest_fd(
+                rebound.file_fd, self.maximum
+            ) != self.sha256:
+                raise ValueError(f"source content changed: {self.source}")
+            rebound.assert_stable()
+            if not self.source_state.same_object(
+                FileState.from_stat(os.fstat(rebound.file_fd))
+            ):
+                raise ValueError(f"source object identity changed: {self.source}")
         finally:
-            os.close(reopened)
-        if not self.source_state.same_object(path_state):
-            raise ValueError(f"source path was replaced: {self.source}")
-        if self.source_state.size != path_state.size or path_digest != self.sha256:
-            raise ValueError(f"source path content changed: {self.source}")
+            rebound.close()
 
     def assert_staged_stable(self) -> None:
-        current = regular_file_state(self.staged_fd, self.path, self.maximum)
-        if not self.staged_state.same_object(current):
-            raise ValueError(f"staged object identity changed: {self.path}")
-        if self.staged_state.size != current.size:
-            raise ValueError(f"staged content state changed: {self.path}")
-        reopened = open_regular_nofollow(self.path, self.maximum)
+        self.staged_root.assert_stable()
+        if stat.S_IMODE(os.fstat(self.staged_root.fd).st_mode) != self.staged_root_mode:
+            raise ValueError(f"staged root access policy changed: {self.path}")
+        rebound = bind_relative_source(
+            self.staged_root,
+            self.staged_relative,
+            self.maximum,
+            {},
+            {},
+            failure_subject="staged",
+        )
         try:
-            path_state = FileState.from_stat(os.fstat(reopened))
-            path_digest = digest_fd(reopened, self.maximum)
+            metadata = os.fstat(rebound.file_fd)
+            current = FileState.from_stat(metadata)
+            if not self.staged_state.same_object(current):
+                raise ValueError(f"staged object identity changed: {self.path}")
+            if stat.S_IMODE(metadata.st_mode) != self.staged_mode:
+                raise ValueError(f"staged access policy changed: {self.path}")
+            if self.staged_state.size != current.size or digest_fd(
+                rebound.file_fd, self.maximum
+            ) != self.sha256:
+                raise ValueError(f"staged content changed: {self.path}")
+            rebound.assert_stable()
+            if not self.staged_state.same_object(
+                FileState.from_stat(os.fstat(rebound.file_fd))
+            ):
+                raise ValueError(f"staged object identity changed: {self.path}")
         finally:
-            os.close(reopened)
-        if not self.staged_state.same_object(path_state):
-            raise ValueError(f"staged path was replaced: {self.path}")
-        if self.staged_state.size != path_state.size or path_digest != self.sha256:
-            raise ValueError(f"staged path content changed: {self.path}")
-        if digest_fd(self.staged_fd, self.maximum) != self.sha256:
-            raise ValueError(f"staged content digest changed: {self.path}")
+            rebound.close()
 
     def bytes(self) -> bytes:
         self.assert_staged_stable()
-        return read_fd(self.staged_fd, self.maximum)
+        rebound = bind_relative_source(
+            self.staged_root,
+            self.staged_relative,
+            self.maximum,
+            {},
+            {},
+            failure_subject="staged",
+        )
+        try:
+            data = read_fd(rebound.file_fd, self.maximum)
+            if digest(data) != self.sha256:
+                raise ValueError(f"staged content changed: {self.path}")
+            return data
+        finally:
+            rebound.close()
 
     def close(self) -> None:
-        self.bound_source.close()
-        os.close(self.staged_fd)
+        if self.owns_source_root:
+            self.source_root.close()
+            self.owns_source_root = False
+        if self.owns_staged_root:
+            self.staged_root.close()
+            self.owns_staged_root = False
 
 
 @dataclass(frozen=True)
@@ -668,6 +717,8 @@ def bind_relative_source(
     relative: str,
     maximum: int,
     expected_directory_states: dict[str, FileState] | None = None,
+    expected_directory_modes: dict[str, int] | None = None,
+    failure_subject: str = "source",
 ) -> BoundSource:
     validate_relative_path(relative, "repository source path")
     root.assert_stable()
@@ -690,7 +741,7 @@ def bind_relative_source(
                     raise
                 message = bound_source_open_failure(
                     error.__cause__,
-                    "source ancestor",
+                    f"{failure_subject} ancestor",
                     ancestor,
                 )
                 if message is None:
@@ -702,10 +753,17 @@ def bind_relative_source(
             if expected_directory_states is not None:
                 expected = expected_directory_states.get(ancestor)
                 if expected is None or not expected.same_object(state):
-                    raise ValueError(f"bundle source ancestor was replaced: {ancestor}")
-                if stat.S_IMODE(metadata.st_mode) != 0o755:
                     raise ValueError(
-                        f"bundle source ancestor access policy changed: {ancestor}"
+                        f"bundle {failure_subject} ancestor was replaced: {ancestor}"
+                    )
+                expected_mode = (
+                    expected_directory_modes.get(ancestor, 0o755)
+                    if expected_directory_modes is not None
+                    else 0o755
+                )
+                if stat.S_IMODE(metadata.st_mode) != expected_mode:
+                    raise ValueError(
+                        f"bundle {failure_subject} ancestor access policy changed: {ancestor}"
                     )
             directory_slots.append(DirectorySlot(parent_fd, component, child, state))
             parent_fd = child
@@ -717,7 +775,7 @@ def bind_relative_source(
                 raise
             message = bound_source_open_failure(
                 error.__cause__,
-                "source file",
+                f"{failure_subject} file",
                 relative,
             )
             if message is None:
@@ -855,11 +913,22 @@ def create_exclusive_file(path: Path, mode: int) -> int:
     return os.open(path, flags, mode)
 
 
+def create_exclusive_file_at(parent_fd: int, name: str, mode: int) -> int:
+    validate_relative_path(name, "staging file name")
+    if "/" in name:
+        raise ValueError("staging file name must be a single path component")
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(name, flags, mode, dir_fd=parent_fd)
+
+
 def stage_source(
     source: Path | BoundSource,
     destination: Path,
     maximum: int,
     mode: int,
+    staging_root: BoundDirectory | None = None,
 ) -> StagedFile:
     bound_source = (
         source if isinstance(source, BoundSource) else bind_absolute_source(source, maximum)
@@ -868,11 +937,77 @@ def stage_source(
         bound_source.close()
         raise ValueError("bound source byte limit does not match artifact contract")
     source_path = bound_source.display_path
+    try:
+        source_relative = source_path.relative_to(bound_source.root.display_path).as_posix()
+    except ValueError as error:
+        bound_source.close()
+        raise ValueError("bound source is outside its retained root") from error
+    validate_relative_path(source_relative, "staged source path")
+    source_components = source_relative.split("/")[:-1]
+    source_ancestors = [
+        "/".join(source_components[: index + 1])
+        for index in range(len(source_components))
+    ]
+    source_directory_states = {
+        relative: slot.state
+        for relative, slot in zip(
+            source_ancestors,
+            bound_source.directory_slots,
+            strict=True,
+        )
+    }
+    source_directory_modes = {
+        relative: stat.S_IMODE(os.fstat(slot.child_fd).st_mode)
+        for relative, slot in zip(
+            source_ancestors,
+            bound_source.directory_slots,
+            strict=True,
+        )
+    }
+    source_root = bound_source.root
+    source_root_mode = stat.S_IMODE(os.fstat(source_root.fd).st_mode)
+    owns_source_root = bound_source.owns_root
+    bound_source.owns_root = False
+
+    owns_staged_root = staging_root is None
+    if staging_root is None:
+        try:
+            staging_root = bind_absolute_directory(destination.parent)
+        except Exception:
+            bound_source.close()
+            if owns_source_root:
+                source_root.close()
+            raise
+    try:
+        staged_relative = destination.relative_to(staging_root.display_path).as_posix()
+    except ValueError as error:
+        bound_source.close()
+        if owns_source_root:
+            source_root.close()
+        if owns_staged_root:
+            staging_root.close()
+        raise ValueError("staging destination is outside its retained root") from error
+    validate_relative_path(staged_relative, "staging file path")
+    if "/" in staged_relative:
+        bound_source.close()
+        if owns_source_root:
+            source_root.close()
+        if owns_staged_root:
+            staging_root.close()
+        raise ValueError("staging destination must be a direct child of its retained root")
+    staged_root_mode = stat.S_IMODE(os.fstat(staging_root.fd).st_mode)
+
     source_fd = bound_source.file_fd
     staged_fd = -1
+    staged_created = False
+    source_closed = False
+    staged: StagedFile | None = None
     try:
+        source_metadata = os.fstat(source_fd)
         source_state = regular_file_state(source_fd, source_path, maximum)
-        staged_fd = create_exclusive_file(destination, 0o600)
+        source_mode = stat.S_IMODE(source_metadata.st_mode)
+        staged_fd = create_exclusive_file_at(staging_root.fd, staged_relative, 0o600)
+        staged_created = True
         hasher = hashlib.sha256()
         consumed = 0
         while True:
@@ -889,24 +1024,60 @@ def stage_source(
         os.fchmod(staged_fd, mode)
         os.fsync(staged_fd)
         staged_state = regular_file_state(staged_fd, destination, maximum)
+        staged_mode = stat.S_IMODE(os.fstat(staged_fd).st_mode)
+        source_digest = hasher.hexdigest()
+        bound_source.assert_stable()
+        current_source = regular_file_state(source_fd, source_path, maximum)
+        if not source_state.same_object(current_source):
+            raise ValueError(f"source object identity changed: {source_path}")
+        if source_state.size != current_source.size or digest_fd(
+            source_fd, maximum
+        ) != source_digest:
+            raise ValueError(f"source content changed: {source_path}")
         staged = StagedFile(
             source=source_path,
             path=destination,
-            bound_source=bound_source,
-            staged_fd=staged_fd,
+            source_root=source_root,
+            source_relative=source_relative,
+            source_directory_states=source_directory_states,
+            source_directory_modes=source_directory_modes,
+            source_root_mode=source_root_mode,
             source_state=source_state,
+            source_mode=source_mode,
+            staged_root=staging_root,
+            staged_relative=staged_relative,
+            staged_root_mode=staged_root_mode,
             staged_state=staged_state,
-            sha256=hasher.hexdigest(),
+            staged_mode=staged_mode,
+            sha256=source_digest,
             maximum=maximum,
+            owns_source_root=owns_source_root,
+            owns_staged_root=owns_staged_root,
         )
+        bound_source.close()
+        source_closed = True
+        os.close(staged_fd)
+        staged_fd = -1
         staged.assert_source_stable()
         staged.assert_staged_stable()
         return staged
     except Exception:
-        bound_source.close()
+        if not source_closed:
+            bound_source.close()
         if staged_fd >= 0:
             os.close(staged_fd)
-        destination.unlink(missing_ok=True)
+        if staged_created:
+            try:
+                os.unlink(staged_relative, dir_fd=staging_root.fd)
+            except FileNotFoundError:
+                pass
+        if staged is not None:
+            staged.close()
+        else:
+            if owns_source_root:
+                source_root.close()
+            if owns_staged_root:
+                staging_root.close()
         raise
 
 
@@ -2140,16 +2311,19 @@ def main() -> int:
 
     output_fd = open_output_directory(args.output_dir)
     staged_files: list[StagedFile] = []
+    source_roots: dict[Path, BoundDirectory] = {}
+    staging_binding: BoundDirectory | None = None
     archive_fd = -1
     sidecar_fd = -1
     archive_temp_name = ""
     sidecar_temp_name = ""
     try:
         with tempfile.TemporaryDirectory(prefix="diskplan-package-") as staging_name:
-            staging_root = Path(staging_name)
-            os.chmod(staging_root, 0o700)
-            inputs = staging_root / "inputs"
+            staging_path = Path(staging_name)
+            os.chmod(staging_path, 0o700)
+            inputs = staging_path / "inputs"
             inputs.mkdir(mode=0o700)
+            staging_binding = bind_absolute_directory(inputs)
             token_sources = {
                 "@activator": args.activator,
                 "@common-library": args.common_library,
@@ -2165,20 +2339,43 @@ def main() -> int:
             for index, spec in enumerate(contract):
                 if spec.source == "@protocol-version":
                     continue
-                source = (
-                    bind_absolute_source(token_sources[spec.source], spec.maximum_bytes)
-                    if spec.source.startswith("@")
-                    else require_safe_repository_source(
+                if spec.source.startswith("@"):
+                    source_path = token_sources[spec.source]
+                    if not source_path.is_absolute():
+                        raise ValueError(f"source path must be absolute: {source_path}")
+                    try:
+                        asset_relative = source_path.relative_to(asset_root).as_posix()
+                    except ValueError:
+                        asset_relative = ""
+                    if asset_relative:
+                        source = bind_relative_source(
+                            asset_root_binding,
+                            asset_relative,
+                            spec.maximum_bytes,
+                        )
+                    else:
+                        source_parent = source_path.parent
+                        source_root = source_roots.get(source_parent)
+                        if source_root is None:
+                            source_root = bind_absolute_directory(source_parent)
+                            source_roots[source_parent] = source_root
+                        source = bind_relative_source(
+                            source_root,
+                            source_path.name,
+                            spec.maximum_bytes,
+                        )
+                else:
+                    source = require_safe_repository_source(
                         asset_root_binding,
                         spec.source,
                         spec.maximum_bytes,
                     )
-                )
                 item = stage_source(
                     source,
                     inputs / f"artifact-{index:04d}",
                     spec.maximum_bytes,
                     spec.mode,
+                    staging_binding,
                 )
                 staged_files.append(item)
                 staged[spec.bundle_path] = item
@@ -2227,7 +2424,7 @@ def main() -> int:
                             f"component identity mismatch for {component['component']}: {key}"
                         )
             bundle_name = f"diskplan-{version}-macos-arm64"
-            bundle = staging_root / bundle_name
+            bundle = staging_path / bundle_name
             bundle.mkdir(mode=0o755)
             make_bundle_directories(bundle, [item.bundle_path for item in contract])
             artifacts: list[dict[str, Any]] = []
@@ -2281,6 +2478,15 @@ def main() -> int:
             if digest_fd(contract_binding.file_fd, MAX_CONTRACT_BYTES) != contract_digest:
                 raise ValueError("bundle contract content changed during packaging")
 
+            for item in staged_files:
+                item.close()
+            staged_files.clear()
+            staging_binding.close()
+            staging_binding = None
+            for root in source_roots.values():
+                root.close()
+            source_roots.clear()
+
             archive_name = f"{bundle_name}.tar.gz"
             archive_temp_name, archive_fd, archive_digest = build_archive(
                 bundle,
@@ -2307,6 +2513,10 @@ def main() -> int:
     finally:
         for item in staged_files:
             item.close()
+        if staging_binding is not None:
+            staging_binding.close()
+        for root in source_roots.values():
+            root.close()
         if archive_fd >= 0:
             try:
                 unlink_if_same(
