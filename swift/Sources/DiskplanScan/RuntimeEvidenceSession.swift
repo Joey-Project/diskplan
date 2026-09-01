@@ -31,11 +31,25 @@ package struct RuntimeFreshRootDescriptor: Sendable {
 /// Ownership of `fileDescriptor` transfers to DiskplanScan when collection starts.
 package struct RuntimeFreshVolumeDescriptor: Sendable {
   package let volumeID: String
+  package let rawAbsolutePath: Data
   package let fileDescriptor: Int32
 
-  package init(volumeID: String, fileDescriptor: Int32) {
+  package init(volumeID: String, rawAbsolutePath: Data, fileDescriptor: Int32) {
     self.volumeID = volumeID
+    self.rawAbsolutePath = rawAbsolutePath
     self.fileDescriptor = fileDescriptor
+  }
+}
+
+/// The canonical volume scope that a receipt consumer expects. It deliberately carries no handle:
+/// only DiskplanScan may turn transferred descriptors into sealed collection authority.
+package struct RuntimeFreshVolumeScope: Equatable, Sendable {
+  package let volumeID: String
+  package let rawAbsolutePath: Data
+
+  package init(volumeID: String, rawAbsolutePath: Data) {
+    self.volumeID = volumeID
+    self.rawAbsolutePath = rawAbsolutePath
   }
 }
 
@@ -77,18 +91,22 @@ package final class RuntimeFreshScanReceipt: @unchecked Sendable {
   package let captureID: RuntimeEvidenceCaptureID
   package let kind: RuntimeEvidenceCaptureKind
   package let rootBindingDigest: EvidenceDigest
+  package let volumeBindingDigest: EvidenceDigest
 
   private let lock = NSLock()
   private let session: RuntimeEvidenceSession
   private let leaseState: RuntimeEvidenceLeaseState
   private let rootRequestDigest: EvidenceDigest
+  private let volumeRequestDigest: EvidenceDigest
   private var payload: RuntimeFreshScanPayload?
 
   fileprivate init(
     captureID: RuntimeEvidenceCaptureID,
     kind: RuntimeEvidenceCaptureKind,
     rootRequestDigest: EvidenceDigest,
+    volumeRequestDigest: EvidenceDigest,
     rootBindingDigest: EvidenceDigest,
+    volumeBindingDigest: EvidenceDigest,
     payload: RuntimeFreshScanPayload,
     session: RuntimeEvidenceSession,
     leaseState: RuntimeEvidenceLeaseState
@@ -96,7 +114,9 @@ package final class RuntimeFreshScanReceipt: @unchecked Sendable {
     self.captureID = captureID
     self.kind = kind
     self.rootRequestDigest = rootRequestDigest
+    self.volumeRequestDigest = volumeRequestDigest
     self.rootBindingDigest = rootBindingDigest
+    self.volumeBindingDigest = volumeBindingDigest
     self.payload = payload
     self.session = session
     self.leaseState = leaseState
@@ -107,6 +127,7 @@ package final class RuntimeFreshScanReceipt: @unchecked Sendable {
     lease expectedLease: RuntimeEvidenceLeaseState,
     kind expectedKind: RuntimeEvidenceCaptureKind,
     roots expectedRoots: [ScanRootRequest],
+    volumes expectedVolumes: [RuntimeFreshVolumeScope],
     captureID expectedCaptureID: RuntimeEvidenceCaptureID
   ) throws -> RuntimeFreshScanPayload {
     try lock.withLock {
@@ -115,8 +136,13 @@ package final class RuntimeFreshScanReceipt: @unchecked Sendable {
       guard session === expectedSession, leaseState === expectedLease,
         kind == expectedKind, captureID == expectedCaptureID,
         rootRequestDigest == runtimeRootRequestDigest(expectedRoots),
+        volumeRequestDigest == runtimeVolumeRequestDigest(expectedVolumes),
         payload.rootBindingDigest == rootBindingDigest,
-        expectedLease.consumePublishedReceipt(rootBindingDigest: rootBindingDigest)
+        payload.volumeBindingDigest == volumeBindingDigest,
+        expectedLease.consumePublishedReceipt(
+          rootBindingDigest: rootBindingDigest,
+          volumeBindingDigest: volumeBindingDigest
+        )
       else {
         throw RuntimeFreshScanError.receiptBindingMismatch
       }
@@ -130,7 +156,9 @@ package struct RuntimeFreshScanPayload: Sendable {
   package let captureID: RuntimeEvidenceCaptureID
   package let kind: RuntimeEvidenceCaptureKind
   package let rootBindingDigest: EvidenceDigest
+  package let volumeBindingDigest: EvidenceDigest
   package let rootBindingValidation: Observation<Bool>
+  package let volumeBindingValidation: Observation<Bool>
   package let scanResult: ScanResult
   package let events: Observation<[ScanNodeEvent]>
   package let collectors: RuntimeCollectorSnapshot
@@ -139,7 +167,9 @@ package struct RuntimeFreshScanPayload: Sendable {
     captureID: RuntimeEvidenceCaptureID,
     kind: RuntimeEvidenceCaptureKind,
     rootBindingDigest: EvidenceDigest,
+    volumeBindingDigest: EvidenceDigest,
     rootBindingValidation: Observation<Bool>,
+    volumeBindingValidation: Observation<Bool>,
     scanResult: ScanResult,
     events: Observation<[ScanNodeEvent]>,
     collectors: RuntimeCollectorSnapshot
@@ -147,7 +177,9 @@ package struct RuntimeFreshScanPayload: Sendable {
     self.captureID = captureID
     self.kind = kind
     self.rootBindingDigest = rootBindingDigest
+    self.volumeBindingDigest = volumeBindingDigest
     self.rootBindingValidation = rootBindingValidation
+    self.volumeBindingValidation = volumeBindingValidation
     self.scanResult = scanResult
     self.events = events
     self.collectors = collectors
@@ -158,7 +190,7 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
   private enum Lifecycle {
     case ready
     case collecting
-    case published(rootBindingDigest: EvidenceDigest)
+    case published(rootBindingDigest: EvidenceDigest, volumeBindingDigest: EvidenceDigest)
     case retired
   }
 
@@ -175,11 +207,17 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
     }
   }
 
-  func publish(rootBindingDigest: EvidenceDigest) -> Bool {
+  func publish(
+    rootBindingDigest: EvidenceDigest,
+    volumeBindingDigest: EvidenceDigest
+  ) -> Bool {
     condition.withLock {
       guard collectionInFlight, case .collecting = lifecycle else { return false }
       collectionInFlight = false
-      lifecycle = .published(rootBindingDigest: rootBindingDigest)
+      lifecycle = .published(
+        rootBindingDigest: rootBindingDigest,
+        volumeBindingDigest: volumeBindingDigest
+      )
       condition.broadcast()
       return true
     }
@@ -193,11 +231,15 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
     }
   }
 
-  func consumePublishedReceipt(rootBindingDigest: EvidenceDigest) -> Bool {
+  func consumePublishedReceipt(
+    rootBindingDigest: EvidenceDigest,
+    volumeBindingDigest: EvidenceDigest
+  ) -> Bool {
     condition.withLock {
       guard !receiptConsumed,
-        case .published(let publishedDigest) = lifecycle,
-        publishedDigest == rootBindingDigest
+        case .published(let publishedRootDigest, let publishedVolumeDigest) = lifecycle,
+        publishedRootDigest == rootBindingDigest,
+        publishedVolumeDigest == volumeBindingDigest
       else { return false }
       receiptConsumed = true
       return true
@@ -222,6 +264,7 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
   private let policy: NoMaterializationPolicy
   private let collectorBundle: ProductionScanCollectorBundle
   private let scanProfile: ScanProfile
+  private let testingStructuralBudget: StructuralBudget?
   private let transferredDescriptorObserver: @Sendable ([Int32]) -> Void
   private let sessionNonce: Data
   private var issuedCaptureIDs = Set<RuntimeEvidenceCaptureID>()
@@ -233,6 +276,7 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
     self.policy = policy
     collectorBundle = ProductionScanCollectorBundle()
     scanProfile = .deep
+    testingStructuralBudget = nil
     transferredDescriptorObserver = { _ in }
     var nonce = Data(count: 32)
     nonce.withUnsafeMutableBytes { raw in
@@ -247,11 +291,13 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
     policy: NoMaterializationPolicy,
     testingCollectorBundle: ProductionScanCollectorBundle,
     testingScanProfile: ScanProfile = .deep,
+    testingStructuralBudget: StructuralBudget? = nil,
     testingTransferredDescriptorObserver: @escaping @Sendable ([Int32]) -> Void = { _ in }
   ) {
     self.policy = policy
     collectorBundle = testingCollectorBundle
     scanProfile = testingScanProfile
+    self.testingStructuralBudget = testingStructuralBudget
     transferredDescriptorObserver = testingTransferredDescriptorObserver
     var nonce = Data(count: 32)
     nonce.withUnsafeMutableBytes { raw in
@@ -328,12 +374,22 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
       }
       let environment =
         scanProfile == .quick ? ScanEnvironment(adapterRoots: rootRequests) : ScanEnvironment()
-      let scope = try ScanRootResolver().resolve(
+      let resolvedScope = try ScanRootResolver().resolve(
         profile: scanProfile,
         environment: environment,
         explicitRoots: rootRequests,
         maximumDurationNanoseconds: request.maximumDurationNanoseconds
       )
+      let scope =
+        try testingStructuralBudget.map {
+          try ResolvedScanScope(
+            resolverVersion: resolvedScope.resolverVersion,
+            profile: resolvedScope.profile,
+            roots: resolvedScope.roots,
+            budget: $0,
+            maximumDurationNanoseconds: resolvedScope.maximumDurationNanoseconds
+          )
+        } ?? resolvedScope
       let collectors = await collectorBundle.collect(
         processDeadlineNanoseconds: request.processDeadlineNanoseconds,
         volumes: ownedDescriptors.volumes.map {
@@ -341,7 +397,7 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
         }
       )
       try Task.checkCancellation()
-      let validatedCollectors = ownedDescriptors.revalidateVolumes(collectors)
+      let volumeValidation = ownedDescriptors.revalidateVolumes(collectors)
       let eventSink = RuntimeFreshEventCaptureSink(
         maximumEvents: runtimeFreshEventLimit(scope: scope)
       )
@@ -349,8 +405,9 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
         filesystem: DarwinScanFilesystem(policy: policy),
         scope: scope,
         nodeSink: eventSink,
-        processActivity: scanProcessActivity(validatedCollectors.processActivity),
-        globalFacts: scanGlobalFacts(validatedCollectors.globalFacts),
+        accessPolicyEpochSink: eventSink,
+        processActivity: scanProcessActivity(volumeValidation.snapshot.processActivity),
+        globalFacts: scanGlobalFacts(volumeValidation.snapshot.globalFacts),
         collectorConfiguration: collectorBundle.collectorConfiguration(
           processDeadlineNanoseconds: request.processDeadlineNanoseconds
         )
@@ -363,24 +420,36 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
       try Task.checkCancellation()
       let rootValidation = ownedDescriptors.validateRoots(scanResult: result)
       let requestDigest = runtimeRootRequestDigest(rootRequests)
-      let bindingDigest = ownedDescriptors.rootBindingDigest
+      let volumeRequestDigest = runtimeVolumeRequestDigest(ownedDescriptors.volumeScopes)
+      let rootBindingDigest = ownedDescriptors.rootBindingDigest
+      let volumeBindingDigest = ownedDescriptors.volumeBindingDigest
       let payload = RuntimeFreshScanPayload(
         captureID: captureID,
         kind: kind,
-        rootBindingDigest: bindingDigest,
+        rootBindingDigest: rootBindingDigest,
+        volumeBindingDigest: volumeBindingDigest,
         rootBindingValidation: rootValidation,
+        volumeBindingValidation: volumeValidation.binding,
         scanResult: result,
         events: eventSink.snapshot(),
-        collectors: validatedCollectors
+        collectors: volumeValidation.snapshot
       )
-      guard publish(state, rootBindingDigest: bindingDigest) else {
+      guard
+        publish(
+          state,
+          rootBindingDigest: rootBindingDigest,
+          volumeBindingDigest: volumeBindingDigest
+        )
+      else {
         throw RuntimeFreshScanError.captureRetired
       }
       return RuntimeFreshScanReceipt(
         captureID: captureID,
         kind: kind,
         rootRequestDigest: requestDigest,
-        rootBindingDigest: bindingDigest,
+        volumeRequestDigest: volumeRequestDigest,
+        rootBindingDigest: rootBindingDigest,
+        volumeBindingDigest: volumeBindingDigest,
         payload: payload,
         session: self,
         leaseState: state
@@ -399,11 +468,15 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
 
   private func publish(
     _ state: RuntimeEvidenceLeaseState,
-    rootBindingDigest: EvidenceDigest
+    rootBindingDigest: EvidenceDigest,
+    volumeBindingDigest: EvidenceDigest
   ) -> Bool {
     lock.withLock {
       guard !closed, activeLease === state, !Task.isCancelled else { return false }
-      return state.publish(rootBindingDigest: rootBindingDigest)
+      return state.publish(
+        rootBindingDigest: rootBindingDigest,
+        volumeBindingDigest: volumeBindingDigest
+      )
     }
   }
 
@@ -470,6 +543,7 @@ package final class RuntimeEvidenceCaptureLease: @unchecked Sendable {
     _ receipt: RuntimeFreshScanReceipt,
     expectedKind: RuntimeEvidenceCaptureKind,
     expectedRoots: [ScanRootRequest],
+    expectedVolumes: [RuntimeFreshVolumeScope],
     expectedCaptureID: RuntimeEvidenceCaptureID
   ) throws -> RuntimeFreshScanPayload {
     try receipt.consume(
@@ -477,6 +551,7 @@ package final class RuntimeEvidenceCaptureLease: @unchecked Sendable {
       lease: state,
       kind: expectedKind,
       roots: expectedRoots,
+      volumes: expectedVolumes,
       captureID: expectedCaptureID
     )
   }
@@ -493,19 +568,32 @@ private struct RuntimeFreshBoundRoot {
 
 private struct RuntimeFreshBoundVolume {
   let volumeID: String
+  let rawAbsolutePath: Data
+  let rootIDs: [String]
   let fileDescriptor: Int32
   let seal: RuntimeFreshDescriptorSeal
 }
 
-private struct RuntimeFreshDescriptorSeal: Equatable {
+struct RuntimeFreshDescriptorSeal: Equatable {
   let identity: ObjectIdentity
   let accessPolicy: AccessPolicyEvidence
+}
+
+private struct RuntimeFreshVolumeValidation {
+  let snapshot: RuntimeCollectorSnapshot
+  let binding: Observation<Bool>
 }
 
 private final class RuntimeFreshOwnedDescriptors {
   let roots: [RuntimeFreshBoundRoot]
   let volumes: [RuntimeFreshBoundVolume]
   let rootBindingDigest: EvidenceDigest
+  let volumeBindingDigest: EvidenceDigest
+  var volumeScopes: [RuntimeFreshVolumeScope] {
+    volumes.map {
+      RuntimeFreshVolumeScope(volumeID: $0.volumeID, rawAbsolutePath: $0.rawAbsolutePath)
+    }
+  }
   private let policy: NoMaterializationPolicy
   private let allDescriptors: [Int32]
 
@@ -541,6 +629,12 @@ private final class RuntimeFreshOwnedDescriptors {
       do { _ = try CanonicalScanRootPath.parse(root.rawAbsolutePath) } catch {
         throw RuntimeFreshScanError.invalidRequest(
           reason: "fresh scan roots must use canonical absolute raw paths")
+      }
+    }
+    for volume in sourceVolumes {
+      do { _ = try CanonicalScanRootPath.parse(volume.rawAbsolutePath) } catch {
+        throw RuntimeFreshScanError.invalidRequest(
+          reason: "fresh scan volumes must use canonical absolute raw paths")
       }
     }
 
@@ -606,9 +700,39 @@ private final class RuntimeFreshOwnedDescriptors {
             observation: .failed(reason: "fresh scan volume is not a directory", errorCode: ENOTDIR)
           )
         }
+        let mountedPath = try runtimeMountedVolumePath(copy, scopeID: volume.volumeID)
+        guard mountedPath == volume.rawAbsolutePath else {
+          throw RuntimeFreshScanError.descriptorFailure(
+            scopeID: volume.volumeID,
+            observation: .failed(
+              reason: "fresh scan volume descriptor is not mounted at its canonical raw path",
+              errorCode: ESTALE
+            )
+          )
+        }
+        let relatedRootIDs = boundRoots.filter {
+          $0.seal.identity.device == seal.identity.device
+        }.map(\.rootID).sorted()
+        guard !relatedRootIDs.isEmpty else {
+          throw RuntimeFreshScanError.descriptorFailure(
+            scopeID: volume.volumeID,
+            observation: .failed(
+              reason: "fresh scan volume does not contain a bound scan root",
+              errorCode: EXDEV
+            )
+          )
+        }
+        if let aclFailure = runtimeACLFailure(seal.accessPolicy.aclDigest) {
+          throw RuntimeFreshScanError.descriptorFailure(
+            scopeID: volume.volumeID,
+            observation: aclFailure.erasingValue()
+          )
+        }
         boundVolumes.append(
           RuntimeFreshBoundVolume(
             volumeID: volume.volumeID,
+            rawAbsolutePath: volume.rawAbsolutePath,
+            rootIDs: relatedRootIDs,
             fileDescriptor: copy,
             seal: seal
           ))
@@ -617,6 +741,7 @@ private final class RuntimeFreshOwnedDescriptors {
       volumes = boundVolumes.sorted { $0.volumeID < $1.volumeID }
       allDescriptors = Array(duplicated.values)
       rootBindingDigest = runtimeRootBindingDigest(roots)
+      volumeBindingDigest = runtimeVolumeBindingDigest(volumes)
     } catch {
       for descriptor in duplicated.values { Darwin.close(descriptor) }
       throw error
@@ -678,48 +803,65 @@ private final class RuntimeFreshOwnedDescriptors {
     return .known(true)
   }
 
-  func revalidateVolumes(_ snapshot: RuntimeCollectorSnapshot) -> RuntimeCollectorSnapshot {
+  func revalidateVolumes(_ snapshot: RuntimeCollectorSnapshot) -> RuntimeFreshVolumeValidation {
     var facts = snapshot.globalFacts.apfsSnapshotsByVolume
+    var binding: Observation<Bool> =
+      volumes.isEmpty
+      ? .absent(reason: "fresh scan request declared no volume scope") : .known(true)
+    func reject(_ observation: Observation<Bool>) {
+      if binding == .known(true) { binding = observation }
+    }
+
     for volume in volumes {
+      if facts[volume.volumeID] == nil {
+        let missing = Observation<[Data]>.failed(
+          reason: "fresh scan collector omitted a bound volume", errorCode: EPROTO)
+        facts[volume.volumeID] = missing
+        reject(missing.erasingValue())
+      }
       do {
         let current = try runtimeDescriptorSeal(
           volume.fileDescriptor,
           scopeID: volume.volumeID,
           policy: policy
         )
-        if let aclFailure = runtimeACLFailure(volume.seal.accessPolicy.aclDigest) {
-          facts[volume.volumeID] = aclFailure.erasingValue()
-        } else if let aclFailure = runtimeACLFailure(current.accessPolicy.aclDigest) {
-          facts[volume.volumeID] = aclFailure.erasingValue()
-        } else if current != volume.seal {
-          facts[volume.volumeID] = .failed(
-            reason: "fresh scan volume descriptor identity or access policy changed",
-            errorCode: ESTALE
-          )
+        let validation = runtimeVolumeSealValidation(expected: volume.seal, current: current)
+        if validation != .known(true) {
+          facts[volume.volumeID] = validation.erasingValue()
+          reject(validation)
         }
       } catch let RuntimeFreshScanError.descriptorFailure(_, observation) {
         facts[volume.volumeID] = observation.erasingValue()
+        reject(observation.erasingValue())
       } catch {
-        facts[volume.volumeID] = .failed(
+        let failure = Observation<[Data]>.failed(
           reason: "fresh scan volume revalidation failed", errorCode: EIO)
+        facts[volume.volumeID] = failure
+        reject(failure.erasingValue())
       }
     }
-    return RuntimeCollectorSnapshot(
-      processActivity: snapshot.processActivity,
-      globalFacts: RuntimeGlobalFactSnapshot(
-        vm: snapshot.globalFacts.vm,
-        swap: snapshot.globalFacts.swap,
-        apfsSnapshotsByVolume: facts
-      )
+    return RuntimeFreshVolumeValidation(
+      snapshot: RuntimeCollectorSnapshot(
+        processActivity: snapshot.processActivity,
+        globalFacts: RuntimeGlobalFactSnapshot(
+          vm: snapshot.globalFacts.vm,
+          swap: snapshot.globalFacts.swap,
+          apfsSnapshotsByVolume: facts
+        )
+      ),
+      binding: binding
     )
   }
 }
 
-private final class RuntimeFreshEventCaptureSink: ScanNodeSink, @unchecked Sendable {
+private final class RuntimeFreshEventCaptureSink: ScanNodeSink, AccessPolicyEpochSink,
+  @unchecked Sendable
+{
   private static let maximumEstimatedBytes = 256 * 1_024 * 1_024
 
   private let lock = NSLock()
   private let maximumEvents: Int
+  private let accessPolicyEpochLedger = AccessPolicyEpochLedger()
   private var events: [ScanNodeEvent] = []
   private var estimatedBytes = 0
   private var overflowed = false
@@ -747,13 +889,69 @@ private final class RuntimeFreshEventCaptureSink: ScanNodeSink, @unchecked Senda
     }
   }
 
+  func receive(_ receipt: DirectoryCloseEpochReceipt) {
+    accessPolicyEpochLedger.receive(receipt)
+  }
+
   func snapshot() -> Observation<[ScanNodeEvent]> {
     lock.withLock {
-      overflowed
-        ? .failed(
+      guard !overflowed else {
+        return .failed(
           reason: "fresh scan event corpus exceeded its Scan-owned limit", errorCode: EOVERFLOW)
-        : .known(events)
+      }
+      var finalized: [ScanNodeEvent] = []
+      finalized.reserveCapacity(events.count)
+      for event in events {
+        switch runtimeFinalizeFreshEvent(event, ledger: accessPolicyEpochLedger) {
+        case .known(let value): finalized.append(value)
+        case .absent(let reason): return .absent(reason: reason)
+        case .unknown(let reason): return .unknown(reason: reason)
+        case .unreadable(let reason, let code):
+          return .unreadable(reason: reason, errorCode: code)
+        case .failed(let reason, let code): return .failed(reason: reason, errorCode: code)
+        }
+      }
+      return .known(finalized)
     }
+  }
+}
+
+private func runtimeFinalizeFreshEvent(
+  _ event: ScanNodeEvent,
+  ledger: AccessPolicyEpochLedger
+) -> Observation<ScanNodeEvent> {
+  let node: ScannedNode
+  switch event {
+  case .observed(let value), .directoryClosed(let value): node = value
+  }
+  guard case .known(let seal) = node.ancestorAccessPolicy,
+    !seal.pendingCloseEpochIDs.isEmpty
+  else {
+    return .known(event)
+  }
+  let finalized = ledger.finalize(node.ancestorAccessPolicy)
+  guard case .known(let finalizedSeal) = finalized else { return finalized.erasingValue() }
+  guard finalizedSeal.pendingCloseEpochIDs.isEmpty else {
+    return .failed(
+      reason: "fresh scan event retained unresolved directory close epochs", errorCode: EPROTO)
+  }
+  let finalizedNode = ScannedNode(
+    path: node.path,
+    identity: node.identity,
+    bytes: node.bytes,
+    storageTopology: node.storageTopology,
+    filesystemTimes: node.filesystemTimes,
+    filesystemFlags: node.filesystemFlags,
+    accessPolicy: node.accessPolicy,
+    ancestorAccessPolicy: .known(finalizedSeal),
+    content: node.content,
+    coverage: node.coverage,
+    providerBoundary: node.providerBoundary,
+    providerEvidence: node.providerEvidence
+  )
+  switch event {
+  case .observed: return .known(.observed(finalizedNode))
+  case .directoryClosed: return .known(.directoryClosed(finalizedNode))
   }
 }
 
@@ -812,6 +1010,51 @@ private func runtimeDescriptorSeal(
     identity: seal.identity,
     accessPolicy: seal.accessPolicy
   )
+}
+
+func runtimeVolumeSealValidation(
+  expected: RuntimeFreshDescriptorSeal,
+  current: RuntimeFreshDescriptorSeal
+) -> Observation<Bool> {
+  guard current.identity == expected.identity else {
+    return .failed(reason: "fresh scan volume descriptor identity changed", errorCode: ESTALE)
+  }
+  if let aclFailure = runtimeACLFailure(expected.accessPolicy.aclDigest) {
+    return aclFailure
+  }
+  if let aclFailure = runtimeACLFailure(current.accessPolicy.aclDigest) {
+    return aclFailure
+  }
+  guard current.accessPolicy == expected.accessPolicy else {
+    return .failed(reason: "fresh scan volume access policy changed", errorCode: EAGAIN)
+  }
+  return .known(true)
+}
+
+private func runtimeMountedVolumePath(
+  _ descriptor: Int32,
+  scopeID: String
+) throws -> Data {
+  var filesystem = statfs()
+  guard Darwin.fstatfs(descriptor, &filesystem) == 0 else {
+    throw RuntimeFreshScanError.descriptorFailure(
+      scopeID: scopeID,
+      observation: runtimeDescriptorFailure(errno, operation: "read fresh scan volume mount")
+    )
+  }
+  let rawPath = withUnsafeBytes(of: &filesystem.f_mntonname) { rawBuffer -> Data in
+    let bytes = rawBuffer.bindMemory(to: UInt8.self)
+    let end = bytes.firstIndex(of: 0) ?? bytes.endIndex
+    return Data(bytes[..<end])
+  }
+  do { _ = try CanonicalScanRootPath.parse(rawPath) } catch {
+    throw RuntimeFreshScanError.descriptorFailure(
+      scopeID: scopeID,
+      observation: .failed(
+        reason: "fresh scan volume mount path is not canonical", errorCode: EPROTO)
+    )
+  }
+  return rawPath
 }
 
 private func runtimeValidateDescriptorFlags(
@@ -903,6 +1146,19 @@ private func runtimeRootRequestDigest(_ roots: [ScanRootRequest]) -> EvidenceDig
   return EvidenceDigest(unchecked: Data(SHA256.hash(data: data)))
 }
 
+private func runtimeVolumeRequestDigest(
+  _ volumes: [RuntimeFreshVolumeScope]
+) -> EvidenceDigest {
+  var data = Data("diskplan/runtime-fresh-scan-volume-request/v1\0".utf8)
+  let canonical = volumes.sorted(by: runtimeVolumeScopePrecedes)
+  appendUInt64(UInt64(canonical.count), to: &data)
+  for volume in canonical {
+    appendLengthPrefixed(Data(volume.volumeID.utf8), to: &data)
+    appendLengthPrefixed(volume.rawAbsolutePath, to: &data)
+  }
+  return EvidenceDigest(unchecked: Data(SHA256.hash(data: data)))
+}
+
 private func runtimeRootBindingDigest(
   _ roots: [RuntimeFreshBoundRoot]
 ) -> EvidenceDigest {
@@ -921,6 +1177,46 @@ private func runtimeRootBindingDigest(
     appendObservation(root.seal.accessPolicy.aclDigest, to: &data)
   }
   return EvidenceDigest(unchecked: Data(SHA256.hash(data: data)))
+}
+
+private func runtimeVolumeBindingDigest(
+  _ volumes: [RuntimeFreshBoundVolume]
+) -> EvidenceDigest {
+  var data = Data("diskplan/runtime-fresh-scan-volume-binding/v1\0".utf8)
+  let canonical = volumes.sorted {
+    runtimeVolumeScopePrecedes(
+      RuntimeFreshVolumeScope(volumeID: $0.volumeID, rawAbsolutePath: $0.rawAbsolutePath),
+      RuntimeFreshVolumeScope(volumeID: $1.volumeID, rawAbsolutePath: $1.rawAbsolutePath)
+    )
+  }
+  appendUInt64(UInt64(canonical.count), to: &data)
+  for volume in canonical {
+    appendLengthPrefixed(Data(volume.volumeID.utf8), to: &data)
+    appendLengthPrefixed(volume.rawAbsolutePath, to: &data)
+    appendUInt64(UInt64(volume.rootIDs.count), to: &data)
+    for rootID in volume.rootIDs {
+      appendLengthPrefixed(Data(rootID.utf8), to: &data)
+    }
+    appendInt64(volume.seal.identity.device, to: &data)
+    appendUInt64(volume.seal.identity.fileID, to: &data)
+    data.append(runtimeObjectTypeByte(volume.seal.identity.objectType))
+    appendUInt64(UInt64(volume.seal.accessPolicy.ownerUserID), to: &data)
+    appendUInt64(UInt64(volume.seal.accessPolicy.ownerGroupID), to: &data)
+    appendUInt64(UInt64(volume.seal.accessPolicy.mode), to: &data)
+    appendUInt64(UInt64(volume.seal.accessPolicy.flags), to: &data)
+    appendObservation(volume.seal.accessPolicy.aclDigest, to: &data)
+  }
+  return EvidenceDigest(unchecked: Data(SHA256.hash(data: data)))
+}
+
+private func runtimeVolumeScopePrecedes(
+  _ lhs: RuntimeFreshVolumeScope,
+  _ rhs: RuntimeFreshVolumeScope
+) -> Bool {
+  if lhs.rawAbsolutePath != rhs.rawAbsolutePath {
+    return lhs.rawAbsolutePath.lexicographicallyPrecedes(rhs.rawAbsolutePath)
+  }
+  return lhs.volumeID < rhs.volumeID
 }
 
 private func appendObservation(_ value: Observation<EvidenceDigest>, to data: inout Data) {
@@ -1010,6 +1306,9 @@ private func scanGlobalFact<Value: Equatable & Sendable>(
 private func scanAPFSSnapshotFact(
   _ observations: [String: Observation<[Data]>]
 ) -> GlobalFact<[String]> {
+  guard !observations.isEmpty else {
+    return .unavailable(reason: "no bound volume scope was collected")
+  }
   var names: [String] = []
   for volumeID in observations.keys.sorted() {
     guard case .known(let volumeNames) = observations[volumeID] else {

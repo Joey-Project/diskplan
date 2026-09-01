@@ -7,7 +7,9 @@ let forged = RuntimeFreshScanReceipt(
   captureID: fixtureValue(),
   kind: fixtureValue(),
   rootRequestDigest: fixtureValue(),
+  volumeRequestDigest: fixtureValue(),
   rootBindingDigest: fixtureValue(),
+  volumeBindingDigest: fixtureValue(),
   payload: fixtureValue(),
   session: fixtureValue(),
   leaseState: fixtureValue()

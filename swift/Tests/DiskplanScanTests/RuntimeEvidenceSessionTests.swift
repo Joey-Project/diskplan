@@ -18,13 +18,23 @@ func freshScanReceiptBindsConcreteRootIdentityAndConsumesOnce() async throws {
     receipt,
     expectedKind: .wholePlan,
     expectedRoots: [systemRootRequest],
+    expectedVolumes: [],
     expectedCaptureID: lease.captureID
   )
 
   #expect(payload.captureID == lease.captureID)
   #expect(payload.kind == .wholePlan)
   #expect(payload.rootBindingDigest == receipt.rootBindingDigest)
+  #expect(payload.volumeBindingDigest == receipt.volumeBindingDigest)
   #expect(payload.rootBindingValidation == .known(true))
+  #expect(
+    payload.volumeBindingValidation
+      == .absent(reason: "fresh scan request declared no volume scope")
+  )
+  #expect(
+    payload.scanResult.globalFacts.apfsSnapshots
+      == .unavailable(reason: "no bound volume scope was collected")
+  )
   #expect(payload.scanResult.state == .partial)
   guard case .known(let events) = payload.events else {
     Issue.record("expected a complete Scan-owned event corpus")
@@ -36,6 +46,7 @@ func freshScanReceiptBindsConcreteRootIdentityAndConsumesOnce() async throws {
       receipt,
       expectedKind: .wholePlan,
       expectedRoots: [systemRootRequest],
+      expectedVolumes: [],
       expectedCaptureID: lease.captureID
     )
   }
@@ -69,6 +80,7 @@ func receiptMismatchFailsClosedAndDrainsReceipt(mismatch: ReceiptMismatchKind) a
       receipt,
       expectedKind: expectedKind,
       expectedRoots: expectedRoots,
+      expectedVolumes: [],
       expectedCaptureID: expectedCaptureID
     )
   }
@@ -77,6 +89,7 @@ func receiptMismatchFailsClosedAndDrainsReceipt(mismatch: ReceiptMismatchKind) a
       receipt,
       expectedKind: .wholePlan,
       expectedRoots: [systemRootRequest],
+      expectedVolumes: [],
       expectedCaptureID: lease.captureID
     )
   }
@@ -98,6 +111,7 @@ func concurrentReceiptConsumersProduceExactlyOnePayload() async throws {
           receipt,
           expectedKind: .jitUnit,
           expectedRoots: [systemRootRequest],
+          expectedVolumes: [],
           expectedCaptureID: lease.captureID
         )) != nil
       }
@@ -167,6 +181,7 @@ func rootPathReplacementCannotRelabelAnotherDirectoryAsTheBoundRoot() async thro
     expectedRoots: [
       ScanRootRequest(rootID: bound.rootID, rawAbsolutePath: systemRootRequest.rawAbsolutePath)
     ],
+    expectedVolumes: [],
     expectedCaptureID: lease.captureID
   )
 
@@ -175,6 +190,50 @@ func rootPathReplacementCannotRelabelAnotherDirectoryAsTheBoundRoot() async thro
     return
   }
   #expect(code == ESTALE)
+}
+
+@Test
+func deepFreshScanFinalizesAncestorCloseEpochsForTheFullEventCorpus() async throws {
+  let session = try runtimeFreshSession(
+    scanProfile: .deep,
+    structuralBudget: StructuralBudget(
+      maximumEntriesPerRoot: 64,
+      maximumDepth: 1,
+      retainedNodeCount: 1
+    )
+  )
+  let lease = try session.beginCapture(.wholePlan)
+  defer { lease.finish() }
+  let receipt = try await lease.collectFreshScan(
+    systemRootFreshRequest(descriptor: try openSystemRoot())
+  )
+  let payload = try lease.consumeFreshScanReceipt(
+    receipt,
+    expectedKind: .wholePlan,
+    expectedRoots: [systemRootRequest],
+    expectedVolumes: [],
+    expectedCaptureID: lease.captureID
+  )
+
+  #expect(payload.scanResult.reference.profileID == ScanProfile.deep.rawValue)
+  guard case .known(let events) = payload.events else {
+    Issue.record("deep fresh scan did not publish a finalized event corpus")
+    return
+  }
+  #expect(!events.isEmpty)
+  #expect(events.count > payload.scanResult.progress.retainedNodes.count)
+  var finalizedKnownAncestorCount = 0
+  for event in events {
+    let node: ScannedNode
+    switch event {
+    case .observed(let value), .directoryClosed(let value): node = value
+    }
+    if case .known(let seal) = node.ancestorAccessPolicy {
+      finalizedKnownAncestorCount += 1
+      #expect(seal.pendingCloseEpochIDs.isEmpty)
+    }
+  }
+  #expect(finalizedKnownAncestorCount > 0)
 }
 
 @Test
@@ -198,7 +257,11 @@ func volumeDescriptorIsCopiedCloseOnExecAndInputOwnershipIsConsumed() async thro
       )
     ],
     volumes: [
-      RuntimeFreshVolumeDescriptor(volumeID: "fixture-volume", fileDescriptor: volumeDescriptor)
+      RuntimeFreshVolumeDescriptor(
+        volumeID: "fixture-volume",
+        rawAbsolutePath: systemRootRequest.rawAbsolutePath,
+        fileDescriptor: volumeDescriptor
+      )
     ],
     maximumDurationNanoseconds: nil,
     processDeadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_000_000_000
@@ -207,11 +270,167 @@ func volumeDescriptorIsCopiedCloseOnExecAndInputOwnershipIsConsumed() async thro
   let receipt = try await lease.collectFreshScan(request)
   #expect(ownership.descriptors == [rootDescriptor, volumeDescriptor].sorted())
   #expect(lister.observedCloseOnExec)
-  _ = try lease.consumeFreshScanReceipt(
+  let payload = try lease.consumeFreshScanReceipt(
     receipt,
     expectedKind: .wholePlan,
     expectedRoots: [systemRootRequest],
+    expectedVolumes: [systemVolumeScope],
     expectedCaptureID: lease.captureID
+  )
+  #expect(payload.volumeBindingDigest == receipt.volumeBindingDigest)
+  #expect(payload.volumeBindingValidation == .known(true))
+  #expect(payload.scanResult.globalFacts.apfsSnapshots == .known([]))
+}
+
+@Test
+func volumeScopeMismatchFailsClosedAndDrainsReceipt() async throws {
+  let session = try runtimeFreshSession()
+  let lease = try session.beginCapture(.wholePlan)
+  defer { lease.finish() }
+  let receipt = try await lease.collectFreshScan(
+    systemRootAndVolumeFreshRequest(
+      rootDescriptor: try openSystemRoot(),
+      volumeDescriptor: try openSystemRoot()
+    )
+  )
+
+  #expect(throws: RuntimeFreshScanError.receiptBindingMismatch) {
+    try lease.consumeFreshScanReceipt(
+      receipt,
+      expectedKind: .wholePlan,
+      expectedRoots: [systemRootRequest],
+      expectedVolumes: [
+        RuntimeFreshVolumeScope(
+          volumeID: systemVolumeScope.volumeID,
+          rawAbsolutePath: Data("/private".utf8)
+        )
+      ],
+      expectedCaptureID: lease.captureID
+    )
+  }
+  #expect(throws: RuntimeFreshScanError.receiptConsumed) {
+    try lease.consumeFreshScanReceipt(
+      receipt,
+      expectedKind: .wholePlan,
+      expectedRoots: [systemRootRequest],
+      expectedVolumes: [systemVolumeScope],
+      expectedCaptureID: lease.captureID
+    )
+  }
+}
+
+@Test
+func volumeDescriptorMustIdentifyItsCanonicalBoundRoot() async throws {
+  let rootFixture = try RuntimeFreshRootFixture()
+  defer { rootFixture.remove() }
+  let session = try runtimeFreshSession()
+  let lease = try session.beginCapture(.wholePlan)
+  defer { lease.finish() }
+
+  do {
+    _ = try await lease.collectFreshScan(
+      RuntimeFreshScanRequest(
+        roots: [
+          RuntimeFreshRootDescriptor(
+            rootID: rootFixture.rootID,
+            rawAbsolutePath: rootFixture.rawPath,
+            fileDescriptor: try rootFixture.openRoot()
+          )
+        ],
+        volumes: [
+          RuntimeFreshVolumeDescriptor(
+            volumeID: systemVolumeScope.volumeID,
+            rawAbsolutePath: systemVolumeScope.rawAbsolutePath,
+            fileDescriptor: try openSystemRoot()
+          )
+        ],
+        maximumDurationNanoseconds: nil,
+        processDeadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+      )
+    )
+    Issue.record("unrelated volume descriptor unexpectedly matched a bound root")
+  } catch let RuntimeFreshScanError.descriptorFailure(scopeID, observation) {
+    #expect(scopeID == systemVolumeScope.volumeID)
+    guard case .failed(_, let code) = observation else {
+      Issue.record("volume/root identity mismatch lost its typed classification")
+      return
+    }
+    #expect(code == EXDEV)
+  }
+}
+
+@Test
+func volumeRevalidationClassifiesDescriptorReplacementAsIdentityChange() async throws {
+  let replacement = try RuntimeFreshRootFixture()
+  defer { replacement.remove() }
+  let session = try runtimeFreshSession(
+    snapshotLister: try IdentityReplacingSnapshotLister(replacement: replacement)
+  )
+  let lease = try session.beginCapture(.wholePlan)
+  defer { lease.finish() }
+  let receipt = try await lease.collectFreshScan(
+    systemRootAndVolumeFreshRequest(
+      rootDescriptor: try openSystemRoot(),
+      volumeDescriptor: try openSystemRoot()
+    )
+  )
+  let payload = try lease.consumeFreshScanReceipt(
+    receipt,
+    expectedKind: .wholePlan,
+    expectedRoots: [systemRootRequest],
+    expectedVolumes: [systemVolumeScope],
+    expectedCaptureID: lease.captureID
+  )
+
+  guard case .failed(_, let code) = payload.volumeBindingValidation else {
+    Issue.record("volume descriptor replacement was not rejected")
+    return
+  }
+  #expect(code == ESTALE)
+  guard
+    case .failed(_, let snapshotCode) =
+      payload.collectors.globalFacts.apfsSnapshotsByVolume[systemVolumeScope.volumeID]
+  else {
+    Issue.record("volume snapshot fact lost its identity-change classification")
+    return
+  }
+  #expect(snapshotCode == ESTALE)
+}
+
+@Test
+func volumeSealValidationSeparatesIdentityFromAccessPolicy() throws {
+  let aclDigest = try EvidenceDigest(bytes: Data(repeating: 0xA5, count: 32))
+  let identity = ObjectIdentity(device: 7, fileID: 11, objectType: .directory)
+  let initialAccess = AccessPolicyEvidence(
+    ownerUserID: 501,
+    ownerGroupID: 20,
+    mode: 0o755,
+    flags: 0,
+    aclDigest: .known(aclDigest)
+  )
+  let changedAccess = AccessPolicyEvidence(
+    ownerUserID: 501,
+    ownerGroupID: 20,
+    mode: 0o700,
+    flags: 0,
+    aclDigest: .known(aclDigest)
+  )
+  let initial = RuntimeFreshDescriptorSeal(identity: identity, accessPolicy: initialAccess)
+
+  #expect(
+    runtimeVolumeSealValidation(
+      expected: initial,
+      current: RuntimeFreshDescriptorSeal(identity: identity, accessPolicy: changedAccess)
+    ) == .failed(reason: "fresh scan volume access policy changed", errorCode: EAGAIN)
+  )
+  #expect(
+    runtimeVolumeSealValidation(
+      expected: initial,
+      current: RuntimeFreshDescriptorSeal(
+        identity: ObjectIdentity(device: 7, fileID: 12, objectType: .directory),
+        accessPolicy: changedAccess
+      )
+    ) == .failed(reason: "fresh scan volume descriptor identity changed", errorCode: ESTALE)
   )
 }
 
@@ -273,6 +492,9 @@ private final class RuntimeFreshRootFixture: @unchecked Sendable {
   var rootRequest: ScanRootRequest {
     ScanRootRequest(rootID: rootID, rawAbsolutePath: rawPath)
   }
+  var volumeScope: RuntimeFreshVolumeScope {
+    RuntimeFreshVolumeScope(volumeID: "fixture-volume", rawAbsolutePath: rawPath)
+  }
 
   func openRoot() throws -> Int32 {
     let descriptor = Darwin.open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -300,9 +522,36 @@ private func runtimeFreshRequest(
   )
 }
 
+private func runtimeFreshVolumeRequest(
+  fixture: RuntimeFreshRootFixture,
+  rootDescriptor: Int32,
+  volumeDescriptor: Int32
+) -> RuntimeFreshScanRequest {
+  RuntimeFreshScanRequest(
+    roots: [
+      RuntimeFreshRootDescriptor(
+        rootID: fixture.rootID,
+        rawAbsolutePath: fixture.rawPath,
+        fileDescriptor: rootDescriptor
+      )
+    ],
+    volumes: [
+      RuntimeFreshVolumeDescriptor(
+        volumeID: fixture.volumeScope.volumeID,
+        rawAbsolutePath: fixture.rawPath,
+        fileDescriptor: volumeDescriptor
+      )
+    ],
+    maximumDurationNanoseconds: nil,
+    processDeadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+  )
+}
+
 private func runtimeFreshSession(
   activity: any ProcessActivityCollecting = FixedActivityCollector(),
   snapshotLister: any APFSSnapshotListing = FixedSnapshotLister(),
+  scanProfile: ScanProfile = .quick,
+  structuralBudget: StructuralBudget? = nil,
   transferredDescriptorObserver: @escaping @Sendable ([Int32]) -> Void = { _ in }
 ) throws -> RuntimeEvidenceSession {
   let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
@@ -314,7 +563,8 @@ private func runtimeFreshSession(
       swap: FixedSwapCollector(),
       snapshots: snapshotLister
     ),
-    testingScanProfile: .quick,
+    testingScanProfile: scanProfile,
+    testingStructuralBudget: structuralBudget,
     testingTransferredDescriptorObserver: transferredDescriptorObserver
   )
 }
@@ -322,6 +572,11 @@ private func runtimeFreshSession(
 private let systemRootRequest = ScanRootRequest(
   rootID: "system-root",
   rawAbsolutePath: Data("/".utf8)
+)
+
+private let systemVolumeScope = RuntimeFreshVolumeScope(
+  volumeID: "fixture-volume",
+  rawAbsolutePath: systemRootRequest.rawAbsolutePath
 )
 
 private func openSystemRoot() throws -> Int32 {
@@ -337,6 +592,30 @@ private func systemRootFreshRequest(descriptor: Int32) -> RuntimeFreshScanReques
         rootID: systemRootRequest.rootID,
         rawAbsolutePath: systemRootRequest.rawAbsolutePath,
         fileDescriptor: descriptor
+      )
+    ],
+    maximumDurationNanoseconds: nil,
+    processDeadlineNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+  )
+}
+
+private func systemRootAndVolumeFreshRequest(
+  rootDescriptor: Int32,
+  volumeDescriptor: Int32
+) -> RuntimeFreshScanRequest {
+  RuntimeFreshScanRequest(
+    roots: [
+      RuntimeFreshRootDescriptor(
+        rootID: systemRootRequest.rootID,
+        rawAbsolutePath: systemRootRequest.rawAbsolutePath,
+        fileDescriptor: rootDescriptor
+      )
+    ],
+    volumes: [
+      RuntimeFreshVolumeDescriptor(
+        volumeID: systemVolumeScope.volumeID,
+        rawAbsolutePath: systemVolumeScope.rawAbsolutePath,
+        fileDescriptor: volumeDescriptor
       )
     ],
     maximumDurationNanoseconds: nil,
@@ -372,6 +651,26 @@ private final class CLOEXECRecordingSnapshotLister: APFSSnapshotListing, @unchec
     lock.withLock {
       let flags = Darwin.fcntl(volumeFileDescriptor, F_GETFD)
       closeOnExecStorage = flags >= 0 && flags & FD_CLOEXEC != 0
+    }
+    return .known([])
+  }
+}
+
+private final class IdentityReplacingSnapshotLister: APFSSnapshotListing, @unchecked Sendable {
+  private let replacementDescriptor: Int32
+
+  init(replacement: RuntimeFreshRootFixture) throws {
+    replacementDescriptor = try replacement.openRoot()
+  }
+
+  deinit { Darwin.close(replacementDescriptor) }
+
+  func list(volumeFileDescriptor: Int32, maximumEntries: Int) -> Observation<[Data]> {
+    guard Darwin.dup2(replacementDescriptor, volumeFileDescriptor) >= 0 else {
+      return .failed(reason: "test identity replacement failed", errorCode: errno)
+    }
+    guard Darwin.fcntl(volumeFileDescriptor, F_SETFD, FD_CLOEXEC) >= 0 else {
+      return .failed(reason: "test close-on-exec restoration failed", errorCode: errno)
     }
     return .known([])
   }
