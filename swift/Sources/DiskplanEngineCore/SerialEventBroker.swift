@@ -9,7 +9,9 @@ enum EventBrokerError: Error, Equatable {
 }
 
 enum BrokerRuntimeBatchPreparationError: Error {
-  case semanticCapacityExceeded
+  case mirroredEnvelopeCountExceeded(actual: Int, maximum: Int)
+  case mirroredEncodedBytesExceeded(actual: UInt64, maximum: UInt64)
+  case reservationSequenceExhausted
   case eventSequenceExhausted
   case serializationFailed(String)
 }
@@ -51,7 +53,7 @@ private enum PendingOutput: @unchecked Sendable {
 
   var semanticWeight: Int {
     switch self {
-    case .serializedRuntimeBatch(let envelopes, _): envelopes.count
+    case .serializedRuntimeBatch: 1
     case .envelope, .event, .runtimeEvent: 1
     }
   }
@@ -96,6 +98,8 @@ final class SerialEventBroker: @unchecked Sendable {
   private var finished = false
   private var failure: EventBrokerError?
   private var nextEventSequence: UInt64 = 1
+  private var nextRuntimeBatchReservation: UInt64 = 1
+  private var runtimeBatchReservations: [UInt64] = []
 
   init(
     semanticCapacity: Int = 128,
@@ -160,12 +164,26 @@ final class SerialEventBroker: @unchecked Sendable {
   /// may leave a physical prefix on a transport that is immediately failed
   /// and closed, but the shared acknowledgement never reports success.
   func sendRuntimeBatchAwaitingWrite(_ records: [BrokerRuntimeRecord]) throws {
-    guard !records.isEmpty, records.count <= semanticCapacity else {
-      throw BrokerRuntimeBatchPreparationError.semanticCapacityExceeded
+    guard !records.isEmpty,
+      records.count <= RuntimeEmissionBudget.maximumMirroredBatchEnvelopeCount
+    else {
+      throw BrokerRuntimeBatchPreparationError.mirroredEnvelopeCountExceeded(
+        actual: records.count,
+        maximum: RuntimeEmissionBudget.maximumMirroredBatchEnvelopeCount
+      )
     }
     let acknowledgement = BrokerWriteAcknowledgement()
     condition.lock()
-    while (!pending.isEmpty || inFlightCount != 0) && failure == nil && !closing {
+    let reservation: UInt64
+    do {
+      reservation = try reserveRuntimeBatch()
+    } catch {
+      condition.unlock()
+      throw error
+    }
+    while (runtimeBatchReservations.first != reservation || !pending.isEmpty
+      || inFlightCount != 0) && failure == nil && !closing
+    {
       condition.wait()
     }
     do {
@@ -186,10 +204,12 @@ final class SerialEventBroker: @unchecked Sendable {
       let (serialized, nextSequence) = serializedBatch
       nextEventSequence = nextSequence
       pending.append(.serializedRuntimeBatch(serialized, acknowledgement))
-      semanticCount += records.count
-      condition.signal()
+      semanticCount += 1
+      releaseRuntimeBatchReservation(reservation)
+      condition.broadcast()
       condition.unlock()
     } catch {
+      releaseRuntimeBatchReservation(reservation)
       condition.unlock()
       throw error
     }
@@ -221,6 +241,9 @@ final class SerialEventBroker: @unchecked Sendable {
   ) throws {
     condition.lock()
     defer { condition.unlock() }
+    while !runtimeBatchReservations.isEmpty && failure == nil && !closing {
+      condition.wait()
+    }
     try checkOpen()
     if let last = pending.indices.last,
       pending[last].isTelemetry
@@ -287,16 +310,42 @@ final class SerialEventBroker: @unchecked Sendable {
     if let failure { throw failure }
   }
 
+  func runtimeBatchReservationCountForTesting() -> Int {
+    condition.lock()
+    defer { condition.unlock() }
+    return runtimeBatchReservations.count
+  }
+
   private func enqueue(_ output: PendingOutput, semantic: Bool) throws {
     condition.lock()
     defer { condition.unlock() }
-    while semantic && semanticCount >= semanticCapacity && failure == nil && !closing {
+    while semantic && (semanticCount >= semanticCapacity || !runtimeBatchReservations.isEmpty)
+      && failure == nil && !closing
+    {
       condition.wait()
     }
     try checkOpen()
     pending.append(output)
     if semantic { semanticCount += 1 }
     condition.signal()
+  }
+
+  private func reserveRuntimeBatch() throws -> UInt64 {
+    let reservation = nextRuntimeBatchReservation
+    guard reservation != 0 else {
+      throw BrokerRuntimeBatchPreparationError.reservationSequenceExhausted
+    }
+    nextRuntimeBatchReservation =
+      reservation == UInt64.max ? 0 : reservation + 1
+    runtimeBatchReservations.append(reservation)
+    condition.broadcast()
+    return reservation
+  }
+
+  private func releaseRuntimeBatchReservation(_ reservation: UInt64) {
+    guard let index = runtimeBatchReservations.firstIndex(of: reservation) else { return }
+    runtimeBatchReservations.remove(at: index)
+    condition.broadcast()
   }
 
   private func checkOpen() throws {
@@ -389,6 +438,7 @@ final class SerialEventBroker: @unchecked Sendable {
     var sequence = initialSequence
     var serialized: [Data] = []
     serialized.reserveCapacity(records.count)
+    var framedBytes: UInt64 = 0
     for record in records {
       guard sequence != 0 else {
         throw BrokerRuntimeBatchPreparationError.eventSequenceExhausted
@@ -401,7 +451,19 @@ final class SerialEventBroker: @unchecked Sendable {
       var envelope = Diskplan_V1_Envelope()
       envelope.sequence = sequence
       envelope.body = .runtimeEvent(event)
-      serialized.append(try envelope.serializedData())
+      let encoded = try envelope.serializedData()
+      let (framedLength, frameOverflow) = UInt64(encoded.count).addingReportingOverflow(4)
+      let (nextFramedBytes, aggregateOverflow) = framedBytes.addingReportingOverflow(framedLength)
+      guard !frameOverflow, !aggregateOverflow,
+        nextFramedBytes <= RuntimeEmissionBudget.maximumMirroredBatchFramedBytes
+      else {
+        throw BrokerRuntimeBatchPreparationError.mirroredEncodedBytesExceeded(
+          actual: aggregateOverflow ? UInt64.max : nextFramedBytes,
+          maximum: RuntimeEmissionBudget.maximumMirroredBatchFramedBytes
+        )
+      }
+      framedBytes = nextFramedBytes
+      serialized.append(encoded)
       sequence = sequence == UInt64.max ? 0 : sequence + 1
     }
     return (serialized, sequence)

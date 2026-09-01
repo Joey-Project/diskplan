@@ -521,7 +521,41 @@ package enum RuntimeExecutionAuthorityValidator {
 }
 
 package enum RuntimeEmissionBudget {
+  package static let maximumBufferedStreamEnvelopeCount = 25_000
+  package static let maximumBufferedStreamFramedBytes: UInt64 = 32 * 1_024 * 1_024
+  package static let maximumMirroredBatchEnvelopeCount =
+    maximumBufferedStreamEnvelopeCount * 2
+  package static let maximumMirroredBatchFramedBytes =
+    maximumBufferedStreamFramedBytes * 2
+
   package static func validateEncodedEnvelopeLengths(_ lengths: [Int]) throws {
+    try validateEncodedEnvelopeLengths(
+      lengths,
+      maximumCount: Int.max,
+      maximumBytes: SealedRuntimeWire.maximumRuntimeFramedEmissionBytes
+    )
+  }
+
+  package static func validateBufferedStreamEnvelopeLengths(_ lengths: [Int]) throws {
+    try validateEncodedEnvelopeLengths(
+      lengths,
+      maximumCount: maximumBufferedStreamEnvelopeCount,
+      maximumBytes: maximumBufferedStreamFramedBytes
+    )
+  }
+
+  private static func validateEncodedEnvelopeLengths(
+    _ lengths: [Int],
+    maximumCount: Int,
+    maximumBytes: UInt64
+  ) throws {
+    guard lengths.count <= maximumCount else {
+      throw SealedRuntimeWireError.countExceeded(
+        field: "runtime emission envelopes",
+        actual: UInt64(lengths.count),
+        maximum: UInt64(maximumCount)
+      )
+    }
     var aggregate: UInt64 = 0
     for length in lengths {
       guard length >= 0, length <= maximumFrameLength else {
@@ -534,10 +568,10 @@ package enum RuntimeEmissionBudget {
       }
       aggregate = next
     }
-    guard aggregate <= SealedRuntimeWire.maximumRuntimeFramedEmissionBytes else {
+    guard aggregate <= maximumBytes else {
       throw SealedRuntimeWireError.encodedBytesExceeded(
         actual: aggregate,
-        maximum: SealedRuntimeWire.maximumRuntimeFramedEmissionBytes
+        maximum: maximumBytes
       )
     }
   }
@@ -1755,7 +1789,9 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     try sendBodies(
       sealed.dropFirst(executionPrefix.count).map {
         .executionStreamEvent($0)
-      })
+      },
+      bufferedExecutionStream: true
+    )
     executionPrefix = sealed
   }
 
@@ -1798,8 +1834,14 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       Diskplan_V1_RuntimeEvent.OneOf_Body.executionStreamEvent($0)
     }
     let records =
-      try cancellationResponder.runtimeRecords(cancellationBodies)
-      + runtimeRecords(confirmationBodies)
+      try cancellationResponder.runtimeRecords(
+        cancellationBodies,
+        bufferedExecutionStream: true
+      )
+      + runtimeRecords(
+        confirmationBodies,
+        bufferedExecutionStream: true
+      )
     try broker.sendRuntimeBatchAwaitingWrite(records)
     executionPrefix = sealed
     cancellationResponder.executionPrefix = sealed
@@ -2070,9 +2112,13 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   }
 
   private func sendBodies(
-    _ bodies: some Sequence<Diskplan_V1_RuntimeEvent.OneOf_Body>
+    _ bodies: some Sequence<Diskplan_V1_RuntimeEvent.OneOf_Body>,
+    bufferedExecutionStream: Bool = false
   ) throws {
-    let records = try runtimeRecords(bodies)
+    let records = try runtimeRecords(
+      bodies,
+      bufferedExecutionStream: bufferedExecutionStream
+    )
     for record in records {
       try broker.sendRuntime(
         requestID: record.requestID,
@@ -2088,11 +2134,20 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     mirroredTo cancellationResponder: RuntimeBusinessResponder?
   ) throws -> [BrokerRuntimeRecord] {
     guard let cancellationResponder else {
-      return try runtimeRecords(prepared.bodies)
+      return try runtimeRecords(
+        prepared.bodies,
+        bufferedExecutionStream: true
+      )
     }
     return
-      try cancellationResponder.runtimeRecords(prepared.bodies)
-      + runtimeRecords(prepared.bodies)
+      try cancellationResponder.runtimeRecords(
+        prepared.bodies,
+        bufferedExecutionStream: true
+      )
+      + runtimeRecords(
+        prepared.bodies,
+        bufferedExecutionStream: true
+      )
   }
 
   private func sendTerminalRecords(
@@ -2139,7 +2194,8 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     if let preparationError = error as? BrokerRuntimeBatchPreparationError {
       let code: Diskplan_V1_RuntimeRejectCode
       switch preparationError {
-      case .semanticCapacityExceeded, .eventSequenceExhausted:
+      case .mirroredEnvelopeCountExceeded, .mirroredEncodedBytesExceeded,
+        .reservationSequenceExhausted, .eventSequenceExhausted:
         code = .limitExceeded
       case .serializationFailed:
         code = .internalError
@@ -2156,7 +2212,8 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   }
 
   private func runtimeRecords(
-    _ bodies: some Sequence<Diskplan_V1_RuntimeEvent.OneOf_Body>
+    _ bodies: some Sequence<Diskplan_V1_RuntimeEvent.OneOf_Body>,
+    bufferedExecutionStream: Bool = false
   ) throws -> [BrokerRuntimeRecord] {
     let bodies = Array(bodies)
     var envelopeLengths: [Int] = []
@@ -2174,6 +2231,9 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       envelopeLengths.append(encoded.count)
     }
     try RuntimeEmissionBudget.validateEncodedEnvelopeLengths(envelopeLengths)
+    if bufferedExecutionStream {
+      try RuntimeEmissionBudget.validateBufferedStreamEnvelopeLengths(envelopeLengths)
+    }
     return bodies.map { body in
       BrokerRuntimeRecord(
         requestID: requestID,

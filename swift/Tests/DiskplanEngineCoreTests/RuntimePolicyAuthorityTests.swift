@@ -623,6 +623,80 @@ import Testing
   #expect(plan.plan.evidenceSnapshots.count == 1)
 }
 
+@Test func runtimeBatchReservationPreventsLaterSemanticProducerOvertaking() async throws {
+  let writer = RuntimePositiveWriter()
+  writer.block(at: .applyStarted)
+  let broker = SerialEventBroker(semanticCapacity: 4) { data in
+    try writer.write(data)
+  }
+  defer {
+    writer.release()
+    try? broker.finish()
+  }
+  var started = Diskplan_V1_ExecutionStreamEvent()
+  started.executionID.value = Data("reservation-execution".utf8)
+  started.body = .applyStarted(Diskplan_V1_ApplyStartedProjection())
+  try broker.sendRuntime(
+    requestID: 1,
+    runtimeSessionID: Data("reservation-session".utf8),
+    body: .executionStreamEvent(started)
+  )
+  try #require(writer.waitUntilBlocked())
+
+  var acknowledgement = Diskplan_V1_ExecutionCancellationAcknowledgedProjection()
+  acknowledgement.reason = "reservation-fixture"
+  var acknowledgementEvent = Diskplan_V1_ExecutionStreamEvent()
+  acknowledgementEvent.executionID.value = started.executionID.value
+  acknowledgementEvent.body = .cancellationAcknowledged(acknowledgement)
+  let batchRecords = [UInt64(10), 11].map { requestID in
+    BrokerRuntimeRecord(
+      requestID: requestID,
+      runtimeSessionID: Data("reservation-session".utf8),
+      body: .executionStreamEvent(acknowledgementEvent)
+    )
+  }
+  let batchStarted = AuthorityTestFlag()
+  let batch = Task.detached {
+    batchStarted.set()
+    try broker.sendRuntimeBatchAwaitingWrite(batchRecords)
+  }
+  try #require(batchStarted.wait(timeout: 1))
+  try #require(
+    await runtimeEventually {
+      broker.runtimeBatchReservationCountForTesting() == 1
+    })
+
+  let producerFinished = AuthorityTestFlag()
+  let producer = Task.detached {
+    for offset in 0..<128 {
+      var rejection = Diskplan_V1_RuntimeRejected()
+      rejection.code = .invalidState
+      rejection.summary = "later-producer-\(offset)"
+      try broker.sendRuntime(
+        requestID: UInt64(100 + offset),
+        runtimeSessionID: Data("reservation-session".utf8),
+        body: .runtimeRejected(rejection)
+      )
+    }
+    producerFinished.set()
+  }
+  #expect(!producerFinished.wait(timeout: 0.05))
+
+  writer.release()
+  try await batch.value
+  try await producer.value
+  try broker.finish()
+
+  let requestIDs = writer.output.runtimeEvents().map(\.requestID)
+  let firstLaterProducer = try #require(requestIDs.firstIndex(where: { $0 >= 100 }))
+  let firstBatch = try #require(requestIDs.firstIndex(of: 10))
+  let secondBatch = try #require(requestIDs.firstIndex(of: 11))
+  #expect(requestIDs.first == 1)
+  #expect(firstBatch < firstLaterProducer)
+  #expect(secondBatch < firstLaterProducer)
+  #expect(broker.runtimeBatchReservationCountForTesting() == 0)
+}
+
 @Test func coordinatorDoesNotExposePlanDuringFinalBrokerWindow() {
   for state: Diskplan_V1_ScanState in [.finished, .finalizedPartial] {
     #expect(!ScanCoordinator.authorityPlanIsReachable(state: state, workerFinished: false))
@@ -1371,6 +1445,81 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
   #expect(cancellationAcknowledgementCount == 1)
   _ = try SealedRuntimeWire.sealExecutionStream(
     confirmStream,
+    requiredForceWarningActionIDs: review.forceWarningActionIds
+  )
+}
+
+@Test func cancellationMirrorsValidTailLargerThanBrokerQueueCapacity() async throws {
+  let backend = RuntimePositiveBackend(
+    waitForCancellation: true,
+    additionalAuditFailureCount: 65
+  )
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  try #require(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == backend.executionID
+    })
+
+  var cancellation = Diskplan_V1_CancelExecutionRequest()
+  cancellation.requestID = 5
+  cancellation.executionID.value = backend.executionID
+  try #require(fixture.authority.claim(.cancelExecution(cancellation)) == nil)
+  try fixture.controller.handle(
+    .cancelExecution(cancellation),
+    responder: fixture.responder(.cancelExecution(cancellation))
+  )
+  let cancellationRequestID = cancellation.requestID
+  #expect(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == nil
+        && fixture.output.runtimeEvents().contains { event in
+          guard event.requestID == cancellationRequestID,
+            case .executionStreamEvent(let stream)? = event.body,
+            case .applyFinished? = stream.body
+          else { return false }
+          return true
+        }
+    })
+
+  let events = fixture.output.runtimeEvents()
+  let confirmationStream = events.compactMap { event -> Diskplan_V1_ExecutionStreamEvent? in
+    guard event.requestID == confirmation.requestID,
+      case .executionStreamEvent(let stream)? = event.body
+    else { return nil }
+    return stream
+  }
+  let cancellationStream = events.compactMap { event -> Diskplan_V1_ExecutionStreamEvent? in
+    guard event.requestID == cancellation.requestID,
+      case .executionStreamEvent(let stream)? = event.body
+    else { return nil }
+    return stream
+  }
+  #expect(confirmationStream == cancellationStream)
+  #expect(confirmationStream.count == 68)
+  #expect(
+    confirmationStream.filter { event in
+      if case .auditWriteFailed? = event.body { return true }
+      return false
+    }.count == 65)
+  #expect(
+    confirmationStream.allSatisfy { event in
+      if case .executionStreamFailure? = event.body { return false }
+      return true
+    })
+  #expect(confirmationStream.last?.applyFinished != nil)
+  _ = try SealedRuntimeWire.sealExecutionStream(
+    confirmationStream,
     requiredForceWarningActionIDs: review.forceWarningActionIds
   )
 }
@@ -3690,6 +3839,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   private let startGate: RuntimePositiveGate?
   private let tailFailure: RuntimeExecutionTailFailure?
   private let foreignTailActionID: Data?
+  private let additionalAuditFailureCount: Int
   private let startFailure: Diskplan_V1_ApplyStartFailureKind?
   private let reviewIDs: [Data]
   private var starts = 0
@@ -3735,6 +3885,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     startGate: RuntimePositiveGate? = nil,
     tailFailure: RuntimeExecutionTailFailure? = nil,
     foreignTailActionID: Data? = nil,
+    additionalAuditFailureCount: Int = 0,
     startFailure: Diskplan_V1_ApplyStartFailureKind? = nil,
     reviewIDs: [Data] = [Data("positive-review".utf8)]
   ) {
@@ -3744,6 +3895,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     self.startGate = startGate
     self.tailFailure = tailFailure
     self.foreignTailActionID = foreignTailActionID
+    self.additionalAuditFailureCount = additionalAuditFailureCount
     self.startFailure = startFailure
     self.reviewIDs = reviewIDs
   }
@@ -3833,7 +3985,8 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
       context: context,
       waitForCancellation: waitForCancellation,
       tailFailure: tailFailure,
-      foreignTailActionID: foreignTailActionID
+      foreignTailActionID: foreignTailActionID,
+      additionalAuditFailureCount: additionalAuditFailureCount
     )
     lock.withLock { tailSource = source }
     return .started(
@@ -3907,7 +4060,8 @@ private final class RuntimePositiveTailSource: @unchecked Sendable {
     context: RuntimeExecutionPlanContext,
     waitForCancellation: Bool,
     tailFailure: RuntimeExecutionTailFailure?,
-    foreignTailActionID: Data?
+    foreignTailActionID: Data?,
+    additionalAuditFailureCount: Int
   ) throws {
     released = !waitForCancellation
     var started = Diskplan_V1_ApplyStartedProjection()
@@ -3952,6 +4106,14 @@ private final class RuntimePositiveTailSource: @unchecked Sendable {
         unitStartedEvent.executionID.value = executionID
         unitStartedEvent.body = .unitStarted(unitStarted)
         remainingEvents.append(unitStartedEvent)
+      }
+      for index in 0..<additionalAuditFailureCount {
+        var failure = Diskplan_V1_AuditWriteFailureProjection()
+        failure.code = "fixture-audit-\(index)"
+        var failureEvent = Diskplan_V1_ExecutionStreamEvent()
+        failureEvent.executionID.value = executionID
+        failureEvent.body = .auditWriteFailed(failure)
+        remainingEvents.append(failureEvent)
       }
       remainingEvents.append(terminalEvent)
       tail = .sealed(

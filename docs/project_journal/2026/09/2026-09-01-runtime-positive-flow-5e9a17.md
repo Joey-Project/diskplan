@@ -75,6 +75,10 @@ superseded_by:
   write failure closes the transport, aborts the authority transaction, and leaves the run retained
   for teardown. Normal-tail membership rejection instead falls back to a Protocol 1.6
   `backend_contract_violation` terminal over the unchanged transmitted prefix.
+- Joint batches use the execution capture's per-responder 25,000-event/32 MiB framed limit and a
+  conservative doubled broker boundary, independent of ordinary queue depth. A monotonic FIFO
+  reservation prevents later semantic or telemetry producers from overtaking a waiting mirrored
+  prefix or terminal while prior output drains.
 - Production `DiskplanEngineMain` intentionally does not inject the bridge yet. The repository does
   not expose a production revalidation collector factory, so production apply remains fail-closed
   rather than substituting a fixture collector or bypassing Phase 4 authority.
@@ -108,6 +112,13 @@ superseded_by:
   post-run quiescence; retained output SHA-256 was
   `8bcb2d4b3097ad619ee8e06ee6cc2dc777d0f75a134159cf2bf98df0ab91789c`.
   The subsequent Protocol 1.6 fixture gate passed in 5.220 seconds with the same supervisor
+  guarantees and retained output SHA-256
+  `83653f0a9a3c2efdafd7a8afb9d96929f9ed7016667255bf065ebbdf10932ae4`.
+- India queue-limit and FIFO-reservation closure passed all 120 `DiskplanEngineCoreTests`, including
+  the 65-event cancelled tail and sustained later-producer fixtures, in 18.138 seconds under the
+  bounded supervisor. Process-group verification and post-run quiescence passed; retained output
+  SHA-256 was `07742850beb2e4c1b4047d847a091367be705fc4e148186d1cf454c89741d0c8`.
+  The subsequent Protocol 1.6 fixture gate passed in 5.070 seconds with the same supervisor
   guarantees and retained output SHA-256
   `83653f0a9a3c2efdafd7a8afb9d96929f9ed7016667255bf065ebbdf10932ae4`.
 - India focused gate: `swift test --filter DiskplanEngineCoreTests` passed all 96 tests under the
