@@ -205,39 +205,125 @@ public struct RuntimeReleaseCandidateActionBinding: Equatable, Sendable {
   }
 }
 
-public struct RuntimeReleaseExpectedOwner: Equatable, Sendable {
+public struct RuntimeReleaseOwnerNamespaceBinding: Equatable, Sendable {
   public let link: FileOwnerLink
-  public let slot: RuntimeReleaseNamespaceSlotIdentity
   public let actionID: ActionID
+  public let rawRoot: RawRootPath
+  public let targetPath: RawTargetPath
+  public let rootIdentity: RuntimeReleaseFileObjectIdentity
+  public let parentChain: [RuntimeReleaseFileObjectIdentity]
+  public let targetIdentity: RuntimeReleaseFileObjectIdentity
+  public let inheritedProviderBoundaryByComponent: [Bool]
+  fileprivate let resolvedSlot: RuntimeReleaseNamespaceSlotIdentity
 
-  package init(link: FileOwnerLink, slot: RuntimeReleaseNamespaceSlotIdentity, actionID: ActionID) {
+  package init(
+    link: FileOwnerLink,
+    actionID: ActionID,
+    rawRoot: RawRootPath,
+    rootIdentity: RuntimeReleaseFileObjectIdentity,
+    parentChain: [RuntimeReleaseFileObjectIdentity],
+    targetIdentity: RuntimeReleaseFileObjectIdentity,
+    inheritedProviderBoundaryByComponent: [Bool]
+  ) throws {
+    guard parentChain.count == link.path.components.count - 1,
+      inheritedProviderBoundaryByComponent.count == link.path.components.count,
+      rootIdentity.objectType == .directory,
+      parentChain.allSatisfy({ $0.objectType == .directory }),
+      targetIdentity.objectType == .regularFile
+    else { throw RuntimeReleaseTopologyPlanError.ownerBindingMismatch }
+    let slot = try RuntimeReleaseNamespaceSlotIdentity(
+      rootIdentity: rootIdentity,
+      parentIdentity: parentChain.last ?? rootIdentity,
+      rawBasename: link.path.components.last!,
+      objectIdentity: targetIdentity)
     self.link = link
-    self.slot = slot
     self.actionID = actionID
+    self.rawRoot = rawRoot
+    targetPath = link.path
+    self.rootIdentity = rootIdentity
+    self.parentChain = parentChain
+    self.targetIdentity = targetIdentity
+    self.inheritedProviderBoundaryByComponent = inheritedProviderBoundaryByComponent
+    resolvedSlot = slot
+  }
+
+  fileprivate var slot: RuntimeReleaseNamespaceSlotIdentity {
+    resolvedSlot
+  }
+}
+
+public struct RuntimeReleaseExpectedOwner: Equatable, Sendable {
+  public let namespace: RuntimeReleaseOwnerNamespaceBinding
+  public var link: FileOwnerLink { namespace.link }
+  public var slot: RuntimeReleaseNamespaceSlotIdentity { namespace.slot }
+  public var actionID: ActionID { namespace.actionID }
+
+  package init(namespace: RuntimeReleaseOwnerNamespaceBinding) {
+    self.namespace = namespace
+  }
+
+  init(
+    link: FileOwnerLink,
+    slot: RuntimeReleaseNamespaceSlotIdentity,
+    actionID: ActionID,
+    rawRoot: RawRootPath = try! RawRootPath(absoluteBytes: Data("/fixture".utf8)),
+    parentChain: [RuntimeReleaseFileObjectIdentity]? = nil,
+    inheritedProviderBoundaryByComponent: [Bool]? = nil
+  ) {
+    let resolvedParents =
+      parentChain
+      ?? Array(repeating: slot.parentIdentity, count: link.path.components.count - 1)
+    namespace = try! RuntimeReleaseOwnerNamespaceBinding(
+      link: link,
+      actionID: actionID,
+      rawRoot: rawRoot,
+      rootIdentity: slot.rootIdentity,
+      parentChain: resolvedParents,
+      targetIdentity: slot.objectIdentity,
+      inheritedProviderBoundaryByComponent: inheritedProviderBoundaryByComponent
+        ?? Array(repeating: false, count: link.path.components.count))
   }
 }
 
 public struct RuntimeReleaseExpectedFileObject: Equatable, Sendable {
+  public let graphFileObjectID: String
   public let identity: RuntimeReleaseFileObjectIdentity
   public let owners: [RuntimeReleaseExpectedOwner]
   public let linkCount: UInt32
   public let cloneIdentity: RuntimeReleaseCloneIdentity?
 
   package init(
+    graphFileObjectID: String,
     identity: RuntimeReleaseFileObjectIdentity,
     owners: [RuntimeReleaseExpectedOwner],
     linkCount: UInt32,
     cloneIdentity: RuntimeReleaseCloneIdentity?
   ) {
+    self.graphFileObjectID = graphFileObjectID
     self.identity = identity
     self.owners = owners.sorted(by: expectedOwnerPrecedes)
     self.linkCount = linkCount
     self.cloneIdentity = cloneIdentity
   }
+
+  init(
+    identity: RuntimeReleaseFileObjectIdentity,
+    owners: [RuntimeReleaseExpectedOwner],
+    linkCount: UInt32,
+    cloneIdentity: RuntimeReleaseCloneIdentity?
+  ) {
+    self.init(
+      graphFileObjectID: "\(identity.device):\(identity.fileID)",
+      identity: identity,
+      owners: owners,
+      linkCount: linkCount,
+      cloneIdentity: cloneIdentity)
+  }
 }
 
 public struct RuntimeReleaseExpectedGroup: Equatable, Sendable {
   public let allocationGroupID: String
+  public let ownerGraphFileObjectIDs: [String]
   public let ownerFileObjects: [RuntimeReleaseFileObjectIdentity]
   public let cloneIdentity: RuntimeReleaseCloneIdentity?
   public let cloneRefCount: UInt32?
@@ -245,16 +331,34 @@ public struct RuntimeReleaseExpectedGroup: Equatable, Sendable {
 
   package init(
     allocationGroupID: String,
+    ownerGraphFileObjectIDs: [String],
     ownerFileObjects: [RuntimeReleaseFileObjectIdentity],
     cloneIdentity: RuntimeReleaseCloneIdentity?,
     cloneRefCount: UInt32?,
     snapshotDevice: UInt64
   ) {
     self.allocationGroupID = allocationGroupID
+    self.ownerGraphFileObjectIDs = ownerGraphFileObjectIDs.sorted(by: rawStringPrecedes)
     self.ownerFileObjects = ownerFileObjects.sorted()
     self.cloneIdentity = cloneIdentity
     self.cloneRefCount = cloneRefCount
     self.snapshotDevice = snapshotDevice
+  }
+
+  init(
+    allocationGroupID: String,
+    ownerFileObjects: [RuntimeReleaseFileObjectIdentity],
+    cloneIdentity: RuntimeReleaseCloneIdentity?,
+    cloneRefCount: UInt32?,
+    snapshotDevice: UInt64
+  ) {
+    self.init(
+      allocationGroupID: allocationGroupID,
+      ownerGraphFileObjectIDs: ownerFileObjects.map { "\($0.device):\($0.fileID)" },
+      ownerFileObjects: ownerFileObjects,
+      cloneIdentity: cloneIdentity,
+      cloneRefCount: cloneRefCount,
+      snapshotDevice: snapshotDevice)
   }
 }
 
@@ -270,10 +374,14 @@ public enum RuntimeReleaseTopologyPlanError: Error, Equatable {
   case incompleteGroupCoverage
   case actionSetMismatch
   case volumeSetMismatch
+  case staleValidatedSelection
+  case releaseMembershipMismatch
 }
 
 public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
   public let planHash: PolicyDigest
+  public let validatedOverlayHash: PolicyDigest?
+  public let releaseStepActionID: ActionID?
   public let topologyBindingHash: PolicyDigest
   public let candidateActions: [RuntimeReleaseCandidateActionBinding]
   public let fileObjects: [RuntimeReleaseExpectedFileObject]
@@ -281,17 +389,98 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
   public let volumeDevices: [UInt64]
 
   package init(
-    planHash: PolicyDigest,
+    plan: ImmutablePlan,
+    validatedSelection: ValidatedDecisionOverlay,
+    releaseStepActionID: ActionID,
+    fileObjects: [RuntimeReleaseExpectedFileObject],
+    groups: [RuntimeReleaseExpectedGroup],
+    volumeDevices: [UInt64]
+  ) throws {
+    let actionByID = Dictionary(uniqueKeysWithValues: plan.actions.map { ($0.id, $0) })
+    let selectedActionIDs = Set(validatedSelection.selectedActions.map(\.id))
+    guard selectedActionIDs.count == validatedSelection.selectedActions.count,
+      validatedSelection.selectedActions.allSatisfy { actionByID[$0.id] == $0 },
+      validatedSelection.releaseGraphManifest == plan.releaseGraphManifest,
+      validatedSelection.activatedReleaseSets
+        == plan.releaseSets.filter({
+          Set($0.ownerActionIDs).isSubset(of: selectedActionIDs)
+        })
+    else { throw RuntimeReleaseTopologyPlanError.staleValidatedSelection }
+    guard
+      let releaseStep = validatedSelection.executionSteps.first(where: {
+        $0.action.id == releaseStepActionID
+      }),
+      !releaseStep.releaseSets.isEmpty,
+      releaseStep.releaseGraphManifest == plan.releaseGraphManifest,
+      releaseStep.releaseSets.allSatisfy({ plan.releaseSets.contains($0) })
+    else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+
+    let ownerBindings = releaseStep.releaseSets.flatMap(\.owners)
+    var actionByCandidate: [Data: ActionID] = [:]
+    for owner in ownerBindings {
+      let candidateKey = Data(owner.candidateID.utf8)
+      if let previous = actionByCandidate[candidateKey], previous != owner.actionID {
+        throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch
+      }
+      actionByCandidate[candidateKey] = owner.actionID
+    }
+    let candidateActions = try actionByCandidate.keys.sorted(by: {
+      $0.lexicographicallyPrecedes($1)
+    })
+    .map { candidateKey -> RuntimeReleaseCandidateActionBinding in
+      guard let actionID = actionByCandidate[candidateKey],
+        selectedActionIDs.contains(actionID),
+        let action = actionByID[actionID],
+        Data(action.evidence.candidateID.utf8) == candidateKey
+      else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+      return try RuntimeReleaseCandidateActionBinding(
+        candidateID: action.evidence.candidateID, action: action)
+    }
+    try self.init(
+      validatedPlanHash: plan.planHash,
+      validatedOverlayHash: validatedSelection.overlayHash,
+      releaseStepActionID: releaseStep.action.id,
+      candidateActions: candidateActions,
+      fileObjects: fileObjects,
+      groups: groups,
+      volumeDevices: volumeDevices,
+      releaseSets: releaseStep.releaseSets)
+  }
+
+  init(
+    testingPlanHash planHash: PolicyDigest,
     candidateActions: [RuntimeReleaseCandidateActionBinding],
     fileObjects: [RuntimeReleaseExpectedFileObject],
     groups: [RuntimeReleaseExpectedGroup],
     volumeDevices: [UInt64]
+  ) throws {
+    try self.init(
+      validatedPlanHash: planHash,
+      validatedOverlayHash: nil,
+      releaseStepActionID: nil,
+      candidateActions: candidateActions,
+      fileObjects: fileObjects,
+      groups: groups,
+      volumeDevices: volumeDevices,
+      releaseSets: nil)
+  }
+
+  private init(
+    validatedPlanHash planHash: PolicyDigest,
+    validatedOverlayHash: PolicyDigest?,
+    releaseStepActionID: ActionID?,
+    candidateActions: [RuntimeReleaseCandidateActionBinding],
+    fileObjects: [RuntimeReleaseExpectedFileObject],
+    groups: [RuntimeReleaseExpectedGroup],
+    volumeDevices: [UInt64],
+    releaseSets: [PlanReleaseSet]?
   ) throws {
     guard !candidateActions.isEmpty, !fileObjects.isEmpty, !groups.isEmpty,
       !volumeDevices.isEmpty
     else { throw RuntimeReleaseTopologyPlanError.emptyExpectedSet }
     guard Set(candidateActions.map { Data($0.candidateID.utf8) }).count == candidateActions.count,
       Set(fileObjects.map(\.identity)).count == fileObjects.count,
+      Set(fileObjects.map { Data($0.graphFileObjectID.utf8) }).count == fileObjects.count,
       Set(groups.map { Data($0.allocationGroupID.utf8) }).count == groups.count,
       Set(volumeDevices).count == volumeDevices.count
     else { throw RuntimeReleaseTopologyPlanError.duplicateIdentifier }
@@ -312,14 +501,15 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
       for owner in file.owners {
         guard let action = actionByCandidate[Data(owner.link.candidateID.utf8)],
           owner.actionID == action.actionID,
-          owner.link.path == action.targetPath,
-          owner.slot.rootIdentity == action.rootIdentity,
-          owner.slot.parentIdentity == (action.parentChain.last ?? action.rootIdentity),
-          owner.slot.rawBasename == action.targetPath.components.last,
-          owner.slot.objectIdentity == action.targetIdentity,
+          owner.namespace.rawRoot == action.rawRoot,
+          owner.namespace.targetPath.isWithin(action.targetPath),
+          owner.slot.rootIdentity == owner.namespace.rootIdentity,
+          owner.slot.parentIdentity
+            == (owner.namespace.parentChain.last ?? owner.namespace.rootIdentity),
+          owner.slot.rawBasename == owner.namespace.targetPath.components.last,
+          owner.slot.objectIdentity == owner.namespace.targetIdentity,
           owner.slot.objectIdentity == file.identity,
-          action.parentChain.count == action.targetPath.components.count - 1,
-          action.inheritedProviderBoundaryByComponent.count == action.targetPath.components.count
+          ownerNamespaceIsBound(owner.namespace, to: action)
         else { throw RuntimeReleaseTopologyPlanError.ownerBindingMismatch }
         guard ownerLinks.insert(owner.link).inserted else {
           throw RuntimeReleaseTopologyPlanError.duplicateIdentifier
@@ -348,7 +538,10 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
     var observedCloneGroups = Set<RuntimeReleaseCloneIdentity>()
     for group in groups {
       let groupFiles = Set(group.ownerFileObjects)
+      let graphFileIDs = Set(group.ownerGraphFileObjectIDs.map { Data($0.utf8) })
       guard !groupFiles.isEmpty, groupFiles.count == group.ownerFileObjects.count,
+        !graphFileIDs.isEmpty, graphFileIDs.count == group.ownerGraphFileObjectIDs.count,
+        group.ownerGraphFileObjectIDs.count == group.ownerFileObjects.count,
         groupFiles.allSatisfy({ fileByIdentity[$0] != nil })
       else { throw RuntimeReleaseTopologyPlanError.incompleteGroupCoverage }
       referencedFiles.formUnion(groupFiles)
@@ -374,6 +567,13 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
     guard Set(volumeDevices) == Set(groups.map(\.snapshotDevice)) else {
       throw RuntimeReleaseTopologyPlanError.volumeSetMismatch
     }
+    if let releaseSets {
+      try validateReleaseMembership(
+        releaseSets: releaseSets,
+        fileObjects: fileObjects,
+        groups: groups,
+        candidateActions: candidateActions)
+    }
 
     let canonicalActions = candidateActions.sorted(by: candidateActionPrecedes)
     let canonicalFiles = fileObjects.sorted { $0.identity < $1.identity }
@@ -382,8 +582,12 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
     }
     let canonicalVolumes = volumeDevices.sorted()
     self.planHash = planHash
+    self.validatedOverlayHash = validatedOverlayHash
+    self.releaseStepActionID = releaseStepActionID
     self.topologyBindingHash = releaseTopologyBindingHash(
       planHash: planHash,
+      validatedOverlayHash: validatedOverlayHash,
+      releaseStepActionID: releaseStepActionID,
       candidateActions: canonicalActions,
       fileObjects: canonicalFiles,
       groups: canonicalGroups,
@@ -393,6 +597,96 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
     self.fileObjects = canonicalFiles
     self.groups = canonicalGroups
     self.volumeDevices = canonicalVolumes
+  }
+}
+
+private func ownerNamespaceIsBound(
+  _ owner: RuntimeReleaseOwnerNamespaceBinding,
+  to action: RuntimeReleaseCandidateActionBinding
+) -> Bool {
+  guard owner.rawRoot == action.rawRoot,
+    owner.rootIdentity == action.rootIdentity,
+    owner.targetPath.isWithin(action.targetPath),
+    owner.parentChain.count == owner.targetPath.components.count - 1,
+    owner.inheritedProviderBoundaryByComponent.count == owner.targetPath.components.count,
+    action.parentChain.count == action.targetPath.components.count - 1,
+    action.inheritedProviderBoundaryByComponent.count == action.targetPath.components.count
+  else { return false }
+
+  if owner.targetPath == action.targetPath {
+    return owner.parentChain == action.parentChain
+      && owner.targetIdentity == action.targetIdentity
+      && owner.inheritedProviderBoundaryByComponent
+        == action.inheritedProviderBoundaryByComponent
+  }
+
+  guard action.targetIdentity.objectType == .directory else { return false }
+  let candidateDepth = action.targetPath.components.count
+  guard Array(owner.parentChain.prefix(candidateDepth - 1)) == action.parentChain,
+    owner.parentChain[candidateDepth - 1] == action.targetIdentity,
+    Array(owner.inheritedProviderBoundaryByComponent.prefix(candidateDepth))
+      == action.inheritedProviderBoundaryByComponent
+  else { return false }
+  return true
+}
+
+private func validateReleaseMembership(
+  releaseSets: [PlanReleaseSet],
+  fileObjects: [RuntimeReleaseExpectedFileObject],
+  groups: [RuntimeReleaseExpectedGroup],
+  candidateActions: [RuntimeReleaseCandidateActionBinding]
+) throws {
+  let expectedGroupIDs = Set(releaseSets.map { Data($0.allocationGroupID.utf8) })
+  guard expectedGroupIDs == Set(groups.map { Data($0.allocationGroupID.utf8) }) else {
+    throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch
+  }
+
+  var expectedFiles: [Data: FileTopologyExpectation] = [:]
+  for expected in releaseSets.flatMap(\.topologyExpectation.fileObjects) {
+    let key = Data(expected.fileObjectID.utf8)
+    if let previous = expectedFiles[key], previous != expected {
+      throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch
+    }
+    expectedFiles[key] = expected
+  }
+  let runtimeFiles = Dictionary(
+    uniqueKeysWithValues: fileObjects.map { (Data($0.graphFileObjectID.utf8), $0) })
+  guard Set(expectedFiles.keys) == Set(runtimeFiles.keys) else {
+    throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch
+  }
+  let actionByCandidate = Dictionary(
+    uniqueKeysWithValues: candidateActions.map { (Data($0.candidateID.utf8), $0.actionID) })
+  for (key, expected) in expectedFiles {
+    guard let runtime = runtimeFiles[key],
+      case .known(let expectedLinkCount) = expected.linkCount,
+      expectedLinkCount == runtime.linkCount,
+      Set(expected.owners) == Set(runtime.owners.map(\.link)),
+      runtime.owners.allSatisfy({ owner in
+        actionByCandidate[Data(owner.link.candidateID.utf8)] == owner.actionID
+      })
+    else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+  }
+
+  let identityByFileID = Dictionary(
+    uniqueKeysWithValues: fileObjects.map { (Data($0.graphFileObjectID.utf8), $0.identity) })
+  for releaseSet in releaseSets {
+    guard
+      let runtime = groups.first(where: {
+        rawStringEqual($0.allocationGroupID, releaseSet.allocationGroupID)
+      })
+    else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+    let expectedFileIDs = releaseSet.topologyExpectation.fileObjects.map {
+      Data($0.fileObjectID.utf8)
+    }
+    guard Set(expectedFileIDs) == Set(runtime.ownerGraphFileObjectIDs.map { Data($0.utf8) }),
+      Set(runtime.ownerFileObjects)
+        == Set(expectedFileIDs.compactMap { identityByFileID[$0] })
+    else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+    if let runtimeRefCount = runtime.cloneRefCount {
+      guard case .known(let expectedRefCount) = releaseSet.topologyExpectation.cloneRefCount,
+        expectedRefCount == runtimeRefCount
+      else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+    }
   }
 }
 
@@ -546,7 +840,7 @@ private final class OwnedReleaseDescriptor: @unchecked Sendable {
 
 private struct LeasedOwnerDescriptor: Sendable {
   let expected: RuntimeReleaseExpectedOwner
-  let action: RuntimeReleaseCandidateActionBinding
+  let namespace: RuntimeReleaseOwnerNamespaceBinding
   let root: OwnedReleaseDescriptor
   let parent: OwnedReleaseDescriptor
   let file: OwnedReleaseDescriptor
@@ -779,13 +1073,9 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     else { throw RuntimeReleaseTopologyAuthorityError.descriptorSetMismatch }
 
     let expectedBySlot = Dictionary(uniqueKeysWithValues: expectedOwners.map { ($0.slot, $0) })
-    let actionByCandidate = Dictionary(
-      uniqueKeysWithValues: plan.candidateActions.map { (Data($0.candidateID.utf8), $0) })
     var leasedOwners: [LeasedOwnerDescriptor] = []
     for owner in owners.sorted(by: { $0.slot < $1.slot }) {
-      guard let expected = expectedBySlot[owner.slot],
-        let action = actionByCandidate[Data(expected.link.candidateID.utf8)]
-      else {
+      guard let expected = expectedBySlot[owner.slot] else {
         throw RuntimeReleaseTopologyAuthorityError.descriptorSetMismatch
       }
       let root = try duplicateReadOnlyDescriptor(owner.rootFileDescriptor)
@@ -797,11 +1087,15 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       try requireNamespaceChain(
         root: root.rawValue,
         suppliedParent: parent.rawValue,
-        action: action,
+        namespace: expected.namespace,
         policy: policy)
       leasedOwners.append(
         LeasedOwnerDescriptor(
-          expected: expected, action: action, root: root, parent: parent, file: file))
+          expected: expected,
+          namespace: expected.namespace,
+          root: root,
+          parent: parent,
+          file: file))
     }
     var leasedVolumes: [LeasedVolumeDescriptor] = []
     for volume in volumes.sorted(by: { $0.expectedDevice < $1.expectedDevice }) {
@@ -1002,13 +1296,13 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
   private func requireNamespaceChain(
     root: Int32,
     suppliedParent: Int32,
-    action: RuntimeReleaseCandidateActionBinding,
+    namespace: RuntimeReleaseOwnerNamespaceBinding,
     policy: NoMaterializationPolicy
   ) throws {
     switch namespaceChainObservation(
       root: root,
       suppliedParent: suppliedParent,
-      action: action,
+      namespace: namespace,
       policy: policy)
     {
     case .known(true): return
@@ -1026,18 +1320,18 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
   private func namespaceChainObservation(
     root: Int32,
     suppliedParent: Int32,
-    action: RuntimeReleaseCandidateActionBinding,
+    namespace: RuntimeReleaseOwnerNamespaceBinding,
     policy: NoMaterializationPolicy
   ) -> RuntimeReleaseTopologyObservation<Bool> {
     var currentDescriptor = root
     var heldDescriptor: OwnedReleaseDescriptor?
-    for (index, component) in action.targetPath.components.dropLast().enumerated() {
+    for (index, component) in namespace.targetPath.components.dropLast().enumerated() {
       let item = kernel.item(
         currentDescriptor,
         component,
         policy,
-        action.inheritedProviderBoundaryByComponent[index])
-      let expectedIdentity = action.parentChain[index]
+        namespace.inheritedProviderBoundaryByComponent[index])
+      let expectedIdentity = namespace.parentChain[index]
       let beforeOpen = allTrue([
         item.providerLocal,
         identityMatches(item.identity, expected: expectedIdentity),
@@ -1060,7 +1354,7 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       heldDescriptor = next
       currentDescriptor = next.rawValue
     }
-    let expectedParent = action.parentChain.last ?? action.rootIdentity
+    let expectedParent = namespace.parentChain.last ?? namespace.rootIdentity
     return allTrue([
       identityMatches(
         kernel.descriptorIdentity(currentDescriptor, policy), expected: expectedParent),
@@ -1070,7 +1364,7 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
         kernel.descriptorIdentity(currentDescriptor, policy),
         kernel.descriptorIdentity(suppliedParent, policy),
       ]),
-      .known(heldDescriptor != nil || action.parentChain.isEmpty),
+      .known(heldDescriptor != nil || namespace.parentChain.isEmpty),
     ])
   }
 
@@ -1085,17 +1379,17 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     let chainBefore = namespaceChainObservation(
       root: owner.root.rawValue,
       suppliedParent: owner.parent.rawValue,
-      action: owner.action,
+      namespace: owner.namespace,
       policy: policy)
     let item = kernel.item(
       owner.parent.rawValue,
       expected.rawBasename,
       policy,
-      owner.action.inheritedProviderBoundaryByComponent.last ?? false)
+      owner.namespace.inheritedProviderBoundaryByComponent.last ?? false)
     let chainAfter = namespaceChainObservation(
       root: owner.root.rawValue,
       suppliedParent: owner.parent.rawValue,
-      action: owner.action,
+      namespace: owner.namespace,
       policy: policy)
     let slotMatches = allTrue([
       chainBefore,
@@ -1716,6 +2010,8 @@ private struct RuntimeReleaseTopologyBindingEncoder {
 
 private func releaseTopologyBindingHash(
   planHash: PolicyDigest,
+  validatedOverlayHash: PolicyDigest?,
+  releaseStepActionID: ActionID?,
   candidateActions: [RuntimeReleaseCandidateActionBinding],
   fileObjects: [RuntimeReleaseExpectedFileObject],
   groups: [RuntimeReleaseExpectedGroup],
@@ -1723,6 +2019,10 @@ private func releaseTopologyBindingHash(
 ) -> PolicyDigest {
   var encoder = RuntimeReleaseTopologyBindingEncoder()
   encoder.bytes(planHash.bytes)
+  encoder.uint64(validatedOverlayHash == nil ? 0 : 1)
+  if let validatedOverlayHash { encoder.bytes(validatedOverlayHash.bytes) }
+  encoder.uint64(releaseStepActionID == nil ? 0 : 1)
+  if let releaseStepActionID { encoder.bytes(releaseStepActionID.digest.bytes) }
   encoder.uint64(UInt64(candidateActions.count))
   for binding in candidateActions {
     encoder.string(binding.candidateID)
@@ -1741,6 +2041,7 @@ private func releaseTopologyBindingHash(
   }
   encoder.uint64(UInt64(fileObjects.count))
   for file in fileObjects {
+    encoder.string(file.graphFileObjectID)
     encoder.identity(file.identity)
     encoder.uint64(UInt64(file.linkCount))
     encoder.optionalClone(file.cloneIdentity)
@@ -1749,6 +2050,13 @@ private func releaseTopologyBindingHash(
       encoder.string(owner.link.candidateID)
       encoder.uint64(UInt64(owner.link.path.components.count))
       for component in owner.link.path.components { encoder.bytes(component) }
+      encoder.bytes(owner.namespace.rawRoot.absoluteBytes)
+      encoder.uint64(UInt64(owner.namespace.parentChain.count))
+      for parent in owner.namespace.parentChain { encoder.identity(parent) }
+      encoder.uint64(UInt64(owner.namespace.inheritedProviderBoundaryByComponent.count))
+      for inherited in owner.namespace.inheritedProviderBoundaryByComponent {
+        encoder.uint64(inherited ? 1 : 0)
+      }
       encoder.identity(owner.slot.rootIdentity)
       encoder.identity(owner.slot.parentIdentity)
       encoder.bytes(owner.slot.rawBasename)
@@ -1759,6 +2067,8 @@ private func releaseTopologyBindingHash(
   encoder.uint64(UInt64(groups.count))
   for group in groups {
     encoder.string(group.allocationGroupID)
+    encoder.uint64(UInt64(group.ownerGraphFileObjectIDs.count))
+    for fileObjectID in group.ownerGraphFileObjectIDs { encoder.string(fileObjectID) }
     encoder.uint64(UInt64(group.ownerFileObjects.count))
     for file in group.ownerFileObjects { encoder.identity(file) }
     encoder.optionalClone(group.cloneIdentity)
@@ -1767,7 +2077,7 @@ private func releaseTopologyBindingHash(
   }
   encoder.uint64(UInt64(volumeDevices.count))
   for device in volumeDevices { encoder.uint64(device) }
-  var input = Data("diskplan/runtime-release-topology-binding/v1\0".utf8)
+  var input = Data("diskplan/runtime-release-topology-binding/v3\0".utf8)
   input.append(encoder.data)
   return try! PolicyDigest(bytes: Data(SHA256.hash(data: input)))
 }
