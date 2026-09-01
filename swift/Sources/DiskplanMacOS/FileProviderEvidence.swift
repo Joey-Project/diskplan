@@ -156,52 +156,59 @@ struct FileProviderProbeOperations: Sendable {
     )
   }
 
-  static let production = Self(
-    startIdentity: { url, completion in
-      NSFileProviderManager.getIdentifierForUserVisibleFile(at: url) {
-        itemIdentifier, domainIdentifier, error in
-        if let itemIdentifier, let domainIdentifier {
-          completion(
-            .known(
-              ProviderIdentity(
-                itemIdentifier: itemIdentifier.rawValue,
-                domainIdentifier: domainIdentifier.rawValue
-              )
+  private static let productionIdentityStarter: IdentityStarter = { url, completion in
+    NSFileProviderManager.getIdentifierForUserVisibleFile(at: url) {
+      itemIdentifier, domainIdentifier, error in
+      if let itemIdentifier, let domainIdentifier {
+        completion(
+          .known(
+            ProviderIdentity(
+              itemIdentifier: itemIdentifier.rawValue,
+              domainIdentifier: domainIdentifier.rawValue
             )
           )
-        } else if let error = error as NSError? {
-          if error.domain == NSCocoaErrorDomain, error.code == NSFileNoSuchFileError {
-            completion(.identifierAbsent)
-          } else if error.domain == NSCocoaErrorDomain,
-            error.code == NSFileReadNoPermissionError
-          {
-            completion(
-              .rejected(
-                status: .permissionDenied,
-                detail: "File Provider identity denied",
-                errorCode: Int32(clamping: error.code)
-              )
+        )
+      } else if let error = error as NSError? {
+        if error.domain == NSCocoaErrorDomain, error.code == NSFileNoSuchFileError {
+          completion(.identifierAbsent)
+        } else if error.domain == NSCocoaErrorDomain,
+          error.code == NSFileReadNoPermissionError
+        {
+          completion(
+            .rejected(
+              status: .permissionDenied,
+              detail: "File Provider identity denied",
+              errorCode: Int32(clamping: error.code)
             )
-          } else {
-            completion(
-              .rejected(
-                status: .failed,
-                detail: "File Provider identity lookup failed",
-                errorCode: Int32(clamping: error.code)
-              )
-            )
-          }
+          )
         } else {
           completion(
             .rejected(
-              status: .inconsistent,
-              detail: "File Provider identity callback was empty",
-              errorCode: nil
+              status: .failed,
+              detail: "File Provider identity lookup failed",
+              errorCode: Int32(clamping: error.code)
             )
           )
         }
+      } else {
+        completion(
+          .rejected(
+            status: .inconsistent,
+            detail: "File Provider identity callback was empty",
+            errorCode: nil
+          )
+        )
       }
-    },
+    }
+  }
+
+  static let production = Self(
+    startIdentity: productionIdentityStarter,
+    readItem: productionItemReader
+  )
+
+  static let descriptorProduction = Self(
+    startIdentity: productionIdentityStarter,
     readItem: productionItemReader
   )
 }
@@ -495,7 +502,7 @@ public struct FileProviderBoundaryProbe: Sendable {
     }
   }
 
-  private func probeItem(
+  fileprivate func probeItem(
     parentFileDescriptor: Int32,
     rawName: Data,
     policy: NoMaterializationPolicy,
@@ -825,6 +832,184 @@ public struct FileProviderBoundaryProbe: Sendable {
     if result.last != UInt8(ascii: "/") { result.append(UInt8(ascii: "/")) }
     result.append(rawName)
     return result
+  }
+}
+
+/// Rebinds a held directory descriptor to its current raw path, then applies the same bounded,
+/// non-materializing File Provider probe used for ordinary directory slots. The held descriptor
+/// identity and the derived slot identity are bracketed so a renamed or replaced path cannot be
+/// mistaken for the descriptor's provider state.
+public struct DescriptorFileProviderBoundaryProbe: Sendable {
+  private let boundaryProbe: FileProviderBoundaryProbe
+
+  public init() {
+    boundaryProbe = FileProviderBoundaryProbe(operations: .descriptorProduction)
+  }
+
+  init(boundaryProbe: FileProviderBoundaryProbe) { self.boundaryProbe = boundaryProbe }
+
+  public func probe(
+    fileDescriptor: Int32,
+    policy: NoMaterializationPolicy,
+    timeout: Duration = .seconds(2)
+  ) -> FileProviderProbeOutcome {
+    let initialPolicy = policy.revalidateLive()
+    guard initialPolicy.value != nil else {
+      return .rejected(
+        .policyUnavailable(
+          status: initialPolicy.status,
+          detail: initialPolicy.detail,
+          errorCode: initialPolicy.errorCode))
+    }
+    let beforeCapability = FileDescriptorIdentityProbe().probe(
+      fileDescriptor: fileDescriptor, policy: policy)
+    guard let before = beforeCapability.value else {
+      return .rejected(
+        boundaryProbe.rejection(for: beforeCapability, stage: .heldParentPreflight))
+    }
+    guard before.objectType == .directory else {
+      return .rejected(
+        .failed(
+          stage: .heldParentPreflight,
+          status: .inconsistent,
+          detail: "descriptor-bound File Provider probe requires a directory",
+          errorCode: nil))
+    }
+
+    let pathPolicy = policy.revalidateLive()
+    guard pathPolicy.value != nil else {
+      return .rejected(
+        .policyUnavailable(
+          status: pathPolicy.status,
+          detail: pathPolicy.detail,
+          errorCode: pathPolicy.errorCode))
+    }
+    var rawPath = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    guard fcntl(fileDescriptor, F_GETPATH, &rawPath) == 0 else {
+      return .rejected(
+        boundaryProbe.posixRejection(errno, stage: .derivedPathPreflight))
+    }
+    let pathLength = rawPath.firstIndex(of: 0) ?? rawPath.count
+    let path = rawPath.withUnsafeBytes { Data($0.prefix(pathLength)) }
+
+    if path == Data([UInt8(ascii: "/")]) {
+      let rootPostflightPolicy = policy.revalidateLive()
+      guard rootPostflightPolicy.value != nil else {
+        return .rejected(
+          .policyUnavailable(
+            status: rootPostflightPolicy.status,
+            detail: rootPostflightPolicy.detail,
+            errorCode: rootPostflightPolicy.errorCode))
+      }
+      let afterCapability = FileDescriptorIdentityProbe().probe(
+        fileDescriptor: fileDescriptor, policy: policy)
+      guard let after = afterCapability.value else {
+        return .rejected(
+          boundaryProbe.rejection(for: afterCapability, stage: .heldParentPostflight))
+      }
+      guard after == before else {
+        return .rejected(
+          .identityMismatch(stage: .heldParentPostflight, expected: before, observed: after))
+      }
+
+      // The canonical filesystem root has no parent slot and cannot itself be a File Provider
+      // item. Bind that namespace invariant to the held root descriptor instead of fabricating a
+      // basename or invoking a path-based File Provider API.
+      return .evidence(
+        FileProviderEvidence(
+          identity: .unavailable("canonical filesystem root is not a File Provider item"),
+          identityDisposition: .identifierAbsent,
+          providerCapabilities: .unavailable(
+            "canonical filesystem root has no File Provider domain"),
+          promisedMetadata: .unavailable(
+            "canonical filesystem root has no File Provider item metadata"),
+          traversal: .doNotDescendUnverifiedProviderOwnership,
+          handling: .reportOnly,
+          hiddenBackingBytes: .unavailable("unavailable via public API"),
+          controlledNonMaterializationAcceptance: .unavailable(
+            "canonical filesystem root requires no File Provider materialization probe")
+        )
+      )
+    }
+
+    guard path.first == UInt8(ascii: "/"), path.count > 1,
+      let separator = path.lastIndex(of: UInt8(ascii: "/")),
+      separator < path.index(before: path.endIndex)
+    else { return .rejected(.rawNameUnavailable) }
+    let parentPath =
+      separator == path.startIndex
+      ? Data([UInt8(ascii: "/")]) : Data(path[..<separator])
+    let rawName = Data(path[path.index(after: separator)...])
+
+    let parentOpenPolicy = policy.revalidateLive()
+    guard parentOpenPolicy.value != nil else {
+      return .rejected(
+        .policyUnavailable(
+          status: parentOpenPolicy.status,
+          detail: parentOpenPolicy.detail,
+          errorCode: parentOpenPolicy.errorCode))
+    }
+    var parentCString = Array(parentPath) + [0]
+    let parent = parentCString.withUnsafeMutableBytes { bytes in
+      open(
+        bytes.bindMemory(to: CChar.self).baseAddress!,
+        O_EVTONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    }
+    guard parent >= 0 else {
+      return .rejected(
+        boundaryProbe.posixRejection(errno, stage: .derivedParentPreflight))
+    }
+    defer { close(parent) }
+
+    let slotBefore = boundaryProbe.probeItem(
+      parentFileDescriptor: parent,
+      rawName: rawName,
+      policy: policy,
+      stage: .derivedPathPreflight)
+    guard case .success(let derivedBefore) = slotBefore else {
+      return .rejected(slotBefore.failure!)
+    }
+    guard derivedBefore.identity == before else {
+      return .rejected(
+        .identityMismatch(
+          stage: .derivedPathPreflight,
+          expected: before,
+          observed: derivedBefore.identity))
+    }
+
+    let outcome = boundaryProbe.probe(
+      parentFileDescriptor: parent,
+      rawName: rawName,
+      policy: policy,
+      inheritedProviderBoundary: false,
+      timeout: timeout)
+
+    let slotAfter = boundaryProbe.probeItem(
+      parentFileDescriptor: parent,
+      rawName: rawName,
+      policy: policy,
+      stage: .derivedPathPostflight)
+    guard case .success(let derivedAfter) = slotAfter else {
+      return .rejected(slotAfter.failure!)
+    }
+    guard derivedAfter.identity == before else {
+      return .rejected(
+        .identityMismatch(
+          stage: .derivedPathPostflight,
+          expected: before,
+          observed: derivedAfter.identity))
+    }
+    let afterCapability = FileDescriptorIdentityProbe().probe(
+      fileDescriptor: fileDescriptor, policy: policy)
+    guard let after = afterCapability.value else {
+      return .rejected(
+        boundaryProbe.rejection(for: afterCapability, stage: .heldParentPostflight))
+    }
+    guard after == before else {
+      return .rejected(
+        .identityMismatch(stage: .heldParentPostflight, expected: before, observed: after))
+    }
+    return outcome
   }
 }
 

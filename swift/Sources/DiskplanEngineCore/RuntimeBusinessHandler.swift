@@ -1761,13 +1761,15 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     rollback: @escaping @Sendable () -> Void
   ) async throws -> Bool {
     guard
-      let transaction = try await runtimeResponderBlockingOperation(broker: broker, {
-        try self.beginApplyReview(
-          emission,
-          install: install,
-          rollback: rollback
-        )
-      })
+      let transaction = try await runtimeResponderBlockingOperation(
+        broker: broker,
+        {
+          try self.beginApplyReview(
+            emission,
+            install: install,
+            rollback: rollback
+          )
+        })
     else { return false }
     do {
       try await authority.commitReview(transaction)

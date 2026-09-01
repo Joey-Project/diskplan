@@ -91,7 +91,7 @@ public struct NamespaceSealEvidence: Equatable, Sendable {
     self.mountIdentity = mountIdentity
   }
 
-  var bindingBytes: Data {
+  public var bindingBytes: Data {
     var encoder = PolicyBindingEncoder()
     encoder.string(trustedNamespace.rawValue)
     encoder.observation(accessPolicy) { $0.string($1) }
@@ -2510,8 +2510,19 @@ public struct ImmutablePlan: Equatable, Sendable {
         ownerEncoder.data(owner.path.bindingBytes)
         return ownerEncoder.data
       }
+      nested.array(file.ownerNamespaces) { owner in
+        var ownerEncoder = PolicyBindingEncoder()
+        ownerEncoder.string(owner.link.candidateID)
+        ownerEncoder.data(owner.link.path.bindingBytes)
+        ownerEncoder.data(owner.namespaceBinding.bindingBytes)
+        return ownerEncoder.data
+      }
       nested.observation(file.linkCount) { $0.uint64(UInt64($1)) }
       return nested.data
+    }
+    encoder.observation(topology.cloneIdentity) { encoder, identity in
+      encoder.uint64(identity.device)
+      encoder.uint64(identity.cloneID)
     }
     encoder.observation(topology.cloneRefCount) { $0.uint64(UInt64($1)) }
     encoder.observation(topology.sharedBytes) { $0.uint64($1) }
@@ -3623,8 +3634,19 @@ func encodeReleaseTopologyExpectation(
       ownerEncoder.data(owner.path.bindingBytes)
       return ownerEncoder.data
     }
+    nested.array(file.ownerNamespaces.sorted(by: releaseOwnerNamespacePrecedes)) { owner in
+      var ownerEncoder = PolicyBindingEncoder()
+      ownerEncoder.string(owner.link.candidateID)
+      ownerEncoder.data(owner.link.path.bindingBytes)
+      ownerEncoder.data(owner.namespaceBinding.bindingBytes)
+      return ownerEncoder.data
+    }
     nested.observation(file.linkCount) { $0.uint64(UInt64($1)) }
     return nested.data
+  }
+  encoder.observation(topology.cloneIdentity) { encoder, identity in
+    encoder.uint64(identity.device)
+    encoder.uint64(identity.cloneID)
   }
   encoder.observation(topology.cloneRefCount) { $0.uint64(UInt64($1)) }
   encoder.observation(topology.sharedBytes) { $0.uint64($1) }
@@ -3637,6 +3659,13 @@ private func releaseOwnerLinkPrecedes(_ lhs: FileOwnerLink, _ rhs: FileOwnerLink
     return rawStringPrecedes(lhs.candidateID, rhs.candidateID)
   }
   return lhs.path < rhs.path
+}
+
+private func releaseOwnerNamespacePrecedes(
+  _ lhs: FileOwnerNamespaceExpectation,
+  _ rhs: FileOwnerNamespaceExpectation
+) -> Bool {
+  releaseOwnerLinkPrecedes(lhs.link, rhs.link)
 }
 
 private func manifestBindingBytes(
