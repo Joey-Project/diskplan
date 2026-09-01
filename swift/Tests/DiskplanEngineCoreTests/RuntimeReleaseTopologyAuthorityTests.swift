@@ -990,6 +990,50 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   }
 }
 
+@Test func snapshotVolumeMustOwnEveryRuntimeFileInTheGroup() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let owner = RuntimeReleaseExpectedOwner(
+    link: try ownerLink("first-candidate", "first"),
+    slot: try namespaceSlot(
+      root: fixture.rootIdentity,
+      name: "first",
+      object: fixture.firstIdentity),
+    actionID: try actionID(21))
+  let foreignDevice = fixture.firstIdentity.device &+ 1
+
+  #expect(throws: RuntimeReleaseTopologyPlanError.incompleteGroupCoverage) {
+    try RuntimeReleaseTopologyExpectedPlan(
+      testingPlanHash: digest(21),
+      candidateActions: [
+        try actionBinding(
+          candidateID: "first-candidate",
+          actionID: owner.actionID,
+          root: fixture.rootIdentity,
+          target: ["first"],
+          object: fixture.firstIdentity)
+      ],
+      fileObjects: [
+        RuntimeReleaseExpectedFileObject(
+          graphFileObjectID: "file",
+          identity: fixture.firstIdentity,
+          owners: [owner],
+          linkCount: 1,
+          cloneIdentity: nil)
+      ],
+      groups: [
+        RuntimeReleaseExpectedGroup(
+          allocationGroupID: "group",
+          ownerGraphFileObjectIDs: ["file"],
+          ownerFileObjects: [fixture.firstIdentity],
+          cloneIdentity: nil,
+          cloneRefCount: nil,
+          snapshotDevice: foreignDevice)
+      ],
+      volumeDevices: [foreignDevice])
+  }
+}
+
 @Test func cloneAndHardlinkGroupsShareOneActionAndFileIdentityComponent() throws {
   let policy = try materializationPolicy()
   let fixture = try RealReleaseTopologyFixture(policy: policy)

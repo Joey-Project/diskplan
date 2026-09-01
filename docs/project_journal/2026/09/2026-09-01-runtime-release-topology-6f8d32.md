@@ -34,7 +34,8 @@ superseded_by:
   preflight/postflight TOCTOU bracket.
 - Descriptor leases remain real read-only, close-on-exec file descriptors; generation-aware
   identity checks, deadline rechecks, replay protection, and fail-closed collection states remain
-  unchanged. APFS clone groups continue to receive no conditional shared-byte credit.
+  unchanged. Every snapshot probe volume must own every file object in its allocation group, and
+  APFS clone groups continue to receive no conditional shared-byte credit.
 
 ## Task List
 
@@ -51,14 +52,15 @@ superseded_by:
 
 - `India-mac-mini-m4-hoteng`, macOS 26.5.1, Apple Swift 6.3.3: the
   `swift build --disable-automatic-resolution` gate passed under the bounded process-group
-  supervisor in 2.629
+  supervisor in 2.593
   seconds; retained output SHA-256 was
-  `75f29ec382b74bbd4be53c9eb746441ccf38882c16adfb602cbc072a198ea00c`.
-- The focused `DiskplanEngineCoreTests` gate passed all 143 tests in 11.899 supervisor seconds;
+  `7ae5c4e40ede74d47b52ef4bf37ce6bf7ccb0bca911b16265295867ce8190bb3`.
+- The focused `DiskplanEngineCoreTests` gate passed all 144 tests in 13.179 supervisor seconds;
   retained output SHA-256 was
-  `a392fe95ce04ce7527571cdbdf035d0144c86f7da5a0bb4962ad0521b37e04f0`.
-- Four namespace, provider, deadline, and parent-chain replacement tests passed 20 consecutive
-  iterations each (80 executions total) in 13.065 supervisor seconds; retained output SHA-256 was
-  `a57392a7d3369df0e7355bbd042e49b5cfeab9b70a7fcd14c58bcd0ba9b40813`.
+  `29fb0aa657aba54ce6a7ec39d7f4ee007e351d8fcc21461437ebb8fc7ad45f3c`.
+- Five namespace, provider, deadline, parent-chain replacement, and snapshot-volume tests passed
+  20 consecutive iterations each (100 executions total) in 11.197 supervisor seconds; retained
+  output SHA-256 was
+  `23a8c4fca88c98d670ff8b0e9c89cfdc6861db32fdd385636e71e681e0194703`.
 - Every final supervisor verified the child process group and reported it quiescent. Tests used
   only task-created temporary filesystem fixtures and did not mutate existing user data.

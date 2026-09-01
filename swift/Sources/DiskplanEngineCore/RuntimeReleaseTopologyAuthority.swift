@@ -542,6 +542,7 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
       guard !groupFiles.isEmpty, groupFiles.count == group.ownerFileObjects.count,
         !graphFileIDs.isEmpty, graphFileIDs.count == group.ownerGraphFileObjectIDs.count,
         group.ownerGraphFileObjectIDs.count == group.ownerFileObjects.count,
+        groupFiles.allSatisfy({ $0.device == group.snapshotDevice }),
         groupFiles.allSatisfy({ fileByIdentity[$0] != nil })
       else { throw RuntimeReleaseTopologyPlanError.incompleteGroupCoverage }
       referencedFiles.formUnion(groupFiles)
