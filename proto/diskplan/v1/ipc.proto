@@ -1568,6 +1568,30 @@ message ApplyFinishedProjection {
   Digest256 review_binding_sha256 = 18;
 }
 
+// Protocol 1.6: a fail-closed terminal emitted when the engine can no longer
+// produce a trustworthy positive ApplyFinishedProjection after mutation may
+// have begun. These reasons classify only the projection boundary; they do not
+// reinterpret backend or policy outcomes.
+enum ExecutionStreamFailureKind {
+  EXECUTION_STREAM_FAILURE_KIND_UNSPECIFIED = 0;
+  EXECUTION_STREAM_FAILURE_KIND_PROJECTION_LIMIT_EXCEEDED = 1;
+  EXECUTION_STREAM_FAILURE_KIND_VALIDATION_FAILED = 2;
+  EXECUTION_STREAM_FAILURE_KIND_BACKEND_CONTRACT_VIOLATION = 3;
+}
+
+message ExecutionStreamFailureProjection {
+  ExecutionStreamFailureKind kind = 1;
+  OpaqueIdentifier execution_id = 2;
+  OpaqueIdentifier apply_review_id = 3;
+  Digest256 review_binding_sha256 = 4;
+  bool mutation_may_have_occurred = 5;
+  Digest256 execution_record_sha256 = 6;
+  uint64 event_count = 7;
+  uint64 encoded_event_bytes = 8;
+  uint64 maximum_event_count = 9;
+  uint64 maximum_encoded_event_bytes = 10;
+}
+
 message ExecutionStreamEvent {
   uint64 execution_event_index = 1;
   OpaqueIdentifier execution_id = 2;
@@ -1583,6 +1607,7 @@ message ExecutionStreamEvent {
     UnitJITRejectedProjection unit_jit_rejected = 18;
     UnitSkippedPrerequisiteProjection unit_skipped_prerequisite = 19;
     ExecutionCancellationAcknowledgedProjection cancellation_acknowledged = 20;
+    ExecutionStreamFailureProjection execution_stream_failure = 21;
   }
 }
 

@@ -2501,7 +2501,10 @@ fn runtime_body_is_terminal(body: &runtime_event::Body) -> bool {
         runtime_event::Body::ExecutionStreamEvent(event)
             if matches!(
                 event.body.as_ref(),
-                Some(execution_stream_event::Body::ApplyFinished(_))
+                Some(
+                    execution_stream_event::Body::ApplyFinished(_)
+                        | execution_stream_event::Body::ExecutionStreamFailure(_)
+                )
             )
     )
 }

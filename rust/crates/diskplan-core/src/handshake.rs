@@ -8,7 +8,8 @@ use thiserror::Error;
 pub const PROTOCOL_MAJOR: u32 = 1;
 pub const PROTOCOL14_MINOR: u32 = 4;
 pub const PROTOCOL15_MINOR: u32 = 5;
-pub const PROTOCOL_MINOR: u32 = PROTOCOL15_MINOR;
+pub const PROTOCOL16_MINOR: u32 = 6;
+pub const PROTOCOL_MINOR: u32 = PROTOCOL16_MINOR;
 pub const PROTOCOL14_RUNTIME_CAPABILITIES: [&str; 4] = [
     "decision-overlay-v1",
     "dry-run-projection-v1",
@@ -250,8 +251,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol15_client_accepts_a_protocol14_selection() {
-        assert_eq!(PROTOCOL_MINOR, PROTOCOL15_MINOR);
+    fn protocol16_client_accepts_a_protocol14_selection() {
+        assert_eq!(PROTOCOL_MINOR, PROTOCOL16_MINOR);
         let offered = rust_client_hello_with_runtime_capabilities(&PROTOCOL14_RUNTIME_CAPABILITIES);
         let accepted = HelloAccepted {
             selected_version: Some(ProtocolVersion {

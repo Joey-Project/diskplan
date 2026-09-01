@@ -40,3 +40,4 @@ scripts/canonical-fixture.sh check
 scripts/protocol13-fixtures.sh check
 scripts/protocol14-fixtures.sh check
 scripts/protocol15-fixtures.sh check
+scripts/protocol16-fixtures.sh check

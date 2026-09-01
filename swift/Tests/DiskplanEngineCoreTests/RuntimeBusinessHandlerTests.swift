@@ -36,7 +36,7 @@ import Testing
   #expect(accepted.negotiatedCapabilities.contains("plan-projection-v1"))
   #expect(!accepted.negotiatedCapabilities.contains("decision-overlay-v1"))
   #expect(handler.requestIDs == [2])
-  #expect(handler.negotiatedProtocolMinors == [protocol15Minor])
+  #expect(handler.negotiatedProtocolMinors == [protocol16Minor])
   guard case .runtimeEvent(let event) = envelopes[1].body,
     case .runtimeRejected(let rejected) = event.body
   else {
@@ -55,6 +55,48 @@ import Testing
   }
   #expect(accepted.selectedVersion.minor == protocol14Minor)
   #expect(handler.negotiatedProtocolMinors == [protocol14Minor])
+}
+
+@Test func engineRequiresProtocol16BeforeMutationDispatchButKeepsDryRunCompatible() throws {
+  var review = Diskplan_V1_PrepareApplyReviewRequest()
+  review.requestID = 2
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = 2
+  for body in [
+    Diskplan_V1_Envelope.OneOf_Body.prepareApplyReviewRequest(review),
+    .confirmApplyRequest(confirmation),
+  ] {
+    let envelopes = try runRuntimeExchange(
+      handler: ExecutionRecordingRuntimeHandler(),
+      requestBody: body,
+      peerProtocolMinor: protocol15Minor
+    )
+    guard case .runtimeEvent(let event) = envelopes.last?.body,
+      case .runtimeRejected(let rejected) = event.body
+    else {
+      Issue.record("expected protocol-1.6 mutation rejection")
+      continue
+    }
+    #expect(rejected.code == .capabilityNotNegotiated)
+    #expect(rejected.summary.contains("protocol 1.6"))
+  }
+
+  var dryRun = Diskplan_V1_PrepareDryRunRequest()
+  dryRun.requestID = 2
+  let handler = DryRunRecordingRuntimeHandler()
+  let envelopes = try runRuntimeExchange(
+    handler: handler,
+    requestBody: .prepareDryRunRequest(dryRun),
+    peerProtocolMinor: protocol15Minor
+  )
+  #expect(handler.requestIDs == [2])
+  guard case .runtimeEvent(let event) = envelopes.last?.body,
+    case .runtimeRejected(let rejected) = event.body
+  else {
+    Issue.record("expected dry-run fixture response")
+    return
+  }
+  #expect(rejected.code == .invalidState)
 }
 
 @Test func externalHandlerCannotSelfReportPlanOrForceAuthority() throws {
@@ -408,6 +450,306 @@ import Testing
   }
 }
 
+@Test func protocol16FailureTerminalSealsTheActualPrefixWithoutPositiveClaims() throws {
+  let fixture = executionFailureFixture()
+  let sealed = try SealedRuntimeWire.sealExecutionStream(
+    fixture.events,
+    requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+    negotiatedProtocolMinor: protocol16Minor
+  )
+  #expect(sealed.count == 2)
+  guard case .executionStreamFailure(let terminal)? = sealed.last?.body else {
+    Issue.record("expected execution-stream failure terminal")
+    return
+  }
+  #expect(terminal.kind == .backendContractViolation)
+  #expect(terminal.mutationMayHaveOccurred)
+  #expect(terminal.executionID == sealed.last?.executionID)
+  #expect(terminal.eventCount == UInt64(sealed.count))
+  #expect(terminal.encodedEventBytes > 0)
+  #expect(terminal.maximumEventCount == SealedRuntimeWire.maximumExecutionEventCount)
+  #expect(terminal.maximumEncodedEventBytes == SealedRuntimeWire.maximumExecutionBytes)
+  #expect(terminal.executionRecordSha256.value.count == 32)
+  #expect(
+    !sealed.contains(where: {
+      if case .forceRequiredWarning? = $0.body { return true }
+      return false
+    })
+  )
+}
+
+@Test func executionAuthorityAcceptsBoundFailureTerminalWithoutRuntimeRejection() throws {
+  let output = RuntimeTestOutput()
+  let broker = SerialEventBroker { output.append($0) }
+  let authority = RuntimeBusinessAuthorityState()
+  let runtimeSessionID = Data("runtime-session".utf8)
+  let scanSessionID = Data("scan-session".utf8)
+  let evidenceSHA256 = Data(repeating: 0x42, count: 32)
+  let checkpointID = Data(
+    evidenceSHA256.map { String(format: "%02x", $0) }.joined().utf8
+  )
+  let metadata = PlanProjectionWireMetadata(
+    scanSessionID: scanSessionID,
+    scanCheckpointID: checkpointID,
+    scanCheckpointEvidenceSHA256: Data(repeating: 0x43, count: 32),
+    planSHA256: Data(repeating: 0x44, count: 32),
+    evidenceSHA256: evidenceSHA256,
+    cleanupCandidateCount: 0,
+    policyVersion: "fixture-policy-v1",
+    schemaVersion: "fixture-schema-v1"
+  )
+  let planWire = try PlanProjectionWireEncoder.encode(
+    records: [],
+    metadata: metadata,
+    negotiatedProtocolMinor: protocol16Minor
+  )
+  var build = Diskplan_V1_BuildPlanRequest()
+  build.requestID = 1
+  build.scanSessionID.value = scanSessionID
+  build.scanCheckpointID.value = checkpointID
+  build.scanEvidenceSha256.value = evidenceSHA256
+  #expect(authority.claim(.buildPlan(build))?.code == nil)
+  try RuntimeBusinessResponder(
+    broker: broker,
+    request: .buildPlan(build),
+    runtimeSessionID: runtimeSessionID,
+    authority: authority
+  ).send(
+    try .plan(
+      planBuildID: Data("plan-build".utf8),
+      records: [],
+      metadata: metadata,
+      negotiatedProtocolMinor: protocol16Minor
+    ))
+
+  var edit = Diskplan_V1_DecisionOverlayEditRequest()
+  edit.requestID = 2
+  edit.projectionID = planWire.manifest.projectionID
+  var overlay = Diskplan_V1_DecisionOverlayAcknowledged()
+  overlay.projectionID = planWire.manifest.projectionID
+  overlay.revision = 1
+  overlay.overlaySha256.value = Data(repeating: 0x45, count: 32)
+  overlay.maximumSelectedActions = SealedRuntimeWire.maximumActionCount
+  overlay.maximumWaiverConsents = SealedRuntimeWire.maximumOverlayWaiverCount
+  overlay.maximumUserNotes = SealedRuntimeWire.maximumOverlayNoteCount
+  overlay.maximumEncodedBytes = SealedRuntimeWire.maximumProjectionBytes
+  overlay.maximumNoteBytes = SealedRuntimeWire.maximumOverlayNoteBytes
+  overlay.overlayID.value = Data("overlay".utf8)
+  overlay.planID = planWire.manifest.planID
+  overlay.planSha256 = planWire.manifest.planSha256
+  overlay.evidenceID = planWire.manifest.evidenceID
+  overlay.evidenceSha256 = planWire.manifest.evidenceSha256
+  overlay.scanSessionID = planWire.manifest.scanSessionID
+  overlay.scanCheckpointID = planWire.manifest.scanCheckpointID
+  overlay.scanCheckpointEvidenceSha256 = planWire.manifest.scanCheckpointEvidenceSha256
+  #expect(authority.claim(.editDecisionOverlay(edit))?.code == nil)
+  try RuntimeBusinessResponder(
+    broker: broker,
+    request: .editDecisionOverlay(edit),
+    runtimeSessionID: runtimeSessionID,
+    authority: authority
+  ).send(try .decisionOverlay(overlay))
+
+  var prepareReview = Diskplan_V1_PrepareApplyReviewRequest()
+  prepareReview.requestID = 3
+  prepareReview.projectionID = overlay.projectionID
+  prepareReview.overlayID = overlay.overlayID
+  prepareReview.overlayRevision = overlay.revision
+  prepareReview.overlaySha256 = overlay.overlaySha256
+  var review = Diskplan_V1_ApplyReviewProjection()
+  review.applyReviewID.value = Data("apply-review".utf8)
+  review.projectionID = planWire.manifest.projectionID
+  review.planSha256 = planWire.manifest.planSha256
+  review.overlaySha256 = overlay.overlaySha256
+  review.epoch.epochID.value = Data("epoch".utf8)
+  review.epoch.semanticReferenceTimeSeconds = 1
+  review.epoch.issuedAtSeconds = 2
+  review.epoch.deadlineSeconds = 3
+  review.reviewBindingSha256.value = Data(repeating: 0x46, count: 32)
+  review.overlayID = overlay.overlayID
+  review.planID = planWire.manifest.planID
+  review.evidenceID = planWire.manifest.evidenceID
+  review.evidenceSha256 = planWire.manifest.evidenceSha256
+  review.currentBindingSha256.value = Data(repeating: 0x47, count: 32)
+  review.overlayRevision = overlay.revision
+  review.scanSessionID = planWire.manifest.scanSessionID
+  review.scanCheckpointID = planWire.manifest.scanCheckpointID
+  review.scanCheckpointEvidenceSha256 = planWire.manifest.scanCheckpointEvidenceSha256
+  let sealedReview = try SealedRuntimeWire.sealApplyReview(
+    review,
+    negotiatedProtocolMinor: protocol16Minor
+  )
+  #expect(authority.claim(.prepareApplyReview(prepareReview))?.code == nil)
+  try RuntimeBusinessResponder(
+    broker: broker,
+    request: .prepareApplyReview(prepareReview),
+    runtimeSessionID: runtimeSessionID,
+    authority: authority
+  ).send(
+    try .applyReview(
+      sealedReview,
+      negotiatedProtocolMinor: protocol16Minor
+    ))
+
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = 4
+  confirmation.applyReviewID = sealedReview.applyReviewID
+  confirmation.reviewBindingSha256 = sealedReview.reviewBindingSha256
+  #expect(authority.claim(.confirmApply(confirmation))?.code == nil)
+  let executionID = Data("execution".utf8)
+  var started = Diskplan_V1_ApplyStartedProjection()
+  started.epoch = sealedReview.epoch
+  started.applyReviewID = sealedReview.applyReviewID
+  started.projectionID = planWire.manifest.projectionID
+  started.planSha256 = planWire.manifest.planSha256
+  started.overlayID = overlay.overlayID
+  started.overlaySha256 = overlay.overlaySha256
+  started.reviewBindingSha256 = sealedReview.reviewBindingSha256
+  started.planID = planWire.manifest.planID
+  started.evidenceID = planWire.manifest.evidenceID
+  started.evidenceSha256 = planWire.manifest.evidenceSha256
+  started.currentBindingSha256 = sealedReview.currentBindingSha256
+  started.revalidationSha256 = sealedReview.revalidationSha256
+  started.overlayRevision = overlay.revision
+  started.scanSessionID = planWire.manifest.scanSessionID
+  started.scanCheckpointID = planWire.manifest.scanCheckpointID
+  started.scanCheckpointEvidenceSha256 = planWire.manifest.scanCheckpointEvidenceSha256
+  var failure = Diskplan_V1_ExecutionStreamFailureProjection()
+  failure.kind = .backendContractViolation
+  failure.executionID.value = executionID
+  failure.applyReviewID = sealedReview.applyReviewID
+  failure.reviewBindingSha256 = sealedReview.reviewBindingSha256
+  failure.mutationMayHaveOccurred = true
+  var startEvent = Diskplan_V1_ExecutionStreamEvent()
+  startEvent.executionID.value = executionID
+  startEvent.body = .applyStarted(started)
+  var failureEvent = Diskplan_V1_ExecutionStreamEvent()
+  failureEvent.executionID.value = executionID
+  failureEvent.body = .executionStreamFailure(failure)
+  try RuntimeBusinessResponder(
+    broker: broker,
+    request: .confirmApply(confirmation),
+    runtimeSessionID: runtimeSessionID,
+    authority: authority
+  ).send(try .execution([startEvent, failureEvent]))
+  try broker.finish()
+
+  let executionEvents = output.runtimeEvents().filter { $0.requestID == 4 }
+  #expect(executionEvents.count == 2)
+  #expect(
+    !executionEvents.contains {
+      if case .runtimeRejected? = $0.body { return true }
+      return false
+    }
+  )
+  guard case .executionStreamEvent(let terminal)? = executionEvents.last?.body,
+    case .executionStreamFailure? = terminal.body
+  else {
+    Issue.record("expected the typed failure terminal from the production responder")
+    return
+  }
+  confirmation.requestID = 5
+  #expect(authority.claim(.confirmApply(confirmation))?.code == .staleBinding)
+}
+
+@Test func executionFailureTerminalIsStrictlyProtocol16AndFailClosed() throws {
+  let fixture = executionFailureFixture()
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      fixture.events,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol15Minor
+    )
+  }
+
+  var notFailClosed = fixture.events
+  guard case .executionStreamFailure(var terminal)? = notFailClosed.last?.body else {
+    Issue.record("expected execution-stream failure terminal")
+    return
+  }
+  terminal.mutationMayHaveOccurred = false
+  notFailClosed[notFailClosed.index(before: notFailClosed.endIndex)].body =
+    .executionStreamFailure(terminal)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      notFailClosed,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+
+  terminal = fixture.failure
+  terminal.kind = .unspecified
+  var unspecified = fixture.events
+  unspecified[unspecified.index(before: unspecified.endIndex)].body =
+    .executionStreamFailure(terminal)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      unspecified,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+}
+
+@Test func executionFailureTerminalRejectsMalformedAuthorityAndRewritesRecordFields() throws {
+  let fixture = executionFailureFixture()
+  var malformed = fixture.events
+  var failure = fixture.failure
+  failure.executionID.value = Data("foreign-execution".utf8)
+  malformed[malformed.index(before: malformed.endIndex)].body = .executionStreamFailure(failure)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      malformed,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+
+  malformed = fixture.events
+  failure = fixture.failure
+  failure.applyReviewID.value = Data("foreign-review".utf8)
+  malformed[malformed.index(before: malformed.endIndex)].body = .executionStreamFailure(failure)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      malformed,
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+
+  #expect(throws: SealedRuntimeWireError.self) {
+    try SealedRuntimeWire.sealExecutionStream(
+      [fixture.events.last!],
+      requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+      negotiatedProtocolMinor: protocol16Minor
+    )
+  }
+
+  var unsealed = fixture.events
+  failure = fixture.failure
+  failure.executionRecordSha256.value = Data(repeating: 0xff, count: 32)
+  failure.eventCount = UInt64.max
+  failure.encodedEventBytes = UInt64.max
+  failure.maximumEventCount = 1
+  failure.maximumEncodedEventBytes = 1
+  unsealed[unsealed.index(before: unsealed.endIndex)].body = .executionStreamFailure(failure)
+  let sealed = try SealedRuntimeWire.sealExecutionStream(
+    unsealed,
+    requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+    negotiatedProtocolMinor: protocol16Minor
+  )
+  guard case .executionStreamFailure(let rewritten)? = sealed.last?.body else {
+    Issue.record("expected execution-stream failure terminal")
+    return
+  }
+  #expect(rewritten.executionRecordSha256.value != Data(repeating: 0xff, count: 32))
+  #expect(rewritten.eventCount == UInt64(sealed.count))
+  #expect(rewritten.encodedEventBytes < UInt64.max)
+  #expect(rewritten.maximumEventCount == SealedRuntimeWire.maximumExecutionEventCount)
+  #expect(rewritten.maximumEncodedEventBytes == SealedRuntimeWire.maximumExecutionBytes)
+}
+
 @Test func responderRejectsAnOversizedRuntimeEnvelopeBeforeEnqueue() throws {
   let broker = SerialEventBroker { _ in }
   let authority = RuntimeBusinessAuthorityState()
@@ -698,6 +1040,21 @@ private final class ExecutionRecordingRuntimeHandler: RuntimeBusinessHandler {
   }
 }
 
+private final class DryRunRecordingRuntimeHandler: RuntimeBusinessHandler {
+  let supportedCapabilities: Set<String> = ["dry-run-projection-v1"]
+  private(set) var requestIDs: [UInt64] = []
+
+  func handle(
+    _ request: RuntimeBusinessRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    requestIDs.append(request.requestID)
+    try responder.send(
+      try .rejected(code: .invalidState, summary: "fixture response")
+    )
+  }
+}
+
 private final class MaliciousAuthorityHandler: RuntimeBusinessHandler {
   let supportedCapabilities: Set<String> = ["plan-projection-v1"]
 
@@ -741,6 +1098,29 @@ private enum FixtureHandlerError: Error {
 
 private enum RuntimeTransactionWriterError: Error {
   case failed
+}
+
+private final class RuntimeTestOutput: @unchecked Sendable {
+  private let lock = NSLock()
+  private var payloads: [Data] = []
+
+  func append(_ payload: Data) {
+    lock.lock()
+    payloads.append(payload)
+    lock.unlock()
+  }
+
+  func runtimeEvents() -> [Diskplan_V1_RuntimeEvent] {
+    lock.lock()
+    let snapshot = payloads
+    lock.unlock()
+    return snapshot.compactMap { payload in
+      guard let envelope = try? Diskplan_V1_Envelope(serializedBytes: payload),
+        case .runtimeEvent(let event) = envelope.body
+      else { return nil }
+      return event
+    }
+  }
 }
 
 private final class RuntimeTransactionGate: @unchecked Sendable {
@@ -981,4 +1361,61 @@ private func forceExecutionFixture() throws -> (
     }
   }
   return (events, required)
+}
+
+private struct ExecutionFailureFixture {
+  let events: [Diskplan_V1_ExecutionStreamEvent]
+  let failure: Diskplan_V1_ExecutionStreamFailureProjection
+  let requiredForceActionIDs: [Diskplan_V1_OpaqueIdentifier]
+}
+
+private func executionFailureFixture() -> ExecutionFailureFixture {
+  let executionID = Data("fixture-execution".utf8)
+  let applyReviewID = Data("fixture-apply-review".utf8)
+  let planDigest = Data(repeating: 0xa1, count: 32)
+  let evidenceDigest = Data(repeating: 0xe1, count: 32)
+  let reviewBinding = Data(repeating: 0xd1, count: 32)
+
+  var started = Diskplan_V1_ApplyStartedProjection()
+  started.epoch.epochID.value = Data("fixture-epoch".utf8)
+  started.epoch.semanticReferenceTimeSeconds = 1
+  started.epoch.issuedAtSeconds = 2
+  started.epoch.deadlineSeconds = 3
+  started.applyReviewID.value = applyReviewID
+  started.projectionID.value = Data("fixture-projection".utf8)
+  started.planSha256.value = planDigest
+  started.overlayID.value = Data("fixture-overlay".utf8)
+  started.overlaySha256.value = Data(repeating: 0xb1, count: 32)
+  started.reviewBindingSha256.value = reviewBinding
+  started.planID.value = planDigest
+  started.evidenceID.value = evidenceDigest
+  started.evidenceSha256.value = evidenceDigest
+  started.currentBindingSha256.value = Data(repeating: 0xc1, count: 32)
+  started.revalidationSha256.value = Data(repeating: 0xc2, count: 32)
+  started.scanSessionID.value = Data("fixture-scan-session".utf8)
+  started.scanCheckpointID.value = Data(
+    evidenceDigest.map { String(format: "%02x", $0) }.joined().utf8
+  )
+  started.scanCheckpointEvidenceSha256.value = Data(repeating: 0xe2, count: 32)
+
+  var failure = Diskplan_V1_ExecutionStreamFailureProjection()
+  failure.kind = .backendContractViolation
+  failure.executionID.value = executionID
+  failure.applyReviewID.value = applyReviewID
+  failure.reviewBindingSha256.value = reviewBinding
+  failure.mutationMayHaveOccurred = true
+
+  var startEvent = Diskplan_V1_ExecutionStreamEvent()
+  startEvent.executionID.value = executionID
+  startEvent.body = .applyStarted(started)
+  var failureEvent = Diskplan_V1_ExecutionStreamEvent()
+  failureEvent.executionID.value = executionID
+  failureEvent.body = .executionStreamFailure(failure)
+  var forceActionID = Diskplan_V1_OpaqueIdentifier()
+  forceActionID.value = Data(repeating: 0x11, count: 32)
+  return ExecutionFailureFixture(
+    events: [startEvent, failureEvent],
+    failure: failure,
+    requiredForceActionIDs: [forceActionID]
+  )
 }
