@@ -164,7 +164,8 @@ private let runtimeFixturePolicyDigest = try! PolicyDigest(
 private let runtimeFixtureDescriptorAccessPolicy = RuntimeReleaseDescriptorAccessPolicy(
   accessPolicy: "fixture-access-policy",
   aclDigest: runtimeFixturePolicyDigest,
-  mountIdentity: "fixture-mount")
+  mountIdentity: "fixture-mount",
+  providerState: .local)
 private let runtimeFixtureNamespaceSeal = NamespaceSealEvidence(
   trustedNamespace: .unverified,
   accessPolicy: .known(runtimeFixtureDescriptorAccessPolicy.accessPolicy),
@@ -984,6 +985,7 @@ struct RuntimeReleaseDescriptorAccessPolicy: Equatable, Sendable {
   let accessPolicy: String
   let aclDigest: PolicyDigest
   let mountIdentity: String
+  let providerState: ProviderState
 }
 
 struct RuntimeReleaseTopologyKernel: Sendable {
@@ -1452,6 +1454,11 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       let currentAccessBeforeItem = descriptorAccessPolicyMatches(
         kernel.descriptorAccessPolicy(currentDescriptor, policy),
         expected: currentExpectedSeal)
+      accessPolicyEvidence.append(currentAccessBeforeItem)
+      var result = namespaceChainResult(
+        accessPolicyEvidence: accessPolicyEvidence,
+        namespaceEvidence: namespaceEvidence)
+      guard result.observation == .known(true) else { return result }
       let item = kernel.item(
         currentDescriptor,
         component,
@@ -1461,15 +1468,12 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       let currentAccessAfterItem = descriptorAccessPolicyMatches(
         kernel.descriptorAccessPolicy(currentDescriptor, policy),
         expected: currentExpectedSeal)
-      accessPolicyEvidence.append(contentsOf: [
-        currentAccessBeforeItem,
-        currentAccessAfterItem,
-      ])
+      accessPolicyEvidence.append(currentAccessAfterItem)
       namespaceEvidence.append(contentsOf: [
         item.providerLocal,
         identityMatches(item.identity, expected: expectedIdentity),
       ])
-      var result = namespaceChainResult(
+      result = namespaceChainResult(
         accessPolicyEvidence: accessPolicyEvidence,
         namespaceEvidence: namespaceEvidence)
       guard result.observation == .known(true) else { return result }
@@ -1547,23 +1551,22 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     policy: NoMaterializationPolicy
   ) -> OwnerCurrent {
     let expected = owner.expected.slot
-    let expectedParentSeal = owner.namespace.parentSeals.last ?? owner.namespace.rootSeal
     let root = kernel.descriptorIdentity(owner.root.rawValue, policy)
     let parent = kernel.descriptorIdentity(owner.parent.rawValue, policy)
     let file = kernel.descriptorIdentity(owner.file.rawValue, policy)
-    let accessPolicyBefore = allTrue([
-      descriptorAccessPolicyMatches(
-        kernel.descriptorAccessPolicy(owner.root.rawValue, policy),
-        expected: owner.namespace.rootSeal),
-      descriptorAccessPolicyMatches(
-        kernel.descriptorAccessPolicy(owner.parent.rawValue, policy),
-        expected: expectedParentSeal),
-    ])
     let chainBefore = namespaceChainObservation(
       root: owner.root.rawValue,
       suppliedParent: owner.parent.rawValue,
       namespace: owner.namespace,
       policy: policy)
+    guard chainBefore.observation == .known(true) else {
+      return blockedOwnerCurrent(
+        owner: owner,
+        chain: chainBefore,
+        root: root,
+        parent: parent,
+        file: file)
+    }
     let item = kernel.item(
       owner.parent.rawValue,
       expected.rawBasename,
@@ -1574,14 +1577,6 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       suppliedParent: owner.parent.rawValue,
       namespace: owner.namespace,
       policy: policy)
-    let accessPolicyAfter = allTrue([
-      descriptorAccessPolicyMatches(
-        kernel.descriptorAccessPolicy(owner.root.rawValue, policy),
-        expected: owner.namespace.rootSeal),
-      descriptorAccessPolicyMatches(
-        kernel.descriptorAccessPolicy(owner.parent.rawValue, policy),
-        expected: expectedParentSeal),
-    ])
     let identityEvidence = [
       identityMatches(root, expected: expected.rootIdentity),
       identityMatches(parent, expected: expected.parentIdentity),
@@ -1590,10 +1585,8 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       allEqual([file, item.identity]),
     ]
     let accessPolicyMatches = allTrue([
-      accessPolicyBefore,
       chainBefore.accessPolicyObservation,
       chainAfter.accessPolicyObservation,
-      accessPolicyAfter,
     ])
     let namespaceMatches = allTrue(
       [
@@ -1610,15 +1603,42 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
         identityEvidence.contains(.known(false)) || chainBefore.namespaceMismatchObserved
         || chainAfter.namespaceMismatchObserved,
       accessPolicyMismatchObserved:
-        accessPolicyBefore == .known(false) || accessPolicyAfter == .known(false)
-        || chainBefore.accessPolicyMismatchObserved
-        || chainAfter.accessPolicyMismatchObserved,
+        chainBefore.accessPolicyMismatchObserved || chainAfter.accessPolicyMismatchObserved,
       linkCount: item.linkCount,
       providerLocal: item.providerLocal,
       cloneAssociation: clone.association,
       cloneRefCount: clone.refCount,
       sharesAllBlocks: clone.sharesAllBlocks
     )
+  }
+
+  private func blockedOwnerCurrent(
+    owner: LeasedOwnerDescriptor,
+    chain: RuntimeReleaseNamespaceChainObservation,
+    root: RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>,
+    parent: RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>,
+    file: RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>
+  ) -> OwnerCurrent {
+    let expected = owner.expected.slot
+    let descriptorIdentityEvidence = [
+      identityMatches(root, expected: expected.rootIdentity),
+      identityMatches(parent, expected: expected.parentIdentity),
+      identityMatches(file, expected: expected.objectIdentity),
+    ]
+    let unavailableItemEvidence: RuntimeReleaseTopologyObservation<UInt32> =
+      chain.observation.erased()
+    return OwnerCurrent(
+      expected: owner.expected,
+      slotMatches: allTrue([chain.observation] + descriptorIdentityEvidence),
+      accessPolicyMatches: chain.accessPolicyObservation,
+      identityMismatchObserved:
+        descriptorIdentityEvidence.contains(.known(false)) || chain.namespaceMismatchObserved,
+      accessPolicyMismatchObserved: chain.accessPolicyMismatchObserved,
+      linkCount: unavailableItemEvidence,
+      providerLocal: chain.observation.erased(),
+      cloneAssociation: chain.observation.erased(),
+      cloneRefCount: chain.observation.erased(),
+      sharesAllBlocks: chain.observation.erased())
   }
 }
 
@@ -2001,6 +2021,11 @@ private func runtimeReleaseDescriptorAccessPolicy(
   let identity = capabilityObservation(
     FileDescriptorIdentityProbe().probe(fileDescriptor: descriptor, policy: policy))
   guard case .known(let identity) = identity else { return identity.erased() }
+  let providerState = runtimeReleaseDescriptorProviderState(
+    DescriptorFileProviderBoundaryProbe().probe(
+      fileDescriptor: descriptor,
+      policy: policy))
+  guard case .known(let providerState) = providerState else { return providerState.erased() }
   var status = stat()
   guard fstat(descriptor, &status) == 0 else {
     return posixObservation(errno, collector: "release-descriptor-access-policy")
@@ -2012,7 +2037,32 @@ private func runtimeReleaseDescriptorAccessPolicy(
       accessPolicy:
         "uid=\(status.st_uid);gid=\(status.st_gid);mode=\(UInt32(status.st_mode));flags=\(runtimeReleaseAccessControlFlags(status.st_flags))",
       aclDigest: aclDigest,
-      mountIdentity: "real-device:\(identity.device)"))
+      mountIdentity: "real-device:\(identity.device)",
+      providerState: providerState))
+}
+
+private func runtimeReleaseDescriptorProviderState(
+  _ outcome: FileProviderProbeOutcome
+) -> RuntimeReleaseTopologyObservation<ProviderState> {
+  switch outcome {
+  case .evidence(let evidence):
+    switch evidence.identityDisposition {
+    case .confirmedProvider:
+      return .known(.fileProviderManaged)
+    case .identifierAbsent:
+      return .known(
+        evidence.traversal == .doNotDescendUnverifiedProviderOwnership
+          ? .local : .fileProviderManaged)
+    case .indeterminate(let status):
+      return providerStatusObservation(
+        status, collector: "descriptor-file-provider-identity"
+      ).map { $0 ? .local : .fileProviderManaged }
+    }
+  case .rejected(let rejection):
+    return providerRejectionObservation(rejection).map {
+      $0 ? .local : .fileProviderManaged
+    }
+  }
 }
 
 private func runtimeReleaseDescriptorACLDigest(
@@ -2253,7 +2303,7 @@ private func descriptorAccessPolicyMatches(
   guard expectedProvider == .local else { return .known(false) }
   return observed.map {
     $0.accessPolicy == expectedAccess && $0.aclDigest == expectedACL
-      && $0.mountIdentity == expectedMount
+      && $0.mountIdentity == expectedMount && $0.providerState == expectedProvider
   }
 }
 

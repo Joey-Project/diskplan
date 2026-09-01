@@ -347,7 +347,7 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
         rootFileDescriptor: fixture.rootDescriptor)
     ])
   let report = try authority.collect(lease)
-  #expect(report.topologyMatchesExpected == .known(false))
+  #expect(report.topologyMatchesExpected != .known(true))
   #expect(report.seal.fileObjects[0].providerLocal == .known(false))
 }
 
@@ -444,11 +444,12 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
     RuntimeReleaseDescriptorAccessPolicy(
       accessPolicy: initial.accessPolicy + "-changed",
       aclDigest: initial.aclDigest,
-      mountIdentity: initial.mountIdentity))
+      mountIdentity: initial.mountIdentity,
+      providerState: initial.providerState))
 
   let report = try authority.collect(lease)
 
-  #expect(report.topologyMatchesExpected == .known(false))
+  #expect(report.topologyMatchesExpected != .known(true))
   #expect(report.seal.fileObjects[0].namespaceAccessPolicyMatches == .known(false))
   #expect(
     report.issues.contains(
@@ -464,15 +465,23 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
     RuntimeReleaseDescriptorAccessPolicy(
       accessPolicy: initial.accessPolicy + "-changed",
       aclDigest: initial.aclDigest,
-      mountIdentity: initial.mountIdentity),
+      mountIdentity: initial.mountIdentity,
+      providerState: initial.providerState),
     RuntimeReleaseDescriptorAccessPolicy(
       accessPolicy: initial.accessPolicy,
       aclDigest: try digest(0xEF),
-      mountIdentity: initial.mountIdentity),
+      mountIdentity: initial.mountIdentity,
+      providerState: initial.providerState),
     RuntimeReleaseDescriptorAccessPolicy(
       accessPolicy: initial.accessPolicy,
       aclDigest: initial.aclDigest,
-      mountIdentity: initial.mountIdentity + "-changed"),
+      mountIdentity: initial.mountIdentity + "-changed",
+      providerState: initial.providerState),
+    RuntimeReleaseDescriptorAccessPolicy(
+      accessPolicy: initial.accessPolicy,
+      aclDigest: initial.aclDigest,
+      mountIdentity: initial.mountIdentity,
+      providerState: .fileProviderManaged),
   ]
   for changed in changedPolicies {
     let state = DescriptorAccessPolicyState(.known(initial))
@@ -492,12 +501,74 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
 
     let report = try authority.collect(lease)
 
-    #expect(report.topologyMatchesExpected == .known(false))
+    #expect(report.topologyMatchesExpected != .known(true))
     #expect(report.seal.fileObjects[0].namespaceAccessPolicyMatches == .known(false))
     #expect(
       report.issues.contains(
         .namespaceAccessPolicyMismatch(setup.descriptors[0].slot)))
   }
+}
+
+@Test func rootProviderTransitionStopsBeforeLeafAccess() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let setup = try hardlinkSetup(fixture: fixture)
+  let initial = try testingDescriptorAccessPolicy()
+  let state = DescriptorAccessPolicyState(.known(initial))
+  let recorder = ReleaseItemAccessRecorder()
+  let authority = testAuthority(
+    kernel: accessPolicyKernel(state: state, itemAccessRecorder: recorder))
+  let lease = try authority.bind(
+    plan: setup.plan,
+    executionEpochNonce: UUID(),
+    validForNanoseconds: 100,
+    policy: policy,
+    owners: setup.descriptors,
+    volumes: [
+      BoundRuntimeReleaseVolumeDescriptor(
+        expectedDevice: fixture.rootIdentity.device,
+        rootFileDescriptor: fixture.rootDescriptor)
+    ])
+  recorder.reset()
+  state.value = .known(
+    RuntimeReleaseDescriptorAccessPolicy(
+      accessPolicy: initial.accessPolicy,
+      aclDigest: initial.aclDigest,
+      mountIdentity: initial.mountIdentity,
+      providerState: .fileProviderManaged))
+
+  let report = try authority.collect(lease)
+
+  #expect(recorder.rawNames.isEmpty)
+  #expect(report.topologyMatchesExpected != .known(true))
+  #expect(report.seal.fileObjects[0].namespaceAccessPolicyMatches == .known(false))
+  #expect(
+    report.issues.contains(
+      .namespaceAccessPolicyMismatch(setup.descriptors[0].slot)))
+
+  let stableState = DescriptorAccessPolicyState(.known(initial))
+  let stableRecorder = ReleaseItemAccessRecorder()
+  let stableAuthority = testAuthority(
+    kernel: accessPolicyKernel(
+      state: stableState,
+      itemAccessRecorder: stableRecorder))
+  let stableLease = try stableAuthority.bind(
+    plan: setup.plan,
+    executionEpochNonce: UUID(),
+    validForNanoseconds: 100,
+    policy: policy,
+    owners: setup.descriptors,
+    volumes: [
+      BoundRuntimeReleaseVolumeDescriptor(
+        expectedDevice: fixture.rootIdentity.device,
+        rootFileDescriptor: fixture.rootDescriptor)
+    ])
+  stableRecorder.reset()
+
+  let stableReport = try stableAuthority.collect(stableLease)
+
+  #expect(stableReport.topologyMatchesExpected == .known(true))
+  #expect(stableRecorder.rawNames.count == setup.descriptors.count)
 }
 
 @Test func mixedMismatchAndTypedAccessEvidenceRemainDistinguishable() throws {
@@ -516,10 +587,11 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   ]
   for outcome in outcomes {
     let state = DescriptorAccessPolicyState(.known(initial))
+    let identityState = DescriptorIdentityTransitionState()
     let authority = testAuthority(
       kernel: accessPolicyKernel(
         state: state,
-        itemIdentity: .known(fixture.secondIdentity)))
+        descriptorIdentityState: identityState))
     let lease = try authority.bind(
       plan: setup.plan,
       executionEpochNonce: UUID(),
@@ -531,6 +603,7 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
           expectedDevice: fixture.rootIdentity.device,
           rootFileDescriptor: fixture.rootDescriptor)
       ])
+    identityState.setFileIdentity(fixture.secondIdentity)
     state.value = outcome
 
     let report = try authority.collect(lease)
@@ -873,6 +946,127 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   let report = try authority.collect(lease)
   #expect(report.topologyMatchesExpected == .known(true))
   #expect(plan.planHash == policyFixture.plan.planHash)
+}
+
+@Test func intermediateProviderTransitionStopsBeforeItsChildAccess() throws {
+  let policy = try materializationPolicy()
+  let fixture = try NestedReleaseTopologyFixture(policy: policy)
+  let policyFixture = try releasePlanFixture(
+    rootIdentity: fixture.rootIdentity,
+    candidateIdentity: fixture.parentIdentity,
+    fileIdentity: fixture.fileIdentity,
+    ownerPath: ["nested", "leaf"])
+  let namespace = try RuntimeReleaseOwnerNamespaceBinding(
+    link: FileOwnerLink(
+      candidateID: "cache",
+      path: try rawTarget(["nested", "leaf"])),
+    actionID: policyFixture.ownerAction.id,
+    rawRoot: try RawRootPath(absoluteBytes: Data("/fixture".utf8)),
+    rootIdentity: fixture.rootIdentity,
+    rootSeal: try topologyRootSeal(),
+    parentChain: [fixture.parentIdentity],
+    parentSeals: [try topologyCandidateSeal()],
+    targetIdentity: fixture.fileIdentity,
+    inheritedProviderBoundaryByComponent: [false, false])
+  let owner = RuntimeReleaseExpectedOwner(namespace: namespace)
+  let plan = try RuntimeReleaseTopologyExpectedPlan(
+    plan: policyFixture.plan,
+    validatedSelection: policyFixture.validatedSelection,
+    releaseStepActionID: policyFixture.releaseAction.id,
+    fileObjects: [
+      RuntimeReleaseExpectedFileObject(
+        graphFileObjectID: "file",
+        identity: fixture.fileIdentity,
+        owners: [owner],
+        linkCount: 1,
+        cloneIdentity: nil)
+    ],
+    groups: [
+      RuntimeReleaseExpectedGroup(
+        allocationGroupID: "group",
+        ownerGraphFileObjectIDs: ["file"],
+        ownerFileObjects: [fixture.fileIdentity],
+        cloneIdentity: nil,
+        cloneRefCount: nil,
+        snapshotDevice: fixture.rootIdentity.device)
+    ],
+    volumeDevices: [fixture.rootIdentity.device])
+  let baseKernel = nonCloneKernel(snapshot: .known(false))
+  let rootIdentity = fixture.rootIdentity
+  let transitions: [RuntimeReleaseFileObjectIdentity?] = [
+    nil,
+    fixture.rootIdentity,
+    fixture.parentIdentity,
+  ]
+  for transition in transitions {
+    let state = DescriptorProviderTransitionState()
+    let recorder = ReleaseItemAccessRecorder()
+    let authority = testAuthority(
+      kernel: RuntimeReleaseTopologyKernel(
+        descriptorIdentity: baseKernel.descriptorIdentity,
+        item: { parent, name, livePolicy, inheritedProviderBoundary in
+          recorder.record(name)
+          return baseKernel.item(parent, name, livePolicy, inheritedProviderBoundary)
+        },
+        snapshotBlocker: baseKernel.snapshotBlocker,
+        pathAccessPolicy: baseKernel.pathAccessPolicy,
+        descriptorAccessPolicy: { descriptor, livePolicy in
+          let identity = baseKernel.descriptorIdentity(descriptor, livePolicy)
+          guard case .known(let identity) = identity else {
+            return identity.map { _ in try! testingDescriptorAccessPolicy() }
+          }
+          let seal =
+            identity == rootIdentity
+            ? try! topologyRootSeal() : try! topologyCandidateSeal()
+          let expected = try! descriptorAccessPolicy(seal)
+          guard state.isManaged(identity) else { return .known(expected) }
+          return .known(
+            RuntimeReleaseDescriptorAccessPolicy(
+              accessPolicy: expected.accessPolicy,
+              aclDigest: expected.aclDigest,
+              mountIdentity: expected.mountIdentity,
+              providerState: .fileProviderManaged))
+        }))
+    let lease = try authority.bind(
+      plan: plan,
+      executionEpochNonce: UUID(),
+      validForNanoseconds: 100,
+      policy: policy,
+      owners: [
+        BoundRuntimeReleaseOwnerDescriptor(
+          slot: owner.slot,
+          rootFileDescriptor: fixture.rootDescriptor,
+          parentFileDescriptor: fixture.parentDescriptor,
+          fileDescriptor: fixture.fileDescriptor)
+      ],
+      volumes: [
+        BoundRuntimeReleaseVolumeDescriptor(
+          expectedDevice: fixture.rootIdentity.device,
+          rootFileDescriptor: fixture.rootDescriptor)
+      ])
+    recorder.reset()
+    state.setManagedIdentity(transition)
+
+    let report = try authority.collect(lease)
+
+    if transition == nil {
+      #expect(report.topologyMatchesExpected == .known(true))
+      #expect(
+        recorder.rawNames == [
+          Data("nested".utf8),
+          Data("leaf".utf8),
+          Data("nested".utf8),
+        ])
+    } else if transition == fixture.rootIdentity {
+      #expect(report.topologyMatchesExpected != .known(true))
+      #expect(recorder.rawNames.isEmpty)
+    } else if transition == fixture.parentIdentity {
+      #expect(report.topologyMatchesExpected != .known(true))
+      #expect(recorder.rawNames == [Data("nested".utf8)])
+    } else {
+      Issue.record("unexpected provider transition fixture")
+    }
+  }
 }
 
 @Test func directoryCandidateRejectsDescendantNamespaceEscape() throws {
@@ -2206,6 +2400,41 @@ private final class DescriptorAccessPolicyState: @unchecked Sendable {
   }
 }
 
+private final class DescriptorProviderTransitionState: @unchecked Sendable {
+  private let lock = NSLock()
+  private var managedIdentity: RuntimeReleaseFileObjectIdentity?
+
+  func setManagedIdentity(_ identity: RuntimeReleaseFileObjectIdentity?) {
+    lock.withLock { managedIdentity = identity }
+  }
+
+  func isManaged(_ identity: RuntimeReleaseFileObjectIdentity) -> Bool {
+    lock.withLock { managedIdentity == identity }
+  }
+}
+
+private final class DescriptorIdentityTransitionState: @unchecked Sendable {
+  private let lock = NSLock()
+  private var fileIdentity: RuntimeReleaseFileObjectIdentity?
+
+  func setFileIdentity(_ identity: RuntimeReleaseFileObjectIdentity?) {
+    lock.withLock { fileIdentity = identity }
+  }
+
+  var currentFileIdentity: RuntimeReleaseFileObjectIdentity? {
+    lock.withLock { fileIdentity }
+  }
+}
+
+private final class ReleaseItemAccessRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: [Data] = []
+
+  func record(_ rawName: Data) { lock.withLock { storage.append(rawName) } }
+  func reset() { lock.withLock { storage.removeAll(keepingCapacity: true) } }
+  var rawNames: [Data] { lock.withLock { storage } }
+}
+
 private final class PathAccessOrderRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private var storage: [String] = []
@@ -2283,12 +2512,21 @@ private func cloneKernel(
 
 private func accessPolicyKernel(
   state: DescriptorAccessPolicyState,
-  itemIdentity: RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>? = nil
+  itemIdentity: RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>? = nil,
+  descriptorIdentityState: DescriptorIdentityTransitionState? = nil,
+  itemAccessRecorder: ReleaseItemAccessRecorder? = nil
 ) -> RuntimeReleaseTopologyKernel {
   let base = nonCloneKernel(snapshot: .known(false))
   return RuntimeReleaseTopologyKernel(
-    descriptorIdentity: base.descriptorIdentity,
+    descriptorIdentity: { descriptor, policy in
+      let observed = base.descriptorIdentity(descriptor, policy)
+      guard let replacement = descriptorIdentityState?.currentFileIdentity,
+        observed.knownValue?.objectType == .regularFile
+      else { return observed }
+      return .known(replacement)
+    },
     item: { parent, name, policy, inheritedProviderBoundary in
+      itemAccessRecorder?.record(name)
       let item = base.item(parent, name, policy, inheritedProviderBoundary)
       return RuntimeReleaseKernelItem(
         identity: itemIdentity ?? item.identity,
@@ -2633,7 +2871,8 @@ private func testingDescriptorAccessPolicy() throws -> RuntimeReleaseDescriptorA
   RuntimeReleaseDescriptorAccessPolicy(
     accessPolicy: "fixture-access-policy",
     aclDigest: try digest(0xF0),
-    mountIdentity: "fixture-mount")
+    mountIdentity: "fixture-mount",
+    providerState: .local)
 }
 
 private func descriptorAccessPolicy(
@@ -2646,7 +2885,8 @@ private func descriptorAccessPolicy(
   return RuntimeReleaseDescriptorAccessPolicy(
     accessPolicy: accessPolicy,
     aclDigest: aclDigest,
-    mountIdentity: mountIdentity)
+    mountIdentity: mountIdentity,
+    providerState: .local)
 }
 
 private func booleanFailure<Value: Equatable & Sendable>(

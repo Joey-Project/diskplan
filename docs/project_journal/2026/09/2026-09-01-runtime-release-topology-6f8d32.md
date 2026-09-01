@@ -53,6 +53,12 @@ superseded_by:
   digest, mount identity, and local-provider state while revalidating the no-materialization policy
   before each probe. Directory child-entry churn does not alter this selected access-policy seal,
   while same-inode permission, ACL, ownership, flag, or mount drift fails closed.
+- Local-provider state is observed live for each held root and parent descriptor through a bounded
+  descriptor-to-slot File Provider probe. The probe rebinds the current raw path to the held
+  directory identity, uses only metadata and the public File Provider identity API under repeated
+  no-materialization checks, and brackets both identities. Descriptor provider drift now stops
+  before the next child lookup; root drift performs no child access, while intermediate drift can
+  resolve that intermediate but cannot touch its child.
 - Topology aggregation preserves typed failed, unreadable, unknown, and missing observations ahead
   of a known mismatch. Identity and access-policy mismatches are also retained as explicit issues,
   so a concurrent replacement cannot hide a simultaneous collector or accessibility outcome.
@@ -79,6 +85,8 @@ superseded_by:
   failure propagation.
 - [x] Revalidate descriptor-bound access-policy seals before and after every relevant root or
   parent namespace access without treating benign child-entry churn as a policy change.
+- [x] Observe and compare live descriptor-bound File Provider state for every root and parent,
+  stopping before child access on a same-inode provider transition.
 - [x] Preserve typed missing, unreadable, and failed evidence when it co-occurs with an explicit
   identity or access-policy mismatch at file, group, and report levels.
 - [x] Run targeted build, tests, and stress validation on the macOS 26 Apple Silicon release host.
@@ -121,4 +129,15 @@ superseded_by:
   `5f9fb82b2e516ae1f31ba36074f239f22973f76dbbe8437f327154581d487783`). The final build
   passed with retained output SHA-256
   `7ae5c4e40ede74d47b52ef4bf37ce6bf7ccb0bca911b16265295867ce8190bb3`, and strict
+  `swift-format` lint produced no diagnostics.
+- The final descriptor-provider closure passed on `India-mac-mini-m4-hoteng`: the complete
+  `DiskplanEngineCoreTests` gate passed all 157 tests (retained output SHA-256
+  `4f5d1787d66e369f534220c19e3db7a70f2dd84ad20928012d6761c16d723dd6`) and the complete
+  `DiskplanPolicyTests` gate passed all 66 tests (retained output SHA-256
+  `c8849bc12801af0ee32b417d04bd597dec02a539c850fcb4d47c2b2797fac729`). Eight
+  provider-transition, access-policy, namespace-race, and typed-evidence regressions passed 20
+  consecutive stress iterations (160 executions; retained output SHA-256
+  `56c282a6a61669115f23c9f9d19e64c74f69c62312f9cc65c0bcbaadb22004fa`). The final build
+  passed with retained output SHA-256
+  `370a3de17cbc23915bbd607b48ae3e38db460e34553526382b8af33f2b2d85fd`, and strict
   `swift-format` lint produced no diagnostics.
