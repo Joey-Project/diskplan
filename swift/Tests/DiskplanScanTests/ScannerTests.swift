@@ -14,6 +14,7 @@ private struct FakeNode: Sendable {
   let enumerateFailure: Observation<DirectoryEnumeration>?
   let closeFailure: DirectoryCloseEvidence?
   let providerEvidence: Observation<ProviderScanEvidence>
+  let accessPolicy: Observation<AccessPolicyEvidence>
 
   init(
     identity: ObjectIdentity,
@@ -23,7 +24,8 @@ private struct FakeNode: Sendable {
     openFailure: Observation<BoundDirectory>?,
     enumerateFailure: Observation<DirectoryEnumeration>?,
     closeFailure: DirectoryCloseEvidence? = nil,
-    providerEvidence: Observation<ProviderScanEvidence> = .unknown(reason: "not observed")
+    providerEvidence: Observation<ProviderScanEvidence> = .unknown(reason: "not observed"),
+    accessPolicy: Observation<AccessPolicyEvidence> = .known(fakeAccessPolicy)
   ) {
     self.identity = identity
     self.bytes = bytes
@@ -33,6 +35,7 @@ private struct FakeNode: Sendable {
     self.enumerateFailure = enumerateFailure
     self.closeFailure = closeFailure
     self.providerEvidence = providerEvidence
+    self.accessPolicy = accessPolicy
   }
 }
 
@@ -119,7 +122,7 @@ private final class FakeFilesystem: ScanFilesystem, @unchecked Sendable {
       InspectedObject(
         identity: node.identity,
         bytes: node.bytes,
-        accessPolicy: .known(fakeAccessPolicy),
+        accessPolicy: node.accessPolicy,
         providerBoundary: node.boundary,
         providerEvidence: node.providerEvidence
       )
@@ -141,7 +144,7 @@ private final class FakeFilesystem: ScanFilesystem, @unchecked Sendable {
     guard node.identity == expectedIdentity else {
       return .failed(reason: "identity changed", errorCode: ESTALE)
     }
-    guard expectedAccessPolicy == fakeAccessPolicy else {
+    guard expectedAccessPolicy == node.accessPolicy.value else {
       return .failed(reason: "access policy changed", errorCode: EAGAIN)
     }
     lock.withLock { openedPaths += 1 }
@@ -404,8 +407,25 @@ private let fakeAccessPolicy = AccessPolicyEvidence(
   ownerGroupID: 20,
   mode: UInt32(S_IFDIR | S_IRWXU),
   flags: 0,
-  aclDigest: .known(try! EvidenceDigest(bytes: Data(repeating: 0, count: 32)))
+  aclDigest: .known(try! EvidenceDigest(bytes: Data(repeating: 0, count: 32))),
+  aclGrantSafety: .known(.noExtendedEntries)
 )
+
+private func fixtureAccessPolicy(
+  userID: UInt32 = 501,
+  mode: UInt32,
+  flags: UInt32 = 0,
+  aclGrantSafety: Observation<ACLGrantSafety> = .known(.noExtendedEntries)
+) -> AccessPolicyEvidence {
+  AccessPolicyEvidence(
+    ownerUserID: userID,
+    ownerGroupID: 20,
+    mode: mode,
+    flags: flags,
+    aclDigest: .known(try! EvidenceDigest(bytes: Data(repeating: 1, count: 32))),
+    aclGrantSafety: aclGrantSafety
+  )
+}
 
 private func replacingItemEvidence(
   _ item: ItemStorageEvidence,
@@ -492,7 +512,12 @@ private func boundedEnumeration(
   return accumulator.result()
 }
 
-private func file(_ id: UInt64, bytes: UInt64, device: Int64 = 1) -> FakeNode {
+private func file(
+  _ id: UInt64,
+  bytes: UInt64,
+  device: Int64 = 1,
+  accessPolicy: Observation<AccessPolicyEvidence> = .known(fakeAccessPolicy)
+) -> FakeNode {
   FakeNode(
     identity: ObjectIdentity(device: device, fileID: id, objectType: .regular),
     bytes: ItemByteEvidence(
@@ -502,7 +527,8 @@ private func file(_ id: UInt64, bytes: UInt64, device: Int64 = 1) -> FakeNode {
     boundary: .localOrUnindicated,
     children: [],
     openFailure: nil,
-    enumerateFailure: nil
+    enumerateFailure: nil,
+    accessPolicy: accessPolicy
   )
 }
 private func directory(
@@ -512,7 +538,8 @@ private func directory(
   boundary: ProviderBoundary = .localOrUnindicated,
   openFailure: Observation<BoundDirectory>? = nil,
   enumerateFailure: Observation<DirectoryEnumeration>? = nil,
-  closeFailure: DirectoryCloseEvidence? = nil
+  closeFailure: DirectoryCloseEvidence? = nil,
+  accessPolicy: Observation<AccessPolicyEvidence> = .known(fakeAccessPolicy)
 ) -> FakeNode {
   FakeNode(
     identity: ObjectIdentity(device: device, fileID: id, objectType: .directory),
@@ -523,7 +550,8 @@ private func directory(
     children: children,
     openFailure: openFailure,
     enumerateFailure: enumerateFailure,
-    closeFailure: closeFailure
+    closeFailure: closeFailure,
+    accessPolicy: accessPolicy
   )
 }
 
@@ -567,6 +595,73 @@ private func run(_ filesystem: FakeFilesystem, budget: StructuralBudget? = nil) 
   let rhs = run(FakeFilesystem(rootChildren: [a, b], nodes: nodes))
   #expect(lhs.progress.retainedNodes == rhs.progress.retainedNodes)
   #expect(lhs.roots == rhs.roots)
+}
+
+@Test func scannerAggregatesPromptStyleAndUnsafeRemovalPreflightVotes() throws {
+  let cache = component("cache")
+  let locked = component("locked")
+  let unsafe = component("unsafe")
+  let root = RawPath(rootID: "root")
+  let fs = FakeFilesystem(
+    rootChildren: [cache],
+    nodes: [
+      root.appending(cache): directory(2, children: [locked, unsafe]),
+      root.appending(cache).appending(locked): file(
+        3,
+        bytes: 1,
+        accessPolicy: .known(fixtureAccessPolicy(mode: UInt32(S_IFREG | S_IRUSR)))
+      ),
+      root.appending(cache).appending(unsafe): file(
+        4,
+        bytes: 1,
+        accessPolicy: .known(
+          fixtureAccessPolicy(
+            mode: UInt32(S_IFREG | S_IRUSR | S_IWGRP),
+            flags: 0x2,
+            aclGrantSafety: .known(.grantsAdditionalPrincipal)
+          )
+        )
+      ),
+    ]
+  )
+
+  let result = run(fs)
+  let candidate = try #require(
+    result.progress.retainedNodes.first(where: { $0.path == root.appending(cache) })
+  )
+  let preflight = try #require(candidate.removalPreflight.value)
+  #expect(preflight.ownerScope == .known(.uniform(501)))
+  #expect(preflight.groupOrOtherWritablePresent == .known(true))
+  #expect(preflight.unsafeACLGrantPresent == .known(true))
+  #expect(preflight.restrictedFlagsPresent == .known(true))
+  #expect(preflight.parentAccessInsufficient == .known(false))
+  #expect(preflight.promptStyleUnwritableEntryPresent == .known(true))
+}
+
+@Test func scannerPreservesUnreadableRemovalPreflightAsUnreadable() throws {
+  let cache = component("cache")
+  let unreadable = component("unreadable")
+  let root = RawPath(rootID: "root")
+  let fs = FakeFilesystem(
+    rootChildren: [cache],
+    nodes: [
+      root.appending(cache): directory(2, children: [unreadable]),
+      root.appending(cache).appending(unreadable): file(
+        3,
+        bytes: 1,
+        accessPolicy: .unreadable(reason: "fixture denied", errorCode: EACCES)
+      ),
+    ]
+  )
+
+  let result = run(fs)
+  let candidate = try #require(
+    result.progress.retainedNodes.first(where: { $0.path == root.appending(cache) })
+  )
+  #expect(
+    candidate.removalPreflight
+      == .unreadable(reason: "fixture denied", errorCode: EACCES)
+  )
 }
 
 @Test func rootAccessPolicySealIsDeterministicAndACLBound() {

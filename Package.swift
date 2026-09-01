@@ -65,6 +65,7 @@ let package = Package(
       name: "DiskplanEngineCore",
       dependencies: [
         "DiskplanCore", "DiskplanMacOS", "DiskplanPolicy", "DiskplanProto", "DiskplanScan",
+        "DiskplanRules",
       ],
       path: "swift/Sources/DiskplanEngineCore"
     ),
@@ -134,6 +135,7 @@ let package = Package(
         "DiskplanEngineCore",
         "DiskplanPolicy",
         "DiskplanProto",
+        "DiskplanRules",
         "DiskplanScan",
         .product(name: "SwiftProtobuf", package: "swift-protobuf"),
       ],

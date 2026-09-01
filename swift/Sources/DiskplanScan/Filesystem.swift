@@ -912,6 +912,7 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
     guard fstat(fileDescriptor, &value) == 0 else {
       return posixObservation(errno, operation: "read descriptor-bound item policy and times")
     }
+    let acl = descriptorACLEvidence(fileDescriptor)
     return .known(
       SlotSeal(
         identity: observedIdentity,
@@ -920,7 +921,8 @@ public final class DarwinScanFilesystem: ScanFilesystem, @unchecked Sendable {
           ownerGroupID: value.st_gid,
           mode: UInt32(value.st_mode),
           flags: darwinAccessControlFlags(value.st_flags),
-          aclDigest: descriptorACLDigest(fileDescriptor)
+          aclDigest: acl.digest,
+          aclGrantSafety: acl.grantSafety
         ),
         filesystemFlags: FilesystemFlagMetadataEvidence(rawFlags: value.st_flags),
         times: FilesystemTimeEvidence(

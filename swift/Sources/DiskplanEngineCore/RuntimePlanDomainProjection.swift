@@ -7,6 +7,7 @@ enum RuntimePlanDomainProjectionError: Error, Equatable {
   case unsupportedActionKind
   case ancestorLimitExceeded
   case integerOverflow
+  case reportOnlyProjectionCapacityUnavailable
 }
 
 struct RuntimePlanDomainProjection: Sendable {
@@ -27,8 +28,21 @@ enum RuntimePlanDomainProjector {
       uniqueKeysWithValues: plan.releaseSets.map { release in
         (Data(release.allocationGroupID.utf8), releaseID(release))
       })
+    let allReportOnlyItems = authority.items.filter { $0.actionID == nil }
+    let baseRecordCount = plan.actions.count * 2 + plan.releaseSets.count
+    let reportOnlyCapacity = maximumReportOnlyItemCount(baseRecordCount: baseRecordCount)
+    guard allReportOnlyItems.isEmpty || reportOnlyCapacity > 0 else {
+      throw RuntimePlanDomainProjectionError.reportOnlyProjectionCapacityUnavailable
+    }
+    let reportOnlyItems = Array(allReportOnlyItems.prefix(reportOnlyCapacity))
+    let omittedReportOnlyCount = allReportOnlyItems.count - reportOnlyItems.count
+    let evidenceByCandidateID = Dictionary(
+      uniqueKeysWithValues: plan.evidenceSnapshots.map { ($0.candidateID, $0) }
+    )
     var records: [Diskplan_V1_PlanProjectionRecord] = []
-    records.reserveCapacity(plan.actions.count * 2 + plan.releaseSets.count)
+    records.reserveCapacity(
+      (plan.actions.count + reportOnlyItems.count) * 2 + plan.releaseSets.count
+    )
 
     for (order, action) in ActionOrdering.display(plan.actions).enumerated() {
       let target = try targetProjection(action: action, order: UInt64(order))
@@ -53,6 +67,36 @@ enum RuntimePlanDomainProjector {
       records.append(targetRecord)
     }
 
+    for (offset, item) in reportOnlyItems.enumerated() {
+      guard let evidence = evidenceByCandidateID[item.candidateID],
+        evidence.evidenceID == item.evidenceID
+      else { continue }
+      let order = UInt64(plan.actions.count + offset)
+      let actionID = reportOnlyActionID(item)
+      let target = reportOnlyTargetProjection(
+        item: item,
+        evidence: evidence,
+        actionID: actionID,
+        order: order
+      )
+      var actionRecord = Diskplan_V1_PlanProjectionRecord()
+      actionRecord.body = .action(
+        try reportOnlyActionProjection(
+          item: item,
+          evidence: evidence,
+          actionID: actionID,
+          targetID: target.targetID.value,
+          order: order,
+          omittedReportOnlyCount: omittedReportOnlyCount,
+          negotiatedProtocolMinor: negotiatedProtocolMinor
+        ))
+      records.append(actionRecord)
+
+      var targetRecord = Diskplan_V1_PlanProjectionRecord()
+      targetRecord.body = .target(target)
+      records.append(targetRecord)
+    }
+
     for release in plan.releaseSets {
       var record = Diskplan_V1_PlanProjectionRecord()
       record.body = .releaseSet(
@@ -64,6 +108,179 @@ enum RuntimePlanDomainProjector {
       records: records,
       releaseSetIDByAllocationGroup: releaseIDs
     )
+  }
+
+  static func maximumReportOnlyItemCount(baseRecordCount: Int) -> Int {
+    guard baseRecordCount < PlanProjectionWireEncoder.maximumRecordCount else { return 0 }
+    return (PlanProjectionWireEncoder.maximumRecordCount - baseRecordCount) / 2
+  }
+
+  private static func reportOnlyActionID(_ item: RuntimePlanItem) -> Data {
+    runtimeDigest(
+      domain: "diskplan/report-only-action-id/v1\0",
+      fields: [item.evidenceID.bytes, Data(item.candidateID.utf8)]
+    )
+  }
+
+  private static func reportOnlyActionProjection(
+    item: RuntimePlanItem,
+    evidence: FrozenEvidenceSnapshot,
+    actionID: Data,
+    targetID: Data,
+    order: UInt64,
+    omittedReportOnlyCount: Int,
+    negotiatedProtocolMinor: UInt32
+  ) throws -> Diskplan_V1_PlanActionProjection {
+    let typedActionID = ActionID(digest: try PolicyDigest(bytes: actionID))
+    var projection = Diskplan_V1_PlanActionProjection()
+    projection.actionID.value = actionID
+    projection.actionLineageID.value = runtimeDigest(
+      domain: "diskplan/report-only-lineage-id/v1\0",
+      fields: [item.evidenceID.bytes, Data(item.kind.rawValue.utf8)]
+    )
+    projection.disposition = .keepInformational
+    projection.kind = .reportOnly
+    projection.kindLabel = kindLabel(.reportOnly)
+    projection.kindOrder = UInt32(Diskplan_V1_PlanActionKind.reportOnly.rawValue)
+    projection.label = item.candidateID
+    projection.order = order
+    projection.stageability = .notStageable
+    projection.immediateReclaim = byteEstimate(item.immediateReclaimBytes)
+    projection.sharedUnlock.knownBytes = 0
+    projection.activity = activity(evidence.activity)
+    projection.recoverability = recoverability(evidence.recoverability)
+    projection.blockers = reportOnlyBlockers(
+      item,
+      actionID: typedActionID,
+      omittedReportOnlyCount: omittedReportOnlyCount
+    )
+    projection.targetIds = [opaque(targetID)]
+    projection.evidence =
+      evidenceSummaries(item.evaluation)
+      + reportOnlyEvidence(item.reasons, omittedReportOnlyCount: omittedReportOnlyCount)
+    projection.executionPreview.adapter = .reportOnly
+    projection.executionPreview.mutationSupported = false
+    projection.executionPreview.postcondition = "Report-only evidence cannot mutate the target."
+    projection.pathRace = .unknown
+    if negotiatedProtocolMinor >= protocol15Minor {
+      projection.executionPreview.rawWorkingDirectory = Data()
+      projection.executionPreview.pathRace = .unknown
+    }
+    projection.recommendation =
+      item.kind == .providerReportOnly ? .managedByProvider : .keep
+    projection.safetyEvidence = try reportOnlySafetyEvidence(evidence)
+    return projection
+  }
+
+  private static func reportOnlyBlockers(
+    _ item: RuntimePlanItem,
+    actionID: ActionID,
+    omittedReportOnlyCount: Int
+  ) -> [Diskplan_V1_PlanBlockerProjection] {
+    let policyBlockers = blockers(item.evaluation, actionID: actionID)
+    let authorityBlockers = item.reasons.map { reason in
+      var blocker = Diskplan_V1_PlanBlockerProjection()
+      blocker.blockerID.value = runtimeDigest(
+        domain: "diskplan/report-only-authority-blocker/v1\0",
+        fields: [actionID.digest.bytes, Data(reason.rawValue.utf8)]
+      )
+      blocker.kind = reportOnlyBlockerKind(reason)
+      blocker.disposition = .hard
+      blocker.code = reason.rawValue
+      blocker.summary = "The Swift authority kept this candidate report-only."
+      return blocker
+    }
+    guard omittedReportOnlyCount > 0 else { return policyBlockers + authorityBlockers }
+    var truncation = Diskplan_V1_PlanBlockerProjection()
+    truncation.blockerID.value = runtimeDigest(
+      domain: "diskplan/report-only-projection-truncated/v1\0",
+      fields: [actionID.digest.bytes, bigEndian(UInt64(omittedReportOnlyCount))]
+    )
+    truncation.kind = .incompleteEvidence
+    truncation.disposition = .hard
+    truncation.code = "report_only_projection_truncated"
+    truncation.summary = "Additional report-only candidates were omitted by the wire bound."
+    return policyBlockers + authorityBlockers + [truncation]
+  }
+
+  private static func reportOnlyEvidence(
+    _ reasons: [RuntimeAuthorityReason],
+    omittedReportOnlyCount: Int
+  ) -> [Diskplan_V1_EvidenceSummaryProjection] {
+    var summaries = reasons.map { reason in
+      var summary = Diskplan_V1_EvidenceSummaryProjection()
+      summary.status = .known
+      summary.code = reason.rawValue
+      summary.summary = "Authoritative report-only reason."
+      return summary
+    }
+    if omittedReportOnlyCount > 0 {
+      var summary = Diskplan_V1_EvidenceSummaryProjection()
+      summary.status = .unknown
+      summary.code = "report_only_projection_truncated"
+      summary.summary = "The bounded projection omitted additional report-only candidates."
+      summaries.append(summary)
+    }
+    return summaries
+  }
+
+  private static func reportOnlyBlockerKind(
+    _ reason: RuntimeAuthorityReason
+  ) -> Diskplan_V1_PlanBlockerKind {
+    switch reason {
+    case .providerManaged, .providerStateUnavailable:
+      return .providerManaged
+    case .activityActive, .activityUnavailable:
+      return .currentActivity
+    case .identityUnavailable, .accessPolicyUnavailable, .aclEvidenceUnavailable,
+      .rootNamespaceSealUnavailable, .namespaceAncestorUnavailable, .subtreeAccessUnsafe:
+      return .identityOrAccess
+    case .candidateOverlap:
+      return .semanticUniqueness
+    case .recoverabilityProvenanceUnavailable:
+      return .recoverability
+    case .dependencyCoverageIncomplete, .sharedOwnerIncomplete, .releaseGraphIncomplete:
+      return .dependency
+    case .genericRemoveDisabled, .rulesConfigurationUnavailable,
+      .systemCacheRootUnavailable, .gitExecutionEvidenceUnavailable,
+      .actionContractEvidenceUnavailable:
+      return .unsupportedAdapter
+    case .protectedByRule:
+      return .identityOrAccess
+    case .corpusIntegrityFailure, .authorityBudgetExhausted,
+      .planningBudgetExhausted, .scanNotTerminal, .rootCoverageIncomplete,
+      .candidateCoverageIncomplete, .collectorIncomplete, .subtreePreflightUnavailable,
+      .nameOnlyTypeHint:
+      return .incompleteEvidence
+    }
+  }
+
+  private static func reportOnlyTargetProjection(
+    item: RuntimePlanItem,
+    evidence: FrozenEvidenceSnapshot,
+    actionID: Data,
+    order: UInt64
+  ) -> Diskplan_V1_PlanTargetProjection {
+    let targetID = runtimeDigest(
+      domain: "diskplan/plan-target-id/v1\0",
+      fields: [actionID] + item.target.components
+    )
+    var path = Diskplan_V1_PlanRawPathProjection()
+    path.rootID.value = runtimeDigest(
+      domain: "diskplan/plan-root-id/v1\0",
+      fields: [item.rawRoot]
+    )
+    path.components = item.target.components
+    path.displayPath = displayPath(root: item.rawRoot, components: item.target.components)
+
+    var target = Diskplan_V1_PlanTargetProjection()
+    target.targetID.value = targetID
+    target.actionID.value = actionID
+    target.depth = 0
+    target.order = order
+    target.path = path
+    target.kind = targetKind(evidence.namespaceBinding.targetIdentity.type)
+    return target
   }
 
   private static func actionProjection(
@@ -282,6 +499,104 @@ enum RuntimePlanDomainProjector {
     case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges:
       throw RuntimePlanDomainProjectionError.unsupportedActionKind
     }
+    return projection
+  }
+
+  private static func reportOnlySafetyEvidence(
+    _ evidence: FrozenEvidenceSnapshot
+  ) throws -> Diskplan_V1_PlanSafetyEvidenceProjection {
+    let binding = evidence.namespaceBinding
+    guard binding.parentChain.count <= Int(PlanProjectionWireEncoder.maximumNamespaceAncestorCount)
+    else { throw RuntimePlanDomainProjectionError.ancestorLimitExceeded }
+
+    var namespace = Diskplan_V1_NamespaceAccessEvidenceProjection()
+    namespace.targetAccessPolicy = observation(
+      evidence.accessPolicy,
+      code: "target-access-policy",
+      summary: "Target access policy captured by the Swift authority.",
+      valueBytes: { Data($0.utf8) }
+    )
+    namespace.targetAclDigest = observation(
+      evidence.aclDigest,
+      code: "target-acl-digest",
+      summary: "Target ACL digest captured by the Swift authority.",
+      valueBytes: { $0.bytes }
+    )
+    namespace.rootAccessPolicy = observation(
+      binding.rootSeal.accessPolicy,
+      code: "root-access-policy",
+      summary: "Root access policy captured by the Swift authority.",
+      valueBytes: { Data($0.utf8) }
+    )
+    namespace.rootAclDigest = observation(
+      binding.rootSeal.aclDigest,
+      code: "root-acl-digest",
+      summary: "Root ACL digest captured by the Swift authority.",
+      valueBytes: { $0.bytes }
+    )
+    let ancestorChainBinding = runtimeDigest(
+      domain: "diskplan/ancestor-access-chain/v1\0",
+      fields: binding.parentChain.map(parentNamespaceBinding)
+    )
+    namespace.ancestorAccessPolicyChain = knownObservation(
+      code: "ancestor-access-policy-chain",
+      summary: "Ordered ancestor namespace chain retained by the Swift authority.",
+      valueBytes: ancestorChainBinding
+    )
+    namespace.ancestorCount = UInt32(binding.parentChain.count)
+    namespace.maximumAncestorCount = PlanProjectionWireEncoder.maximumNamespaceAncestorCount
+    namespace.namespaceBindingSha256.value = protectedNamespaceBinding(binding)
+    namespace.rootAccessPolicySeal = namespace.rootAccessPolicy
+    namespace.ancestorAccessPolicySeal = namespace.ancestorAccessPolicyChain
+
+    var content = Diskplan_V1_ContentBaselineEvidenceProjection()
+    switch evidence.contentProtection {
+    case .known(.requiredDigest(let digest)):
+      content.observation = knownObservation(
+        code: "content-required-digest",
+        summary: "Content stability is protected by an exact digest.",
+        valueBytes: digest.bytes
+      )
+      content.knownKind = .requiredDigest
+    case .known(.explicitlyNotApplicable):
+      content.observation = knownObservation(
+        code: "content-explicitly-not-applicable",
+        summary: "The action contract explicitly excludes content stability.",
+        valueBytes: Data("metadata-only-object".utf8)
+      )
+      content.knownKind = .explicitlyNotApplicable
+      content.notApplicableReason = .metadataOnlyObject
+    case .absent:
+      content.observation = absentObservation(
+        code: "content-baseline-absent",
+        summary: "No content baseline applies."
+      )
+    case .unknown(let reason):
+      content.observation = unknownObservation(
+        reason,
+        code: "content-baseline-unknown",
+        summary: "Content baseline is unavailable."
+      )
+    case .unreadable(let failure):
+      content.observation = failedObservation(
+        failure,
+        status: .unreadable,
+        code: "content-baseline-unreadable",
+        summary: "Content baseline could not be read."
+      )
+    case .failed(let failure):
+      content.observation = failedObservation(
+        failure,
+        status: .failed,
+        code: "content-baseline-failed",
+        summary: "Content baseline collection failed."
+      )
+    }
+
+    var projection = Diskplan_V1_PlanSafetyEvidenceProjection()
+    projection.policyEvidenceSha256.value = evidence.evidenceID.bytes
+    projection.namespaceAccess = namespace
+    projection.contentBaseline = content
     return projection
   }
 
