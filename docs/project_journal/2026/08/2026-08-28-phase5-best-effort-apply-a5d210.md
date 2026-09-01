@@ -1,7 +1,7 @@
 ---
 id: 20260828-a5d210
 title: Phase 5 Best-Effort Apply
-status: active
+status: completed
 created: 2026-08-28
 updated: 2026-09-01
 branch: wip/phase5-best-effort-apply
@@ -49,7 +49,9 @@ superseded_by:
 - Release graph, runtime-unit, JIT topology, and post-verification joins use raw UTF-8 keys, so
   NFC/NFD-equivalent allocation-group and file-object identifiers remain distinct.
 - Typed unknown-recoverability waivers revalidate a stable semantic proof rather than a fresh
-  capture/evidence ID; missing, unreadable, and failed observations remain fail-closed.
+  capture/evidence ID. Operational unknowns such as incomplete coverage remain rejected even when
+  an unrelated recoverability review fact exists; missing, unreadable, and failed observations
+  remain fail-closed.
 - Dirty Git worktrees and their dependent remove chains remain evidence-rich but report-only in
   v1. Policy blocks them without a waiver path, apply preparation cannot mint authority for them,
   and both production routing and the quarantine adapter reject them without a Git executable in
@@ -115,16 +117,15 @@ superseded_by:
 - [x] Run the final India targeted/full validation plus local journal, formatting, parse, and diff
   gates.
 - [x] Complete frozen-range review and the signed landing commits.
-- [ ] Revalidate the signed integration merge with targeted Phase 5 and serial full Swift gates on
+- [x] Revalidate the signed integration merge with targeted Phase 5 and serial full Swift gates on
   India-mac-mini-m4-hoteng.
 
 ## Handoff
 
-- Phase: Phase 5 best-effort apply and the accepted dirty-Git report-only boundary are complete;
-  the merge with the current Protocol 1.5, batch, and TUI integration baseline is awaiting fresh
-  dynamic validation.
-- Next step: validate the signed integration merge on India, then integrate the branch and remove
-  the remote validation worktree, `.build` directory, and retained Phase 5 logs.
+- Phase: Phase 5 best-effort apply and the accepted dirty-Git report-only boundary are complete on
+  the current Protocol 1.5, batch, and TUI integration baseline.
+- Next step: none within this completed workstream. Repository delivery owns landing the reviewed
+  branch and reclaiming the remote validation worktree, `.build` directory, and retained logs.
 - Dependency: the final live production route must consume the separately owned concrete
   revalidation collector and typed survivor/terminal-namespace invariant proofs. This slice does
   not fabricate or weaken those inputs and does not depend on their two pending hookup decisions.
@@ -146,9 +147,9 @@ superseded_by:
   full concurrent runs and passed when run alone; no production change was made for this
   parallel-only flake.
 - Pre-follow-up head: production `swift build -c release --product diskplan-engine`: passed.
-- Current dirty head: `swift-format lint --strict`, `swiftc -frontend -parse`, and
-  `git diff --check` passed locally as static-only checks; Swift build/test gates are reserved for
-  India-mac-mini-m4-hoteng and remain pending the shared slot.
+- Final code head `d078f5e1b117a01f61a290a7cf722e03244c3429`: `swift-format lint --strict`,
+  `swiftc -frontend -parse`, `git diff --check`, and the project-journal validator passed locally
+  as static-only checks. Dynamic validation ran only on India-mac-mini-m4-hoteng.
 - Fresh review of checkpoint `714d13e` found one compile-time coverage-token mismatch and one
   missing quarantine-payload identity rebind before restore. The follow-up wraps administrative
   coverage in its typed token and binds the restore leaf to the still-held original descriptor.
@@ -321,3 +322,17 @@ superseded_by:
   `unavailableViaPublicAPI`, whose exact stable semantic facts are structurally required, can
   require waiver; `notRequested`, `budgetExhausted`, `timedOut`, and `incompleteCoverage` remain
   rejected even when another recoverability fact is present.
+- India final validation of exact code head `d078f5e1b117a01f61a290a7cf722e03244c3429`
+  passed the isolated complete-corpus authority regression (1/1, 0.003-second test runtime); its
+  bounded supervisor completed in 23.961 seconds, emitted 15,174 bytes with SHA-256
+  `dee4f4ce66b530d377bedf10dadc363ec4a87a663b43c4294ec6701872a03cc4`, and verified a
+  quiescent process group. Focused policy validation passed all 66 tests in 4.696 seconds; its
+  supervisor completed in 8.921 seconds, emitted 17,870 bytes with SHA-256
+  `7e31950f70e00e2f46ead1bc10fa16277891303278aeaed702b07866cb3d08dd`, and verified a
+  quiescent process group. Serial full validation passed all 594 tests in 15.313 seconds; its
+  supervisor completed in 19.613 seconds, emitted 112,407 bytes with SHA-256
+  `0acedfd407c1b06c631df017ebac2a0f07e308fb1876a7131173138528281155`, and verified the
+  process group quiescent. Execution validation from `22085b87c79c161521aa546509f17124844799ef`
+  remains applicable because subsequent commits did not change execution production or tests; it
+  passed all 152 tests in 0.461 seconds with a 22.613-second supervisor, SHA-256 prefix `8bc66b75`,
+  and a quiescent process group.
