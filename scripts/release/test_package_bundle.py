@@ -1640,7 +1640,13 @@ class PackagingAssetsTests(unittest.TestCase):
                     "diskplan-0.1.0-macos-arm64/manifest.json"
                 )
                 self.assertIsNotNone(manifest_member)
-                manifest = json.load(manifest_member)
+                manifest_bytes = manifest_member.read()
+                manifest = json.loads(manifest_bytes)
+                common_member = bundled.extractfile(
+                    "diskplan-0.1.0-macos-arm64/release-common.sh"
+                )
+                self.assertIsNotNone(common_member)
+                common_bytes = common_member.read()
             artifact_paths = [item["path"] for item in manifest["artifacts"]]
             artifact_compatibility = {
                 item["path"]: item["compatibility_version"]
@@ -1712,6 +1718,52 @@ class PackagingAssetsTests(unittest.TestCase):
             )
             self.assertFalse(any("history.json" in name for name in names))
             self.assertFalse(any("execution-record.json" in name for name in names))
+            if sys.platform == "darwin":
+                emitted_common = root / "emitted-release-common.sh"
+                emitted_manifest = root / "emitted-manifest.json"
+                emitted_common.write_bytes(common_bytes)
+                emitted_manifest.write_bytes(manifest_bytes)
+                command = 'source "$1"; diskplan_verify_manifest_schema "$2"'
+                completed = subprocess.run(
+                    [
+                        "/bin/bash",
+                        "-c",
+                        command,
+                        "manifest-schema-test",
+                        str(emitted_common),
+                        str(emitted_manifest),
+                    ],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    completed.stderr.decode("utf-8", errors="replace"),
+                )
+                manifest["unknown_fixture_field"] = True
+                emitted_manifest.write_bytes(packager.canonical_json(manifest))
+                rejected = subprocess.run(
+                    [
+                        "/bin/bash",
+                        "-c",
+                        command,
+                        "manifest-schema-test",
+                        str(emitted_common),
+                        str(emitted_manifest),
+                    ],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(
+                    b"manifest contains missing or unknown fields",
+                    rejected.stderr,
+                )
 
     def test_main_packages_with_real_low_process_descriptor_limit(self) -> None:
         repository_root = SCRIPT_DIR.parent.parent

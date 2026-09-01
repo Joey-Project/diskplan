@@ -185,6 +185,18 @@ diskplan_expected_artifact_contract() {
         $'uninstall.sh\t0755\tlifecycle-script\tlocal-install-v1'
 }
 
+diskplan_verify_manifest_schema() {
+    local manifest="$1"
+    local manifest_key_count expected_manifest_key_count=13
+    manifest_key_count="$(/usr/bin/plutil -convert xml1 -o - "${manifest}" | /usr/bin/grep -c '<key>')" ||
+        diskplan_die "manifest schema cannot be enumerated"
+    while IFS= read -r _; do
+        expected_manifest_key_count=$((expected_manifest_key_count + 6))
+    done < <(diskplan_expected_artifact_contract)
+    [[ "${manifest_key_count}" == "${expected_manifest_key_count}" ]] ||
+        diskplan_die "manifest contains missing or unknown fields"
+}
+
 diskplan_verify_bundle() {
     local bundle="$1"
     [[ -d "${bundle}" && ! -L "${bundle}" ]] || diskplan_die "bundle must be a non-symlink directory"
@@ -210,9 +222,8 @@ diskplan_verify_bundle() {
     version="$(<"${bundle}/VERSION")"
     diskplan_validate_version "${version}" || diskplan_die "bundle VERSION is invalid"
 
-    local manifest_key_count capability_key_count
-    manifest_key_count="$(/usr/bin/plutil -convert xml1 -o - "${bundle}/manifest.json" | /usr/bin/grep -c '<key>')" || diskplan_die "manifest schema cannot be enumerated"
-    [[ "${manifest_key_count}" == "235" ]] || diskplan_die "manifest contains missing or unknown fields"
+    local capability_key_count
+    diskplan_verify_manifest_schema "${bundle}/manifest.json"
     capability_key_count="$(/usr/bin/plutil -convert xml1 -o - "${bundle}/runtime-capabilities.json" | /usr/bin/grep -c '<key>')" || diskplan_die "runtime capability schema cannot be enumerated"
     [[ "${capability_key_count}" == "18" ]] || diskplan_die "runtime capability manifest contains missing or unknown fields"
 

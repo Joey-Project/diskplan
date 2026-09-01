@@ -53,6 +53,9 @@ superseded_by:
 - [x] Close the targeted review follow-ups by preserving typed missing/unreadable
   categories and source/staged subjects across post-bind namespace races, and by
   exercising failure delivery through the real authority/responder transaction.
+- [x] Keep release manifest schema validation synchronized with the canonical
+  Protocol 1.6 artifact contract and exercise the emitted manifest with the
+  validator shipped in the real archive.
 - [ ] Complete frozen-head review, signed commits, PR readiness, and integration
   branch handoff.
 
@@ -91,13 +94,15 @@ superseded_by:
   mapping as the initial bind. `ENOENT`, `EACCES`/`EPERM`, replacement/type drift,
   content drift, and access-policy drift remain distinct, with the correct source
   or staged subject after the descriptor has already been opened.
+- Release manifest validation derives its expected artifact-field count from the
+  canonical bundle contract instead of a stale artifact-count constant. The
+  validator still rejects any missing or unknown manifest field.
 
 ## Handoff
 
-- Phase: the first frozen review's five findings are fixed and focused India
-  validation is complete.
-- Next step: create the signed append commit and run the targeted frozen-head
-  closure review before the integration PR handoff.
+- Phase: Protocol 1.6 implementation and the release-manifest CI repair are
+  validated on the macOS 26 release host.
+- Next step: complete the signed PR delivery and integration handoff.
 - Blocker: none.
 
 ## Evidence
@@ -160,3 +165,17 @@ superseded_by:
   `d4403471152d070c23b9010a665427f2c01d43b57ede37583483c16d723b89a9`.
   Both closure supervisors verified their process groups and ended quiescent; the
   exact India worktree, `.build`, temporary ref/bundle, and raw logs were removed.
+- Release CI exposed a stale manifest schema key count: Protocol 1.6 expanded the
+  bundle contract from 37 to 45 artifacts, while `release-common.sh` still required
+  the former total of 235 keys. The validator now derives the expected total as 13
+  top-level keys plus six keys for each canonical artifact-contract row.
+- On India, the real-archive manifest regression passed 1/1 with supervisor output
+  SHA-256
+  `3921436c6f6cc3b997a2e7af910baa69e3a7827b581fea9d6bb36c2160034c6d`.
+  The exact package-resolved guard plus release build passed with output SHA-256
+  `bc920cf4c232de926db6d8fc80c9ec91ebcc709733efc4dd0d321c12b4e47811`,
+  and `test-release.sh` passed the package, install, upgrade, rollback, and
+  mixed-version lifecycle with output SHA-256
+  `047fcaa7787788e3d195427bd6e44f478667f3f419b82ab27d998961582b9633`.
+  All three supervisors verified their process groups and ended quiescent; the
+  India worktree, build directories, release artifacts, and raw logs were removed.
