@@ -1,7 +1,8 @@
-@_spi(DiskplanEngine) @testable import DiskplanExecution
 import DiskplanPolicy
 import Foundation
 import Testing
+
+@_spi(DiskplanEngine) @testable import DiskplanExecution
 
 @Test
 func dryRunHasNoApplyCapabilityAndDoesNotInvokeMutation() async throws {
@@ -1263,6 +1264,55 @@ func partialSelectionCannotForgeACompleteReleaseAction() throws {
 }
 
 @Test
+func releaseFixtureRejectsMissingAndMismatchedTypedCloneIdentity() throws {
+  let facts = globalFacts()
+  let aEvidence = snapshot(
+    candidateID: "a",
+    path: "a",
+    object: 1,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "clone-group")]
+  )
+  let bEvidence = snapshot(candidateID: "b", path: "b", object: 2)
+  #expect(
+    throws: PolicyModelError.invalidStorageGraph("invalid-clone-identity:clone-group")
+  ) {
+    try completeStorageGraph(
+      aEvidence: aEvidence,
+      bEvidence: bEvidence,
+      cloneIdentity: .absent)
+  }
+
+  let fixture = try ReleaseFixture()
+  let substitutedGraph = try completeStorageGraph(
+    aEvidence: fixture.ownerActions[0].evidence,
+    bEvidence: fixture.ownerActions[1].evidence,
+    cloneIdentity: .known(ReleaseCloneIdentity(device: 1, cloneID: 45)))
+  let bindings = [
+    CandidateActionBinding(candidateID: "a", action: fixture.ownerActions[0]),
+    CandidateActionBinding(candidateID: "b", action: fixture.ownerActions[1]),
+  ]
+  let substitutedBundle = try PlanReleaseSet.buildAll(
+    from: substitutedGraph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings)
+  let substitutedRelease = try #require(substitutedBundle.releaseSets.first)
+  let substitutedAction = try makeAction(
+    evidence: fixture.ownerActions[0].evidence,
+    facts: facts,
+    prerequisites: fixture.ownerActions,
+    request: .completeReleaseSetRemove(binding: substitutedRelease.actionBinding))
+
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try ImmutablePlan(
+      policyVersion: "policy-1",
+      schemaVersion: "schema-1",
+      globalFacts: facts,
+      evidenceSnapshots: fixture.ownerActions.map(\.evidence),
+      actions: fixture.ownerActions + [substitutedAction],
+      releaseGraphBundle: fixture.releaseGraphBundle)
+  }
+}
+
+@Test
 func completeReleaseUnitRevalidatesEveryOwnerAndTopology() async throws {
   let release = try ReleaseFixture()
   let currentActions =
@@ -1503,6 +1553,7 @@ struct ReleaseFixture {
   let ownerActions: [ActionDefinition]
   let releaseAction: ActionDefinition
   let releaseSet: PlanReleaseSet
+  let releaseGraphBundle: PlanReleaseGraphBundle
   let plan: ImmutablePlan
   let overlay: DecisionOverlay
 
@@ -1531,7 +1582,7 @@ struct ReleaseFixture {
       CandidateActionBinding(candidateID: "b", action: b),
     ]
     let evaluation = try graph.evaluate(selectedCandidateActions: bindings)
-    let releaseGraphBundle = try PlanReleaseSet.buildAll(
+    releaseGraphBundle = try PlanReleaseSet.buildAll(
       from: evaluation, candidateActions: bindings
     )
     releaseSet = try #require(releaseGraphBundle.releaseSets.first)
@@ -1914,7 +1965,9 @@ func makeAction(
 
 func completeStorageGraph(
   aEvidence: FrozenEvidenceSnapshot,
-  bEvidence: FrozenEvidenceSnapshot
+  bEvidence: FrozenEvidenceSnapshot,
+  cloneIdentity: Observation<ReleaseCloneIdentity> = .known(
+    ReleaseCloneIdentity(device: 1, cloneID: 44))
 ) throws -> StorageReleaseGraph {
   let facts = globalFacts()
   let a = try StorageCandidate(id: "a", evidence: aEvidence, immediatePrivateBytes: .known(1))
@@ -1936,6 +1989,7 @@ func completeStorageGraph(
     provenance: provenance,
     id: "clone-group",
     ownerFileObjectIDs: ["file-a", "file-b"],
+    cloneIdentity: cloneIdentity,
     cloneRefCount: .known(2),
     sharedBytes: .known(100),
     snapshotBlocker: .known(false)

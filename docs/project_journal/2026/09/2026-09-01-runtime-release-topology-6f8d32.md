@@ -67,6 +67,9 @@ superseded_by:
   become inconsistent evidence. Identity and access-policy mismatches are also retained as
   explicit issues, so a concurrent replacement cannot hide a simultaneous collector or
   accessibility outcome.
+- Foundation execution fixtures now model multi-file clone groups with the same exact typed clone
+  identity required by production graphs. Missing identity still fails graph construction, and a
+  different typed identity cannot be combined with the original plan release bundle.
 
 ## Task List
 
@@ -98,6 +101,8 @@ superseded_by:
   or invoking the File Provider identity API.
 - [x] Preserve failed, unreadable, unknown, and absent owner observations before classifying
   conflicting known consensus values as inconsistent evidence.
+- [x] Migrate complete-release execution fixtures to exact typed clone identity without weakening
+  graph or plan binding validation.
 - [x] Run targeted build, tests, and stress validation on the macOS 26 Apple Silicon release host.
 
 ## Evidence
@@ -186,3 +191,13 @@ superseded_by:
   passed with SHA-256 `c83f8bcdf414ec601dd42da86342596666119297f394f243309c4a968c734ccf`.
   Strict `swift-format` lint produced no diagnostics. Every command ran under the bounded
   supervisor, which verified the target process group and reported a quiescent exit.
+- After the PR Foundation gate exposed legacy execution fixtures without a typed clone identity,
+  `ReleaseFixture` was migrated to `ReleaseCloneIdentity(device: 1, cloneID: 44)`, matching both
+  owner objects' device. The complete `DiskplanExecutionTests` target passed all 167 tests on
+  `India-mac-mini-m4-hoteng` with retained output SHA-256
+  `7ce327f94d84e4ac64090cb1aadedd322ab866feb6d6c383347151c050b9d595`.
+- The complete Swift Foundation suite then passed all 714 tests under
+  `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, with retained output SHA-256
+  `b00e9504336adb96a1ef042ca033acab55d2f51a2dad77f2752dc5358846b4eb`. Both runs used
+  the bounded process-group supervisor, which verified the target group and reported quiescent
+  successful exits. Strict `swift-format` lint accepted the changed execution test fixture.
