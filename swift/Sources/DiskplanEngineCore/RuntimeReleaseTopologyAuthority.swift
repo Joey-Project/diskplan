@@ -683,10 +683,17 @@ private func validateReleaseMembership(
       Set(runtime.ownerFileObjects)
         == Set(expectedFileIDs.compactMap { identityByFileID[$0] })
     else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
-    if let runtimeRefCount = runtime.cloneRefCount {
-      guard case .known(let expectedRefCount) = releaseSet.topologyExpectation.cloneRefCount,
-        expectedRefCount == runtimeRefCount
-      else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+    guard case .known(let expectedRefCount) = releaseSet.topologyExpectation.cloneRefCount,
+      Int(expectedRefCount) == expectedFileIDs.count
+    else { throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch }
+    if expectedRefCount == 1 {
+      guard runtime.cloneIdentity == nil, runtime.cloneRefCount == nil else {
+        throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch
+      }
+    } else {
+      guard runtime.cloneIdentity != nil, runtime.cloneRefCount == expectedRefCount else {
+        throw RuntimeReleaseTopologyPlanError.releaseMembershipMismatch
+      }
     }
   }
 }
@@ -921,6 +928,32 @@ struct RuntimeReleaseTopologyKernel: Sendable {
   let item: @Sendable (Int32, Data, NoMaterializationPolicy, Bool) -> RuntimeReleaseKernelItem
   let snapshotBlocker:
     @Sendable (Int32, NoMaterializationPolicy) -> RuntimeReleaseTopologyObservation<Bool>
+  let pathAccessPolicy:
+    @Sendable (NoMaterializationPolicy) -> RuntimeReleaseTopologyObservation<Bool>
+
+  init(
+    descriptorIdentity:
+      @escaping @Sendable (
+        Int32, NoMaterializationPolicy
+      ) -> RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>,
+    item:
+      @escaping @Sendable (
+        Int32, Data, NoMaterializationPolicy, Bool
+      ) -> RuntimeReleaseKernelItem,
+    snapshotBlocker:
+      @escaping @Sendable (
+        Int32, NoMaterializationPolicy
+      ) -> RuntimeReleaseTopologyObservation<Bool>,
+    pathAccessPolicy:
+      @escaping @Sendable (
+        NoMaterializationPolicy
+      ) -> RuntimeReleaseTopologyObservation<Bool> = materializationPolicyObservation
+  ) {
+    self.descriptorIdentity = descriptorIdentity
+    self.item = item
+    self.snapshotBlocker = snapshotBlocker
+    self.pathAccessPolicy = pathAccessPolicy
+  }
 
   static let live = RuntimeReleaseTopologyKernel(
     descriptorIdentity: { descriptor, policy in
@@ -1009,11 +1042,8 @@ struct RuntimeReleaseTopologyKernel: Sendable {
       )
     },
     snapshotBlocker: { descriptor, policy in
-      guard policy.revalidateLive().value != nil else {
-        return .failed(
-          RuntimeReleaseTopologyFailure(
-            kind: .probeFailed, collector: "snapshot-materialization-policy"))
-      }
+      let accessPolicy = materializationPolicyObservation(policy)
+      guard accessPolicy == .known(true) else { return accessPolicy }
       let isolated = openat(
         descriptor, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
       guard isolated >= 0 else {
@@ -1339,6 +1369,8 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       ])
       guard beforeOpen == .known(true) else { return beforeOpen }
       var nullTerminatedComponent = Array(component) + [0]
+      let accessPolicy = kernel.pathAccessPolicy(policy)
+      guard accessPolicy == .known(true) else { return accessPolicy }
       let opened = nullTerminatedComponent.withUnsafeMutableBytes { bytes in
         openat(
           currentDescriptor,
@@ -1796,6 +1828,12 @@ private func capabilityObservation<Value: Equatable & Sendable>(
       RuntimeReleaseTopologyFailure(
         kind: .inconsistentEvidence, collector: "known-capability-without-value"))
   }
+}
+
+private func materializationPolicyObservation(
+  _ policy: NoMaterializationPolicy
+) -> RuntimeReleaseTopologyObservation<Bool> {
+  capabilityObservation(policy.revalidateLive()).map { _ in true }
 }
 
 private func providerLocalObservation(
