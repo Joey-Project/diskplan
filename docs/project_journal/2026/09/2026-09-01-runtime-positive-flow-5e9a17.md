@@ -195,6 +195,14 @@ superseded_by:
   had created a separate process group, so it was subsequently identified by exact workspace
   cwd/argv/open-file evidence, terminated with `TERM`, and the isolated India workspace, `.build`,
   and retained logs were removed.
+- The publication-wait fixtures now observe an authority-owned waiter count set under the same
+  condition lock immediately before a confirm claim sleeps, rather than inferring entry from task
+  scheduling. The three exact publication-race regressions passed 3/3 on India in 24.531 supervisor
+  seconds (0.016 test seconds), SHA-256
+  `245fae136c7d56435afddf8c4f5e11ae5a62b1c5685bfb0360f5955db2d652d0`. The exact full Foundation
+  command then passed all 637 tests in 10.268 supervisor seconds (6.021 test seconds), SHA-256
+  `d4de3f4555b570b68293794fac397f29d36f33ac39cd15e23d3f3c5377236746`. Both supervisors verified
+  their process groups and ended quiescent; the isolated workspace, `.build`, and logs were removed.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races. Bridge

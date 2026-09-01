@@ -1619,15 +1619,16 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
   let review = try #require(reviews.last)
 
   let confirmation = runtimePositiveConfirmation(review, requestID: 4)
-  let claimStarted = AuthorityTestFlag()
   let claimFinished = AuthorityTestFlag()
   let claim = Task.detached {
-    claimStarted.set()
     let rejection = fixture.authority.claim(.confirmApply(confirmation))
     claimFinished.set()
     return rejection
   }
-  try #require(await claimStarted.waitUntilSet())
+  try #require(
+    await runtimeEventually {
+      fixture.authority.hasConfirmClaimWaitingForReviewPublicationForTesting()
+    })
   #expect(!claimFinished.value)
 
   commitGate.open()
@@ -1679,15 +1680,16 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
   #expect(fixture.controller.preparedApplyReviewIDForTesting() == reviewBID)
 
   let confirmation = runtimePositiveConfirmation(reviewA, requestID: 5)
-  let claimStarted = AuthorityTestFlag()
   let claimFinished = AuthorityTestFlag()
   let claim = Task.detached {
-    claimStarted.set()
     let rejection = fixture.authority.claim(.confirmApply(confirmation))
     claimFinished.set()
     return rejection
   }
-  try #require(await claimStarted.waitUntilSet())
+  try #require(
+    await runtimeEventually {
+      fixture.authority.hasConfirmClaimWaitingForReviewPublicationForTesting()
+    })
   #expect(!claimFinished.value)
 
   commitHook.open()
@@ -1741,15 +1743,16 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
   confirmation.requestID = 4
   confirmation.applyReviewID.value = Data("positive-review".utf8)
   confirmation.reviewBindingSha256.value = Data(repeating: 0x83, count: 32)
-  let claimStarted = AuthorityTestFlag()
   let claimFinished = AuthorityTestFlag()
   let claim = Task.detached {
-    claimStarted.set()
     let rejection = fixture.authority.claim(.confirmApply(confirmation))
     claimFinished.set()
     return rejection
   }
-  try #require(await claimStarted.waitUntilSet())
+  try #require(
+    await runtimeEventually {
+      fixture.authority.hasConfirmClaimWaitingForReviewPublicationForTesting()
+    })
   #expect(!claimFinished.value)
 
   writer.release()

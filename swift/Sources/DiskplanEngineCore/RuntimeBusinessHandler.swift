@@ -590,6 +590,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private var activeRequestID: UInt64?
   private var activeEmissionToken: RuntimeAuthorityEmissionToken?
   private var reviewPublicationInFlight = false
+  private var waitingConfirmClaimCount = 0
 
   init(reviewCommitHookForTesting: (@Sendable () async throws -> Void)? = nil) {
     self.reviewCommitHookForTesting = reviewCommitHookForTesting
@@ -617,7 +618,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         return nil
       }
       if case .confirmApply = request {
-        while reviewPublicationInFlight { lock.wait() }
+        waitForReviewPublicationIfNeededUnderLock()
       }
       if activeRequestID != nil {
         return (.invalidState, "another runtime authority request is still active")
@@ -1044,6 +1045,17 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     withLock {
       activeRequestID != nil || activeCancellationRequestID != nil || executionClaim != nil
     }
+  }
+
+  func hasConfirmClaimWaitingForReviewPublicationForTesting() -> Bool {
+    withLock { waitingConfirmClaimCount > 0 }
+  }
+
+  private func waitForReviewPublicationIfNeededUnderLock() {
+    guard reviewPublicationInFlight else { return }
+    waitingConfirmClaimCount += 1
+    defer { waitingConfirmClaimCount -= 1 }
+    while reviewPublicationInFlight { lock.wait() }
   }
 
   private func beginEmission(
