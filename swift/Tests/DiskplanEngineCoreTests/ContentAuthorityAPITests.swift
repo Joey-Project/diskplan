@@ -591,6 +591,22 @@ private let forbiddenSurfaceExpectations = [
     expectedSymbol: "RuntimeExecutionBackend",
     expectedFailure: .notVisible
   ),
+  CompileFailExpectation(
+    fixtureName: "ForgeRuntimeFreshScanReceipt.swift",
+    packageContext: .currentPackage,
+    markerFile: "DiskplanCompileFail-ForgeRuntimeFreshScanReceipt.swift",
+    markerLine: 1007,
+    expectedSymbol: "RuntimeFreshScanReceipt",
+    expectedFailure: .inaccessible
+  ),
+  CompileFailExpectation(
+    fixtureName: "AccessRuntimeFreshScanReceipt.swift",
+    packageContext: .external("external_runtime_scan_client"),
+    markerFile: "DiskplanCompileFail-AccessRuntimeFreshScanReceipt.swift",
+    markerLine: 1008,
+    expectedSymbol: "RuntimeFreshScanReceipt",
+    expectedFailure: .notVisible
+  ),
 ]
 
 private func compileFailRejection(

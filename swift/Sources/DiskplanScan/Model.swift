@@ -531,6 +531,16 @@ public struct GlobalScanFacts: Equatable, Sendable {
   public let swap: GlobalFact<[String: UInt64]>
   public let apfsSnapshots: GlobalFact<[String]>
 
+  package init(
+    vm: GlobalFact<[String: UInt64]>,
+    swap: GlobalFact<[String: UInt64]>,
+    apfsSnapshots: GlobalFact<[String]>
+  ) {
+    self.vm = vm
+    self.swap = swap
+    self.apfsSnapshots = apfsSnapshots
+  }
+
   public static let publicEvidenceUnavailable = Self(
     vm: .unavailable(reason: "not requested by this scanner slice"),
     swap: .unavailable(reason: "not requested by this scanner slice"),
