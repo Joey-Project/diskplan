@@ -50,6 +50,9 @@ superseded_by:
   mutation boundary before handler dispatch, accept a bound failure terminal as
   the authoritative execution result, cover below/current/future UI minors, bind
   archive reads to one verified descriptor, and exercise a real low-RLIMIT package.
+- [x] Close the targeted review follow-ups by preserving typed missing/unreadable
+  categories and source/staged subjects across post-bind namespace races, and by
+  exercising failure delivery through the real authority/responder transaction.
 - [ ] Complete frozen-head review, signed commits, PR readiness, and integration
   branch handoff.
 
@@ -84,6 +87,10 @@ superseded_by:
 - Archive bytes are read from the same no-follow rebound descriptor on which
   staged object identity, exact access mode, SHA-256 content, namespace stability,
   and post-read identity/mode are revalidated.
+- Retained root, ancestor, and leaf revalidation uses the same classified error
+  mapping as the initial bind. `ENOENT`, `EACCES`/`EPERM`, replacement/type drift,
+  content drift, and access-policy drift remain distinct, with the correct source
+  or staged subject after the descriptor has already been opened.
 
 ## Handoff
 
@@ -141,3 +148,15 @@ superseded_by:
   `e0ca0d6157400506048f623452ba180e04595f0b829543b3829cbd3db5d030f5`.
   Every final India supervisor verified its process group and ended quiescent;
   the remote task worktree, `.build`, and raw logs were then removed.
+- The targeted P2 closure package suite passed 69 tests in 6.854 seconds. It adds
+  staged-leaf post-read unlink and `EACCES` races plus retained-root missing and
+  unreadable races; supervisor output SHA-256 was
+  `ba86575007c7b65f076bab662ed2c297084f956fe630461fed51416479b8b277`.
+- The final focused Swift test passed 1/1 after traversing the real
+  `RuntimeBusinessAuthorityState` and `RuntimeBusinessResponder` chain from plan
+  receipt through overlay, review, confirmation, and execution. It observed a
+  typed failure terminal, no runtime rejection, and a consumed confirmation claim.
+  Supervisor output SHA-256 was
+  `d4403471152d070c23b9010a665427f2c01d43b57ede37583483c16d723b89a9`.
+  Both closure supervisors verified their process groups and ended quiescent; the
+  exact India worktree, `.build`, temporary ref/bundle, and raw logs were removed.

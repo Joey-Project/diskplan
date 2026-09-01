@@ -91,26 +91,33 @@ class BoundDirectory:
         self.slots = slots
         self.fd = descriptors[-1]
 
-    def assert_stable(self) -> None:
+    def assert_stable(self, failure_subject: str = "source") -> None:
         for slot in self.slots:
-            held = FileState.from_stat(os.fstat(slot.child_fd))
             try:
+                held = FileState.from_stat(os.fstat(slot.child_fd))
                 named_metadata = os.stat(
                     slot.name,
                     dir_fd=slot.parent_fd,
                     follow_symlinks=False,
                 )
             except OSError as error:
-                raise ValueError(
-                    f"bound directory slot became unreadable: {self.display_path}"
-                ) from error
+                message = bound_source_open_failure(
+                    error,
+                    f"{failure_subject} root slot",
+                    str(self.display_path),
+                )
+                if message is None:
+                    raise
+                raise ValueError(message) from error
             named = FileState.from_stat(named_metadata)
             if (
                 not stat.S_ISDIR(named_metadata.st_mode)
                 or not slot.state.same_object(held)
                 or not slot.state.same_object(named)
             ):
-                raise ValueError(f"bound directory slot was replaced: {self.display_path}")
+                raise ValueError(
+                    f"bundle {failure_subject} root slot was replaced: {self.display_path}"
+                )
 
     def close(self) -> None:
         for descriptor in reversed(self.descriptors):
@@ -131,6 +138,8 @@ class BoundSource:
         file_fd: int,
         maximum: int,
         owns_root: bool,
+        failure_subject: str,
+        relative: str,
     ):
         self.display_path = display_path
         self.root = root
@@ -140,47 +149,70 @@ class BoundSource:
         self.file_fd = file_fd
         self.maximum = maximum
         self.owns_root = owns_root
+        self.failure_subject = failure_subject
+        self.relative = relative
 
     @property
     def parent_fd(self) -> int:
         return self.directory_fds[-1] if self.directory_fds else self.root.fd
 
     def assert_stable(self) -> None:
-        self.root.assert_stable()
+        self.root.assert_stable(self.failure_subject)
+        ancestor_components: list[str] = []
         for slot in self.directory_slots:
-            held = FileState.from_stat(os.fstat(slot.child_fd))
+            ancestor_components.append(slot.name)
+            ancestor = "/".join(ancestor_components)
             try:
+                held = FileState.from_stat(os.fstat(slot.child_fd))
                 named_metadata = os.stat(
                     slot.name,
                     dir_fd=slot.parent_fd,
                     follow_symlinks=False,
                 )
             except OSError as error:
-                raise ValueError(
-                    f"source ancestor became unreadable: {self.display_path}"
-                ) from error
+                message = bound_source_open_failure(
+                    error,
+                    f"{self.failure_subject} ancestor",
+                    ancestor,
+                )
+                if message is None:
+                    raise
+                raise ValueError(message) from error
             named = FileState.from_stat(named_metadata)
             if (
                 not stat.S_ISDIR(named_metadata.st_mode)
                 or not slot.state.same_object(held)
                 or not slot.state.same_object(named)
             ):
-                raise ValueError(f"source ancestor was replaced: {self.display_path}")
+                raise ValueError(
+                    f"bundle {self.failure_subject} ancestor was replaced: {ancestor}"
+                )
         try:
             named_metadata = os.stat(
                 self.leaf_name,
                 dir_fd=self.parent_fd,
                 follow_symlinks=False,
             )
+            held = FileState.from_stat(os.fstat(self.file_fd))
         except OSError as error:
-            raise ValueError(f"source path became unreadable: {self.display_path}") from error
-        held = FileState.from_stat(os.fstat(self.file_fd))
+            message = bound_source_open_failure(
+                error,
+                f"{self.failure_subject} file",
+                self.relative,
+            )
+            if message is None:
+                raise
+            raise ValueError(message) from error
         named = FileState.from_stat(named_metadata)
-        if (
-            not stat.S_ISREG(named_metadata.st_mode)
-            or not held.same_object(named)
-        ):
-            raise ValueError(f"source path was replaced: {self.display_path}")
+        if not stat.S_ISREG(named_metadata.st_mode):
+            raise ValueError(
+                f"bundle {self.failure_subject} file was replaced or changed type: "
+                f"{self.relative}"
+            )
+        if not held.same_object(named):
+            raise ValueError(
+                f"bundle {self.failure_subject} file object identity changed: {self.relative}"
+            )
 
     def close(self) -> None:
         os.close(self.file_fd)
@@ -259,7 +291,7 @@ class StagedFile:
     owns_staged_root: bool
 
     def assert_source_stable(self) -> None:
-        self.source_root.assert_stable()
+        self.source_root.assert_stable("source")
         if stat.S_IMODE(os.fstat(self.source_root.fd).st_mode) != self.source_root_mode:
             raise ValueError(f"source root access policy changed: {self.source}")
         rebound = bind_relative_source(
@@ -293,7 +325,7 @@ class StagedFile:
         self._read_verified_staged_bytes(include_bytes=False)
 
     def _read_verified_staged_bytes(self, include_bytes: bool) -> bytes | None:
-        self.staged_root.assert_stable()
+        self.staged_root.assert_stable("staged")
         if stat.S_IMODE(os.fstat(self.staged_root.fd).st_mode) != self.staged_root_mode:
             raise ValueError(f"staged root access policy changed: {self.path}")
         rebound = bind_relative_source(
@@ -720,7 +752,7 @@ def bind_relative_source(
     failure_subject: str = "source",
 ) -> BoundSource:
     validate_relative_path(relative, "repository source path")
-    root.assert_stable()
+    root.assert_stable(failure_subject)
     components = relative.split("/")
     directory_fds: list[int] = []
     directory_slots: list[DirectorySlot] = []
@@ -789,6 +821,8 @@ def bind_relative_source(
             file_fd,
             maximum,
             False,
+            failure_subject,
+            relative,
         )
         bound.assert_stable()
         return bound
@@ -807,7 +841,18 @@ def bind_absolute_source(path: Path, maximum: int) -> BoundSource:
     file_fd = -1
     try:
         file_fd = open_regular_at(parent.fd, path.name, path, maximum)
-        bound = BoundSource(path, parent, [], [], path.name, file_fd, maximum, True)
+        bound = BoundSource(
+            path,
+            parent,
+            [],
+            [],
+            path.name,
+            file_fd,
+            maximum,
+            True,
+            "source",
+            path.name,
+        )
         bound.assert_stable()
         return bound
     except Exception:

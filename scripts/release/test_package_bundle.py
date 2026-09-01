@@ -914,7 +914,7 @@ class StagedFileTests(unittest.TestCase):
                 parent.rename(root / "original-parent")
                 parent.mkdir()
                 (parent / "source").write_bytes(b"replacement\n")
-                with self.assertRaisesRegex(ValueError, "bound directory slot was replaced"):
+                with self.assertRaisesRegex(ValueError, "source root slot was replaced"):
                     staged.assert_source_stable()
             finally:
                 staged.close()
@@ -1087,9 +1087,123 @@ class StagedFileTests(unittest.TestCase):
                     "bind_relative_source",
                     side_effect=bind_then_replace,
                 ):
-                    with self.assertRaisesRegex(ValueError, "source path was replaced"):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "staged file object identity changed",
+                    ):
                         staged.bytes()
                 self.assertEqual(bind_count, 1)
+            finally:
+                staged.close()
+
+    def test_staged_bytes_classifies_post_read_missing_and_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            real_read = packager.read_fd
+
+            def read_then_unlink(descriptor: int, maximum: int) -> bytes:
+                data = real_read(descriptor, maximum)
+                staged.path.unlink()
+                return data
+
+            try:
+                with mock.patch.object(
+                    packager,
+                    "read_fd",
+                    side_effect=read_then_unlink,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "bundle staged file is missing",
+                    ):
+                        staged.bytes()
+            finally:
+                staged.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            real_read = packager.read_fd
+            real_stat = packager.os.stat
+            post_read = False
+
+            def read_then_arm(descriptor: int, maximum: int) -> bytes:
+                nonlocal post_read
+                data = real_read(descriptor, maximum)
+                post_read = True
+                return data
+
+            def reject_post_read_leaf(path, *args, **kwargs):
+                if post_read and path == staged.staged_relative:
+                    raise OSError(errno.EACCES, "synthetic post-read denial")
+                return real_stat(path, *args, **kwargs)
+
+            try:
+                with (
+                    mock.patch.object(packager, "read_fd", side_effect=read_then_arm),
+                    mock.patch.object(
+                        packager.os,
+                        "stat",
+                        side_effect=reject_post_read_leaf,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "bundle staged file became unreadable",
+                    ):
+                        staged.bytes()
+            finally:
+                staged.close()
+
+    def test_retained_source_root_slot_classifies_missing_and_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source-root"
+            source_root.mkdir()
+            source = source_root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            try:
+                source_root.rename(root / "held-source-root")
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "bundle source root slot is missing",
+                ):
+                    staged.assert_source_stable()
+            finally:
+                staged.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source-root"
+            source_root.mkdir()
+            source = source_root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            denied_slot = staged.source_root.slots[-1]
+            real_stat = packager.os.stat
+
+            def reject_root_slot(path, *args, **kwargs):
+                if path == denied_slot.name and kwargs.get("dir_fd") == denied_slot.parent_fd:
+                    raise OSError(errno.EACCES, "synthetic root-slot denial")
+                return real_stat(path, *args, **kwargs)
+
+            try:
+                with mock.patch.object(
+                    packager.os,
+                    "stat",
+                    side_effect=reject_root_slot,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "bundle source root slot became unreadable",
+                    ):
+                        staged.assert_source_stable()
             finally:
                 staged.close()
 

@@ -479,62 +479,177 @@ import Testing
 }
 
 @Test func executionAuthorityAcceptsBoundFailureTerminalWithoutRuntimeRejection() throws {
-  let fixture = executionFailureFixture()
-  let events = try SealedRuntimeWire.sealExecutionStream(
-    fixture.events,
-    requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+  let output = RuntimeTestOutput()
+  let broker = SerialEventBroker { output.append($0) }
+  let authority = RuntimeBusinessAuthorityState()
+  let runtimeSessionID = Data("runtime-session".utf8)
+  let scanSessionID = Data("scan-session".utf8)
+  let evidenceSHA256 = Data(repeating: 0x42, count: 32)
+  let checkpointID = Data(
+    evidenceSHA256.map { String(format: "%02x", $0) }.joined().utf8
+  )
+  let metadata = PlanProjectionWireMetadata(
+    scanSessionID: scanSessionID,
+    scanCheckpointID: checkpointID,
+    scanCheckpointEvidenceSHA256: Data(repeating: 0x43, count: 32),
+    planSHA256: Data(repeating: 0x44, count: 32),
+    evidenceSHA256: evidenceSHA256,
+    cleanupCandidateCount: 0,
+    policyVersion: "fixture-policy-v1",
+    schemaVersion: "fixture-schema-v1"
+  )
+  let planWire = try PlanProjectionWireEncoder.encode(
+    records: [],
+    metadata: metadata,
     negotiatedProtocolMinor: protocol16Minor
   )
-  guard case .applyStarted(let started)? = events.first?.body,
-    case .executionStreamFailure(let failure)? = events.last?.body
-  else {
-    Issue.record("expected a started execution with a typed failure terminal")
-    return
-  }
-  var manifest = Diskplan_V1_PlanProjectionManifest()
-  manifest.projectionID = started.projectionID
-  manifest.planID = started.planID
-  manifest.planSha256 = started.planSha256
-  manifest.evidenceID = started.evidenceID
-  manifest.evidenceSha256 = started.evidenceSha256
-  manifest.scanSessionID = started.scanSessionID
-  manifest.scanCheckpointID = started.scanCheckpointID
-  manifest.scanCheckpointEvidenceSha256 = started.scanCheckpointEvidenceSha256
-  var overlay = Diskplan_V1_DecisionOverlayAcknowledged()
-  overlay.overlayID = started.overlayID
-  overlay.overlaySha256 = started.overlaySha256
-  overlay.revision = started.overlayRevision
-  overlay.selectedActionCount = started.selectedActionCount
-  var review = Diskplan_V1_ApplyReviewProjection()
-  review.applyReviewID = failure.applyReviewID
-  review.reviewBindingSha256 = failure.reviewBindingSha256
-  review.currentBindingSha256 = started.currentBindingSha256
-  review.revalidationSha256 = started.revalidationSha256
-  review.epoch = started.epoch
+  var build = Diskplan_V1_BuildPlanRequest()
+  build.requestID = 1
+  build.scanSessionID.value = scanSessionID
+  build.scanCheckpointID.value = checkpointID
+  build.scanEvidenceSha256.value = evidenceSHA256
+  #expect(authority.claim(.buildPlan(build))?.code == nil)
+  try RuntimeBusinessResponder(
+    broker: broker,
+    request: .buildPlan(build),
+    runtimeSessionID: runtimeSessionID,
+    authority: authority
+  ).send(
+    try .plan(
+      planBuildID: Data("plan-build".utf8),
+      records: [],
+      metadata: metadata,
+      negotiatedProtocolMinor: protocol16Minor
+    ))
 
-  try RuntimeExecutionAuthorityValidator.validateLiveBindings(
-    events: events,
-    planManifest: manifest,
-    overlay: overlay,
-    review: review
+  var edit = Diskplan_V1_DecisionOverlayEditRequest()
+  edit.requestID = 2
+  edit.projectionID = planWire.manifest.projectionID
+  var overlay = Diskplan_V1_DecisionOverlayAcknowledged()
+  overlay.projectionID = planWire.manifest.projectionID
+  overlay.revision = 1
+  overlay.overlaySha256.value = Data(repeating: 0x45, count: 32)
+  overlay.maximumSelectedActions = SealedRuntimeWire.maximumActionCount
+  overlay.maximumWaiverConsents = SealedRuntimeWire.maximumOverlayWaiverCount
+  overlay.maximumUserNotes = SealedRuntimeWire.maximumOverlayNoteCount
+  overlay.maximumEncodedBytes = SealedRuntimeWire.maximumProjectionBytes
+  overlay.maximumNoteBytes = SealedRuntimeWire.maximumOverlayNoteBytes
+  overlay.overlayID.value = Data("overlay".utf8)
+  overlay.planID = planWire.manifest.planID
+  overlay.planSha256 = planWire.manifest.planSha256
+  overlay.evidenceID = planWire.manifest.evidenceID
+  overlay.evidenceSha256 = planWire.manifest.evidenceSha256
+  overlay.scanSessionID = planWire.manifest.scanSessionID
+  overlay.scanCheckpointID = planWire.manifest.scanCheckpointID
+  overlay.scanCheckpointEvidenceSha256 = planWire.manifest.scanCheckpointEvidenceSha256
+  #expect(authority.claim(.editDecisionOverlay(edit))?.code == nil)
+  try RuntimeBusinessResponder(
+    broker: broker,
+    request: .editDecisionOverlay(edit),
+    runtimeSessionID: runtimeSessionID,
+    authority: authority
+  ).send(try .decisionOverlay(overlay))
+
+  var prepareReview = Diskplan_V1_PrepareApplyReviewRequest()
+  prepareReview.requestID = 3
+  prepareReview.projectionID = overlay.projectionID
+  prepareReview.overlayID = overlay.overlayID
+  prepareReview.overlayRevision = overlay.revision
+  prepareReview.overlaySha256 = overlay.overlaySha256
+  var review = Diskplan_V1_ApplyReviewProjection()
+  review.applyReviewID.value = Data("apply-review".utf8)
+  review.projectionID = planWire.manifest.projectionID
+  review.planSha256 = planWire.manifest.planSha256
+  review.overlaySha256 = overlay.overlaySha256
+  review.epoch.epochID.value = Data("epoch".utf8)
+  review.epoch.semanticReferenceTimeSeconds = 1
+  review.epoch.issuedAtSeconds = 2
+  review.epoch.deadlineSeconds = 3
+  review.reviewBindingSha256.value = Data(repeating: 0x46, count: 32)
+  review.overlayID = overlay.overlayID
+  review.planID = planWire.manifest.planID
+  review.evidenceID = planWire.manifest.evidenceID
+  review.evidenceSha256 = planWire.manifest.evidenceSha256
+  review.currentBindingSha256.value = Data(repeating: 0x47, count: 32)
+  review.overlayRevision = overlay.revision
+  review.scanSessionID = planWire.manifest.scanSessionID
+  review.scanCheckpointID = planWire.manifest.scanCheckpointID
+  review.scanCheckpointEvidenceSha256 = planWire.manifest.scanCheckpointEvidenceSha256
+  let sealedReview = try SealedRuntimeWire.sealApplyReview(
+    review,
+    negotiatedProtocolMinor: protocol16Minor
   )
+  #expect(authority.claim(.prepareApplyReview(prepareReview))?.code == nil)
+  try RuntimeBusinessResponder(
+    broker: broker,
+    request: .prepareApplyReview(prepareReview),
+    runtimeSessionID: runtimeSessionID,
+    authority: authority
+  ).send(
+    try .applyReview(
+      sealedReview,
+      negotiatedProtocolMinor: protocol16Minor
+    ))
+
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = 4
+  confirmation.applyReviewID = sealedReview.applyReviewID
+  confirmation.reviewBindingSha256 = sealedReview.reviewBindingSha256
+  #expect(authority.claim(.confirmApply(confirmation))?.code == nil)
+  let executionID = Data("execution".utf8)
+  var started = Diskplan_V1_ApplyStartedProjection()
+  started.epoch = sealedReview.epoch
+  started.applyReviewID = sealedReview.applyReviewID
+  started.projectionID = planWire.manifest.projectionID
+  started.planSha256 = planWire.manifest.planSha256
+  started.overlayID = overlay.overlayID
+  started.overlaySha256 = overlay.overlaySha256
+  started.reviewBindingSha256 = sealedReview.reviewBindingSha256
+  started.planID = planWire.manifest.planID
+  started.evidenceID = planWire.manifest.evidenceID
+  started.evidenceSha256 = planWire.manifest.evidenceSha256
+  started.currentBindingSha256 = sealedReview.currentBindingSha256
+  started.revalidationSha256 = sealedReview.revalidationSha256
+  started.overlayRevision = overlay.revision
+  started.scanSessionID = planWire.manifest.scanSessionID
+  started.scanCheckpointID = planWire.manifest.scanCheckpointID
+  started.scanCheckpointEvidenceSha256 = planWire.manifest.scanCheckpointEvidenceSha256
+  var failure = Diskplan_V1_ExecutionStreamFailureProjection()
+  failure.kind = .backendContractViolation
+  failure.executionID.value = executionID
+  failure.applyReviewID = sealedReview.applyReviewID
+  failure.reviewBindingSha256 = sealedReview.reviewBindingSha256
+  failure.mutationMayHaveOccurred = true
+  var startEvent = Diskplan_V1_ExecutionStreamEvent()
+  startEvent.executionID.value = executionID
+  startEvent.body = .applyStarted(started)
+  var failureEvent = Diskplan_V1_ExecutionStreamEvent()
+  failureEvent.executionID.value = executionID
+  failureEvent.body = .executionStreamFailure(failure)
+  try RuntimeBusinessResponder(
+    broker: broker,
+    request: .confirmApply(confirmation),
+    runtimeSessionID: runtimeSessionID,
+    authority: authority
+  ).send(try .execution([startEvent, failureEvent]))
+  try broker.finish()
+
+  let executionEvents = output.runtimeEvents().filter { $0.requestID == 4 }
+  #expect(executionEvents.count == 2)
   #expect(
-    events.allSatisfy {
-      if case .executionStreamFailure? = $0.body { return true }
-      if case .applyStarted? = $0.body { return true }
+    !executionEvents.contains {
+      if case .runtimeRejected? = $0.body { return true }
       return false
     }
   )
-
-  review.reviewBindingSha256.value = Data(repeating: 0xee, count: 32)
-  #expect(throws: SealedRuntimeWireError.self) {
-    try RuntimeExecutionAuthorityValidator.validateLiveBindings(
-      events: events,
-      planManifest: manifest,
-      overlay: overlay,
-      review: review
-    )
+  guard case .executionStreamEvent(let terminal)? = executionEvents.last?.body,
+    case .executionStreamFailure? = terminal.body
+  else {
+    Issue.record("expected the typed failure terminal from the production responder")
+    return
   }
+  confirmation.requestID = 5
+  #expect(authority.claim(.confirmApply(confirmation))?.code == .staleBinding)
 }
 
 @Test func executionFailureTerminalIsStrictlyProtocol16AndFailClosed() throws {
@@ -983,6 +1098,29 @@ private enum FixtureHandlerError: Error {
 
 private enum RuntimeTransactionWriterError: Error {
   case failed
+}
+
+private final class RuntimeTestOutput: @unchecked Sendable {
+  private let lock = NSLock()
+  private var payloads: [Data] = []
+
+  func append(_ payload: Data) {
+    lock.lock()
+    payloads.append(payload)
+    lock.unlock()
+  }
+
+  func runtimeEvents() -> [Diskplan_V1_RuntimeEvent] {
+    lock.lock()
+    let snapshot = payloads
+    lock.unlock()
+    return snapshot.compactMap { payload in
+      guard let envelope = try? Diskplan_V1_Envelope(serializedBytes: payload),
+        case .runtimeEvent(let event) = envelope.body
+      else { return nil }
+      return event
+    }
+  }
 }
 
 private final class RuntimeTransactionGate: @unchecked Sendable {
