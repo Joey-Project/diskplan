@@ -177,6 +177,32 @@ superseded_by:
   reached. Log:
   `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-p1-rereview-retry4.log`;
   bounded output SHA-256: `3ea1f178344e73ca6a6c234523297f4cbc3a41f57262dcc5e4bb59a8a5a32fae`.
+- The public macOS 26 Foundation timeout was reproduced as fixture executor starvation: synchronous
+  review/start gates occupied cooperative executor threads while their matching test tasks waited
+  to release them, and one composition fixture let a wall-clock epoch expire behind that backlog.
+  The fixtures now use bounded asynchronous one-shot signals, publication commit remains serialized
+  by the production authority transaction, and the composition fixture injects one shared internal
+  deterministic clock while production construction remains real-time. On India, the five exact
+  barrier regressions passed 5/5 in 13.833 supervisor seconds (0.014 test seconds), SHA-256
+  `ee9241055923e037680050c4984b616e2d21d7393b3f51ccae66ad62c3c59b60`; the composition regression
+  passed 1/1 in 4.456 supervisor seconds, SHA-256
+  `99c398694781276274629b91c2a4a29e169ced5c9ab8d5605ebb5965768a2354`; and the exact full Foundation
+  command passed all 637 tests in 10.341 supervisor seconds (5.966 test seconds), SHA-256
+  `e925680d7f71e178e56be9602b70a7f46549d61810d6e2edffcea94de8218393`. Every supervisor verified
+  its process group and ended quiescent. The diagnostic deadlock run was intentionally terminated
+  after sampling, with supervisor output SHA-256
+  `cbfc97405de97754b7264390cd477cb076dad58981fcf025a142e6714a7bd022`; its reparented SwiftPM helper
+  had created a separate process group, so it was subsequently identified by exact workspace
+  cwd/argv/open-file evidence, terminated with `TERM`, and the isolated India workspace, `.build`,
+  and retained logs were removed.
+- The publication-wait fixtures now observe an authority-owned waiter count set under the same
+  condition lock immediately before a confirm claim sleeps, rather than inferring entry from task
+  scheduling. The three exact publication-race regressions passed 3/3 on India in 24.531 supervisor
+  seconds (0.016 test seconds), SHA-256
+  `245fae136c7d56435afddf8c4f5e11ae5a62b1c5685bfb0360f5955db2d652d0`. The exact full Foundation
+  command then passed all 637 tests in 10.268 supervisor seconds (6.021 test seconds), SHA-256
+  `d4de3f4555b570b68293794fac397f29d36f33ac39cd15e23d3f3c5377236746`. Both supervisors verified
+  their process groups and ended quiescent; the isolated workspace, `.build`, and logs were removed.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races. Bridge
