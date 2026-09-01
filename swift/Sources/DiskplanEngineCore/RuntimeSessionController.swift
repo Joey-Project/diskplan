@@ -1,4 +1,5 @@
 import CryptoKit
+import DiskplanCore
 import DiskplanPolicy
 import DiskplanProto
 import DiskplanScan
@@ -35,27 +36,105 @@ enum RuntimeSessionControllerError: Error, Equatable {
 /// Scan receipts become visible only after `ScanCoordinator` receives the
 /// final checkpoint writer acknowledgement. Plan and overlay state remain
 /// engine-owned domain models; protobufs are projections of that state.
-public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Sendable {
-  public let supportedCapabilities: Set<String> = [
-    "decision-overlay-v1",
-    "plan-projection-v1",
-  ]
+public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusinessLifecycle,
+  @unchecked Sendable
+{
+  public var supportedCapabilities: Set<String> {
+    var capabilities: Set<String> = [
+      "decision-overlay-v1",
+      "plan-projection-v1",
+    ]
+    if executionBackend != nil {
+      capabilities.formUnion(["dry-run-projection-v1", "execution-stream-v1"])
+    }
+    return capabilities
+  }
 
   private struct LivePlan {
     let receipt: RuntimeFinalizedScanReceipt
     let result: RuntimePolicyAuthorityResult
     let records: [Diskplan_V1_PlanProjectionRecord]
+    let releaseSetIDByAllocationGroup: [Data: Data]
     let metadata: PlanProjectionWireMetadata
     let manifest: Diskplan_V1_PlanProjectionManifest
     var domainOverlay: DecisionOverlay?
+    var overlayProjection: Diskplan_V1_DecisionOverlayAcknowledged?
     var overlayRevision: UInt64
   }
 
+  private struct PreparedApply {
+    let context: RuntimeExecutionPlanContext
+    let projection: Diskplan_V1_ApplyReviewProjection
+    let authority: RuntimeApplyAuthorityBox
+  }
+
+  private struct ActiveExecution {
+    let run: RuntimeExecutionRunHandle
+    let context: RuntimeExecutionPlanContext
+    let review: Diskplan_V1_ApplyReviewProjection
+    let confirmationResponder: RuntimeBusinessResponder
+    var events: [Diskplan_V1_ExecutionStreamEvent]
+    var cancellationResponder: RuntimeBusinessResponder?
+    var prefixSent: Bool
+    var finishing: Bool
+  }
+
+  private final class RuntimeApplyAuthorityBox: @unchecked Sendable {
+    private enum State {
+      case fresh(RuntimePreparedApplyAttempt)
+      case claimed
+      case invalidated
+    }
+
+    private let lock = NSLock()
+    private var state: State
+
+    init(_ attempt: RuntimePreparedApplyAttempt) {
+      state = .fresh(attempt)
+    }
+
+    func claim() -> RuntimePreparedApplyAttempt? {
+      lock.lock()
+      defer { lock.unlock() }
+      guard case .fresh(let attempt) = state else { return nil }
+      state = .claimed
+      return attempt
+    }
+
+    func invalidate() {
+      lock.lock()
+      if case .fresh = state { state = .invalidated }
+      lock.unlock()
+    }
+  }
+
+  private final class PreparedApplyPublication: @unchecked Sendable {
+    let candidate: PreparedApply
+    var previous: PreparedApply?
+
+    init(_ candidate: PreparedApply) {
+      self.candidate = candidate
+    }
+  }
+
   private let lock = NSLock()
+  private let taskCondition = NSCondition()
+  private let executionBackend: (any RuntimeExecutionBackend)?
   private var finalizedReceipts: [Data: RuntimeFinalizedScanReceipt] = [:]
   private var livePlan: LivePlan?
+  private var preparedApply: PreparedApply?
+  private var activeExecution: ActiveExecution?
+  private var responderBrokers: [ObjectIdentifier: SerialEventBroker] = [:]
+  private var ownedTasks: [UUID: RuntimeOwnedTask] = [:]
+  private var stopping = false
 
-  public init() {}
+  public init() {
+    executionBackend = nil
+  }
+
+  package init(executionBackend: any RuntimeExecutionBackend) {
+    self.executionBackend = executionBackend
+  }
 
   func makeAuthoritySession(
     scope: ResolvedScanScope,
@@ -74,17 +153,20 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
     _ request: RuntimeBusinessRequest,
     responder: RuntimeBusinessResponder
   ) throws {
+    registerResponderBroker(responder.eventBroker)
     switch request {
     case .buildPlan(let build):
       try handleBuildPlan(build, responder: responder)
     case .editDecisionOverlay(let edit):
       try handleOverlayEdit(edit, responder: responder)
-    case .prepareDryRun, .prepareApplyReview, .confirmApply, .cancelExecution:
-      try responder.send(
-        try .rejected(
-          code: .businessUnsupported,
-          summary: "this runtime slice does not implement revalidation or execution"
-        ))
+    case .prepareDryRun(let prepare):
+      try handleDryRun(prepare, responder: responder)
+    case .prepareApplyReview(let prepare):
+      try handleApplyReview(prepare, responder: responder)
+    case .confirmApply(let confirmation):
+      try handleConfirmApply(confirmation, responder: responder)
+    case .cancelExecution(let cancellation):
+      try handleCancelExecution(cancellation, responder: responder)
     }
   }
 
@@ -136,10 +218,11 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
     }
 
     let result = try receipt.authoritySession.makePlan()
-    let records = try RuntimePlanDomainProjector.project(
+    let projection = try RuntimePlanDomainProjector.project(
       result,
       negotiatedProtocolMinor: responder.negotiatedProtocolMinor
     )
+    let records = projection.records
     let metadata = PlanProjectionWireMetadata(
       scanSessionID: receipt.scanSessionID,
       scanCheckpointID: receipt.checkpointID,
@@ -172,9 +255,11 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
       receipt: receipt,
       result: result,
       records: records,
+      releaseSetIDByAllocationGroup: projection.releaseSetIDByAllocationGroup,
       metadata: metadata,
       manifest: wire.manifest,
       domainOverlay: nil,
+      overlayProjection: nil,
       overlayRevision: 0
     )
     lock.unlock()
@@ -239,9 +324,11 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
       )
       try responder.send(try .decisionOverlay(projected))
       live.domainOverlay = edited
+      live.overlayProjection = projected
       live.overlayRevision = nextRevision
       lock.lock()
       self.livePlan = live
+      preparedApply = nil
       lock.unlock()
     } catch let rejection as RuntimeOverlayEditRejection {
       try sendOverlayRejection(
@@ -260,6 +347,578 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
         responder: responder
       )
     }
+  }
+
+  private func handleDryRun(
+    _ request: Diskplan_V1_PrepareDryRunRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    guard let executionBackend else {
+      try responder.send(
+        try .rejected(
+          code: .businessUnsupported,
+          summary: "runtime execution backend is not installed"
+        ))
+      return
+    }
+    guard
+      let context = executionContext(
+        projectionID: request.projectionID,
+        overlayID: request.overlayID,
+        overlayRevision: request.overlayRevision,
+        overlaySHA256: request.overlaySha256,
+        negotiatedProtocolMinor: responder.negotiatedProtocolMinor
+      )
+    else {
+      try responder.send(
+        try .rejected(code: .staleBinding, summary: "dry-run predecessor binding is stale"))
+      return
+    }
+    startTask { [weak self] in
+      guard let self else { return }
+      do {
+        let prepared = try await executionBackend.prepareDryRun(
+          context: context,
+          lifetimeSeconds: 300
+        )
+        guard self.contextIsCurrent(context) else {
+          try await responder.sendAsync(
+            try .rejected(
+              code: .staleBinding,
+              summary: "plan or overlay changed during dry-run preparation"
+            ))
+          return
+        }
+        try await responder.sendAsync(
+          try .dryRun(
+            payload: prepared.payload,
+            manifest: prepared.manifest,
+            negotiatedProtocolMinor: responder.negotiatedProtocolMinor
+          ))
+      } catch RuntimeExecutionBackendFailure.revalidationFailed {
+        try? await responder.sendAsync(
+          try .rejected(
+            code: .revalidationFailed,
+            summary: "current evidence no longer matches the prepared plan"
+          ))
+      } catch {
+        try? await responder.rejectHandlerFailureAsync()
+      }
+    }
+  }
+
+  private func handleApplyReview(
+    _ request: Diskplan_V1_PrepareApplyReviewRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    guard responder.negotiatedProtocolMinor >= protocol16Minor else {
+      try responder.send(
+        try .rejected(
+          code: .capabilityNotNegotiated,
+          summary: "protocol 1.6 is required before preparing a mutation review"
+        ))
+      return
+    }
+    guard let executionBackend else {
+      try responder.send(
+        try .rejected(
+          code: .businessUnsupported,
+          summary: "runtime execution backend is not installed"
+        ))
+      return
+    }
+    guard
+      let context = executionContext(
+        projectionID: request.projectionID,
+        overlayID: request.overlayID,
+        overlayRevision: request.overlayRevision,
+        overlaySHA256: request.overlaySha256,
+        negotiatedProtocolMinor: responder.negotiatedProtocolMinor
+      )
+    else {
+      try responder.send(
+        try .rejected(code: .staleBinding, summary: "apply-review predecessor binding is stale"))
+      return
+    }
+    startTask { [weak self] in
+      guard let self else { return }
+      do {
+        let prepared = try await executionBackend.prepareApplyReview(
+          context: context,
+          lifetimeSeconds: 300
+        )
+        let sealed = try SealedRuntimeWire.sealApplyReview(
+          prepared.projection,
+          negotiatedProtocolMinor: responder.negotiatedProtocolMinor
+        )
+        guard self.contextIsCurrent(context) else {
+          try await responder.sendAsync(
+            try .rejected(
+              code: .staleBinding,
+              summary: "plan or overlay changed during apply-review preparation"
+            ))
+          return
+        }
+        let authority = RuntimeApplyAuthorityBox(prepared.attempt)
+        let candidate = PreparedApply(
+          context: context,
+          projection: sealed,
+          authority: authority
+        )
+        let publication = PreparedApplyPublication(candidate)
+        let installed = try await responder.sendApplyReview(
+          try .applyReview(
+            sealed,
+            negotiatedProtocolMinor: responder.negotiatedProtocolMinor
+          ),
+          install: { self.installPreparedApplyIfCurrent(publication) },
+          rollback: { self.rollbackPreparedApply(publication) }
+        )
+        guard installed else {
+          authority.invalidate()
+          try await responder.sendAsync(
+            try .rejected(
+              code: .staleBinding,
+              summary: "plan or overlay changed during apply-review publication"
+            ))
+          return
+        }
+        publication.previous?.authority.invalidate()
+      } catch RuntimeExecutionBackendFailure.revalidationFailed {
+        try? await responder.sendAsync(
+          try .rejected(
+            code: .revalidationFailed,
+            summary: "current evidence no longer matches the prepared plan"
+          ))
+      } catch {
+        try? await responder.rejectHandlerFailureAsync()
+      }
+    }
+  }
+
+  private func handleConfirmApply(
+    _ request: Diskplan_V1_ConfirmApplyRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    guard executionBackend != nil else {
+      try responder.send(
+        try .rejected(
+          code: .businessUnsupported,
+          summary: "runtime execution backend is not installed"
+        ))
+      return
+    }
+    guard let (prepared, attempt) = claimPreparedApply(request)
+    else {
+      try responder.send(
+        try .rejected(
+          code: .confirmationMismatch,
+          summary: "apply confirmation differs from the prepared single-use review"
+        ))
+      return
+    }
+
+    startTask { [weak self] in
+      guard let self else { return }
+      do {
+        let launch = try await attempt.start(
+          confirmation: RuntimeApplyConfirmation(
+            review: prepared.projection,
+            confirmedForceActionIDs: request.confirmedForceActionIds
+          ),
+          context: prepared.context
+        )
+        guard case .started(let run) = launch else {
+          if case .startFailed(let terminal) = launch {
+            do {
+              try await responder.finishApplyStartFailureAsync(terminal)
+            } catch {
+              try? await responder.abortExecutionStreamWithoutEmissionAsync()
+            }
+          }
+          return
+        }
+        var started = run.applyStarted
+        started.executionEventIndex = 1
+        guard
+          installActiveExecution(
+            run: run,
+            context: prepared.context,
+            review: prepared.projection,
+            responder: responder,
+            started: started
+          )
+        else {
+          run.cancel()
+          _ = await run.awaitTail()
+          try? await responder.rejectHandlerFailureAsync()
+          return
+        }
+        await driveStartedExecution(run: run, fallbackResponder: responder)
+      } catch {
+        try? await responder.rejectHandlerFailureAsync()
+      }
+    }
+  }
+
+  private func handleCancelExecution(
+    _ request: Diskplan_V1_CancelExecutionRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    lock.lock()
+    guard var active = activeExecution,
+      active.run.executionID == request.executionID.value,
+      active.cancellationResponder == nil
+    else {
+      lock.unlock()
+      try responder.send(
+        try .rejected(code: .staleBinding, summary: "execution_id is not active"))
+      return
+    }
+    var acknowledgement = Diskplan_V1_ExecutionCancellationAcknowledgedProjection()
+    acknowledgement.reason = "frontend-requested"
+    var event = Diskplan_V1_ExecutionStreamEvent()
+    event.executionID.value = active.run.executionID
+    event.body = .cancellationAcknowledged(acknowledgement)
+    event.executionEventIndex = UInt64(active.events.count + 1)
+    let prefix = active.events + [event]
+    do {
+      try active.confirmationResponder.sendExecutionPrefix(
+        prefix,
+        mirroredTo: responder
+      )
+      active.events = prefix
+      active.cancellationResponder = responder
+      active.prefixSent = true
+      activeExecution = active
+      lock.unlock()
+      active.run.cancel()
+    } catch {
+      lock.unlock()
+      throw error
+    }
+  }
+
+  private func driveStartedExecution(
+    run: RuntimeExecutionRunHandle,
+    fallbackResponder: RuntimeBusinessResponder
+  ) async {
+    do {
+      guard contextIsCurrentForActiveRun(run) else {
+        throw RuntimeSessionControllerError.staleReceipt
+      }
+      try fallbackResponder.registerExecution(run.executionID)
+      try await fallbackResponder.sendExecutionPrefixAsync([run.applyStarted])
+      markExecutionPrefixSent(run)
+    } catch {
+      await abortStartedExecutionBeforePrefix(run, fallbackResponder: fallbackResponder)
+      return
+    }
+
+    let outcome = await run.awaitTail()
+    switch outcome {
+    case .sealed(let tail):
+      while !Task.isCancelled {
+        do {
+          try await finishExecution(run: run, tail: tail)
+          return
+        } catch let error {
+          switch error {
+          case .pendingCancellation:
+            await Task.yield()
+          case .authoritySemanticRejection:
+            await finishFailedExecution(
+              run: run,
+              failure: .backendContractViolation,
+              fallbackResponder: fallbackResponder
+            )
+            return
+          case .transportOrCommitFailure:
+            run.cancel()
+            _ = await run.awaitTail()
+            return
+          }
+        }
+      }
+    case .failed(let failure):
+      await finishFailedExecution(
+        run: run,
+        failure: failure,
+        fallbackResponder: fallbackResponder
+      )
+      return
+    }
+    run.cancel()
+    _ = await run.awaitTail()
+  }
+
+  private func finishFailedExecution(
+    run: RuntimeExecutionRunHandle,
+    failure: RuntimeExecutionTailFailure,
+    fallbackResponder: RuntimeBusinessResponder
+  ) async {
+    run.cancel()
+    _ = await run.awaitTail()
+    while !Task.isCancelled {
+      let cancellationResponder = cancellationResponder(for: run)
+      do {
+        try await fallbackResponder.finishExecutionFailureAsync(
+          failure,
+          mirroredTo: cancellationResponder
+        )
+        clearActiveExecution(run)
+        return
+      } catch let error {
+        switch error {
+        case .pendingCancellation:
+          await Task.yield()
+        case .authoritySemanticRejection, .transportOrCommitFailure:
+          run.cancel()
+          _ = await run.awaitTail()
+          return
+        }
+      }
+    }
+    run.cancel()
+    _ = await run.awaitTail()
+  }
+
+  private func abortStartedExecutionBeforePrefix(
+    _ run: RuntimeExecutionRunHandle,
+    fallbackResponder: RuntimeBusinessResponder
+  ) async {
+    run.cancel()
+    _ = await run.awaitTail()
+    clearActiveExecution(run)
+    try? await fallbackResponder.rejectHandlerFailureAsync()
+  }
+
+  private func clearActiveExecution(_ run: RuntimeExecutionRunHandle) {
+    lock.lock()
+    if activeExecution?.run === run { activeExecution = nil }
+    lock.unlock()
+  }
+
+  private func cancellationResponder(
+    for run: RuntimeExecutionRunHandle
+  ) -> RuntimeBusinessResponder? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard activeExecution?.run === run else { return nil }
+    return activeExecution?.cancellationResponder
+  }
+
+  private func finishExecution(
+    run: RuntimeExecutionRunHandle,
+    tail: RuntimeExecutionTail
+  ) async throws(RuntimeExecutionTerminalError) {
+    guard let active = activeExecutionForFinishing(run) else { return }
+    let events = active.events + tail.events
+    try await active.confirmationResponder.finishExecutionAsync(
+      events,
+      mirroredTo: active.cancellationResponder
+    )
+    clearActiveExecution(run)
+  }
+
+  private func activeExecutionForFinishing(
+    _ run: RuntimeExecutionRunHandle
+  ) -> ActiveExecution? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard var active = activeExecution, active.run === run
+    else { return nil }
+    active.finishing = true
+    activeExecution = active
+    return active
+  }
+
+  private func executionContext(
+    projectionID: Diskplan_V1_OpaqueIdentifier,
+    overlayID: Diskplan_V1_OpaqueIdentifier,
+    overlayRevision: UInt64,
+    overlaySHA256: Diskplan_V1_Digest256,
+    negotiatedProtocolMinor: UInt32
+  ) -> RuntimeExecutionPlanContext? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let live = livePlan,
+      let overlay = live.domainOverlay,
+      let overlayProjection = live.overlayProjection,
+      projectionID == live.manifest.projectionID,
+      overlayID == overlayProjection.overlayID,
+      overlayRevision == overlayProjection.revision,
+      overlaySHA256 == overlayProjection.overlaySha256
+    else { return nil }
+    return RuntimeExecutionPlanContext(
+      plan: live.result.plan,
+      overlay: overlay,
+      planRecords: live.records,
+      releaseSetIDByAllocationGroup: live.releaseSetIDByAllocationGroup,
+      planManifest: live.manifest,
+      overlayProjection: overlayProjection,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
+  }
+
+  private func contextIsCurrent(_ context: RuntimeExecutionPlanContext) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return contextIsCurrentUnderLock(context)
+  }
+
+  private func contextIsCurrentUnderLock(_ context: RuntimeExecutionPlanContext) -> Bool {
+    guard let live = livePlan,
+      let overlay = live.domainOverlay,
+      let overlayProjection = live.overlayProjection
+    else { return false }
+    return live.result.plan.planHash == context.plan.planHash
+      && overlay.overlayHash == context.overlay.overlayHash
+      && live.manifest.projectionID == context.planManifest.projectionID
+      && overlayProjection.overlayID == context.overlayProjection.overlayID
+      && overlayProjection.revision == context.overlayProjection.revision
+      && overlayProjection.overlaySha256 == context.overlayProjection.overlaySha256
+  }
+
+  private func claimPreparedApply(
+    _ request: Diskplan_V1_ConfirmApplyRequest
+  ) -> (PreparedApply, RuntimePreparedApplyAttempt)? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let prepared = preparedApply,
+      request.applyReviewID == prepared.projection.applyReviewID,
+      request.reviewBindingSha256 == prepared.projection.reviewBindingSha256,
+      Set(request.confirmedForceActionIds.map(\.value))
+        == Set(prepared.projection.forceWarningActionIds.map(\.value)),
+      request.confirmedForceActionIds.count
+        == Set(request.confirmedForceActionIds.map(\.value)).count,
+      let attempt = prepared.authority.claim()
+    else { return nil }
+    preparedApply = nil
+    return (prepared, attempt)
+  }
+
+  private func installPreparedApplyIfCurrent(_ publication: PreparedApplyPublication) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard contextIsCurrentUnderLock(publication.candidate.context) else { return false }
+    publication.previous = preparedApply
+    preparedApply = publication.candidate
+    return true
+  }
+
+  private func rollbackPreparedApply(_ publication: PreparedApplyPublication) {
+    lock.lock()
+    if preparedApply?.authority === publication.candidate.authority {
+      preparedApply = publication.previous
+    }
+    lock.unlock()
+    publication.candidate.authority.invalidate()
+  }
+
+  private func installActiveExecution(
+    run: RuntimeExecutionRunHandle,
+    context: RuntimeExecutionPlanContext,
+    review: Diskplan_V1_ApplyReviewProjection,
+    responder: RuntimeBusinessResponder,
+    started: Diskplan_V1_ExecutionStreamEvent
+  ) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !stopping, activeExecution == nil else { return false }
+    activeExecution = ActiveExecution(
+      run: run,
+      context: context,
+      review: review,
+      confirmationResponder: responder,
+      events: [started],
+      cancellationResponder: nil,
+      prefixSent: false,
+      finishing: false
+    )
+    return true
+  }
+
+  private func contextIsCurrentForActiveRun(_ run: RuntimeExecutionRunHandle) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let active = activeExecution, active.run === run else { return false }
+    return contextIsCurrentUnderLock(active.context)
+  }
+
+  private func markExecutionPrefixSent(_ run: RuntimeExecutionRunHandle) {
+    lock.lock()
+    if var active = activeExecution, active.run === run {
+      active.prefixSent = true
+      activeExecution = active
+    }
+    lock.unlock()
+  }
+
+  func stopAndWait() {
+    lock.lock()
+    stopping = true
+    let run = activeExecution?.run
+    let brokers = Array(responderBrokers.values)
+    taskCondition.lock()
+    let tasks = Array(ownedTasks.values)
+    taskCondition.unlock()
+    lock.unlock()
+
+    run?.cancel()
+    for task in tasks { task.cancel() }
+    for broker in brokers {
+      broker.stopRuntimeResponderOperationsAndWait(interruptingInFlightWriter: true)
+    }
+
+    taskCondition.lock()
+    while !ownedTasks.isEmpty { taskCondition.wait() }
+    taskCondition.unlock()
+
+    lock.lock()
+    activeExecution = nil
+    lock.unlock()
+  }
+
+  private func registerResponderBroker(_ broker: SerialEventBroker) {
+    lock.lock()
+    responderBrokers[ObjectIdentifier(broker)] = broker
+    let shouldStop = stopping
+    lock.unlock()
+    if shouldStop {
+      broker.stopRuntimeResponderOperationsAndWait(interruptingInFlightWriter: true)
+    }
+  }
+
+  @discardableResult
+  private func startTask(
+    _ operation: @escaping @Sendable () async -> Void
+  ) -> Bool {
+    let id = UUID()
+    let owner = RuntimeOwnedTask()
+    lock.lock()
+    guard !stopping else {
+      lock.unlock()
+      return false
+    }
+    taskCondition.lock()
+    ownedTasks[id] = owner
+    taskCondition.unlock()
+    lock.unlock()
+
+    let task = Task { [weak self] in
+      await operation()
+      self?.taskDidFinish(id)
+    }
+    owner.install(task)
+    return true
+  }
+
+  private func taskDidFinish(_ id: UUID) {
+    taskCondition.lock()
+    ownedTasks.removeValue(forKey: id)
+    taskCondition.broadcast()
+    taskCondition.unlock()
   }
 
   private func sendOverlayRejection(
@@ -303,6 +962,46 @@ public final class RuntimeSessionController: RuntimeScanAuthority, @unchecked Se
     lock.lock()
     defer { lock.unlock() }
     return finalizedReceipts.count
+  }
+
+  func preparedApplyReviewIDForTesting() -> Data? {
+    lock.lock()
+    defer { lock.unlock() }
+    return preparedApply?.projection.applyReviewID.value
+  }
+
+  func activeExecutionIDForTesting() -> Data? {
+    lock.lock()
+    defer { lock.unlock() }
+    return activeExecution?.run.executionID
+  }
+
+  func isStoppingForTesting() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return stopping
+  }
+}
+
+private final class RuntimeOwnedTask: @unchecked Sendable {
+  private let lock = NSLock()
+  private var task: Task<Void, Never>?
+  private var cancellationRequested = false
+
+  func install(_ task: Task<Void, Never>) {
+    lock.lock()
+    self.task = task
+    let shouldCancel = cancellationRequested
+    lock.unlock()
+    if shouldCancel { task.cancel() }
+  }
+
+  func cancel() {
+    lock.lock()
+    cancellationRequested = true
+    let task = task
+    lock.unlock()
+    task?.cancel()
   }
 }
 

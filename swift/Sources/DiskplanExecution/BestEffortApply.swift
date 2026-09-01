@@ -133,7 +133,7 @@ public actor BestEffortApplyCoordinator {
         outcomes.append(outcome)
         record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
         await emit(
-          .unitFinished(unit.id, outcome.status),
+          .unitFinished(outcome),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -144,7 +144,7 @@ public actor BestEffortApplyCoordinator {
         outcomes.append(outcome)
         record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
         await emit(
-          .unitFinished(unit.id, outcome.status),
+          .unitFinished(outcome),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -155,7 +155,7 @@ public actor BestEffortApplyCoordinator {
         outcomes.append(outcome)
         record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
         await emit(
-          .unitFinished(unit.id, outcome.status),
+          .unitFinished(outcome),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -166,7 +166,7 @@ public actor BestEffortApplyCoordinator {
         outcomes.append(outcome)
         record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
         await emit(
-          .unitFinished(unit.id, outcome.status),
+          .unitFinished(outcome),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -223,7 +223,7 @@ public actor BestEffortApplyCoordinator {
         outcomes.append(outcome)
         record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
         await emit(
-          .unitFinished(unit.id, outcome.status),
+          .unitFinished(outcome),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -234,7 +234,7 @@ public actor BestEffortApplyCoordinator {
         outcomes.append(outcome)
         record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
         await emit(
-          .unitFinished(unit.id, outcome.status),
+          .unitFinished(outcome),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -245,7 +245,7 @@ public actor BestEffortApplyCoordinator {
         outcomes.append(outcome)
         record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
         await emit(
-          .unitFinished(unit.id, outcome.status),
+          .unitFinished(outcome),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -263,7 +263,7 @@ public actor BestEffortApplyCoordinator {
         outcomes.append(outcome)
         record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
         await emit(
-          .unitFinished(unit.id, outcome.status),
+          .unitFinished(outcome),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -409,7 +409,7 @@ public actor BestEffortApplyCoordinator {
       outcomes.append(outcome)
       record(status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
       await emit(
-        .unitFinished(unit.id, status),
+        .unitFinished(outcome),
         index: &eventIndex,
         auditFailures: &auditFailures
       )

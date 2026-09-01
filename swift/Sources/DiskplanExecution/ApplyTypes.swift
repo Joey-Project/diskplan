@@ -507,7 +507,7 @@ public enum ExecutionEvent: Equatable, Sendable {
   case forceRequiredWarning(ActionID)
   case stepFinished(ExecutionStepOutcome)
   case releasePostVerificationFinished(ReleasePostVerificationOutcome)
-  case unitFinished(ExecutionUnitID, ExecutionUnitStatus)
+  case unitFinished(ExecutionUnitOutcome)
   case auditWriteFailed(AuditWriteFailure)
   case applyFinished
 }
@@ -549,8 +549,8 @@ public actor ShellExecutionEventSink: ExecutionEventSink {
     case .releasePostVerificationFinished(let outcome):
       return
         "release-postverify group=\(outcome.allocationGroupID) outcome=\(postverifyLabel(outcome.outcome))"
-    case .unitFinished(let id, let status):
-      return "unit-finished id=\(unitLabel(id)) status=\(status.rawValue)"
+    case .unitFinished(let outcome):
+      return "unit-finished id=\(unitLabel(outcome.id)) status=\(outcome.status.rawValue)"
     case .auditWriteFailed(let failure):
       let retained =
         failure.retainedLocator == nil

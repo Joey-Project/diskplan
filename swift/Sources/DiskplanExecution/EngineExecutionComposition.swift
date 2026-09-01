@@ -8,6 +8,11 @@ public final class EngineExecutionComposition: @unchecked Sendable {
   public let preparation: ExecutionPreparationEngine
   public let applyCoordinator: BestEffortApplyCoordinator
 
+  private let adapter: any ExecutionMutationAdapter
+  private let eventSink: any ExecutionEventSink
+  private let auditSink: (any ExecutionAuditSink)?
+  private let injectedClock: (@Sendable () -> Int64)?
+
   public init(
     collector: EngineRevalidationCollector,
     eventSink: any ExecutionEventSink = ShellExecutionEventSink(),
@@ -17,12 +22,74 @@ public final class EngineExecutionComposition: @unchecked Sendable {
       genericRemove: PosixRemoveAdapter(),
       gitWorktree: GitWorktreeQuarantineAdapter()
     )
+    self.adapter = adapter
+    self.eventSink = eventSink
+    self.auditSink = auditSink
+    injectedClock = nil
     preparation = ExecutionPreparationEngine(collector: collector)
     applyCoordinator = BestEffortApplyCoordinator(
       adapter: adapter,
       eventSink: eventSink,
       auditSink: auditSink
     )
+  }
+
+  init(
+    collector: EngineRevalidationCollector,
+    eventSink: any ExecutionEventSink,
+    auditSink: (any ExecutionAuditSink)? = nil,
+    clock: @escaping @Sendable () -> Int64
+  ) {
+    let adapter = ProductionExecutionAdapter(
+      genericRemove: PosixRemoveAdapter(),
+      gitWorktree: GitWorktreeQuarantineAdapter()
+    )
+    self.adapter = adapter
+    self.eventSink = eventSink
+    self.auditSink = auditSink
+    injectedClock = clock
+    preparation = ExecutionPreparationEngine(collector: collector, clock: clock)
+    applyCoordinator = BestEffortApplyCoordinator(
+      adapter: adapter,
+      eventSink: eventSink,
+      auditSink: auditSink,
+      clock: clock
+    )
+  }
+
+  /// Creates one coordinator whose events remain visible to the configured shell sink while an
+  /// executable composition root observes the exact same authoritative Phase 5 stream.
+  public func makeApplyCoordinator(
+    observing observer: any ExecutionEventSink
+  ) -> BestEffortApplyCoordinator {
+    if let injectedClock {
+      return BestEffortApplyCoordinator(
+        adapter: adapter,
+        eventSink: TeeExecutionEventSink(primary: eventSink, observer: observer),
+        auditSink: auditSink,
+        clock: injectedClock
+      )
+    }
+    return BestEffortApplyCoordinator(
+      adapter: adapter,
+      eventSink: TeeExecutionEventSink(primary: eventSink, observer: observer),
+      auditSink: auditSink
+    )
+  }
+}
+
+private actor TeeExecutionEventSink: ExecutionEventSink {
+  private let primary: any ExecutionEventSink
+  private let observer: any ExecutionEventSink
+
+  init(primary: any ExecutionEventSink, observer: any ExecutionEventSink) {
+    self.primary = primary
+    self.observer = observer
+  }
+
+  func emit(_ event: ExecutionEvent) async {
+    await primary.emit(event)
+    await observer.emit(event)
   }
 }
 

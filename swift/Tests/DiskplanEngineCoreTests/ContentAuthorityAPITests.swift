@@ -583,6 +583,14 @@ private let forbiddenSurfaceExpectations = [
     expectedSymbol: "ContentEvidenceConsumer",
     expectedFailure: .notVisible
   ),
+  CompileFailExpectation(
+    fixtureName: "ForgeRuntimeExecutionAuthority.swift",
+    packageContext: .external("external_runtime_client"),
+    markerFile: "DiskplanCompileFail-ForgeRuntimeExecutionAuthority.swift",
+    markerLine: 1005,
+    expectedSymbol: "RuntimeExecutionBackend",
+    expectedFailure: .notVisible
+  ),
 ]
 
 private func compileFailRejection(

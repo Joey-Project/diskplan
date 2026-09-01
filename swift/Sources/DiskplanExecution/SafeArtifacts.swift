@@ -562,11 +562,11 @@ extension ExecutionEvent {
         "outcome": outcome.outcome.artifactJSON,
         "type": .string("release_post_verification_finished"),
       ])
-    case .unitFinished(let unit, let status):
+    case .unitFinished(let outcome):
       return .object([
-        "status": .string(status.rawValue),
+        "status": .string(outcome.status.rawValue),
         "type": .string("unit_finished"),
-        "unit": unit.artifactJSON,
+        "unit": outcome.id.artifactJSON,
       ])
     case .auditWriteFailed(let failure):
       var fields: [String: CanonicalJSONValue] = [

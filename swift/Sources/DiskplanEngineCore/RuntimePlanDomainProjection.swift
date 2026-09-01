@@ -9,18 +9,23 @@ enum RuntimePlanDomainProjectionError: Error, Equatable {
   case integerOverflow
 }
 
+struct RuntimePlanDomainProjection: Sendable {
+  let records: [Diskplan_V1_PlanProjectionRecord]
+  let releaseSetIDByAllocationGroup: [Data: Data]
+}
+
 /// Projects an already validated `ImmutablePlan`; it never reclassifies or
 /// upgrades policy evidence.
 enum RuntimePlanDomainProjector {
   static func project(
     _ authority: RuntimePolicyAuthorityResult,
     negotiatedProtocolMinor: UInt32 = protocolMinor
-  ) throws -> [Diskplan_V1_PlanProjectionRecord] {
+  ) throws -> RuntimePlanDomainProjection {
     try SealedRuntimeWire.requireSupportedProtocolMinor(negotiatedProtocolMinor)
     let plan = authority.plan
     let releaseIDs = Dictionary(
       uniqueKeysWithValues: plan.releaseSets.map { release in
-        (release.allocationGroupID, releaseID(release))
+        (Data(release.allocationGroupID.utf8), releaseID(release))
       })
     var records: [Diskplan_V1_PlanProjectionRecord] = []
     records.reserveCapacity(plan.actions.count * 2 + plan.releaseSets.count)
@@ -28,7 +33,8 @@ enum RuntimePlanDomainProjector {
     for (order, action) in ActionOrdering.display(plan.actions).enumerated() {
       let target = try targetProjection(action: action, order: UInt64(order))
       let releaseSetIDs = plan.releaseSets.compactMap { release -> Data? in
-        release.ownerActionIDs.contains(action.id) ? releaseIDs[release.allocationGroupID] : nil
+        release.ownerActionIDs.contains(action.id)
+          ? releaseIDs[Data(release.allocationGroupID.utf8)] : nil
       }
       var actionRecord = Diskplan_V1_PlanProjectionRecord()
       actionRecord.body = .action(
@@ -50,11 +56,14 @@ enum RuntimePlanDomainProjector {
     for release in plan.releaseSets {
       var record = Diskplan_V1_PlanProjectionRecord()
       record.body = .releaseSet(
-        releaseProjection(release, id: releaseIDs[release.allocationGroupID]!))
+        releaseProjection(release, id: releaseIDs[Data(release.allocationGroupID.utf8)]!))
       records.append(record)
     }
     for index in records.indices { records[index].recordIndex = UInt64(index) }
-    return records
+    return RuntimePlanDomainProjection(
+      records: records,
+      releaseSetIDByAllocationGroup: releaseIDs
+    )
   }
 
   private static func actionProjection(
