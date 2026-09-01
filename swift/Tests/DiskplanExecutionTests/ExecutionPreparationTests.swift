@@ -748,7 +748,7 @@ func dirtyDiscardRemovePreparationRemainsReportOnly() async throws {
     waiverConsents: [],
     userNotes: []
   )
-  #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
+  #expect(throws: PolicyModelError.actionNotStageable(remove.id)) {
     try DecisionOverlayValidator.validate(overlay, against: plan)
   }
   let source = SequenceSource([])
@@ -756,7 +756,7 @@ func dirtyDiscardRemovePreparationRemainsReportOnly() async throws {
     evidenceSource: source,
     randomBytes: deterministicEntropy
   )
-  await #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
+  await #expect(throws: PolicyModelError.actionNotStageable(remove.id)) {
     _ = try await engine.prepare(
       plan: plan,
       overlay: overlay,

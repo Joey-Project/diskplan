@@ -285,3 +285,11 @@ superseded_by:
   initializers. The successor uses the integration authority's derived display tier and
   `releaseGraphBundle: nil` for plans without release topology. Policy and serial full gates were
   not started for the failed merge head.
+- India execution validation of successor `c420ecc4afdf1b43f7f28f4d70248ee2ac51a8cb`
+  compiled and ran 152 tests; one dirty-Git preparation test produced two assertion issues. The
+  bounded supervisor completed in 22.276 seconds, emitted 44,421 bytes with SHA-256 prefix
+  `9eec5fb6`, and verified a quiescent process group. Both policy validation and async preparation
+  deterministically rejected the blocked dependent remove action first in canonical evaluated-
+  action order, while the stale assertion expected the discard action ID. The successor asserts
+  the exact remove ID and preserves the collector-not-called proof. Policy and serial full gates
+  were not started for this failed head.
