@@ -1337,6 +1337,99 @@ import Testing
   try fixture.broker.finish()
 }
 
+@Test func controllerTeardownWaitsForRunReturnedAfterStopping() async throws {
+  let startGate = RuntimePositiveGate()
+  let backend = RuntimePositiveBackend(
+    waitForCancellation: true,
+    startGate: startGate
+  )
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer {
+    startGate.open()
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  try #require(startGate.waitUntilEntered())
+
+  let teardown = Task.detached { fixture.controller.stopAndWait() }
+  try #require(
+    await runtimeEventually {
+      fixture.controller.isStoppingForTesting()
+    })
+  startGate.open()
+  await teardown.value
+
+  #expect(backend.startCount == 1)
+  #expect(backend.cancelCount == 1)
+  #expect(backend.tailAwaitCount == 1)
+  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
+}
+
+@Test func confirmWaitsForVisibleReviewPublicationCommit() async throws {
+  let commitGate = RuntimePositiveGate()
+  let backend = RuntimePositiveBackend(waitForCancellation: false)
+  let fixture = try runtimePositiveFixture(
+    backend: backend,
+    reviewCommitGate: commitGate
+  )
+  defer {
+    commitGate.open()
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+
+  var request = Diskplan_V1_PrepareApplyReviewRequest()
+  request.requestID = 3
+  request.projectionID = fixture.plan.projectionID
+  request.overlayID = fixture.overlay.overlayID
+  request.overlayRevision = fixture.overlay.revision
+  request.overlaySha256 = fixture.overlay.overlaySha256
+  try #require(fixture.authority.claim(.prepareApplyReview(request)) == nil)
+  try fixture.controller.handle(
+    .prepareApplyReview(request),
+    responder: fixture.responder(.prepareApplyReview(request))
+  )
+  try #require(commitGate.waitUntilEntered())
+  let reviews: [Diskplan_V1_ApplyReviewProjection] =
+    fixture.output.runtimeEvents().compactMap { event in
+      guard case .applyReviewProjection(let projection)? = event.body else { return nil }
+      return projection
+    }
+  let review = try #require(reviews.last)
+
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  let claimStarted = AuthorityTestFlag()
+  let claimFinished = AuthorityTestFlag()
+  let claim = Task.detached {
+    claimStarted.set()
+    let rejection = fixture.authority.claim(.confirmApply(confirmation))
+    claimFinished.set()
+    return rejection
+  }
+  try #require(claimStarted.wait(timeout: 2))
+  #expect(!claimFinished.wait(timeout: 0.05))
+
+  commitGate.open()
+  let rejection = await claim.value
+  #expect(rejection?.code == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  #expect(
+    await runtimeEventually {
+      backend.startCount == 1
+        && fixture.controller.activeExecutionIDForTesting() == nil
+    })
+}
+
 @Test func controllerInstallsReviewBeforePublicationAndRollsBackOnWriterFailure() async throws {
   let backend = RuntimePositiveBackend(waitForCancellation: false)
   let writer = RuntimePositiveWriter()
@@ -1360,7 +1453,23 @@ import Testing
   #expect(writer.sawInstalledReview)
   #expect(fixture.controller.preparedApplyReviewIDForTesting() != nil)
 
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = 4
+  confirmation.applyReviewID.value = Data("positive-review".utf8)
+  confirmation.reviewBindingSha256.value = Data(repeating: 0x83, count: 32)
+  let claimStarted = AuthorityTestFlag()
+  let claimFinished = AuthorityTestFlag()
+  let claim = Task.detached {
+    claimStarted.set()
+    let rejection = fixture.authority.claim(.confirmApply(confirmation))
+    claimFinished.set()
+    return rejection
+  }
+  try #require(claimStarted.wait(timeout: 2))
+  #expect(!claimFinished.wait(timeout: 0.05))
+
   writer.release()
+  #expect((await claim.value)?.code == .staleBinding)
   #expect(
     await runtimeEventually {
       fixture.controller.preparedApplyReviewIDForTesting() == nil
@@ -2508,6 +2617,38 @@ private final class AuthorityTestFlag: @unchecked Sendable {
     }
     return true
   }
+
+}
+
+private final class RuntimePositiveGate: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var entered = false
+  private var isOpen = false
+
+  func wait() {
+    condition.lock()
+    entered = true
+    condition.broadcast()
+    while !isOpen { condition.wait() }
+    condition.unlock()
+  }
+
+  func waitUntilEntered(timeout: TimeInterval = 2) -> Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    let deadline = Date(timeIntervalSinceNow: timeout)
+    while !entered {
+      guard condition.wait(until: deadline) else { return entered }
+    }
+    return true
+  }
+
+  func open() {
+    condition.lock()
+    isOpen = true
+    condition.broadcast()
+    condition.unlock()
+  }
 }
 
 private final class AuthorityTestOutput: @unchecked Sendable {
@@ -2774,7 +2915,8 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
 
 private func runtimePositiveFixture(
   backend: RuntimePositiveBackend,
-  writer: RuntimePositiveWriter? = nil
+  writer: RuntimePositiveWriter? = nil,
+  reviewCommitGate: RuntimePositiveGate? = nil
 ) throws -> RuntimePositiveFixture {
   let result = authorityScanResult()
   let session = seededAuthoritySession(result: result)
@@ -2800,7 +2942,12 @@ private func runtimePositiveFixture(
       output.append(data)
     }
   }
-  let authority = RuntimeBusinessAuthorityState()
+  let reviewCommitHook: (@Sendable () -> Void)? = reviewCommitGate.map { gate in
+    { @Sendable in gate.wait() }
+  }
+  let authority = RuntimeBusinessAuthorityState(
+    reviewCommitHookForTesting: reviewCommitHook
+  )
   var build = Diskplan_V1_BuildPlanRequest()
   build.requestID = 1
   build.scanSessionID.value = Data("positive-scan".utf8)
@@ -2912,6 +3059,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   let executionID: Data
   private let lock = NSLock()
   private let waitForCancellation: Bool
+  private let startGate: RuntimePositiveGate?
   private var starts = 0
   private var cancellations = 0
   private var dryRuns = 0
@@ -2943,10 +3091,12 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
 
   init(
     waitForCancellation: Bool,
-    executionID: Data = Data("positive-execution".utf8)
+    executionID: Data = Data("positive-execution".utf8),
+    startGate: RuntimePositiveGate? = nil
   ) {
     self.waitForCancellation = waitForCancellation
     self.executionID = executionID
+    self.startGate = startGate
   }
 
   func prepareDryRun(
@@ -3010,6 +3160,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     confirmation: RuntimeApplyConfirmation,
     context: RuntimeExecutionPlanContext
   ) async throws -> RuntimeExecutionRunHandle {
+    startGate?.wait()
     recordStart()
     let sourceExecutionID =
       executionID.isEmpty ? Data("invalid-physical-execution".utf8) : executionID

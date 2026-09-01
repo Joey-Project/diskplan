@@ -722,7 +722,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
   ) -> Bool {
     lock.lock()
     defer { lock.unlock() }
-    guard activeExecution == nil else { return false }
+    guard !stopping, activeExecution == nil else { return false }
     activeExecution = ActiveExecution(
       run: run,
       context: context,
@@ -754,14 +754,14 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
 
   func stopAndWait() {
     lock.lock()
-    let run = activeExecution?.run
-    lock.unlock()
-    run?.cancel()
-
-    taskCondition.lock()
     stopping = true
+    let run = activeExecution?.run
+    taskCondition.lock()
     let tasks = Array(ownedTasks.values)
     taskCondition.unlock()
+    lock.unlock()
+
+    run?.cancel()
     for task in tasks { task.cancel() }
 
     taskCondition.lock()
@@ -779,13 +779,15 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
   ) -> Bool {
     let id = UUID()
     let owner = RuntimeOwnedTask()
-    taskCondition.lock()
+    lock.lock()
     guard !stopping else {
-      taskCondition.unlock()
+      lock.unlock()
       return false
     }
+    taskCondition.lock()
     ownedTasks[id] = owner
     taskCondition.unlock()
+    lock.unlock()
 
     let task = Task { [weak self] in
       await operation()
@@ -855,6 +857,12 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     lock.lock()
     defer { lock.unlock() }
     return activeExecution?.run.executionID
+  }
+
+  func isStoppingForTesting() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return stopping
   }
 }
 

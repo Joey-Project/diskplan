@@ -445,7 +445,8 @@ package enum RuntimeEmissionBudget {
 
 final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private static let maximumConsumedReviewBindingCount = 100_000
-  private let lock = NSLock()
+  private let lock = NSCondition()
+  private let reviewCommitHookForTesting: (@Sendable () -> Void)?
   private var plan: RuntimePlanReceipt?
   private var overlay: Diskplan_V1_DecisionOverlayAcknowledged?
   private var review: Diskplan_V1_ApplyReviewProjection?
@@ -454,6 +455,11 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private var activeCancellationRequestID: UInt64?
   private var activeRequestID: UInt64?
   private var activeEmissionToken: RuntimeAuthorityEmissionToken?
+  private var reviewPublicationInFlight = false
+
+  init(reviewCommitHookForTesting: (@Sendable () -> Void)? = nil) {
+    self.reviewCommitHookForTesting = reviewCommitHookForTesting
+  }
 
   func withLock<T>(_ body: () throws -> T) rethrows -> T {
     lock.lock()
@@ -475,6 +481,9 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         else { return (.staleBinding, "cancellation differs from the active execution") }
         activeCancellationRequestID = request.requestID
         return nil
+      }
+      if case .confirmApply = request {
+        while reviewPublicationInFlight { lock.wait() }
       }
       if activeRequestID != nil {
         return (.invalidState, "another runtime authority request is still active")
@@ -662,6 +671,9 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   }
 
   fileprivate func commit(_ transaction: RuntimeAuthorityEmissionTransaction) throws {
+    if case .review = transaction.prepared.transition {
+      reviewCommitHookForTesting?()
+    }
     try withLock {
       guard
         transitionRequestIsActive(
@@ -672,6 +684,10 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       else { throw invalidState("runtime emission transaction is no longer active") }
       commitUnderLock(transaction.prepared.transition, requestID: transaction.requestID)
       activeEmissionToken = nil
+      if case .review = transaction.prepared.transition {
+        reviewPublicationInFlight = false
+        lock.broadcast()
+      }
     }
   }
 
@@ -685,9 +701,27 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         activeEmissionToken === transaction.token
       else { return }
       activeEmissionToken = nil
+      if case .review = transaction.prepared.transition {
+        reviewPublicationInFlight = false
+        lock.broadcast()
+      }
       if case .executionCompleted = transaction.prepared.transition {
         executionClaim?.phase = .registered
       }
+    }
+  }
+
+  fileprivate func abortReviewPublication(
+    _ transaction: RuntimeAuthorityEmissionTransaction
+  ) {
+    withLock {
+      guard case .review = transaction.prepared.transition,
+        activeRequestID == transaction.requestID
+      else { return }
+      if activeEmissionToken === transaction.token { activeEmissionToken = nil }
+      reviewPublicationInFlight = false
+      activeRequestID = nil
+      lock.broadcast()
     }
   }
 
@@ -707,6 +741,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     }
     let token = RuntimeAuthorityEmissionToken()
     activeEmissionToken = token
+    if case .review = prepared.transition { reviewPublicationInFlight = true }
     return RuntimeAuthorityEmissionTransaction(
       requestID: request.requestID,
       token: token,
@@ -1409,10 +1444,14 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       return false
     }
     do {
-      try transmit(transaction)
+      try sendPrepared(transaction.prepared)
+      try authority.commit(transaction)
+      completed = true
       return true
     } catch {
+      authority.abortReviewPublication(transaction)
       rollback()
+      completed = true
       throw error
     }
   }

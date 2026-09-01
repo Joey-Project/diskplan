@@ -32,6 +32,9 @@ superseded_by:
   the review becomes visible and restores the predecessor on writer or commit failure. Exact
   confirmation consumes the box before backend entry; stale, mismatched, and replayed confirmation
   cannot invoke the backend again.
+- A confirmation that arrives after review bytes flush waits for the same publication transaction
+  to commit or roll back. It then sees the committed review or a typed stale-binding rejection,
+  never the transient active prepare request.
 - The registered execution ID becomes visible through an early `apply_started` prefix. One exact
   cancellation mirrors the same prefix, appends one typed acknowledgement, cancels the retained
   run, and gives both pending requests the same sealed terminal stream.
@@ -39,7 +42,8 @@ superseded_by:
   same non-throwing sealed tail. The run remains retained through the joint confirm/cancel terminal
   commit, while a finishing authority phase rejects late cancellation without token competition.
 - EngineServer no longer pre-rejects cancellation and calls the handler lifecycle before closing
-  the broker at EOF. Controller teardown cancels and waits for all retained asynchronous work.
+  the broker at EOF. Controller teardown atomically prevents new run installation, then cancels and
+  waits even when a backend start returns only after teardown has begun.
 
 ## Next Steps
 
@@ -60,6 +64,11 @@ superseded_by:
   verification and quiescence both passed. Log:
   `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-review-fixes-4.log`;
   bounded output SHA-256: `1d9b099f7d4163fb699ba94daeeba1d66aa772e9260e0e717ccbde015e049800`.
+- India rereview gate: the same command passed all 105 tests under a 900-second process-group
+  deadline and a 2 MiB retained-log quota in 13.505 seconds. Target process-group verification and
+  post-run quiescence passed; the quota was not reached. Log:
+  `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-rereview.log`;
+  bounded output SHA-256: `d67a15d051cf609f5f42b70e71aab56d832188227048f0c308349e54a0d8ddea`.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
-  retained-run teardown.
+  retained-run teardown, including gated backend start and review-publication races.
