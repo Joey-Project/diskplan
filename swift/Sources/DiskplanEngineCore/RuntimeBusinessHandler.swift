@@ -580,7 +580,7 @@ package enum RuntimeEmissionBudget {
 final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private static let maximumConsumedReviewBindingCount = 100_000
   private let lock = NSCondition()
-  private let reviewCommitHookForTesting: (@Sendable () throws -> Void)?
+  private let reviewCommitHookForTesting: (@Sendable () async throws -> Void)?
   private var plan: RuntimePlanReceipt?
   private var overlay: Diskplan_V1_DecisionOverlayAcknowledged?
   private var review: Diskplan_V1_ApplyReviewProjection?
@@ -590,8 +590,9 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private var activeRequestID: UInt64?
   private var activeEmissionToken: RuntimeAuthorityEmissionToken?
   private var reviewPublicationInFlight = false
+  private var waitingConfirmClaimCount = 0
 
-  init(reviewCommitHookForTesting: (@Sendable () throws -> Void)? = nil) {
+  init(reviewCommitHookForTesting: (@Sendable () async throws -> Void)? = nil) {
     self.reviewCommitHookForTesting = reviewCommitHookForTesting
   }
 
@@ -617,7 +618,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         return nil
       }
       if case .confirmApply = request {
-        while reviewPublicationInFlight { lock.wait() }
+        waitForReviewPublicationIfNeededUnderLock()
       }
       if activeRequestID != nil {
         return (.invalidState, "another runtime authority request is still active")
@@ -965,9 +966,6 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   }
 
   fileprivate func commit(_ transaction: RuntimeAuthorityEmissionTransaction) throws {
-    if case .review = transaction.prepared.transition {
-      try reviewCommitHookForTesting?()
-    }
     try withLock {
       guard
         transitionRequestIsActive(
@@ -983,6 +981,16 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         lock.broadcast()
       }
     }
+  }
+
+  fileprivate func commitReview(
+    _ transaction: RuntimeAuthorityEmissionTransaction
+  ) async throws {
+    guard case .review = transaction.prepared.transition else {
+      throw invalidState("runtime emission transaction is not an apply review")
+    }
+    try await reviewCommitHookForTesting?()
+    try commit(transaction)
   }
 
   fileprivate func abort(_ transaction: RuntimeAuthorityEmissionTransaction) {
@@ -1037,6 +1045,17 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     withLock {
       activeRequestID != nil || activeCancellationRequestID != nil || executionClaim != nil
     }
+  }
+
+  func hasConfirmClaimWaitingForReviewPublicationForTesting() -> Bool {
+    withLock { waitingConfirmClaimCount > 0 }
+  }
+
+  private func waitForReviewPublicationIfNeededUnderLock() {
+    guard reviewPublicationInFlight else { return }
+    waitingConfirmClaimCount += 1
+    defer { waitingConfirmClaimCount -= 1 }
+    while reviewPublicationInFlight { lock.wait() }
   }
 
   private func beginEmission(
@@ -1676,6 +1695,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   private let request: RuntimeBusinessRequest
   private let authority: RuntimeBusinessAuthorityState
   private var completed = false
+  private var reviewCommitInFlight = false
   private var executionPrefix: [Diskplan_V1_ExecutionStreamEvent] = []
 
   /// The exact protocol minor selected by the version handshake for this
@@ -1700,7 +1720,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   public func send(_ emission: RuntimeBusinessEmission) throws {
     responseLock.lock()
     defer { responseLock.unlock() }
-    guard !completed else {
+    guard !completed, !reviewCommitInFlight else {
       throw RuntimeResponderError.alreadyTerminal
     }
     let transaction: RuntimeAuthorityEmissionTransaction
@@ -1731,40 +1751,81 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     _ emission: RuntimeBusinessEmission,
     install: () -> Bool,
     rollback: () -> Void
-  ) throws -> Bool {
-    responseLock.lock()
-    defer { responseLock.unlock() }
-    guard !completed else { throw RuntimeResponderError.alreadyTerminal }
-    let transaction = try authority.authorize(
-      emission,
-      for: request,
-      negotiatedProtocolMinor: negotiatedProtocolMinor
-    )
-    guard case .review = transaction.prepared.transition else {
-      authority.abort(transaction)
-      throw RuntimeResponderError.alreadyTerminal
-    }
-    guard install() else {
-      authority.abort(transaction)
-      return false
-    }
+  ) async throws -> Bool {
+    guard
+      let transaction = try beginApplyReview(
+        emission,
+        install: install,
+        rollback: rollback
+      )
+    else { return false }
     do {
-      try sendPrepared(transaction.prepared)
-      try authority.commit(transaction)
-      completed = true
+      try await authority.commitReview(transaction)
+      completeApplyReview()
       return true
     } catch {
       rollback()
       authority.abortReviewPublication(transaction)
-      completed = true
+      completeApplyReview()
       throw error
     }
+  }
+
+  private func beginApplyReview(
+    _ emission: RuntimeBusinessEmission,
+    install: () -> Bool,
+    rollback: () -> Void
+  ) throws -> RuntimeAuthorityEmissionTransaction? {
+    responseLock.lock()
+    defer { responseLock.unlock() }
+    guard !completed, !reviewCommitInFlight else {
+      throw RuntimeResponderError.alreadyTerminal
+    }
+    reviewCommitInFlight = true
+    let transaction: RuntimeAuthorityEmissionTransaction
+    do {
+      transaction = try authority.authorize(
+        emission,
+        for: request,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+    } catch {
+      reviewCommitInFlight = false
+      throw error
+    }
+    guard case .review = transaction.prepared.transition else {
+      authority.abort(transaction)
+      reviewCommitInFlight = false
+      throw RuntimeResponderError.alreadyTerminal
+    }
+    guard install() else {
+      authority.abort(transaction)
+      reviewCommitInFlight = false
+      return nil
+    }
+    do {
+      try sendPrepared(transaction.prepared)
+    } catch {
+      rollback()
+      authority.abortReviewPublication(transaction)
+      completed = true
+      reviewCommitInFlight = false
+      throw error
+    }
+    return transaction
+  }
+
+  private func completeApplyReview() {
+    responseLock.lock()
+    completed = true
+    reviewCommitInFlight = false
+    responseLock.unlock()
   }
 
   func registerExecution(_ executionID: Data) throws {
     responseLock.lock()
     defer { responseLock.unlock() }
-    guard !completed, executionPrefix.isEmpty else {
+    guard !completed, !reviewCommitInFlight, executionPrefix.isEmpty else {
       throw RuntimeResponderError.alreadyTerminal
     }
     try authority.registerExecution(executionID, for: request)
@@ -1775,7 +1836,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   ) throws {
     responseLock.lock()
     defer { responseLock.unlock() }
-    guard !completed, candidate.count > executionPrefix.count,
+    guard !completed, !reviewCommitInFlight, candidate.count > executionPrefix.count,
       Array(candidate.prefix(executionPrefix.count)) == executionPrefix
     else { throw RuntimeResponderError.alreadyTerminal }
     let sealed = try authority.validateExecutionPrefix(
@@ -1805,7 +1866,8 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       cancellationResponder.responseLock.unlock()
       responseLock.unlock()
     }
-    guard !completed, !cancellationResponder.completed,
+    guard !completed, !reviewCommitInFlight, !cancellationResponder.completed,
+      !cancellationResponder.reviewCommitInFlight,
       broker === cancellationResponder.broker,
       authority === cancellationResponder.authority,
       case .confirmApply = request,
@@ -1857,7 +1919,9 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       cancellationResponder?.responseLock.unlock()
       responseLock.unlock()
     }
-    guard !completed, cancellationResponder?.completed != true else {
+    guard !completed, !reviewCommitInFlight, cancellationResponder?.completed != true,
+      cancellationResponder?.reviewCommitInFlight != true
+    else {
       throw RuntimeExecutionTerminalError.authoritySemanticRejection(
         code: .invalidState,
         summary: "execution terminal responder is already complete"
@@ -1948,7 +2012,9 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       cancellationResponder?.responseLock.unlock()
       responseLock.unlock()
     }
-    guard !completed, cancellationResponder?.completed != true else {
+    guard !completed, !reviewCommitInFlight, cancellationResponder?.completed != true,
+      cancellationResponder?.reviewCommitInFlight != true
+    else {
       throw RuntimeExecutionTerminalError.authoritySemanticRejection(
         code: .invalidState,
         summary: "execution failure responder is already complete"
@@ -2032,7 +2098,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   func finishApplyStartFailure(_ terminal: RuntimeApplyStartFailureTerminal) throws {
     responseLock.lock()
     defer { responseLock.unlock() }
-    guard !completed, executionPrefix.isEmpty else {
+    guard !completed, !reviewCommitInFlight, executionPrefix.isEmpty else {
       throw RuntimeResponderError.alreadyTerminal
     }
     let transaction = try authority.authorizeApplyStartFailureTerminal(
@@ -2052,7 +2118,9 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       cancellationResponder?.responseLock.unlock()
       responseLock.unlock()
     }
-    guard !completed, cancellationResponder?.completed != true else {
+    guard !completed, !reviewCommitInFlight, cancellationResponder?.completed != true,
+      cancellationResponder?.reviewCommitInFlight != true
+    else {
       throw RuntimeResponderError.alreadyTerminal
     }
     let transaction = try authority.authorizeExecutionAbortWithoutEmission(
@@ -2072,7 +2140,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   func rejectHandlerFailure() throws {
     responseLock.lock()
     defer { responseLock.unlock() }
-    guard !completed else { return }
+    guard !completed, !reviewCommitInFlight else { return }
     let transition = authority.rejectionTransition(for: request)
     let transaction = try authority.authorize(
       typedRejection(
