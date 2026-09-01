@@ -302,3 +302,16 @@ superseded_by:
   canonical evaluated-action order rejected the blocked dependent remove action, while the stale
   assertion expected the discard action ID. The successor updates only that test expectation;
   production behavior is unchanged. The serial full gate was not started for this failed head.
+- India policy validation of successor `f3ac3d7b67488aa737b14f541b27d4e661662bf3` passed all
+  66 tests; the bounded supervisor completed in 26.558 seconds with SHA-256 prefix `2afc8dee` and
+  verified a quiescent process group. The serial full gate then failed deterministically in
+  `authorityUsesCompleteCorpusInsteadOfRetainedViewport`: the complete authority corpus projected
+  zero report-only items instead of one and the stale unchecked subscript then terminated the test
+  process with signal 5. The bounded supervisor completed in 10.582 seconds, emitted 12,311 bytes
+  with SHA-256 prefix `16a072ed`, and verified a quiescent process group. An isolated rerun failed
+  the same way after 3.065 seconds with 1,650 output bytes and SHA-256 prefix `0758f68b`. The merge
+  exposed an invalid cross-module combination: transient incomplete-coverage recoverability has no
+  stable waiver proof, but snapshot validation required one while policy construction attempted an
+  empty waiver. The successor permits proof-free operational unknowns only as rejected report-only
+  evidence, retains stable typed proof for unsupported/public-API unknown waivers, and hardens the
+  corpus test against an unchecked index. Dirty Git remains non-stageable and non-executable.

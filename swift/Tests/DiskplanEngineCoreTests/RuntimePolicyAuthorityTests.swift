@@ -101,16 +101,21 @@ import Testing
   #expect(first.plan == second.plan)
   #expect(first.items == second.items)
   #expect(first.items.count == 1)
-  #expect(first.items[0].kind == .cache)
-  #expect(first.items[0].actionID == nil)
-  #expect(first.items[0].reasons.contains(.aclEvidenceUnavailable))
-  #expect(first.items[0].reasons.contains(.rootNamespaceSealUnavailable))
-  #expect(first.items[0].reasons.contains(.nameOnlyTypeHint))
-  #expect(first.items[0].reasons.contains(.recoverabilityProvenanceUnavailable))
+  let item = try #require(first.items.first)
+  #expect(item.kind == .cache)
+  #expect(item.actionID == nil)
+  #expect(item.reasons.contains(.aclEvidenceUnavailable))
+  #expect(item.reasons.contains(.rootNamespaceSealUnavailable))
+  #expect(item.reasons.contains(.nameOnlyTypeHint))
+  #expect(item.reasons.contains(.recoverabilityProvenanceUnavailable))
   #expect(first.plan.evidenceSnapshots.count == 1)
   #expect(first.plan.evidenceSnapshots[0].namespaceBinding.trustedNamespace == .unverified)
   #expect(
-    first.items[0].evaluation.votes.first(where: { $0.dimension == .identityAndAccess })?.result
+    item.evaluation.votes.first(where: { $0.dimension == .identityAndAccess })?.result
+      .isRejectedForAuthorityTest == true
+  )
+  #expect(
+    item.evaluation.votes.first(where: { $0.dimension == .recoverability })?.result
       .isRejectedForAuthorityTest == true
   )
   #expect(first.plan.actions.isEmpty)

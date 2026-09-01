@@ -646,7 +646,12 @@ public struct FrozenEvidenceSnapshot: Equatable, Sendable {
     }
     switch recoverability {
     case .unknown(let reason):
-      return semanticEvidence.count == 1 && semanticEvidence[0].reason == reason
+      switch reason {
+      case .unsupported, .unavailableViaPublicAPI:
+        return semanticEvidence.count == 1 && semanticEvidence[0].reason == reason
+      case .notRequested, .budgetExhausted, .timedOut, .incompleteCoverage:
+        return semanticEvidence.isEmpty
+      }
     case .known, .absent, .unreadable, .failed:
       return semanticEvidence.isEmpty
     }

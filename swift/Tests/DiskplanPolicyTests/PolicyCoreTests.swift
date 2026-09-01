@@ -504,6 +504,25 @@ func unknownRecoverabilitySemanticProofIsStructurallyRequiredAndFailClosed() thr
       recoverabilityReviewFacts: [.unknownRecoverability(semantic)]
     )
   }
+
+  let operationalUnknown = try refreeze(
+    known,
+    recoverability: .unknown(.incompleteCoverage),
+    recoverabilityReviewFacts: []
+  )
+  let operationalEvaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(
+      evidence: operationalUnknown,
+      globalFacts: globalFacts()
+    )
+  )
+  let recoverabilityVote = try #require(
+    operationalEvaluation.votes.first { $0.dimension == .recoverability }
+  )
+  guard case .rejected = recoverabilityVote.result else {
+    Issue.record("operationally unknown recoverability must remain report-only")
+    return
+  }
 }
 
 @Test
