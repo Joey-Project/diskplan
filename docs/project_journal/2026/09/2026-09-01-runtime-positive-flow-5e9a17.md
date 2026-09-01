@@ -69,6 +69,12 @@ superseded_by:
   outcomes to one sealed `execution_stream_failure` over the exact emitted prefix, mirrors it to
   any admitted cancellation responder, and jointly consumes both claims. Protocol 1.4/1.5 apply
   review fails closed before backend preparation while dry-run remains compatible.
+- Mirrored cancellation prefixes and terminals are prevalidated and serialized before entering the
+  broker as one queue item with one writer acknowledgement. Authority commit, responder completion,
+  and run cancellation occur only after that shared barrier succeeds; a physical between-envelope
+  write failure closes the transport, aborts the authority transaction, and leaves the run retained
+  for teardown. Normal-tail membership rejection instead falls back to a Protocol 1.6
+  `backend_contract_violation` terminal over the unchanged transmitted prefix.
 - Production `DiskplanEngineMain` intentionally does not inject the bridge yet. The repository does
   not expose a production revalidation collector factory, so production apply remains fail-closed
   rather than substituting a fixture collector or bypassing Phase 4 authority.
@@ -96,6 +102,14 @@ superseded_by:
   quiescence, and confirmed that the Protocol 1.6 runtime fixtures match the Swift authority;
   retained output SHA-256 was
   `17349332d9176d53aeff4f82bc65e554462d6b3276be799f7edddbbf1468443d`.
+- India joint-broker closure retained the earlier 166/166 passing `DiskplanExecutionTests`, then
+  passed all 118 `DiskplanEngineCoreTests` after the exact writer-failure synchronization barrier.
+  The final EngineCore supervisor completed in 13.818 seconds with process-group verification and
+  post-run quiescence; retained output SHA-256 was
+  `8bcb2d4b3097ad619ee8e06ee6cc2dc777d0f75a134159cf2bf98df0ab91789c`.
+  The subsequent Protocol 1.6 fixture gate passed in 5.220 seconds with the same supervisor
+  guarantees and retained output SHA-256
+  `83653f0a9a3c2efdafd7a8afb9d96929f9ed7016667255bf065ebbdf10932ae4`.
 - India focused gate: `swift test --filter DiskplanEngineCoreTests` passed all 96 tests under the
   bounded supervisor in 13.793 seconds; process-group verification and quiescence both passed.
   Log: `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-enginecore-retry6.log`;

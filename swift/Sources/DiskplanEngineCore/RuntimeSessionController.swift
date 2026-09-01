@@ -579,8 +579,10 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     event.executionEventIndex = UInt64(active.events.count + 1)
     let prefix = active.events + [event]
     do {
-      try active.confirmationResponder.sendExecutionPrefix(prefix)
-      try responder.sendExecutionPrefix(prefix)
+      try active.confirmationResponder.sendExecutionPrefix(
+        prefix,
+        mirroredTo: responder
+      )
       active.events = prefix
       active.cancellationResponder = responder
       active.prefixSent = true
@@ -616,12 +618,22 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
         do {
           try finishExecution(run: run, tail: tail)
           return
-        } catch RuntimeTerminalCommitError.pendingCancellation {
-          await Task.yield()
-        } catch {
-          run.cancel()
-          _ = await run.awaitTail()
-          return
+        } catch let error {
+          switch error {
+          case .pendingCancellation:
+            await Task.yield()
+          case .authoritySemanticRejection:
+            await finishFailedExecution(
+              run: run,
+              failure: .backendContractViolation,
+              fallbackResponder: fallbackResponder
+            )
+            return
+          case .transportOrCommitFailure:
+            run.cancel()
+            _ = await run.awaitTail()
+            return
+          }
         }
       }
     case .failed(let failure):
@@ -652,12 +664,15 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
         )
         clearActiveExecution(run)
         return
-      } catch RuntimeTerminalCommitError.pendingCancellation {
-        await Task.yield()
-      } catch {
-        run.cancel()
-        _ = await run.awaitTail()
-        return
+      } catch let error {
+        switch error {
+        case .pendingCancellation:
+          await Task.yield()
+        case .authoritySemanticRejection, .transportOrCommitFailure:
+          run.cancel()
+          _ = await run.awaitTail()
+          return
+        }
       }
     }
     run.cancel()
@@ -692,7 +707,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
   private func finishExecution(
     run: RuntimeExecutionRunHandle,
     tail: RuntimeExecutionTail
-  ) throws {
+  ) throws(RuntimeExecutionTerminalError) {
     lock.lock()
     guard var active = activeExecution, active.run === run
     else {

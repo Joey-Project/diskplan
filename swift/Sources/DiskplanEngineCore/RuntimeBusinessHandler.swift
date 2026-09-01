@@ -303,6 +303,20 @@ enum RuntimeTerminalCommitError: Error {
   case pendingCancellation
 }
 
+enum RuntimeExecutionTransportBoundary: String {
+  case enqueueOrWrite
+  case authorityCommit
+}
+
+enum RuntimeExecutionTerminalError: Error {
+  case pendingCancellation
+  case authoritySemanticRejection(code: Diskplan_V1_RuntimeRejectCode, summary: String)
+  case transportOrCommitFailure(
+    boundary: RuntimeExecutionTransportBoundary,
+    summary: String
+  )
+}
+
 private struct RuntimePlanReceipt {
   let records: [Diskplan_V1_PlanProjectionRecord]
   let manifest: Diskplan_V1_PlanProjectionManifest
@@ -1745,10 +1759,56 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     executionPrefix = sealed
   }
 
+  func sendExecutionPrefix(
+    _ candidate: [Diskplan_V1_ExecutionStreamEvent],
+    mirroredTo cancellationResponder: RuntimeBusinessResponder
+  ) throws {
+    responseLock.lock()
+    cancellationResponder.responseLock.lock()
+    defer {
+      cancellationResponder.responseLock.unlock()
+      responseLock.unlock()
+    }
+    guard !completed, !cancellationResponder.completed,
+      broker === cancellationResponder.broker,
+      authority === cancellationResponder.authority,
+      case .confirmApply = request,
+      case .cancelExecution = cancellationResponder.request,
+      candidate.count > executionPrefix.count,
+      Array(candidate.prefix(executionPrefix.count)) == executionPrefix,
+      cancellationResponder.executionPrefix.isEmpty
+    else { throw RuntimeResponderError.alreadyTerminal }
+    let sealed = try authority.validateExecutionPrefix(
+      candidate,
+      for: request,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
+    let cancellationSealed = try authority.validateExecutionPrefix(
+      candidate,
+      for: cancellationResponder.request,
+      negotiatedProtocolMinor: cancellationResponder.negotiatedProtocolMinor
+    )
+    guard sealed == cancellationSealed,
+      Array(sealed.prefix(executionPrefix.count)) == executionPrefix
+    else { throw RuntimeResponderError.alreadyTerminal }
+    let confirmationBodies = sealed.dropFirst(executionPrefix.count).map {
+      Diskplan_V1_RuntimeEvent.OneOf_Body.executionStreamEvent($0)
+    }
+    let cancellationBodies = cancellationSealed.map {
+      Diskplan_V1_RuntimeEvent.OneOf_Body.executionStreamEvent($0)
+    }
+    let records =
+      try cancellationResponder.runtimeRecords(cancellationBodies)
+      + runtimeRecords(confirmationBodies)
+    try broker.sendRuntimeBatchAwaitingWrite(records)
+    executionPrefix = sealed
+    cancellationResponder.executionPrefix = sealed
+  }
+
   func finishExecution(
     _ events: [Diskplan_V1_ExecutionStreamEvent],
     mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
-  ) throws {
+  ) throws(RuntimeExecutionTerminalError) {
     responseLock.lock()
     cancellationResponder?.responseLock.lock()
     defer {
@@ -1756,7 +1816,10 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       responseLock.unlock()
     }
     guard !completed, cancellationResponder?.completed != true else {
-      throw RuntimeResponderError.alreadyTerminal
+      throw RuntimeExecutionTerminalError.authoritySemanticRejection(
+        code: .invalidState,
+        summary: "execution terminal responder is already complete"
+      )
     }
     if let cancellationResponder {
       guard broker === cancellationResponder.broker,
@@ -1764,34 +1827,79 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
         case .confirmApply = request,
         case .cancelExecution = cancellationResponder.request,
         executionPrefix == cancellationResponder.executionPrefix
-      else { throw RuntimeResponderError.alreadyTerminal }
-    }
-    let transaction = try authority.authorizeExecutionTerminal(
-      events,
-      sentPrefix: executionPrefix,
-      cancellationRequest: cancellationResponder?.request,
-      cancellationSentPrefix: cancellationResponder?.executionPrefix,
-      for: request,
-      negotiatedProtocolMinor: negotiatedProtocolMinor
-    )
-    do {
-      if let cancellationResponder {
-        try cancellationResponder.sendPrepared(transaction.prepared)
+      else {
+        throw RuntimeExecutionTerminalError.authoritySemanticRejection(
+          code: .invalidState,
+          summary: "execution terminal mirror does not match the live responder"
+        )
       }
-      try sendPrepared(transaction.prepared)
-      try authority.commit(transaction)
-      completed = true
-      cancellationResponder?.completed = true
+    }
+    let transaction: RuntimeAuthorityEmissionTransaction
+    do {
+      transaction = try authority.authorizeExecutionTerminal(
+        events,
+        sentPrefix: executionPrefix,
+        cancellationRequest: cancellationResponder?.request,
+        cancellationSentPrefix: cancellationResponder?.executionPrefix,
+        for: request,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+    } catch RuntimeTerminalCommitError.pendingCancellation {
+      throw RuntimeExecutionTerminalError.pendingCancellation
+    } catch {
+      throw terminalSemanticRejection(
+        error,
+        fallbackSummary: "execution terminal failed authority validation"
+      )
+    }
+
+    let records: [BrokerRuntimeRecord]
+    do {
+      records = try terminalRecords(
+        transaction.prepared,
+        mirroredTo: cancellationResponder
+      )
     } catch {
       authority.abort(transaction)
-      throw error
+      throw terminalSemanticRejection(
+        error,
+        fallbackSummary: "execution terminal failed pre-enqueue projection"
+      )
     }
+    do {
+      try sendTerminalRecords(records, mirrored: cancellationResponder != nil)
+    } catch let error as BrokerRuntimeBatchPreparationError {
+      authority.abort(transaction)
+      throw terminalSemanticRejection(
+        error,
+        fallbackSummary: "execution terminal failed broker preflight"
+      )
+    } catch {
+      authority.abort(transaction)
+      broker.failClosed("execution terminal transport failed: \(error)")
+      throw RuntimeExecutionTerminalError.transportOrCommitFailure(
+        boundary: .enqueueOrWrite,
+        summary: String(describing: error)
+      )
+    }
+    do {
+      try authority.commit(transaction)
+    } catch {
+      authority.abort(transaction)
+      broker.failClosed("execution terminal authority commit failed: \(error)")
+      throw RuntimeExecutionTerminalError.transportOrCommitFailure(
+        boundary: .authorityCommit,
+        summary: String(describing: error)
+      )
+    }
+    completed = true
+    cancellationResponder?.completed = true
   }
 
   func finishExecutionFailure(
     _ failure: RuntimeExecutionTailFailure,
     mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
-  ) throws {
+  ) throws(RuntimeExecutionTerminalError) {
     responseLock.lock()
     cancellationResponder?.responseLock.lock()
     defer {
@@ -1799,7 +1907,10 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       responseLock.unlock()
     }
     guard !completed, cancellationResponder?.completed != true else {
-      throw RuntimeResponderError.alreadyTerminal
+      throw RuntimeExecutionTerminalError.authoritySemanticRejection(
+        code: .invalidState,
+        summary: "execution failure responder is already complete"
+      )
     }
     if let cancellationResponder {
       guard broker === cancellationResponder.broker,
@@ -1807,28 +1918,73 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
         case .confirmApply = request,
         case .cancelExecution = cancellationResponder.request,
         executionPrefix == cancellationResponder.executionPrefix
-      else { throw RuntimeResponderError.alreadyTerminal }
-    }
-    let transaction = try authority.authorizeExecutionFailureTerminal(
-      failure,
-      sentPrefix: executionPrefix,
-      cancellationRequest: cancellationResponder?.request,
-      cancellationSentPrefix: cancellationResponder?.executionPrefix,
-      for: request,
-      negotiatedProtocolMinor: negotiatedProtocolMinor
-    )
-    do {
-      if let cancellationResponder {
-        try cancellationResponder.sendPrepared(transaction.prepared)
+      else {
+        throw RuntimeExecutionTerminalError.authoritySemanticRejection(
+          code: .invalidState,
+          summary: "execution failure mirror does not match the live responder"
+        )
       }
-      try sendPrepared(transaction.prepared)
-      try authority.commit(transaction)
-      completed = true
-      cancellationResponder?.completed = true
+    }
+    let transaction: RuntimeAuthorityEmissionTransaction
+    do {
+      transaction = try authority.authorizeExecutionFailureTerminal(
+        failure,
+        sentPrefix: executionPrefix,
+        cancellationRequest: cancellationResponder?.request,
+        cancellationSentPrefix: cancellationResponder?.executionPrefix,
+        for: request,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+    } catch RuntimeTerminalCommitError.pendingCancellation {
+      throw RuntimeExecutionTerminalError.pendingCancellation
+    } catch {
+      throw terminalSemanticRejection(
+        error,
+        fallbackSummary: "execution failure failed authority validation"
+      )
+    }
+
+    let records: [BrokerRuntimeRecord]
+    do {
+      records = try terminalRecords(
+        transaction.prepared,
+        mirroredTo: cancellationResponder
+      )
     } catch {
       authority.abort(transaction)
-      throw error
+      throw terminalSemanticRejection(
+        error,
+        fallbackSummary: "execution failure failed pre-enqueue projection"
+      )
     }
+    do {
+      try sendTerminalRecords(records, mirrored: cancellationResponder != nil)
+    } catch let error as BrokerRuntimeBatchPreparationError {
+      authority.abort(transaction)
+      throw terminalSemanticRejection(
+        error,
+        fallbackSummary: "execution failure failed broker preflight"
+      )
+    } catch {
+      authority.abort(transaction)
+      broker.failClosed("execution failure transport failed: \(error)")
+      throw RuntimeExecutionTerminalError.transportOrCommitFailure(
+        boundary: .enqueueOrWrite,
+        summary: String(describing: error)
+      )
+    }
+    do {
+      try authority.commit(transaction)
+    } catch {
+      authority.abort(transaction)
+      broker.failClosed("execution failure authority commit failed: \(error)")
+      throw RuntimeExecutionTerminalError.transportOrCommitFailure(
+        boundary: .authorityCommit,
+        summary: String(describing: error)
+      )
+    }
+    completed = true
+    cancellationResponder?.completed = true
   }
 
   func finishApplyStartFailure(_ terminal: RuntimeApplyStartFailureTerminal) throws {
@@ -1916,6 +2072,92 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   private func sendBodies(
     _ bodies: some Sequence<Diskplan_V1_RuntimeEvent.OneOf_Body>
   ) throws {
+    let records = try runtimeRecords(bodies)
+    for record in records {
+      try broker.sendRuntime(
+        requestID: record.requestID,
+        runtimeSessionID: record.runtimeSessionID,
+        body: record.body
+      )
+    }
+    try broker.flush()
+  }
+
+  private func terminalRecords(
+    _ prepared: PreparedRuntimeEmission,
+    mirroredTo cancellationResponder: RuntimeBusinessResponder?
+  ) throws -> [BrokerRuntimeRecord] {
+    guard let cancellationResponder else {
+      return try runtimeRecords(prepared.bodies)
+    }
+    return
+      try cancellationResponder.runtimeRecords(prepared.bodies)
+      + runtimeRecords(prepared.bodies)
+  }
+
+  private func sendTerminalRecords(
+    _ records: [BrokerRuntimeRecord],
+    mirrored: Bool
+  ) throws {
+    if mirrored {
+      try broker.sendRuntimeBatchAwaitingWrite(records)
+      return
+    }
+    for record in records {
+      try broker.sendRuntime(
+        requestID: record.requestID,
+        runtimeSessionID: record.runtimeSessionID,
+        body: record.body
+      )
+    }
+    try broker.flush()
+  }
+
+  private func terminalSemanticRejection(
+    _ error: any Error,
+    fallbackSummary: String
+  ) -> RuntimeExecutionTerminalError {
+    if let authorityError = error as? RuntimeAuthorityError {
+      return .authoritySemanticRejection(
+        code: authorityError.code,
+        summary: authorityError.summary
+      )
+    }
+    if let wireError = error as? SealedRuntimeWireError {
+      let code: Diskplan_V1_RuntimeRejectCode
+      switch wireError {
+      case .countExceeded, .encodedBytesExceeded, .integerOverflow:
+        code = .limitExceeded
+      case .invalid:
+        code = .invalidState
+      }
+      return .authoritySemanticRejection(
+        code: code,
+        summary: "\(fallbackSummary): \(wireError)"
+      )
+    }
+    if let preparationError = error as? BrokerRuntimeBatchPreparationError {
+      let code: Diskplan_V1_RuntimeRejectCode
+      switch preparationError {
+      case .semanticCapacityExceeded, .eventSequenceExhausted:
+        code = .limitExceeded
+      case .serializationFailed:
+        code = .internalError
+      }
+      return .authoritySemanticRejection(
+        code: code,
+        summary: "\(fallbackSummary): \(preparationError)"
+      )
+    }
+    return .authoritySemanticRejection(
+      code: .internalError,
+      summary: "\(fallbackSummary): \(error)"
+    )
+  }
+
+  private func runtimeRecords(
+    _ bodies: some Sequence<Diskplan_V1_RuntimeEvent.OneOf_Body>
+  ) throws -> [BrokerRuntimeRecord] {
     let bodies = Array(bodies)
     var envelopeLengths: [Int] = []
     envelopeLengths.reserveCapacity(bodies.count)
@@ -1932,13 +2174,12 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       envelopeLengths.append(encoded.count)
     }
     try RuntimeEmissionBudget.validateEncodedEnvelopeLengths(envelopeLengths)
-    for body in bodies {
-      try broker.sendRuntime(
+    return bodies.map { body in
+      BrokerRuntimeRecord(
         requestID: requestID,
         runtimeSessionID: runtimeSessionID,
         body: body
       )
     }
-    try broker.flush()
   }
 }

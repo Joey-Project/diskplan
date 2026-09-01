@@ -1219,11 +1219,14 @@ import Testing
   #expect(backend.dryRunCount == 1)
 }
 
-@Test func controllerRequiresProtocol16BeforeBackendMutationPreparation() async throws {
+@Test(arguments: [protocol14Minor, protocol15Minor])
+func controllerRequiresProtocol16BeforeBackendMutationPreparation(
+  negotiatedProtocolMinor: UInt32
+) async throws {
   let backend = RuntimePositiveBackend(waitForCancellation: false)
   let fixture = try runtimePositiveFixture(
     backend: backend,
-    negotiatedProtocolMinor: protocol15Minor
+    negotiatedProtocolMinor: negotiatedProtocolMinor
   )
   defer {
     fixture.controller.stopAndWait()
@@ -1695,6 +1698,147 @@ import Testing
   #expect(throws: (any Error).self) { try fixture.broker.finish() }
 }
 
+@Test func cancellationPrefixMirrorWriteFailureFailsClosedBeforeRunCancellation() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: true)
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  try #require(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == backend.executionID
+    })
+
+  writer.fail(at: .cancellationAcknowledged, occurrence: 2)
+  var cancellation = Diskplan_V1_CancelExecutionRequest()
+  cancellation.requestID = 5
+  cancellation.executionID.value = backend.executionID
+  try #require(fixture.authority.claim(.cancelExecution(cancellation)) == nil)
+  #expect(throws: (any Error).self) {
+    try fixture.controller.handle(
+      .cancelExecution(cancellation),
+      responder: fixture.responder(.cancelExecution(cancellation))
+    )
+  }
+
+  #expect(backend.cancelCount == 0)
+  #expect(backend.tailAwaitCount == 1)
+  #expect(fixture.controller.activeExecutionIDForTesting() == backend.executionID)
+  #expect(fixture.authority.hasActiveRuntimeClaimsForTesting())
+  #expect(fixture.authority.liveApplyReviewIDForTesting() == review.applyReviewID.value)
+  #expect(throws: EventBrokerError.self) { try fixture.broker.flush() }
+
+  let confirmationStream = fixture.output.runtimeEvents().compactMap {
+    event -> Diskplan_V1_ExecutionStreamEvent? in
+    guard event.requestID == confirmation.requestID,
+      case .executionStreamEvent(let stream)? = event.body
+    else { return nil }
+    return stream
+  }
+  let cancellationStream = fixture.output.runtimeEvents().compactMap {
+    event -> Diskplan_V1_ExecutionStreamEvent? in
+    guard event.requestID == cancellation.requestID,
+      case .executionStreamEvent(let stream)? = event.body
+    else { return nil }
+    return stream
+  }
+  #expect(confirmationStream.count == 1)
+  #expect(cancellationStream.count == 2)
+  #expect(
+    cancellationStream.contains { event in
+      if case .cancellationAcknowledged? = event.body { return true }
+      return false
+    })
+
+  fixture.controller.stopAndWait()
+  #expect(backend.cancelCount == 1)
+  #expect(backend.tailAwaitCount == 1)
+  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
+  #expect(throws: EventBrokerError.self) { try fixture.broker.finish() }
+}
+
+@Test func mirroredTerminalWriteFailureAbortsAuthorityAndRequiresTeardown() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: true)
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  try #require(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == backend.executionID
+    })
+
+  writer.fail(at: .applyFinished, occurrence: 2)
+  var cancellation = Diskplan_V1_CancelExecutionRequest()
+  cancellation.requestID = 5
+  cancellation.executionID.value = backend.executionID
+  try #require(fixture.authority.claim(.cancelExecution(cancellation)) == nil)
+  try fixture.controller.handle(
+    .cancelExecution(cancellation),
+    responder: fixture.responder(.cancelExecution(cancellation))
+  )
+
+  #expect(
+    await runtimeEventually {
+      writer.didInjectFailure && backend.cancelCount == 1 && backend.tailAwaitCount == 1
+        && fixture.controller.activeExecutionIDForTesting() == backend.executionID
+        && fixture.authority.hasActiveRuntimeClaimsForTesting()
+    })
+  #expect(fixture.authority.liveApplyReviewIDForTesting() == review.applyReviewID.value)
+  #expect(throws: EventBrokerError.self) { try fixture.broker.flush() }
+
+  let confirmationStream = fixture.output.runtimeEvents().compactMap {
+    event -> Diskplan_V1_ExecutionStreamEvent? in
+    guard event.requestID == confirmation.requestID,
+      case .executionStreamEvent(let stream)? = event.body
+    else { return nil }
+    return stream
+  }
+  let cancellationStream = fixture.output.runtimeEvents().compactMap {
+    event -> Diskplan_V1_ExecutionStreamEvent? in
+    guard event.requestID == cancellation.requestID,
+      case .executionStreamEvent(let stream)? = event.body
+    else { return nil }
+    return stream
+  }
+  #expect(confirmationStream.count == 2)
+  #expect(cancellationStream.count == 3)
+  #expect(
+    !confirmationStream.contains { event in
+      if case .applyFinished? = event.body { return true }
+      return false
+    })
+  #expect(
+    cancellationStream.contains { event in
+      if case .applyFinished? = event.body { return true }
+      return false
+    })
+
+  fixture.controller.stopAndWait()
+  #expect(backend.cancelCount == 1)
+  #expect(backend.tailAwaitCount == 1)
+  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
+  #expect(throws: EventBrokerError.self) { try fixture.broker.finish() }
+}
+
 @Test func lateCancellationCannotRaceFinishingTerminal() async throws {
   let backend = RuntimePositiveBackend(waitForCancellation: false)
   let writer = RuntimePositiveWriter()
@@ -1828,6 +1972,61 @@ private func controllerEmitsSealedExecutionFailureForEveryTailFailure(
     requiredForceWarningActionIDs: review.forceWarningActionIds,
     negotiatedProtocolMinor: protocol16Minor
   )
+  #expect(fixture.authority.liveApplyReviewIDForTesting() == nil)
+}
+
+@Test func controllerConvertsForeignSemanticTailToBackendContractFailure() async throws {
+  let foreignActionID = Data(repeating: 0xee, count: 32)
+  let backend = RuntimePositiveBackend(
+    waitForCancellation: false,
+    foreignTailActionID: foreignActionID
+  )
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+
+  #expect(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == nil
+        && !fixture.authority.hasActiveRuntimeClaimsForTesting()
+        && fixture.output.runtimeEvents().contains { event in
+          guard event.requestID == confirmation.requestID,
+            case .executionStreamEvent(let stream)? = event.body,
+            case .executionStreamFailure? = stream.body
+          else { return false }
+          return true
+        }
+    })
+  let stream = fixture.output.runtimeEvents().compactMap {
+    event -> Diskplan_V1_ExecutionStreamEvent? in
+    guard event.requestID == confirmation.requestID,
+      case .executionStreamEvent(let stream)? = event.body
+    else { return nil }
+    return stream
+  }
+  #expect(stream.count == 2)
+  #expect(
+    !stream.contains { event in
+      guard case .unitStarted(let started)? = event.body else { return false }
+      return started.unit.actionID.value == foreignActionID
+    })
+  guard case .executionStreamFailure(let terminal)? = stream.last?.body else {
+    Issue.record("expected backend-contract execution failure terminal")
+    return
+  }
+  #expect(terminal.kind == .backendContractViolation)
+  #expect(terminal.eventCount == UInt64(stream.count))
+  #expect(backend.cancelCount == 1)
+  #expect(backend.tailAwaitCount == 1)
   #expect(fixture.authority.liveApplyReviewIDForTesting() == nil)
 }
 
@@ -3220,10 +3419,12 @@ private final class RuntimePositiveFixture: @unchecked Sendable {
   }
 }
 
-private enum RuntimePositiveWritePoint: Equatable {
+private enum RuntimePositiveWritePoint: Hashable {
   case applyReview
   case applyStarted
+  case cancellationAcknowledged
   case applyFinished
+  case executionStreamFailure
 }
 
 private enum RuntimePositiveWriterError: Error {
@@ -3236,9 +3437,12 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
 
   private let condition = NSCondition()
   private var failurePoint: RuntimePositiveWritePoint?
+  private var failureOccurrence = 1
+  private var writeCounts: [RuntimePositiveWritePoint: Int] = [:]
   private var blockingPoint: RuntimePositiveWritePoint?
   private var blocked = false
   private var released = false
+  private var injectedFailure = false
   private var observeReviewInstallation = false
   private var observedInstalledReview = false
 
@@ -3248,9 +3452,11 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
     condition.unlock()
   }
 
-  func fail(at point: RuntimePositiveWritePoint) {
+  func fail(at point: RuntimePositiveWritePoint, occurrence: Int = 1) {
+    precondition(occurrence > 0)
     condition.lock()
     failurePoint = point
+    failureOccurrence = occurrence
     condition.unlock()
   }
 
@@ -3283,9 +3489,16 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
     return observedInstalledReview
   }
 
+  var didInjectFailure: Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    return injectedFailure
+  }
+
   func write(_ data: Data) throws {
     let point = Self.writePoint(data)
     condition.lock()
+    if let point { writeCounts[point, default: 0] += 1 }
     if point == .applyReview, observeReviewInstallation {
       observedInstalledReview = controller?.preparedApplyReviewIDForTesting() != nil
     }
@@ -3294,7 +3507,11 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
       condition.broadcast()
       while !released { condition.wait() }
     }
-    let shouldFail = failurePoint.map { point == $0 } ?? false
+    let shouldFail =
+      failurePoint.map {
+        point == $0 && writeCounts[$0] == failureOccurrence
+      } ?? false
+    if shouldFail { injectedFailure = true }
     condition.unlock()
     if shouldFail { throw RuntimePositiveWriterError.injected }
     output.append(data)
@@ -3307,7 +3524,9 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
     if case .applyReviewProjection? = runtimeEvent.body { return .applyReview }
     guard case .executionStreamEvent(let event)? = runtimeEvent.body else { return nil }
     if case .applyStarted? = event.body { return .applyStarted }
+    if case .cancellationAcknowledged? = event.body { return .cancellationAcknowledged }
     if case .applyFinished? = event.body { return .applyFinished }
+    if case .executionStreamFailure? = event.body { return .executionStreamFailure }
     return nil
   }
 }
@@ -3470,6 +3689,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   private let waitForCancellation: Bool
   private let startGate: RuntimePositiveGate?
   private let tailFailure: RuntimeExecutionTailFailure?
+  private let foreignTailActionID: Data?
   private let startFailure: Diskplan_V1_ApplyStartFailureKind?
   private let reviewIDs: [Data]
   private var starts = 0
@@ -3514,6 +3734,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     executionID: Data = Data("positive-execution".utf8),
     startGate: RuntimePositiveGate? = nil,
     tailFailure: RuntimeExecutionTailFailure? = nil,
+    foreignTailActionID: Data? = nil,
     startFailure: Diskplan_V1_ApplyStartFailureKind? = nil,
     reviewIDs: [Data] = [Data("positive-review".utf8)]
   ) {
@@ -3522,6 +3743,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     self.executionID = executionID
     self.startGate = startGate
     self.tailFailure = tailFailure
+    self.foreignTailActionID = foreignTailActionID
     self.startFailure = startFailure
     self.reviewIDs = reviewIDs
   }
@@ -3610,7 +3832,8 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
       review: confirmation.review,
       context: context,
       waitForCancellation: waitForCancellation,
-      tailFailure: tailFailure
+      tailFailure: tailFailure,
+      foreignTailActionID: foreignTailActionID
     )
     lock.withLock { tailSource = source }
     return .started(
@@ -3683,7 +3906,8 @@ private final class RuntimePositiveTailSource: @unchecked Sendable {
     review: Diskplan_V1_ApplyReviewProjection,
     context: RuntimeExecutionPlanContext,
     waitForCancellation: Bool,
-    tailFailure: RuntimeExecutionTailFailure?
+    tailFailure: RuntimeExecutionTailFailure?,
+    foreignTailActionID: Data?
   ) throws {
     released = !waitForCancellation
     var started = Diskplan_V1_ApplyStartedProjection()
@@ -3718,10 +3942,22 @@ private final class RuntimePositiveTailSource: @unchecked Sendable {
     if let tailFailure {
       tail = .failed(tailFailure)
     } else {
+      var remainingEvents: [Diskplan_V1_ExecutionStreamEvent] = []
+      if let foreignTailActionID {
+        var foreignUnit = Diskplan_V1_ExecutionUnitProjection()
+        foreignUnit.actionID.value = foreignTailActionID
+        var unitStarted = Diskplan_V1_UnitStartedProjection()
+        unitStarted.unit = foreignUnit
+        var unitStartedEvent = Diskplan_V1_ExecutionStreamEvent()
+        unitStartedEvent.executionID.value = executionID
+        unitStartedEvent.body = .unitStarted(unitStarted)
+        remainingEvents.append(unitStartedEvent)
+      }
+      remainingEvents.append(terminalEvent)
       tail = .sealed(
         try RuntimeExecutionTail(
           applyStarted: startEvent,
-          remainingEvents: [terminalEvent],
+          remainingEvents: remainingEvents,
           requiredForceWarningActionIDs: review.forceWarningActionIds,
           negotiatedProtocolMinor: context.negotiatedProtocolMinor
         )
