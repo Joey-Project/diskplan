@@ -523,6 +523,27 @@ func unknownRecoverabilitySemanticProofIsStructurallyRequiredAndFailClosed() thr
     Issue.record("operationally unknown recoverability must remain report-only")
     return
   }
+
+  let operationalUnknownWithUnrelatedFact = try refreeze(
+    known,
+    recoverability: .unknown(.incompleteCoverage),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(62))
+    ]
+  )
+  let unrelatedFactEvaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(
+      evidence: operationalUnknownWithUnrelatedFact,
+      globalFacts: globalFacts()
+    )
+  )
+  let unrelatedFactVote = try #require(
+    unrelatedFactEvaluation.votes.first { $0.dimension == .recoverability }
+  )
+  guard case .rejected = unrelatedFactVote.result else {
+    Issue.record("an unrelated review fact must not make operational unknowns waivable")
+    return
+  }
 }
 
 @Test

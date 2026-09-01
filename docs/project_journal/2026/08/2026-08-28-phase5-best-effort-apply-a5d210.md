@@ -315,3 +315,9 @@ superseded_by:
   empty waiver. The successor permits proof-free operational unknowns only as rejected report-only
   evidence, retains stable typed proof for unsupported/public-API unknown waivers, and hardens the
   corpus test against an unchecked index. Dirty Git remains non-stageable and non-executable.
+- Focused review of the first authority-projection fix found that checking only for a nonempty
+  recoverability predicate list could let an unrelated review fact make an operational unknown
+  waivable. The successor branches on the typed unknown reason: only `unsupported` and
+  `unavailableViaPublicAPI`, whose exact stable semantic facts are structurally required, can
+  require waiver; `notRequested`, `budgetExhausted`, `timedOut`, and `incompleteCoverage` remain
+  rejected even when another recoverability fact is present.

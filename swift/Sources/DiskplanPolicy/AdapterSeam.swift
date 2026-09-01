@@ -234,14 +234,18 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
           )
       case .known(.irrecoverable):
         boundRecoverability = .rejected(reasons: recoverabilityReasons + [evidenceReason])
-      case .unknown:
-        boundRecoverability =
-          recoverabilityPredicates.isEmpty
-          ? .rejected(reasons: recoverabilityReasons + [evidenceReason])
-          : .requiresWaiver(
+      case .unknown(let reason):
+        switch reason {
+        case .unsupported, .unavailableViaPublicAPI:
+          boundRecoverability = .requiresWaiver(
             predicates: recoverabilityPredicates,
             reasons: recoverabilityReasons + [evidenceReason]
           )
+        case .notRequested, .budgetExhausted, .timedOut, .incompleteCoverage:
+          boundRecoverability = .rejected(
+            reasons: recoverabilityReasons + [evidenceReason]
+          )
+        }
       case .absent, .unreadable, .failed:
         boundRecoverability = .rejected(reasons: recoverabilityReasons + [evidenceReason])
       }
