@@ -271,6 +271,40 @@ superseded_by:
   passed all 644 tests with output SHA-256
   `6f4c80dd07056f19431717c67bd7c4d2d8335b22e4445a57b586dddd32a9c301`. Every successful
   supervisor verified its process group and ended quiescent.
+- GitHub Foundation run `33535580318`, job `99948960612`, confirmed a remaining
+  full-parallel fixture hang on macOS 26: six RuntimePolicyAuthority tests started without a
+  terminal result. India reproduced it under `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`; the
+  180-second diagnostic supervisor timed out with output SHA-256
+  `66a2cc1608461e27a99de499efb115f4383bcfbd4bfe742a58e30f1be1d0b3e3`, and `sample` showed the
+  only cooperative worker synchronously inside `RuntimeSessionController.stopAndWait()`. The
+  blocking fixture bridge now starts its named Foundation thread synchronously during future
+  construction, every async controller/broker teardown is awaited through that bridge, and the
+  failed-tail race uses an independently running release coordinator instead of relying on a
+  cooperative task to release a lock holder. Production runtime semantics were unchanged. The
+  required macOS 26 Foundation workflow now runs Swift build/test with the strict cooperative pool
+  so this class remains a CI regression gate. On India, the strict EngineCore gate passed 127/127
+  tests (SHA-256 `f66becd3787bf8f1b2b9b685be929c0553405f9d4ad9e64ed752b75af82d1c69`), the strict full
+  Foundation gate passed 644/644 tests (SHA-256
+  `0869435f34f85dd9cb0de12bbaa66a7f612e08573a21d1e4b95402dd67898b70`), and two normal full
+  runs passed 644/644 tests with SHA-256 values
+  `f730b73c15baea79c81fd0494ef9fced8dc8ea68906408dce0866bbb4fe582b9` and
+  `261c9a3474e5741e84125e96da53ae7bb03c137c85f4cc934333b32c08167914`; the final Swift build
+  passed with SHA-256 `28a116b2e7e35eb872e005f13299d5eefab1dbf976ecbf497baec52501a21183`.
+  Every successful supervisor verified its process group and ended quiescent. `actionlint`, the
+  project-journal validator, and `git diff --check` also passed.
+- Final review found that the failed-tail native release coordinator could still wait forever if
+  backend cancellation never became visible. It now uses an executor-independent
+  `ContinuousClock` deadline and a release-once token: success preserves cancel-before-release
+  ordering, while deadline expiry releases the writer exactly once and then throws a typed test
+  failure so structured teardown can join every worker. The strict targeted normal-condition,
+  zero-deadline, and failed-tail races passed 3/3 tests with bounded output SHA-256
+  `bcfa2e696a13e46142e7b7014908b6419a11e187fc5def5972341fc31329dc29`; the final strict full
+  Foundation gate passed 646/646 tests with SHA-256
+  `2d211248d21341ec2257a45c66ef73ba2e4cbb209e99e879b1c46bf157dc7cf4`. A normal full run passed
+  646/646 tests with SHA-256 `802dd7fde6477dca2f2d13d50fa34ee180fa5d5734a53da5a501686eff1efcae`,
+  and the Swift build passed with SHA-256
+  `ae17cf238f1453e91ff3908046cfcb301b936cca7bb0a6b732874d81e0e28977`. Every supervisor verified
+  its process group and ended quiescent; strict Swift formatting and `actionlint` passed.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races. Bridge
