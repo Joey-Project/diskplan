@@ -18,9 +18,10 @@ pub use model::{
 };
 pub use runtime::{
     DecisionOverlay, EngineApplyReviewSnapshot, EngineOverlaySnapshot, EnginePlanSnapshot,
-    ExecutionPreviewProjection, ExecutionStatusProjection, ExecutionUnitProjection,
-    ExecutionWarningProjection, OverlayStageEdit, OverlayStageResult, PlanIntent, PlanIntentKind,
-    PlanProjectionAdapter, PlanRuntime, PlanRuntimeError, PlanRuntimeEvent, PlanView,
+    ExecutionCancelBinding, ExecutionPreviewProjection, ExecutionStatusProjection,
+    ExecutionUnitProjection, ExecutionWarningProjection, OverlayStageEdit, OverlayStageResult,
+    PlanIntent, PlanIntentKind, PlanProjectionAdapter, PlanRuntime, PlanRuntimeError,
+    PlanRuntimeEvent, PlanView,
 };
 pub use types::{
     ActionId, ActionKindId, ActionKindProjection, ActionProjection, Activity, BlockerId,

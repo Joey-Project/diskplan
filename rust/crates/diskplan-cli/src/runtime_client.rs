@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 
 use diskplan_proto::diskplan::v1::{
     ApplyReviewProjection, BatchSelectionPreset, DecisionEditKind, DecisionOverlayAcknowledged,
-    DecisionOverlayEdit, DecisionOverlayEditRequest, DecisionOverlayRejected, Digest256,
-    DryRunProjection, OpaqueIdentifier, PlanProjectionManifest, PrepareApplyReviewRequest,
-    PrepareDryRunRequest, RuntimeRejectCode, RuntimeRejected, decision_overlay_edit, runtime_event,
+    DecisionOverlayEdit, DecisionOverlayEditRequest, DecisionOverlayRejectCode,
+    DecisionOverlayRejected, Digest256, DryRunProjection, OpaqueIdentifier, PlanProjectionManifest,
+    PrepareApplyReviewRequest, PrepareDryRunRequest, RuntimeRejectCode, RuntimeRejected,
+    decision_overlay_edit, runtime_event,
 };
 use diskplan_proto::runtime::{
     MAXIMUM_PLAN_PROJECTION_MANIFEST_BYTES, MAXIMUM_PLAN_PROJECTION_RAW_BYTES,
@@ -16,6 +17,8 @@ use prost::Message;
 use thiserror::Error;
 
 use crate::{ClientError, EngineSession, SessionEvent};
+
+const MAXIMUM_PENDING_ROUTED_EVENTS: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum RuntimeClientError {
@@ -36,6 +39,28 @@ pub enum RuntimeClientError {
 }
 
 impl RuntimeClientError {
+    pub fn is_recoverable_operation_rejection(&self) -> bool {
+        match self {
+            Self::Rejected { code, .. } => matches!(
+                RuntimeRejectCode::try_from(*code).ok(),
+                Some(
+                    RuntimeRejectCode::CapabilityNotNegotiated
+                        | RuntimeRejectCode::BusinessUnsupported
+                        | RuntimeRejectCode::InvalidState
+                        | RuntimeRejectCode::StaleBinding
+                )
+            ),
+            Self::OverlayRejected { code, .. } => matches!(
+                DecisionOverlayRejectCode::try_from(*code).ok(),
+                Some(
+                    DecisionOverlayRejectCode::UnknownProjection
+                        | DecisionOverlayRejectCode::StaleRevision
+                )
+            ),
+            _ => false,
+        }
+    }
+
     pub fn is_unavailable(&self) -> bool {
         matches!(
             self,
@@ -174,6 +199,35 @@ pub fn edit_overlay(
     predecessor: Option<&DecisionOverlayAcknowledged>,
     chain: &mut RuntimeChainVerifier,
 ) -> Result<DecisionOverlayAcknowledged, RuntimeClientError> {
+    let mut pending = Vec::new();
+    let result = edit_overlay_routed(
+        session,
+        request_id,
+        projection_id,
+        base_revision,
+        edits,
+        predecessor,
+        chain,
+        &mut pending,
+    );
+    if pending.is_empty() {
+        result
+    } else {
+        Err(RuntimeClientError::Unexpected("decision overlay"))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn edit_overlay_routed(
+    session: &mut EngineSession,
+    request_id: u64,
+    projection_id: diskplan_proto::diskplan::v1::OpaqueIdentifier,
+    base_revision: u64,
+    edits: Vec<DecisionOverlayEdit>,
+    predecessor: Option<&DecisionOverlayAcknowledged>,
+    chain: &mut RuntimeChainVerifier,
+    pending: &mut Vec<SessionEvent>,
+) -> Result<DecisionOverlayAcknowledged, RuntimeClientError> {
     validate_overlay_predecessor(base_revision, predecessor)?;
     session.send_decision_overlay_edit_request(DecisionOverlayEditRequest {
         request_id,
@@ -181,7 +235,7 @@ pub fn edit_overlay(
         base_revision,
         edits: edits.clone(),
     })?;
-    let event = runtime_event_for_request(session, request_id, "decision overlay")?;
+    let event = runtime_event_for_request_routed(session, request_id, pending)?;
     match event.body {
         Some(runtime_event::Body::DecisionOverlayAcknowledged(overlay)) => {
             verify_overlay_transition(base_revision, &edits, predecessor, &overlay)?;
@@ -376,9 +430,24 @@ pub fn prepare_dry_run(
     request: PrepareDryRunRequest,
     chain: &RuntimeChainVerifier,
 ) -> Result<VerifiedDryRunProjection, RuntimeClientError> {
+    let mut pending = Vec::new();
+    let result = prepare_dry_run_routed(session, request, chain, &mut pending);
+    if pending.is_empty() {
+        result
+    } else {
+        Err(RuntimeClientError::Unexpected("dry-run"))
+    }
+}
+
+pub fn prepare_dry_run_routed(
+    session: &mut EngineSession,
+    request: PrepareDryRunRequest,
+    chain: &RuntimeChainVerifier,
+    pending: &mut Vec<SessionEvent>,
+) -> Result<VerifiedDryRunProjection, RuntimeClientError> {
     let request_id = request.request_id;
     session.send_prepare_dry_run_request(request)?;
-    let event = runtime_event_for_request(session, request_id, "dry-run")?;
+    let event = runtime_event_for_request_routed(session, request_id, pending)?;
     match event.body {
         Some(runtime_event::Body::DryRunProjection(projection)) => {
             verify_dry_run(chain, projection)
@@ -393,9 +462,24 @@ pub fn prepare_apply_review(
     request: PrepareApplyReviewRequest,
     chain: &mut RuntimeChainVerifier,
 ) -> Result<ApplyReviewProjection, RuntimeClientError> {
+    let mut pending = Vec::new();
+    let result = prepare_apply_review_routed(session, request, chain, &mut pending);
+    if pending.is_empty() {
+        result
+    } else {
+        Err(RuntimeClientError::Unexpected("apply review"))
+    }
+}
+
+pub fn prepare_apply_review_routed(
+    session: &mut EngineSession,
+    request: PrepareApplyReviewRequest,
+    chain: &mut RuntimeChainVerifier,
+    pending: &mut Vec<SessionEvent>,
+) -> Result<ApplyReviewProjection, RuntimeClientError> {
     let request_id = request.request_id;
     session.send_prepare_apply_review_request(request)?;
-    let event = runtime_event_for_request(session, request_id, "apply review")?;
+    let event = runtime_event_for_request_routed(session, request_id, pending)?;
     match event.body {
         Some(runtime_event::Body::ApplyReviewProjection(projection)) => chain
             .verify_apply_review(&projection.encode_to_vec())
@@ -425,6 +509,37 @@ fn runtime_event_for_request(
     }
 }
 
+fn runtime_event_for_request_routed(
+    session: &mut EngineSession,
+    request_id: u64,
+    pending: &mut Vec<SessionEvent>,
+) -> Result<diskplan_proto::diskplan::v1::RuntimeEvent, RuntimeClientError> {
+    loop {
+        if let Some(event) =
+            route_session_event(session.read_session_event()?, request_id, pending)?
+        {
+            return Ok(event);
+        }
+    }
+}
+
+fn route_session_event(
+    event: SessionEvent,
+    request_id: u64,
+    pending: &mut Vec<SessionEvent>,
+) -> Result<Option<diskplan_proto::diskplan::v1::RuntimeEvent>, RuntimeClientError> {
+    match event {
+        SessionEvent::Runtime(event) if event.request_id == request_id => Ok(Some(event)),
+        event => {
+            if pending.len() >= MAXIMUM_PENDING_ROUTED_EVENTS {
+                return Err(RuntimeClientError::Limit("pending routed events"));
+            }
+            pending.push(event);
+            Ok(None)
+        }
+    }
+}
+
 fn runtime_rejected(rejected: RuntimeRejected) -> RuntimeClientError {
     RuntimeClientError::Rejected {
         code: rejected.code,
@@ -442,7 +557,7 @@ fn overlay_rejected(rejected: DecisionOverlayRejected) -> RuntimeClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diskplan_proto::diskplan::v1::StageActionEdit;
+    use diskplan_proto::diskplan::v1::{PlanProjectionInvalidated, RuntimeEvent, StageActionEdit};
 
     fn opaque(value: impl AsRef<[u8]>) -> OpaqueIdentifier {
         OpaqueIdentifier {
@@ -572,5 +687,131 @@ mod tests {
             .permits_agent_fallback()
         );
         assert!(!RuntimeClientError::Binding("mismatch").permits_agent_fallback());
+    }
+
+    #[test]
+    fn only_exact_stale_or_unavailable_operation_rejections_are_recoverable() {
+        for code in [
+            RuntimeRejectCode::Unspecified,
+            RuntimeRejectCode::CapabilityNotNegotiated,
+            RuntimeRejectCode::InvalidState,
+            RuntimeRejectCode::UnknownProjection,
+            RuntimeRejectCode::StaleBinding,
+            RuntimeRejectCode::LimitExceeded,
+            RuntimeRejectCode::RevalidationFailed,
+            RuntimeRejectCode::ConfirmationMismatch,
+            RuntimeRejectCode::InternalError,
+            RuntimeRejectCode::BusinessUnsupported,
+            RuntimeRejectCode::MalformedRequest,
+            RuntimeRejectCode::DuplicateRequestId,
+        ] {
+            let expected = matches!(
+                code,
+                RuntimeRejectCode::CapabilityNotNegotiated
+                    | RuntimeRejectCode::BusinessUnsupported
+                    | RuntimeRejectCode::InvalidState
+                    | RuntimeRejectCode::StaleBinding
+            );
+            assert_eq!(
+                RuntimeClientError::Rejected {
+                    code: code as i32,
+                    summary: code.as_str_name().into(),
+                }
+                .is_recoverable_operation_rejection(),
+                expected,
+                "unexpected recovery classification for {code:?}"
+            );
+        }
+        assert!(
+            !RuntimeClientError::Rejected {
+                code: i32::MAX,
+                summary: "unknown runtime code".into(),
+            }
+            .is_recoverable_operation_rejection()
+        );
+
+        for code in [
+            DecisionOverlayRejectCode::Unspecified,
+            DecisionOverlayRejectCode::UnknownProjection,
+            DecisionOverlayRejectCode::StaleRevision,
+            DecisionOverlayRejectCode::UnknownAction,
+            DecisionOverlayRejectCode::ActionNotStageable,
+            DecisionOverlayRejectCode::UnknownWaiver,
+            DecisionOverlayRejectCode::WaiverNotAllowed,
+            DecisionOverlayRejectCode::InvalidReason,
+            DecisionOverlayRejectCode::LimitExceeded,
+            DecisionOverlayRejectCode::InvalidEdit,
+            DecisionOverlayRejectCode::InternalError,
+        ] {
+            let expected = matches!(
+                code,
+                DecisionOverlayRejectCode::UnknownProjection
+                    | DecisionOverlayRejectCode::StaleRevision
+            );
+            assert_eq!(
+                RuntimeClientError::OverlayRejected {
+                    code: code as i32,
+                    summary: code.as_str_name().into(),
+                }
+                .is_recoverable_operation_rejection(),
+                expected,
+                "unexpected recovery classification for {code:?}"
+            );
+        }
+        assert!(
+            !RuntimeClientError::OverlayRejected {
+                code: i32::MAX,
+                summary: "unknown overlay code".into(),
+            }
+            .is_recoverable_operation_rejection()
+        );
+    }
+
+    #[test]
+    fn routed_response_preserves_prior_invalidation_before_typed_stale_rejection() {
+        let mut pending = Vec::new();
+        let invalidation = RuntimeEvent {
+            request_id: 4,
+            body: Some(runtime_event::Body::PlanProjectionInvalidated(
+                PlanProjectionInvalidated::default(),
+            )),
+            ..Default::default()
+        };
+        assert!(
+            route_session_event(SessionEvent::Runtime(invalidation.clone()), 8, &mut pending)
+                .unwrap()
+                .is_none()
+        );
+        let rejection = RuntimeEvent {
+            request_id: 8,
+            body: Some(runtime_event::Body::RuntimeRejected(RuntimeRejected {
+                code: RuntimeRejectCode::StaleBinding as i32,
+                summary: "plan invalidated before response".into(),
+            })),
+            ..Default::default()
+        };
+        let routed = route_session_event(SessionEvent::Runtime(rejection), 8, &mut pending)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            routed.body,
+            Some(runtime_event::Body::RuntimeRejected(RuntimeRejected {
+                code,
+                ..
+            })) if code == RuntimeRejectCode::StaleBinding as i32
+        ));
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            &pending[0],
+            SessionEvent::Runtime(event) if event == &invalidation
+        ));
+
+        let mut full = (0..MAXIMUM_PENDING_ROUTED_EVENTS)
+            .map(|_| SessionEvent::Runtime(invalidation.clone()))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            route_session_event(SessionEvent::Runtime(invalidation), 8, &mut full),
+            Err(RuntimeClientError::Limit("pending routed events"))
+        ));
     }
 }

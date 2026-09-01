@@ -12,13 +12,16 @@ use diskplan_proto::diskplan::v1::{
     engine_event, envelope, execution_stream_event, runtime_event,
 };
 use diskplan_proto::runtime::PROTOCOL16_MINOR;
-use diskplan_proto::sealed::RuntimeChainVerifier;
+use diskplan_proto::sealed::{
+    MAXIMUM_EXECUTION_ENCODED_BYTES, MAXIMUM_EXECUTION_EVENT_COUNT, RuntimeChainVerifier,
+};
 use diskplan_proto::{CanonicalEnvelopeReceipt, decode_canonical_envelope};
 use prost::Message;
+use sha2::{Digest as ShaDigest, Sha256};
 
 use crate::runtime_client::{
-    PlanScanBinding, RuntimeClientError, edit_overlay, prepare_apply_review, prepare_dry_run,
-    receive_plan,
+    PlanScanBinding, RuntimeClientError, edit_overlay_routed, prepare_apply_review_routed,
+    prepare_dry_run_routed, receive_plan,
 };
 use crate::tui::InteractiveRuntimeOptions;
 use crate::{BoundEngine, ClientError, EngineSession, SessionEvent};
@@ -26,9 +29,10 @@ use crate::{BoundEngine, ClientError, EngineSession, SessionEvent};
 use super::event::{EngineEventIngress, EngineEventStream, engine_event_channel};
 use super::model::{ControlCommand, PlanCommand};
 use super::plan::{
-    ActionId, EngineApplyReviewSnapshot, EngineOverlaySnapshot, ExecutionPreviewProjection,
-    ExecutionStatusProjection, ExecutionUnitId, ExecutionUnitProjection, ExecutionWarningId,
-    ExecutionWarningProjection, PlanId, PlanIntentKind, PlanRuntimeEvent, snapshot_from_verified,
+    ActionId, EngineApplyReviewSnapshot, EngineOverlaySnapshot, ExecutionCancelBinding,
+    ExecutionPreviewProjection, ExecutionStatusProjection, ExecutionUnitId,
+    ExecutionUnitProjection, ExecutionWarningId, ExecutionWarningProjection, PlanId, PlanIntent,
+    PlanIntentKind, PlanRuntimeEvent, snapshot_from_verified,
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -165,47 +169,7 @@ fn run_engine(
         }
 
         match session.read_session_event_with_timeout(EVENT_POLL_INTERVAL) {
-            Ok(SessionEvent::Scan(mut event)) => {
-                let plan_source = match event.body.as_ref() {
-                    Some(engine_event::Body::ScanFinalized(finalized)) => Some((
-                        event.scan_session_id.clone(),
-                        finalized.checkpoint.clone(),
-                        finalized.manifest.clone(),
-                        false,
-                    )),
-                    Some(engine_event::Body::ScanCheckpointReady(ready))
-                        if ready
-                            .checkpoint
-                            .as_ref()
-                            .is_some_and(|checkpoint| checkpoint.provisional) =>
-                    {
-                        Some((
-                            event.scan_session_id.clone(),
-                            ready.checkpoint.clone(),
-                            ready.manifest.clone(),
-                            true,
-                        ))
-                    }
-                    _ => None,
-                };
-                runtime.project_control_request_id(&mut event);
-                if events.send_engine_event(event).is_err() {
-                    return session.shutdown();
-                }
-                if let Some((scan_session_id, checkpoint, manifest, provisional)) = plan_source {
-                    runtime.build_plan(
-                        &mut session,
-                        events,
-                        scan_session_id,
-                        checkpoint.as_ref(),
-                        manifest.as_ref(),
-                        provisional,
-                    )?;
-                }
-            }
-            Ok(SessionEvent::Runtime(event)) => {
-                runtime.handle_unsolicited_runtime(&mut session, events, event)?
-            }
+            Ok(event) => runtime.handle_session_event(&mut session, events, event)?,
             Err(ClientError::Timeout {
                 phase: "session event",
                 ..
@@ -243,10 +207,23 @@ struct PlanAuthority {
 struct ExecutionAuthority {
     confirm_request_id: u64,
     confirm_envelope: CanonicalEnvelopeReceipt,
-    cancel_request_id: Option<u64>,
+    cancel: Option<CancelMirrorAuthority>,
     execution_id: Option<Vec<u8>>,
     canonical_events: Vec<Vec<u8>>,
+    canonical_event_count: u64,
+    canonical_event_bytes: u64,
+    canonical_digest: Sha256,
     cancel_requested: bool,
+    pending_terminal: Option<ExecutionStatusProjection>,
+}
+
+struct CancelMirrorAuthority {
+    request_id: u64,
+    event_count: u64,
+    encoded_bytes: u64,
+    digest: Sha256,
+    acknowledgement_seen: bool,
+    terminal_seen: bool,
 }
 
 struct DriverRuntime {
@@ -255,7 +232,6 @@ struct DriverRuntime {
     capabilities: Vec<String>,
     agent_mode: crate::batch::PlanningAgentMode,
     control_request_ids: BTreeMap<u64, u64>,
-    retired_cancel_request_ids: BTreeSet<u64>,
     plan: Option<PlanAuthority>,
 }
 
@@ -273,7 +249,6 @@ impl DriverRuntime {
             capabilities: session.accepted().negotiated_capabilities.clone(),
             agent_mode,
             control_request_ids,
-            retired_cancel_request_ids: BTreeSet::new(),
             plan: None,
         }
     }
@@ -316,6 +291,51 @@ impl DriverRuntime {
         self.capabilities.iter().any(|value| value == capability)
     }
 
+    fn handle_session_event(
+        &mut self,
+        session: &mut EngineSession,
+        events: &EngineEventIngress,
+        event: SessionEvent,
+    ) -> Result<(), ClientError> {
+        match event {
+            SessionEvent::Scan(mut event) => {
+                let plan_source = match event.body.as_ref() {
+                    Some(engine_event::Body::ScanFinalized(finalized)) => Some((
+                        event.scan_session_id.clone(),
+                        finalized.checkpoint.clone(),
+                        finalized.manifest.clone(),
+                    )),
+                    _ => None,
+                };
+                self.project_control_request_id(&mut event);
+                events.send_engine_event(event).map_err(ClientError::Io)?;
+                if let Some((scan_session_id, checkpoint, manifest)) = plan_source {
+                    self.build_plan(
+                        session,
+                        events,
+                        scan_session_id,
+                        checkpoint.as_ref(),
+                        manifest.as_ref(),
+                    )?;
+                }
+                Ok(())
+            }
+            SessionEvent::Runtime(event) => self.handle_unsolicited_runtime(session, events, event),
+        }
+    }
+
+    fn replay_pending_events(
+        &mut self,
+        session: &mut EngineSession,
+        events: &EngineEventIngress,
+        pending: Vec<SessionEvent>,
+    ) -> Result<(), ClientError> {
+        for event in pending {
+            self.handle_session_event(session, events, event)?;
+        }
+        Ok(())
+    }
+
     fn build_plan(
         &mut self,
         session: &mut EngineSession,
@@ -323,7 +343,6 @@ impl DriverRuntime {
         scan_session_id: String,
         checkpoint: Option<&diskplan_proto::diskplan::v1::ScanCheckpointEvidence>,
         manifest: Option<&diskplan_proto::diskplan::v1::ScanCheckpointManifest>,
-        provisional: bool,
     ) -> Result<(), ClientError> {
         if !self.has_capability("plan-projection-v1") {
             return events
@@ -342,10 +361,9 @@ impl DriverRuntime {
         let machine_state = ScanMachineState::try_from(checkpoint.machine_state).map_err(|_| {
             ClientError::InvalidRuntimeStream("finalized scan has unknown state".into())
         })?;
-        let allow_partial_evidence = match (provisional, machine_state) {
-            (true, ScanMachineState::Scanning) => true,
-            (false, ScanMachineState::Complete) => false,
-            (false, ScanMachineState::Partial) => true,
+        let allow_partial_evidence = match machine_state {
+            ScanMachineState::Complete => false,
+            ScanMachineState::Partial => true,
             _ => return Ok(()),
         };
         let plan_scan_binding = PlanScanBinding {
@@ -386,7 +404,7 @@ impl DriverRuntime {
                 Err(error) => return Err(runtime_error(error)),
             }
         };
-        let snapshot = snapshot_from_verified(receipt.projection(), provisional)
+        let snapshot = snapshot_from_verified(receipt.projection(), false)
             .map_err(|error| ClientError::InvalidRuntimeStream(error.to_string()))?;
         let projection_id = receipt
             .projection()
@@ -421,52 +439,75 @@ impl DriverRuntime {
         command: PlanCommand,
     ) -> Result<(), ClientError> {
         match command {
-            PlanCommand::EditStage(edit) => {
+            PlanCommand::EditStage(visible_edit) => {
                 if !self.has_capability("decision-overlay-v1") {
                     return send_rejection(events, "overlay edit", "capability was not negotiated");
                 }
-                let request_id = self.reserve_request_id()?;
-                let plan = self.plan.as_mut().ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream("overlay edit has no plan".into())
-                })?;
-                let expected_revision = plan.overlay.as_ref().map_or(0, |value| value.revision);
-                if edit.base_revision() != expected_revision {
-                    return Err(ClientError::InvalidRuntimeStream(
-                        "overlay edit base revision is stale".into(),
-                    ));
+                if !self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| overlay_stage_edit_matches(plan, &visible_edit))
+                {
+                    return send_rejection(
+                        events,
+                        "overlay edit",
+                        "stale UI plan or overlay was not edited",
+                    );
                 }
-                let action_id = decode_action_id(edit.action_id())?;
+                let request_id = self.reserve_request_id()?;
+                let action_id = decode_action_id(visible_edit.action_id())?;
                 let edit_body = StageActionEdit {
                     action_id: Some(opaque(&action_id)),
                 };
-                let edit = DecisionOverlayEdit {
-                    kind: if edit.stage() {
+                let wire_edit = DecisionOverlayEdit {
+                    kind: if visible_edit.stage() {
                         DecisionEditKind::StageAction as i32
                     } else {
                         DecisionEditKind::UnstageAction as i32
                     },
-                    edit: Some(if edit.stage() {
+                    edit: Some(if visible_edit.stage() {
                         decision_overlay_edit::Edit::StageAction(edit_body)
                     } else {
                         decision_overlay_edit::Edit::UnstageAction(edit_body)
                     }),
                 };
-                let predecessor = plan.overlay.clone();
-                let acknowledged = match edit_overlay(
-                    session,
-                    request_id,
-                    plan.projection_id.clone(),
-                    expected_revision,
-                    vec![edit],
-                    predecessor.as_ref(),
-                    &mut plan.chain,
-                ) {
+                let mut pending = Vec::new();
+                let result = {
+                    let plan = self.plan.as_mut().expect("matching edit retains plan");
+                    let expected_revision = plan.overlay.as_ref().map_or(0, |value| value.revision);
+                    debug_assert_eq!(visible_edit.base_revision(), expected_revision);
+                    let predecessor = plan.overlay.clone();
+                    edit_overlay_routed(
+                        session,
+                        request_id,
+                        plan.projection_id.clone(),
+                        expected_revision,
+                        vec![wire_edit],
+                        predecessor.as_ref(),
+                        &mut plan.chain,
+                        &mut pending,
+                    )
+                };
+                self.replay_pending_events(session, events, pending)?;
+                let acknowledged = match result {
                     Ok(value) => value,
-                    Err(error) if error.is_unavailable() => {
+                    Err(error) if error.is_recoverable_operation_rejection() => {
                         return send_rejection(events, "overlay edit", &error.to_string());
                     }
                     Err(error) => return Err(runtime_error(error)),
                 };
+                if !self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| overlay_stage_edit_matches(plan, &visible_edit))
+                {
+                    return send_rejection(
+                        events,
+                        "overlay edit",
+                        "plan changed before the overlay acknowledgement was committed",
+                    );
+                }
+                let plan = self.plan.as_mut().expect("rechecked edit retains plan");
                 let snapshot = overlay_snapshot(plan, &acknowledged)?;
                 plan.overlay = Some(acknowledged);
                 plan.review = None;
@@ -475,34 +516,61 @@ impl DriverRuntime {
                     .send_plan_event(PlanRuntimeEvent::OverlayAcknowledged(snapshot))
                     .map_err(ClientError::Io)
             }
-            PlanCommand::Prepare(PlanIntentKind::DryRun) => {
+            PlanCommand::Prepare(intent) if intent.kind() == PlanIntentKind::DryRun => {
                 if !self.has_capability("dry-run-projection-v1") {
                     return send_rejection(events, "dry-run", "capability was not negotiated");
                 }
+                if !self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan_intent_matches(plan, &intent))
+                {
+                    return send_rejection(
+                        events,
+                        "dry-run",
+                        "stale UI plan or overlay was not dry-run",
+                    );
+                }
                 let request_id = self.reserve_request_id()?;
-                let plan = self.plan.as_ref().ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream("dry-run has no plan".into())
-                })?;
-                let overlay = plan.overlay.as_ref().ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream("dry-run has no acknowledged overlay".into())
-                })?;
-                let receipt = match prepare_dry_run(
-                    session,
-                    PrepareDryRunRequest {
-                        request_id,
-                        projection_id: overlay.projection_id.clone(),
-                        overlay_revision: overlay.revision,
-                        overlay_sha256: overlay.overlay_sha256.clone(),
-                        overlay_id: overlay.overlay_id.clone(),
-                    },
-                    &plan.chain,
-                ) {
+                let mut pending = Vec::new();
+                let result = {
+                    let plan = self.plan.as_ref().expect("matching dry-run retains plan");
+                    let overlay = plan
+                        .overlay
+                        .as_ref()
+                        .expect("matching dry-run retains overlay");
+                    prepare_dry_run_routed(
+                        session,
+                        PrepareDryRunRequest {
+                            request_id,
+                            projection_id: overlay.projection_id.clone(),
+                            overlay_revision: overlay.revision,
+                            overlay_sha256: overlay.overlay_sha256.clone(),
+                            overlay_id: overlay.overlay_id.clone(),
+                        },
+                        &plan.chain,
+                        &mut pending,
+                    )
+                };
+                self.replay_pending_events(session, events, pending)?;
+                let receipt = match result {
                     Ok(value) => value,
-                    Err(error) if error.is_unavailable() => {
+                    Err(error) if error.is_recoverable_operation_rejection() => {
                         return send_rejection(events, "dry-run", &error.to_string());
                     }
                     Err(error) => return Err(runtime_error(error)),
                 };
+                if !self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan_intent_matches(plan, &intent))
+                {
+                    return send_rejection(
+                        events,
+                        "dry-run",
+                        "plan changed before the dry-run result was committed",
+                    );
+                }
                 events
                     .send_plan_event(PlanRuntimeEvent::DryRunReady {
                         current: receipt.manifest().current,
@@ -511,42 +579,72 @@ impl DriverRuntime {
                     })
                     .map_err(ClientError::Io)
             }
-            PlanCommand::Prepare(PlanIntentKind::ApplyReview) => {
+            PlanCommand::Prepare(intent) if intent.kind() == PlanIntentKind::ApplyReview => {
                 if let Err(reason) = validate_apply_review_transport(
                     self.selected_minor,
                     self.has_capability(EXECUTION_STREAM_CAPABILITY),
                 ) {
                     return send_rejection(events, "apply review", reason);
                 }
+                if !self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan_intent_matches(plan, &intent))
+                {
+                    return send_rejection(
+                        events,
+                        "apply review",
+                        "stale UI plan or overlay was not reviewed",
+                    );
+                }
                 let request_id = self.reserve_request_id()?;
-                let plan = self.plan.as_mut().ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream("apply review has no plan".into())
-                })?;
-                if plan.execution.is_some() {
+                if self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.execution.is_some())
+                {
                     return send_rejection(events, "apply review", "execution is already active");
                 }
-                let overlay = plan.overlay.as_ref().ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream(
-                        "apply review has no acknowledged overlay".into(),
+                let mut pending = Vec::new();
+                let result = {
+                    let plan = self.plan.as_mut().expect("matching review retains plan");
+                    let overlay = plan
+                        .overlay
+                        .as_ref()
+                        .expect("matching review retains overlay");
+                    prepare_apply_review_routed(
+                        session,
+                        PrepareApplyReviewRequest {
+                            request_id,
+                            projection_id: overlay.projection_id.clone(),
+                            overlay_revision: overlay.revision,
+                            overlay_sha256: overlay.overlay_sha256.clone(),
+                            overlay_id: overlay.overlay_id.clone(),
+                        },
+                        &mut plan.chain,
+                        &mut pending,
                     )
-                })?;
-                let review = match prepare_apply_review(
-                    session,
-                    PrepareApplyReviewRequest {
-                        request_id,
-                        projection_id: overlay.projection_id.clone(),
-                        overlay_revision: overlay.revision,
-                        overlay_sha256: overlay.overlay_sha256.clone(),
-                        overlay_id: overlay.overlay_id.clone(),
-                    },
-                    &mut plan.chain,
-                ) {
+                };
+                self.replay_pending_events(session, events, pending)?;
+                let review = match result {
                     Ok(value) => value,
-                    Err(error) if error.is_unavailable() => {
+                    Err(error) if error.is_recoverable_operation_rejection() => {
                         return send_rejection(events, "apply review", &error.to_string());
                     }
                     Err(error) => return Err(runtime_error(error)),
                 };
+                if !self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan_intent_matches(plan, &intent))
+                {
+                    return send_rejection(
+                        events,
+                        "apply review",
+                        "plan changed before the apply review was committed",
+                    );
+                }
+                let plan = self.plan.as_mut().expect("rechecked review retains plan");
                 let (review_snapshot, preview) = apply_review_snapshot(plan, &review)?;
                 plan.review = Some(review);
                 events
@@ -556,17 +654,27 @@ impl DriverRuntime {
                     })
                     .map_err(ClientError::Io)
             }
-            PlanCommand::ConfirmApply => {
-                let request_id = self.reserve_request_id()?;
-                let plan = self.plan.as_mut().ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream("confirm apply has no plan".into())
-                })?;
-                if plan.execution.is_some() {
-                    return send_rejection(events, "confirm apply", "execution is already active");
+            PlanCommand::ConfirmApply(visible_review) => {
+                let review_matches = self.plan.as_ref().is_some_and(|plan| {
+                    plan.execution.is_none()
+                        && plan.review.as_ref().is_some_and(|review| {
+                            apply_review_snapshot(plan, review)
+                                .map(|(snapshot, _)| {
+                                    exact_review_binding_matches(&snapshot, &visible_review)
+                                })
+                                .unwrap_or(false)
+                        })
+                });
+                if !review_matches {
+                    return send_rejection(
+                        events,
+                        "confirm apply",
+                        "stale or replaced UI review was not confirmed",
+                    );
                 }
-                let review = plan.review.as_ref().ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream("confirm apply has no visible review".into())
-                })?;
+                let request_id = self.reserve_request_id()?;
+                let plan = self.plan.as_mut().expect("matching review retains plan");
+                let review = plan.review.as_ref().expect("matching review remains live");
                 let confirm = ConfirmApplyRequest {
                     request_id,
                     apply_review_id: review.apply_review_id.clone(),
@@ -581,14 +689,19 @@ impl DriverRuntime {
                 plan.execution = Some(ExecutionAuthority {
                     confirm_request_id: request_id,
                     confirm_envelope,
-                    cancel_request_id: None,
+                    cancel: None,
                     execution_id: None,
                     canonical_events: Vec::new(),
+                    canonical_event_count: 0,
+                    canonical_event_bytes: 0,
+                    canonical_digest: Sha256::new(),
                     cancel_requested: false,
+                    pending_terminal: None,
                 });
                 events
                     .send_plan_event(PlanRuntimeEvent::ExecutionStatus(
                         ExecutionStatusProjection {
+                            authority_generation: request_id,
                             execution_id: None,
                             event_count: 0,
                             summary: "Apply confirmed; waiting for ApplyStarted".into(),
@@ -599,31 +712,55 @@ impl DriverRuntime {
                     ))
                     .map_err(ClientError::Io)
             }
-            PlanCommand::DismissApplyReview => {
-                let plan = self.plan.as_mut().ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream("dismiss review has no plan".into())
-                })?;
-                if plan.execution.is_some() {
-                    return send_rejection(events, "dismiss review", "execution is already active");
+            PlanCommand::DismissApplyReview(visible_review) => {
+                let review_matches = self.plan.as_ref().is_some_and(|plan| {
+                    plan.execution.is_none()
+                        && plan.review.as_ref().is_some_and(|review| {
+                            apply_review_snapshot(plan, review)
+                                .map(|(snapshot, _)| {
+                                    exact_review_binding_matches(&snapshot, &visible_review)
+                                })
+                                .unwrap_or(false)
+                        })
+                });
+                if !review_matches {
+                    return send_rejection(
+                        events,
+                        "dismiss apply review",
+                        "stale or replaced UI review was not dismissed",
+                    );
                 }
+                let plan = self.plan.as_mut().expect("matching dismiss retains plan");
                 plan.review = None;
                 events
                     .send_plan_event(PlanRuntimeEvent::ApplyReviewDismissed)
                     .map_err(ClientError::Io)
             }
-            PlanCommand::CancelExecution => {
-                let (execution_id, event_count) = {
-                    let plan = self.plan.as_mut().ok_or_else(|| {
-                        ClientError::InvalidRuntimeStream("cancel has no plan".into())
-                    })?;
-                    let execution = plan.execution.as_mut().ok_or_else(|| {
-                        ClientError::InvalidRuntimeStream("cancel has no active execution".into())
-                    })?;
+            PlanCommand::Prepare(_) => unreachable!("all plan intent kinds are handled"),
+            PlanCommand::CancelExecution(visible_binding) => {
+                let binding_matches = self
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| cancel_binding_matches(plan, &visible_binding));
+                if !binding_matches {
+                    return send_rejection(
+                        events,
+                        "cancel execution",
+                        "stale UI execution authority; execution may already be terminal",
+                    );
+                }
+                let (authority_generation, execution_id, event_count) = {
+                    let plan = self.plan.as_mut().expect("matching cancel retains plan");
+                    let execution = plan
+                        .execution
+                        .as_mut()
+                        .expect("matching cancel retains execution");
                     if execution.cancel_requested {
                         return Ok(());
                     }
                     execution.cancel_requested = true;
                     (
+                        execution.confirm_request_id,
                         execution.execution_id.clone(),
                         execution.canonical_events.len() as u64,
                     )
@@ -638,11 +775,19 @@ impl DriverRuntime {
                         .as_mut()
                         .and_then(|plan| plan.execution.as_mut())
                         .expect("active execution remains while cancellation is sent")
-                        .cancel_request_id = Some(request_id);
+                        .cancel = Some(CancelMirrorAuthority {
+                        request_id,
+                        event_count: 0,
+                        encoded_bytes: 0,
+                        digest: Sha256::new(),
+                        acknowledgement_seen: false,
+                        terminal_seen: false,
+                    });
                 }
                 events
                     .send_plan_event(PlanRuntimeEvent::ExecutionStatus(
                         ExecutionStatusProjection {
+                            authority_generation,
                             execution_id: execution_id.as_ref().map(hex::encode),
                             event_count,
                             summary: if execution_id.is_some() {
@@ -693,14 +838,6 @@ impl DriverRuntime {
                 self.handle_execution_event(session, events, request_id, stream)
             }
             Some(runtime_event::Body::RuntimeRejected(rejected)) => {
-                if self.retired_cancel_request_ids.remove(&request_id) {
-                    return events
-                        .send_plan_event(PlanRuntimeEvent::OperationRejected {
-                            operation: "late cancellation",
-                            summary: rejected.summary,
-                        })
-                        .map_err(ClientError::Io);
-                }
                 let plan = self.plan.as_mut().ok_or_else(|| {
                     ClientError::InvalidRuntimeStream("runtime rejection has no live plan".into())
                 })?;
@@ -710,9 +847,13 @@ impl DriverRuntime {
                     )
                 })?;
                 let is_confirm = request_id == execution.confirm_request_id;
-                let is_cancel = execution.cancel_request_id == Some(request_id);
+                let is_cancel = execution
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.request_id == request_id);
                 let execution_id = execution.execution_id.as_ref().map(hex::encode);
                 let event_count = execution.canonical_events.len() as u64;
+                let authority_generation = execution.confirm_request_id;
                 if is_confirm {
                     if rejected.code == RuntimeRejectCode::ConfirmationMismatch as i32 {
                         let rejection_envelope = canonical_envelope_receipt(Envelope {
@@ -754,6 +895,7 @@ impl DriverRuntime {
                         events
                             .send_plan_event(PlanRuntimeEvent::ExecutionStatus(
                                 ExecutionStatusProjection {
+                                    authority_generation,
                                     execution_id: None,
                                     event_count: 0,
                                     summary: format!(
@@ -780,19 +922,26 @@ impl DriverRuntime {
                         .as_mut()
                         .and_then(|plan| plan.execution.as_mut())
                         .expect("live execution was verified above")
-                        .cancel_request_id = None;
-                    events
-                        .send_plan_event(PlanRuntimeEvent::ExecutionStatus(
-                            ExecutionStatusProjection {
-                                execution_id,
-                                event_count,
-                                summary: format!("Cancellation rejected: {}", rejected.summary),
-                                cancel_requested: true,
-                                terminal: false,
-                                verified: false,
-                            },
-                        ))
-                        .map_err(ClientError::Io)
+                        .cancel = None;
+                    if let Some(terminal) = take_ready_execution_terminal(&mut self.plan)? {
+                        events
+                            .send_plan_event(PlanRuntimeEvent::ExecutionStatus(terminal))
+                            .map_err(ClientError::Io)
+                    } else {
+                        events
+                            .send_plan_event(PlanRuntimeEvent::ExecutionStatus(
+                                ExecutionStatusProjection {
+                                    authority_generation,
+                                    execution_id,
+                                    event_count,
+                                    summary: format!("Cancellation rejected: {}", rejected.summary),
+                                    cancel_requested: true,
+                                    terminal: false,
+                                    verified: false,
+                                },
+                            ))
+                            .map_err(ClientError::Io)
+                    }
                 } else {
                     Err(ClientError::InvalidRuntimeStream(
                         "runtime rejection has an unrelated request ID".into(),
@@ -812,14 +961,67 @@ impl DriverRuntime {
         request_id: u64,
         stream: ExecutionStreamEvent,
     ) -> Result<(), ClientError> {
-        if self.retired_cancel_request_ids.contains(&request_id) {
-            if execution_event_is_terminal(&stream) {
-                self.retired_cancel_request_ids.remove(&request_id);
+        let is_cancel_stream = self
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.execution.as_ref())
+            .and_then(|execution| execution.cancel.as_ref())
+            .is_some_and(|cancel| cancel.request_id == request_id);
+        if is_cancel_stream {
+            let plan = self.plan.as_mut().ok_or_else(|| {
+                ClientError::InvalidRuntimeStream("cancel stream has no live plan".into())
+            })?;
+            let execution = plan.execution.as_mut().ok_or_else(|| {
+                ClientError::InvalidRuntimeStream("cancel stream has no active execution".into())
+            })?;
+            let encoded = stream.encode_to_vec();
+            validate_execution_id(execution, &stream)?;
+            let cancel = execution
+                .cancel
+                .as_mut()
+                .expect("cancel route was verified");
+            admit_execution_record(
+                &mut cancel.event_count,
+                &mut cancel.encoded_bytes,
+                &mut cancel.digest,
+                &encoded,
+                execution_event_is_terminal(&stream),
+            )?;
+            if matches!(
+                stream.body.as_ref(),
+                Some(execution_stream_event::Body::CancellationAcknowledged(_))
+            ) {
+                if cancel.acknowledgement_seen {
+                    return Err(ClientError::InvalidRuntimeStream(
+                        "cancel stream repeated its typed acknowledgement".into(),
+                    ));
+                }
+                cancel.acknowledgement_seen = true;
             }
-            return Ok(());
+            if execution_event_is_terminal(&stream) {
+                cancel.terminal_seen = true;
+            }
+            let summary = execution_event_summary(&stream);
+            let waiting_status = ExecutionStatusProjection {
+                authority_generation: execution.confirm_request_id,
+                execution_id: execution.execution_id.as_ref().map(hex::encode),
+                event_count: execution.canonical_events.len() as u64,
+                summary: format!("{summary}; verifying mirrored cancel stream"),
+                cancel_requested: true,
+                terminal: false,
+                verified: false,
+            };
+            if let Some(terminal) = take_ready_execution_terminal(&mut self.plan)? {
+                return events
+                    .send_plan_event(PlanRuntimeEvent::ExecutionStatus(terminal))
+                    .map_err(ClientError::Io);
+            }
+            return events
+                .send_plan_event(PlanRuntimeEvent::ExecutionStatus(waiting_status))
+                .map_err(ClientError::Io);
         }
+
         let mut cancel_after_started = None;
-        let mut terminal_status = None;
         let status = {
             let plan = self.plan.as_mut().ok_or_else(|| {
                 ClientError::InvalidRuntimeStream("execution event has no live plan".into())
@@ -827,50 +1029,34 @@ impl DriverRuntime {
             let execution = plan.execution.as_mut().ok_or_else(|| {
                 ClientError::InvalidRuntimeStream("execution event has no active execution".into())
             })?;
-            if execution.cancel_request_id == Some(request_id) {
-                if execution_event_is_terminal(&stream) {
-                    execution.cancel_request_id = None;
-                }
-                return Ok(());
-            }
             if request_id != execution.confirm_request_id {
                 return Err(ClientError::InvalidRuntimeStream(
                     "execution event has an unrelated request ID".into(),
                 ));
             }
             let encoded = stream.encode_to_vec();
-            let outer_execution_id = stream
-                .execution_id
-                .as_ref()
-                .map(|identifier| identifier.value.clone())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    ClientError::InvalidRuntimeStream("execution event omitted execution_id".into())
-                })?;
-            if execution
-                .execution_id
-                .as_ref()
-                .is_some_and(|current| current != &outer_execution_id)
-            {
-                return Err(ClientError::InvalidRuntimeStream(
-                    "execution_id changed".into(),
-                ));
-            }
-            execution.execution_id = Some(outer_execution_id.clone());
+            let outer_execution_id = validate_execution_id(execution, &stream)?;
             if let Some(execution_stream_event::Body::ApplyStarted(_)) = stream.body.as_ref()
                 && execution.cancel_requested
-                && execution.cancel_request_id.is_none()
+                && execution.cancel.is_none()
             {
                 cancel_after_started = Some(outer_execution_id);
             }
+            admit_execution_record(
+                &mut execution.canonical_event_count,
+                &mut execution.canonical_event_bytes,
+                &mut execution.canonical_digest,
+                &encoded,
+                execution_event_is_terminal(&stream),
+            )?;
             execution.canonical_events.push(encoded);
-            let terminal = execution_event_is_terminal(&stream);
             let summary = execution_event_summary(&stream);
-            if terminal {
+            if execution_event_is_terminal(&stream) {
                 plan.chain
                     .verify_execution_stream(&execution.canonical_events)
                     .map_err(|error| ClientError::InvalidRuntimeStream(error.to_string()))?;
-                terminal_status = Some(ExecutionStatusProjection {
+                execution.pending_terminal = Some(ExecutionStatusProjection {
+                    authority_generation: execution.confirm_request_id,
                     execution_id: execution.execution_id.as_ref().map(hex::encode),
                     event_count: execution.canonical_events.len() as u64,
                     summary: format!("{summary}; complete stream binding verified"),
@@ -880,6 +1066,7 @@ impl DriverRuntime {
                 });
             }
             ExecutionStatusProjection {
+                authority_generation: execution.confirm_request_id,
                 execution_id: execution.execution_id.as_ref().map(hex::encode),
                 event_count: execution.canonical_events.len() as u64,
                 summary,
@@ -904,20 +1091,17 @@ impl DriverRuntime {
                         "execution disappeared before cancellation".into(),
                     )
                 })?;
-            execution.cancel_request_id = Some(cancel_request_id);
+            execution.cancel = Some(CancelMirrorAuthority {
+                request_id: cancel_request_id,
+                event_count: 0,
+                encoded_bytes: 0,
+                digest: Sha256::new(),
+                acknowledgement_seen: false,
+                terminal_seen: false,
+            });
         }
 
-        if let Some(terminal_status) = terminal_status {
-            let plan = self.plan.as_mut().expect("verified execution retains plan");
-            let retired_cancel_request_id = plan
-                .execution
-                .as_ref()
-                .and_then(|execution| execution.cancel_request_id);
-            plan.execution = None;
-            plan.review = None;
-            if let Some(request_id) = retired_cancel_request_id {
-                self.retired_cancel_request_ids.insert(request_id);
-            }
+        if let Some(terminal_status) = take_ready_execution_terminal(&mut self.plan)? {
             events
                 .send_plan_event(PlanRuntimeEvent::ExecutionStatus(terminal_status))
                 .map_err(ClientError::Io)
@@ -927,6 +1111,201 @@ impl DriverRuntime {
                 .map_err(ClientError::Io)
         }
     }
+}
+
+fn cancel_binding_matches(plan: &PlanAuthority, visible: &ExecutionCancelBinding) -> bool {
+    let Some(review) = plan.review.as_ref() else {
+        return false;
+    };
+    let Some(execution) = plan.execution.as_ref() else {
+        return false;
+    };
+    let Ok(review_id) = required_opaque_hex(review.apply_review_id.as_ref(), "apply review ID")
+    else {
+        return false;
+    };
+    let Ok(review_digest) = required_digest_hex(
+        review.review_binding_sha256.as_ref(),
+        "apply review binding digest",
+    ) else {
+        return false;
+    };
+    exact_cancel_binding_matches(
+        &ExecutionCancelBinding {
+            review_id,
+            review_binding_digest: review_digest,
+            authority_generation: execution.confirm_request_id,
+            execution_id: execution.execution_id.as_ref().map(hex::encode),
+        },
+        visible,
+    )
+}
+
+fn overlay_stage_edit_matches(plan: &PlanAuthority, edit: &super::plan::OverlayStageEdit) -> bool {
+    if &plan.plan_id != edit.plan_id() || plan.evidence_reference != edit.evidence_reference() {
+        return false;
+    }
+    match plan.overlay.as_ref() {
+        Some(overlay) => {
+            overlay.revision == edit.base_revision()
+                && required_digest_hex(overlay.overlay_sha256.as_ref(), "overlay digest")
+                    .is_ok_and(|digest| digest == edit.overlay_digest())
+        }
+        None => edit.base_revision() == 0,
+    }
+}
+
+fn plan_intent_matches(plan: &PlanAuthority, intent: &PlanIntent) -> bool {
+    if &plan.plan_id != intent.plan_id() || plan.evidence_reference != intent.evidence_reference() {
+        return false;
+    }
+    let Some(overlay) = plan.overlay.as_ref() else {
+        return false;
+    };
+    if overlay.revision != intent.overlay_revision()
+        || !required_digest_hex(overlay.overlay_sha256.as_ref(), "overlay digest")
+            .is_ok_and(|digest| digest == intent.overlay_digest())
+    {
+        return false;
+    }
+    let current = overlay
+        .selected_action_ids
+        .iter()
+        .map(|identifier| ActionId::new(hex::encode(&identifier.value)))
+        .collect::<BTreeSet<_>>();
+    let visible = intent
+        .selected_action_ids()
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    current.len() == overlay.selected_action_ids.len()
+        && visible.len() == intent.selected_action_ids().len()
+        && current == visible
+}
+
+fn exact_review_binding_matches(
+    current: &EngineApplyReviewSnapshot,
+    visible: &EngineApplyReviewSnapshot,
+) -> bool {
+    current == visible
+}
+
+fn exact_cancel_binding_matches(
+    current: &ExecutionCancelBinding,
+    visible: &ExecutionCancelBinding,
+) -> bool {
+    current == visible
+}
+
+fn validate_execution_id(
+    execution: &mut ExecutionAuthority,
+    stream: &ExecutionStreamEvent,
+) -> Result<Vec<u8>, ClientError> {
+    let execution_id = stream
+        .execution_id
+        .as_ref()
+        .map(|identifier| identifier.value.clone())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ClientError::InvalidRuntimeStream("execution event omitted execution_id".into())
+        })?;
+    if execution
+        .execution_id
+        .as_ref()
+        .is_some_and(|current| current != &execution_id)
+    {
+        return Err(ClientError::InvalidRuntimeStream(
+            "execution_id changed".into(),
+        ));
+    }
+    execution.execution_id = Some(execution_id.clone());
+    Ok(execution_id)
+}
+
+fn admit_execution_record(
+    event_count: &mut u64,
+    encoded_bytes: &mut u64,
+    digest: &mut Sha256,
+    encoded: &[u8],
+    terminal: bool,
+) -> Result<(), ClientError> {
+    if *event_count >= MAXIMUM_EXECUTION_EVENT_COUNT {
+        return Err(ClientError::InvalidRuntimeStream(
+            "execution stream exceeded its event-count limit".into(),
+        ));
+    }
+    let encoded_len = u64::try_from(encoded.len()).map_err(|_| {
+        ClientError::InvalidRuntimeStream("execution record length overflow".into())
+    })?;
+    let record_bytes = encoded_len.checked_add(4).ok_or_else(|| {
+        ClientError::InvalidRuntimeStream("execution record framing overflow".into())
+    })?;
+    let next_bytes = encoded_bytes.checked_add(record_bytes).ok_or_else(|| {
+        ClientError::InvalidRuntimeStream("execution stream byte count overflow".into())
+    })?;
+    let maximum_bytes = MAXIMUM_EXECUTION_ENCODED_BYTES
+        .checked_add(if terminal { 64 } else { 0 })
+        .expect("execution byte constants fit u64");
+    if next_bytes > maximum_bytes {
+        return Err(ClientError::InvalidRuntimeStream(
+            "execution stream exceeded its encoded-byte limit".into(),
+        ));
+    }
+    digest.update(encoded_len.to_be_bytes());
+    digest.update(encoded);
+    *event_count += 1;
+    *encoded_bytes = next_bytes;
+    Ok(())
+}
+
+fn take_ready_execution_terminal(
+    plan: &mut Option<PlanAuthority>,
+) -> Result<Option<ExecutionStatusProjection>, ClientError> {
+    let Some(plan) = plan.as_mut() else {
+        return Ok(None);
+    };
+    let Some(execution) = plan.execution.as_mut() else {
+        return Ok(None);
+    };
+    if execution.pending_terminal.is_none() {
+        return Ok(None);
+    }
+    if let Some(cancel) = execution.cancel.as_ref() {
+        if !cancel.terminal_seen {
+            return Ok(None);
+        }
+        let mirrored = cancel_mirror_is_exact(
+            execution.canonical_event_count,
+            execution.canonical_event_bytes,
+            &execution.canonical_digest,
+            cancel,
+        );
+        if !mirrored {
+            return Err(ClientError::InvalidRuntimeStream(
+                "cancel stream did not exactly mirror the verified confirm stream with a typed acknowledgement"
+                    .into(),
+            ));
+        }
+    }
+    let terminal = execution
+        .pending_terminal
+        .take()
+        .expect("terminal presence was checked");
+    plan.execution = None;
+    plan.review = None;
+    Ok(Some(terminal))
+}
+
+fn cancel_mirror_is_exact(
+    canonical_event_count: u64,
+    canonical_event_bytes: u64,
+    canonical_digest: &Sha256,
+    cancel: &CancelMirrorAuthority,
+) -> bool {
+    cancel.acknowledgement_seen
+        && cancel.event_count == canonical_event_count
+        && cancel.encoded_bytes == canonical_event_bytes
+        && cancel.digest.clone().finalize() == canonical_digest.clone().finalize()
 }
 
 fn validate_apply_review_transport(
@@ -1218,7 +1597,6 @@ mod tests {
             capabilities: Vec::new(),
             agent_mode: crate::batch::PlanningAgentMode::Ask,
             control_request_ids,
-            retired_cancel_request_ids: BTreeSet::new(),
             plan: None,
         };
 
@@ -1255,5 +1633,140 @@ mod tests {
             validate_apply_review_transport(PROTOCOL16_MINOR, true),
             Ok(())
         );
+    }
+
+    #[test]
+    fn confirmation_and_cancellation_require_the_exact_visible_generation() {
+        let review_1 = EngineApplyReviewSnapshot {
+            plan_id: PlanId::new("plan-1"),
+            overlay_digest: "11".repeat(32),
+            review_id: "review-1".into(),
+            review_binding_digest: "22".repeat(32),
+            force_action_ids: vec![ActionId::new("action-1")],
+            selected_action_count: 1,
+            finding_count: 0,
+            deadline_seconds: 300,
+        };
+        assert!(exact_review_binding_matches(&review_1, &review_1));
+        let mut review_2 = review_1.clone();
+        review_2.review_id = "review-2".into();
+        review_2.review_binding_digest = "33".repeat(32);
+        assert!(!exact_review_binding_matches(&review_2, &review_1));
+
+        let current = ExecutionCancelBinding {
+            review_id: review_2.review_id,
+            review_binding_digest: review_2.review_binding_digest,
+            authority_generation: 17,
+            execution_id: Some("execution-2".into()),
+        };
+        assert!(exact_cancel_binding_matches(&current, &current));
+        let mut stale_generation = current.clone();
+        stale_generation.authority_generation = 16;
+        assert!(!exact_cancel_binding_matches(&current, &stale_generation));
+        let mut pre_start = current.clone();
+        pre_start.execution_id = None;
+        assert!(!exact_cancel_binding_matches(&current, &pre_start));
+    }
+
+    #[test]
+    fn execution_record_limits_are_enforced_before_state_changes() {
+        let mut count = 0;
+        let mut bytes = 0;
+        let mut digest = Sha256::new();
+        admit_execution_record(&mut count, &mut bytes, &mut digest, b"record", false).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(bytes, 10);
+
+        let before_digest = digest.clone().finalize();
+        count = MAXIMUM_EXECUTION_EVENT_COUNT;
+        assert!(admit_execution_record(&mut count, &mut bytes, &mut digest, b"x", false).is_err());
+        assert_eq!(count, MAXIMUM_EXECUTION_EVENT_COUNT);
+        assert_eq!(bytes, 10);
+        assert_eq!(digest.clone().finalize(), before_digest);
+
+        count = 0;
+        bytes = MAXIMUM_EXECUTION_ENCODED_BYTES;
+        assert!(admit_execution_record(&mut count, &mut bytes, &mut digest, b"x", false).is_err());
+        assert_eq!(count, 0);
+        assert_eq!(bytes, MAXIMUM_EXECUTION_ENCODED_BYTES);
+        assert_eq!(digest.clone().finalize(), before_digest);
+
+        let mut terminal_digest = Sha256::new();
+        admit_execution_record(&mut count, &mut bytes, &mut terminal_digest, &[0; 60], true)
+            .unwrap();
+        assert_eq!(bytes, MAXIMUM_EXECUTION_ENCODED_BYTES + 64);
+        let terminal_digest = terminal_digest.finalize();
+        assert_ne!(terminal_digest, Sha256::new().finalize());
+
+        count = 0;
+        bytes = MAXIMUM_EXECUTION_ENCODED_BYTES;
+        let mut oversized_terminal_digest = Sha256::new();
+        assert!(
+            admit_execution_record(
+                &mut count,
+                &mut bytes,
+                &mut oversized_terminal_digest,
+                &[0; 61],
+                true,
+            )
+            .is_err()
+        );
+        assert_eq!(count, 0);
+        assert_eq!(bytes, MAXIMUM_EXECUTION_ENCODED_BYTES);
+        assert_eq!(
+            oversized_terminal_digest.finalize(),
+            Sha256::new().finalize()
+        );
+    }
+
+    #[test]
+    fn cancel_mirror_requires_typed_acknowledgement_and_exact_canonical_bytes() {
+        let mut canonical_digest = Sha256::new();
+        let mut canonical_count = 0;
+        let mut canonical_bytes = 0;
+        admit_execution_record(
+            &mut canonical_count,
+            &mut canonical_bytes,
+            &mut canonical_digest,
+            b"same",
+            false,
+        )
+        .unwrap();
+        let mut cancel = CancelMirrorAuthority {
+            request_id: 9,
+            event_count: 0,
+            encoded_bytes: 0,
+            digest: Sha256::new(),
+            acknowledgement_seen: false,
+            terminal_seen: true,
+        };
+        admit_execution_record(
+            &mut cancel.event_count,
+            &mut cancel.encoded_bytes,
+            &mut cancel.digest,
+            b"same",
+            false,
+        )
+        .unwrap();
+        assert!(!cancel_mirror_is_exact(
+            canonical_count,
+            canonical_bytes,
+            &canonical_digest,
+            &cancel
+        ));
+        cancel.acknowledgement_seen = true;
+        assert!(cancel_mirror_is_exact(
+            canonical_count,
+            canonical_bytes,
+            &canonical_digest,
+            &cancel
+        ));
+        cancel.encoded_bytes += 1;
+        assert!(!cancel_mirror_is_exact(
+            canonical_count,
+            canonical_bytes,
+            &canonical_digest,
+            &cancel
+        ));
     }
 }

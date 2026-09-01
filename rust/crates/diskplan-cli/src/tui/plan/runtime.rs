@@ -192,6 +192,9 @@ pub enum OverlayStageResult {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlayStageEdit {
+    plan_id: PlanId,
+    evidence_reference: String,
+    overlay_digest: String,
     action_id: ActionId,
     stage: bool,
     base_revision: u64,
@@ -199,6 +202,18 @@ pub struct OverlayStageEdit {
 }
 
 impl OverlayStageEdit {
+    pub fn plan_id(&self) -> &PlanId {
+        &self.plan_id
+    }
+
+    pub fn evidence_reference(&self) -> &str {
+        &self.evidence_reference
+    }
+
+    pub fn overlay_digest(&self) -> &str {
+        &self.overlay_digest
+    }
+
     pub fn action_id(&self) -> &ActionId {
         &self.action_id
     }
@@ -304,12 +319,21 @@ pub struct EngineApplyReviewSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionStatusProjection {
+    pub authority_generation: u64,
     pub execution_id: Option<String>,
     pub event_count: u64,
     pub summary: String,
     pub cancel_requested: bool,
     pub terminal: bool,
     pub verified: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionCancelBinding {
+    pub review_id: String,
+    pub review_binding_digest: String,
+    pub authority_generation: u64,
+    pub execution_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -532,6 +556,17 @@ impl PlanRuntime {
             .is_some_and(|status| !status.terminal)
     }
 
+    pub fn execution_cancel_binding(&self) -> Option<ExecutionCancelBinding> {
+        let review = self.apply_review.as_ref()?;
+        let status = self.execution_status.as_ref()?;
+        (!status.terminal).then(|| ExecutionCancelBinding {
+            review_id: review.review_id.clone(),
+            review_binding_digest: review.review_binding_digest.clone(),
+            authority_generation: status.authority_generation,
+            execution_id: status.execution_id.clone(),
+        })
+    }
+
     pub fn mark_execution_cancel_requested(&mut self) -> bool {
         let Some(status) = self.execution_status.as_mut() else {
             return false;
@@ -541,6 +576,14 @@ impl PlanRuntime {
         } else {
             status.cancel_requested = true;
             true
+        }
+    }
+
+    pub fn reject_execution_cancel(&mut self) {
+        if let Some(status) = self.execution_status.as_mut()
+            && !status.terminal
+        {
+            status.cancel_requested = false;
         }
     }
 
@@ -773,6 +816,9 @@ impl PlanRuntime {
             }
         }
         Ok(OverlayStageEdit {
+            plan_id: overlay.plan_id.clone(),
+            evidence_reference: overlay.evidence_reference.clone(),
+            overlay_digest: overlay.digest.clone(),
             action_id,
             stage,
             base_revision: overlay.revision,
@@ -815,7 +861,7 @@ impl PlanRuntime {
         Ok(())
     }
 
-    pub fn queue_intent(&mut self, kind: PlanIntentKind) -> Result<(), &'static str> {
+    pub fn queue_intent(&mut self, kind: PlanIntentKind) -> Result<PlanIntent, &'static str> {
         if self.provisional {
             return Err("freeze the partial scan before dry-run or apply review");
         }
@@ -825,21 +871,23 @@ impl PlanRuntime {
         if overlay.selected_actions.is_empty() {
             return Err("stage at least one engine action first");
         }
-        if !self
+        if self
             .pending_intents
             .iter()
             .any(|intent| intent.kind == kind)
         {
-            self.pending_intents.push(PlanIntent {
-                kind,
-                plan_id: overlay.plan_id.clone(),
-                evidence_reference: overlay.evidence_reference.clone(),
-                selected_action_ids: overlay.selected_action_order.clone(),
-                overlay_revision: overlay.revision,
-                overlay_digest: overlay.digest.clone(),
-            });
+            return Err("the same engine intent is already awaiting a response");
         }
-        Ok(())
+        let intent = PlanIntent {
+            kind,
+            plan_id: overlay.plan_id.clone(),
+            evidence_reference: overlay.evidence_reference.clone(),
+            selected_action_ids: overlay.selected_action_order.clone(),
+            overlay_revision: overlay.revision,
+            overlay_digest: overlay.digest.clone(),
+        };
+        self.pending_intents.push(intent.clone());
+        Ok(intent)
     }
 
     pub fn pending_intents(&self) -> &[PlanIntent] {
@@ -1016,6 +1064,13 @@ impl PlanRuntime {
                 if self.apply_review.is_none() && self.execution_status.is_none() {
                     return Err(PlanRuntimeError::InvalidExecutionPreview);
                 }
+                if status.authority_generation == 0
+                    || self.execution_status.as_ref().is_some_and(|current| {
+                        current.authority_generation != status.authority_generation
+                    })
+                {
+                    return Err(PlanRuntimeError::InvalidExecutionPreview);
+                }
                 self.execution_status = Some(status);
                 self.view = PlanView::ExecutionPreview;
                 Ok(())
@@ -1085,6 +1140,7 @@ impl PlanRuntime {
                     "overlay edit" => self.pending_overlay_edit = None,
                     "dry-run" => self.complete_intent(PlanIntentKind::DryRun),
                     "apply review" => self.complete_intent(PlanIntentKind::ApplyReview),
+                    "cancel execution" => self.reject_execution_cancel(),
                     _ => {}
                 }
                 Ok(())
@@ -1662,6 +1718,7 @@ mod tests {
         runtime
             .apply_event(PlanRuntimeEvent::ExecutionStatus(
                 ExecutionStatusProjection {
+                    authority_generation: 7,
                     execution_id: None,
                     event_count: 0,
                     summary: "waiting for ApplyStarted".into(),
@@ -1673,6 +1730,38 @@ mod tests {
             .unwrap();
         assert!(!runtime.apply_review_visible());
         assert!(runtime.execution_active());
+        assert_eq!(
+            runtime
+                .execution_cancel_binding()
+                .unwrap()
+                .authority_generation,
+            7
+        );
+        assert!(runtime.mark_execution_cancel_requested());
+        runtime
+            .apply_event(PlanRuntimeEvent::OperationRejected {
+                operation: "cancel execution",
+                summary: "stale visible generation".into(),
+            })
+            .unwrap();
+        assert!(!runtime.execution_status().unwrap().cancel_requested);
+
+        let wrong_generation = runtime.apply_event(PlanRuntimeEvent::ExecutionStatus(
+            ExecutionStatusProjection {
+                authority_generation: 8,
+                execution_id: Some("execution-other".into()),
+                event_count: 1,
+                summary: "stale generation".into(),
+                cancel_requested: false,
+                terminal: false,
+                verified: false,
+            },
+        ));
+        assert_eq!(
+            wrong_generation,
+            Err(PlanRuntimeError::InvalidExecutionPreview)
+        );
+        assert_eq!(runtime.execution_status().unwrap().authority_generation, 7);
 
         runtime
             .apply_event(PlanRuntimeEvent::ConfirmApplyRejected {
@@ -1686,6 +1775,7 @@ mod tests {
         runtime
             .apply_event(PlanRuntimeEvent::ExecutionStatus(
                 ExecutionStatusProjection {
+                    authority_generation: 8,
                     execution_id: None,
                     event_count: 0,
                     summary: "waiting for ApplyStarted".into(),
@@ -1699,6 +1789,7 @@ mod tests {
         runtime
             .apply_event(PlanRuntimeEvent::ExecutionStatus(
                 ExecutionStatusProjection {
+                    authority_generation: 8,
                     execution_id: Some("execution-1".into()),
                     event_count: 2,
                     summary: "ApplyFinished".into(),
