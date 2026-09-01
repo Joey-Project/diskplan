@@ -66,17 +66,32 @@ public struct RuntimeReleaseFileObjectIdentity: Equatable, Hashable, Comparable,
   public let device: UInt64
   public let fileID: UInt64
   public let objectType: RuntimeReleaseObjectType
+  public let generation: UInt64?
 
-  package init(device: UInt64, fileID: UInt64, objectType: RuntimeReleaseObjectType) {
+  package init(
+    device: UInt64,
+    fileID: UInt64,
+    objectType: RuntimeReleaseObjectType,
+    generation: UInt64? = nil
+  ) {
     self.device = device
     self.fileID = fileID
     self.objectType = objectType
+    self.generation = generation
   }
 
   public static func < (lhs: Self, rhs: Self) -> Bool {
     if lhs.device != rhs.device { return lhs.device < rhs.device }
     if lhs.fileID != rhs.fileID { return lhs.fileID < rhs.fileID }
-    return lhs.objectType.rawValue < rhs.objectType.rawValue
+    if lhs.objectType != rhs.objectType {
+      return lhs.objectType.rawValue < rhs.objectType.rawValue
+    }
+    switch (lhs.generation, rhs.generation) {
+    case (.none, .some): return true
+    case (.some, .none): return false
+    case (.some(let left), .some(let right)): return left < right
+    case (.none, .none): return false
+    }
   }
 }
 
@@ -147,10 +162,46 @@ private struct RuntimeReleaseNamespaceAliasKey: Equatable, Hashable, Sendable {
 public struct RuntimeReleaseCandidateActionBinding: Equatable, Sendable {
   public let candidateID: String
   public let actionID: ActionID
+  public let rawRoot: RawRootPath
+  public let targetPath: RawTargetPath
+  public let rootIdentity: RuntimeReleaseFileObjectIdentity
+  public let parentChain: [RuntimeReleaseFileObjectIdentity]
+  public let targetIdentity: RuntimeReleaseFileObjectIdentity
+  public let inheritedProviderBoundaryByComponent: [Bool]
 
-  package init(candidateID: String, actionID: ActionID) {
+  package init(candidateID: String, action: ActionDefinition) throws {
+    guard rawStringEqual(candidateID, action.evidence.candidateID) else {
+      throw RuntimeReleaseTopologyPlanError.ownerBindingMismatch
+    }
+    let namespace = action.prototype.namespaceBinding
+    self.candidateID = candidateID
+    actionID = action.id
+    rawRoot = namespace.rawRoot
+    targetPath = namespace.targetPath
+    rootIdentity = runtimeIdentity(namespace.rootIdentity)
+    parentChain = namespace.parentChain.map { runtimeIdentity($0.identity) }
+    targetIdentity = runtimeIdentity(namespace.targetIdentity)
+    inheritedProviderBoundaryByComponent = try inheritedProviderBoundaries(namespace)
+  }
+
+  init(
+    candidateID: String,
+    actionID: ActionID,
+    rawRoot: RawRootPath,
+    targetPath: RawTargetPath,
+    rootIdentity: RuntimeReleaseFileObjectIdentity,
+    parentChain: [RuntimeReleaseFileObjectIdentity],
+    targetIdentity: RuntimeReleaseFileObjectIdentity,
+    inheritedProviderBoundaryByComponent: [Bool]
+  ) {
     self.candidateID = candidateID
     self.actionID = actionID
+    self.rawRoot = rawRoot
+    self.targetPath = targetPath
+    self.rootIdentity = rootIdentity
+    self.parentChain = parentChain
+    self.targetIdentity = targetIdentity
+    self.inheritedProviderBoundaryByComponent = inheritedProviderBoundaryByComponent
   }
 }
 
@@ -213,6 +264,7 @@ public enum RuntimeReleaseTopologyPlanError: Error, Equatable {
   case invalidNamespaceSlot
   case aliasedOwnerSlot
   case ownerBindingMismatch
+  case invalidProviderBinding
   case impossibleOwnerCount
   case invalidCloneBinding
   case incompleteGroupCoverage
@@ -244,7 +296,7 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
       Set(volumeDevices).count == volumeDevices.count
     else { throw RuntimeReleaseTopologyPlanError.duplicateIdentifier }
     let actionByCandidate = Dictionary(
-      uniqueKeysWithValues: candidateActions.map { (Data($0.candidateID.utf8), $0.actionID) })
+      uniqueKeysWithValues: candidateActions.map { (Data($0.candidateID.utf8), $0) })
 
     var ownerLinks = Set<FileOwnerLink>()
     var aliasKeys = Set<RuntimeReleaseNamespaceAliasKey>()
@@ -258,8 +310,16 @@ public struct RuntimeReleaseTopologyExpectedPlan: Equatable, Sendable {
         throw RuntimeReleaseTopologyPlanError.invalidCloneBinding
       }
       for owner in file.owners {
-        guard owner.slot.objectIdentity == file.identity,
-          actionByCandidate[Data(owner.link.candidateID.utf8)] == owner.actionID
+        guard let action = actionByCandidate[Data(owner.link.candidateID.utf8)],
+          owner.actionID == action.actionID,
+          owner.link.path == action.targetPath,
+          owner.slot.rootIdentity == action.rootIdentity,
+          owner.slot.parentIdentity == (action.parentChain.last ?? action.rootIdentity),
+          owner.slot.rawBasename == action.targetPath.components.last,
+          owner.slot.objectIdentity == action.targetIdentity,
+          owner.slot.objectIdentity == file.identity,
+          action.parentChain.count == action.targetPath.components.count - 1,
+          action.inheritedProviderBoundaryByComponent.count == action.targetPath.components.count
         else { throw RuntimeReleaseTopologyPlanError.ownerBindingMismatch }
         guard ownerLinks.insert(owner.link).inserted else {
           throw RuntimeReleaseTopologyPlanError.duplicateIdentifier
@@ -407,6 +467,10 @@ public enum RuntimeReleaseTopologyAuthorityError: Error, Equatable {
   case descriptorIdentityUnknown(RuntimeReleaseTopologyUnknownReason)
   case descriptorIdentityUnreadable(RuntimeReleaseTopologyFailure)
   case descriptorIdentityProbeFailed(RuntimeReleaseTopologyFailure)
+  case namespaceChainMismatch
+  case namespaceChainUnknown(RuntimeReleaseTopologyUnknownReason)
+  case namespaceChainUnreadable(RuntimeReleaseTopologyFailure)
+  case namespaceChainProbeFailed(RuntimeReleaseTopologyFailure)
   case collectionLimitExceeded
 }
 
@@ -482,6 +546,7 @@ private final class OwnedReleaseDescriptor: @unchecked Sendable {
 
 private struct LeasedOwnerDescriptor: Sendable {
   let expected: RuntimeReleaseExpectedOwner
+  let action: RuntimeReleaseCandidateActionBinding
   let root: OwnedReleaseDescriptor
   let parent: OwnedReleaseDescriptor
   let file: OwnedReleaseDescriptor
@@ -530,6 +595,17 @@ package final class RuntimeReleaseTopologyDescriptorLease: @unchecked Sendable {
       throw RuntimeReleaseTopologyAuthorityError.captureReceiptStale
     }
   }
+
+  fileprivate func requireFresh(authorityID: UUID, now: UInt64) throws {
+    lock.lock()
+    defer { lock.unlock() }
+    guard self.authorityID == authorityID, consumed else {
+      throw RuntimeReleaseTopologyAuthorityError.captureReceiptMismatch
+    }
+    guard now <= capture.deadlineMonotonicNanoseconds else {
+      throw RuntimeReleaseTopologyAuthorityError.captureReceiptStale
+    }
+  }
 }
 
 struct RuntimeReleaseKernelItem: Equatable, Sendable {
@@ -547,7 +623,7 @@ struct RuntimeReleaseTopologyKernel: Sendable {
     @Sendable (Int32, NoMaterializationPolicy) -> RuntimeReleaseTopologyObservation<
       RuntimeReleaseFileObjectIdentity
     >
-  let item: @Sendable (Int32, Data, NoMaterializationPolicy) -> RuntimeReleaseKernelItem
+  let item: @Sendable (Int32, Data, NoMaterializationPolicy, Bool) -> RuntimeReleaseKernelItem
   let snapshotBlocker:
     @Sendable (Int32, NoMaterializationPolicy) -> RuntimeReleaseTopologyObservation<Bool>
 
@@ -557,7 +633,7 @@ struct RuntimeReleaseTopologyKernel: Sendable {
         FileDescriptorIdentityProbe().probe(fileDescriptor: descriptor, policy: policy)
       ).map(runtimeIdentity)
     },
-    item: { parent, name, policy in
+    item: { parent, name, policy, inheritedProviderBoundary in
       let beforeCapability = ItemProbe().probe(
         parentFileDescriptor: parent, rawName: name, policy: policy)
       guard let before = beforeCapability.value else {
@@ -576,7 +652,8 @@ struct RuntimeReleaseTopologyKernel: Sendable {
       let provider = FileProviderBoundaryProbe().probe(
         parentFileDescriptor: parent,
         rawName: name,
-        policy: policy)
+        policy: policy,
+        inheritedProviderBoundary: inheritedProviderBoundary)
       let afterCapability = ItemProbe().probe(
         parentFileDescriptor: parent, rawName: name, policy: policy)
       guard let after = afterCapability.value else {
@@ -632,7 +709,8 @@ struct RuntimeReleaseTopologyKernel: Sendable {
         providerLocal: providerLocalObservation(
           provider,
           dataless: dataless,
-          syncRoot: syncRoot)
+          syncRoot: syncRoot,
+          inheritedProviderBoundary: inheritedProviderBoundary)
       )
     },
     snapshotBlocker: { descriptor, policy in
@@ -701,9 +779,13 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     else { throw RuntimeReleaseTopologyAuthorityError.descriptorSetMismatch }
 
     let expectedBySlot = Dictionary(uniqueKeysWithValues: expectedOwners.map { ($0.slot, $0) })
+    let actionByCandidate = Dictionary(
+      uniqueKeysWithValues: plan.candidateActions.map { (Data($0.candidateID.utf8), $0) })
     var leasedOwners: [LeasedOwnerDescriptor] = []
     for owner in owners.sorted(by: { $0.slot < $1.slot }) {
-      guard let expected = expectedBySlot[owner.slot] else {
+      guard let expected = expectedBySlot[owner.slot],
+        let action = actionByCandidate[Data(expected.link.candidateID.utf8)]
+      else {
         throw RuntimeReleaseTopologyAuthorityError.descriptorSetMismatch
       }
       let root = try duplicateReadOnlyDescriptor(owner.rootFileDescriptor)
@@ -712,8 +794,14 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       try requireIdentity(root.rawValue, expected: owner.slot.rootIdentity, policy: policy)
       try requireIdentity(parent.rawValue, expected: owner.slot.parentIdentity, policy: policy)
       try requireIdentity(file.rawValue, expected: owner.slot.objectIdentity, policy: policy)
+      try requireNamespaceChain(
+        root: root.rawValue,
+        suppliedParent: parent.rawValue,
+        action: action,
+        policy: policy)
       leasedOwners.append(
-        LeasedOwnerDescriptor(expected: expected, root: root, parent: parent, file: file))
+        LeasedOwnerDescriptor(
+          expected: expected, action: action, root: root, parent: parent, file: file))
     }
     var leasedVolumes: [LeasedVolumeDescriptor] = []
     for volume in volumes.sorted(by: { $0.expectedDevice < $1.expectedDevice }) {
@@ -787,7 +875,7 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       topologyMatches,
       allTrue(Array(snapshots.values).map { $0.map { _ in true } }),
     ])
-    return RuntimeReleaseTopologyReport(
+    let report = RuntimeReleaseTopologyReport(
       collection: collection,
       topologyMatchesExpected: topologyMatches,
       seal: RuntimeReleaseTopologySeal(
@@ -802,6 +890,8 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       ),
       issues: issues
     )
+    try lease.requireFresh(authorityID: authorityID, now: monotonicNow())
+    return report
   }
 
   private func mintCaptureBinding(
@@ -871,11 +961,10 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     expected: RuntimeReleaseFileObjectIdentity,
     policy: NoMaterializationPolicy
   ) throws {
-    switch kernel.descriptorIdentity(descriptor, policy) {
-    case .known(let actual):
-      guard actual == expected else {
-        throw RuntimeReleaseTopologyAuthorityError.descriptorIdentityMismatch(expected)
-      }
+    switch identityMatches(kernel.descriptorIdentity(descriptor, policy), expected: expected) {
+    case .known(true): return
+    case .known(false):
+      throw RuntimeReleaseTopologyAuthorityError.descriptorIdentityMismatch(expected)
     case .absent:
       throw RuntimeReleaseTopologyAuthorityError.descriptorIdentityUnknown(.notObserved)
     case .unknown(let reason):
@@ -910,6 +999,81 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     }
   }
 
+  private func requireNamespaceChain(
+    root: Int32,
+    suppliedParent: Int32,
+    action: RuntimeReleaseCandidateActionBinding,
+    policy: NoMaterializationPolicy
+  ) throws {
+    switch namespaceChainObservation(
+      root: root,
+      suppliedParent: suppliedParent,
+      action: action,
+      policy: policy)
+    {
+    case .known(true): return
+    case .known(false), .absent:
+      throw RuntimeReleaseTopologyAuthorityError.namespaceChainMismatch
+    case .unknown(let reason):
+      throw RuntimeReleaseTopologyAuthorityError.namespaceChainUnknown(reason)
+    case .unreadable(let failure):
+      throw RuntimeReleaseTopologyAuthorityError.namespaceChainUnreadable(failure)
+    case .failed(let failure):
+      throw RuntimeReleaseTopologyAuthorityError.namespaceChainProbeFailed(failure)
+    }
+  }
+
+  private func namespaceChainObservation(
+    root: Int32,
+    suppliedParent: Int32,
+    action: RuntimeReleaseCandidateActionBinding,
+    policy: NoMaterializationPolicy
+  ) -> RuntimeReleaseTopologyObservation<Bool> {
+    var currentDescriptor = root
+    var heldDescriptor: OwnedReleaseDescriptor?
+    for (index, component) in action.targetPath.components.dropLast().enumerated() {
+      let item = kernel.item(
+        currentDescriptor,
+        component,
+        policy,
+        action.inheritedProviderBoundaryByComponent[index])
+      let expectedIdentity = action.parentChain[index]
+      let beforeOpen = allTrue([
+        item.providerLocal,
+        identityMatches(item.identity, expected: expectedIdentity),
+      ])
+      guard beforeOpen == .known(true) else { return beforeOpen }
+      var nullTerminatedComponent = Array(component) + [0]
+      let opened = nullTerminatedComponent.withUnsafeMutableBytes { bytes in
+        openat(
+          currentDescriptor,
+          bytes.bindMemory(to: CChar.self).baseAddress!,
+          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+      }
+      guard opened >= 0 else {
+        return posixObservation(errno, collector: "release-parent-chain-open")
+      }
+      let next = OwnedReleaseDescriptor(opened)
+      let openedIdentity = kernel.descriptorIdentity(opened, policy)
+      let openedMatches = identityMatches(openedIdentity, expected: expectedIdentity)
+      guard openedMatches == .known(true) else { return openedMatches }
+      heldDescriptor = next
+      currentDescriptor = next.rawValue
+    }
+    let expectedParent = action.parentChain.last ?? action.rootIdentity
+    return allTrue([
+      identityMatches(
+        kernel.descriptorIdentity(currentDescriptor, policy), expected: expectedParent),
+      identityMatches(
+        kernel.descriptorIdentity(suppliedParent, policy), expected: expectedParent),
+      allEqual([
+        kernel.descriptorIdentity(currentDescriptor, policy),
+        kernel.descriptorIdentity(suppliedParent, policy),
+      ]),
+      .known(heldDescriptor != nil || action.parentChain.isEmpty),
+    ])
+  }
+
   private func probe(
     _ owner: LeasedOwnerDescriptor,
     policy: NoMaterializationPolicy
@@ -918,12 +1082,28 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     let root = kernel.descriptorIdentity(owner.root.rawValue, policy)
     let parent = kernel.descriptorIdentity(owner.parent.rawValue, policy)
     let file = kernel.descriptorIdentity(owner.file.rawValue, policy)
-    let item = kernel.item(owner.parent.rawValue, expected.rawBasename, policy)
+    let chainBefore = namespaceChainObservation(
+      root: owner.root.rawValue,
+      suppliedParent: owner.parent.rawValue,
+      action: owner.action,
+      policy: policy)
+    let item = kernel.item(
+      owner.parent.rawValue,
+      expected.rawBasename,
+      policy,
+      owner.action.inheritedProviderBoundaryByComponent.last ?? false)
+    let chainAfter = namespaceChainObservation(
+      root: owner.root.rawValue,
+      suppliedParent: owner.parent.rawValue,
+      action: owner.action,
+      policy: policy)
     let slotMatches = allTrue([
-      root.map { $0 == expected.rootIdentity },
-      parent.map { $0 == expected.parentIdentity },
-      file.map { $0 == expected.objectIdentity },
-      item.identity.map { $0 == expected.objectIdentity },
+      chainBefore,
+      chainAfter,
+      identityMatches(root, expected: expected.rootIdentity),
+      identityMatches(parent, expected: expected.parentIdentity),
+      identityMatches(file, expected: expected.objectIdentity),
+      identityMatches(item.identity, expected: expected.objectIdentity),
       allEqual([file, item.identity]),
     ])
     let clone = cloneAssociation(item: item, expectedDevice: expected.objectIdentity.device)
@@ -1234,6 +1414,45 @@ private func runtimeIdentity(_ identity: FileObjectIdentity) -> RuntimeReleaseFi
   )
 }
 
+private func runtimeIdentity(_ identity: ObjectIdentity) -> RuntimeReleaseFileObjectIdentity {
+  let objectType: RuntimeReleaseObjectType =
+    switch identity.type {
+    case .regularFile: .regularFile
+    case .directory: .directory
+    case .symbolicLink: .symbolicLink
+    }
+  return RuntimeReleaseFileObjectIdentity(
+    device: identity.device,
+    fileID: identity.object,
+    objectType: objectType,
+    generation: identity.generation.knownValue)
+}
+
+private func inheritedProviderBoundaries(
+  _ namespace: ProtectedNamespaceBinding
+) throws -> [Bool] {
+  var inherited = try providerManaged(namespace.rootSeal.providerBoundary)
+  var result: [Bool] = []
+  for index in namespace.targetPath.components.indices {
+    result.append(inherited)
+    if index < namespace.parentChain.count {
+      if try providerManaged(namespace.parentChain[index].seal.providerBoundary) {
+        inherited = true
+      }
+    }
+  }
+  return result
+}
+
+private func providerManaged(
+  _ observation: Observation<ProviderState>
+) throws -> Bool {
+  guard case .known(let state) = observation else {
+    throw RuntimeReleaseTopologyPlanError.invalidProviderBinding
+  }
+  return state == .fileProviderManaged
+}
+
 private func runtimeObjectType(_ objectType: FileSystemObjectType) -> RuntimeReleaseObjectType {
   switch objectType {
   case .directory: .directory
@@ -1287,8 +1506,10 @@ private func capabilityObservation<Value: Equatable & Sendable>(
 private func providerLocalObservation(
   _ outcome: FileProviderProbeOutcome,
   dataless: RuntimeReleaseTopologyObservation<Bool>,
-  syncRoot: RuntimeReleaseTopologyObservation<Bool>
+  syncRoot: RuntimeReleaseTopologyObservation<Bool>,
+  inheritedProviderBoundary: Bool
 ) -> RuntimeReleaseTopologyObservation<Bool> {
+  if inheritedProviderBoundary { return .known(false) }
   switch outcome {
   case .evidence(let evidence):
     switch evidence.identityDisposition {
@@ -1401,6 +1622,27 @@ private func allEqual<Value: Equatable & Sendable>(
     .asBooleanFailure()
 }
 
+private func identityMatches(
+  _ observation: RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>,
+  expected: RuntimeReleaseFileObjectIdentity
+) -> RuntimeReleaseTopologyObservation<Bool> {
+  switch observation {
+  case .known(let actual):
+    guard actual.device == expected.device, actual.fileID == expected.fileID,
+      actual.objectType == expected.objectType
+    else { return .known(false) }
+    guard let expectedGeneration = expected.generation else { return .known(true) }
+    guard let actualGeneration = actual.generation else {
+      return .unknown(.unavailableViaPublicAPI)
+    }
+    return .known(actualGeneration == expectedGeneration)
+  case .absent: return .absent
+  case .unknown(let reason): return .unknown(reason)
+  case .unreadable(let failure): return .unreadable(failure)
+  case .failed(let failure): return .failed(failure)
+  }
+}
+
 extension RuntimeReleaseTopologyObservation {
   fileprivate var isFailed: Bool {
     if case .failed = self { return true }
@@ -1459,6 +1701,8 @@ private struct RuntimeReleaseTopologyBindingEncoder {
     uint64(value.device)
     uint64(value.fileID)
     string(value.objectType.rawValue)
+    uint64(value.generation == nil ? 0 : 1)
+    if let generation = value.generation { uint64(generation) }
   }
 
   mutating func optionalClone(_ value: RuntimeReleaseCloneIdentity?) {
@@ -1483,6 +1727,17 @@ private func releaseTopologyBindingHash(
   for binding in candidateActions {
     encoder.string(binding.candidateID)
     encoder.bytes(binding.actionID.digest.bytes)
+    encoder.bytes(binding.rawRoot.absoluteBytes)
+    encoder.uint64(UInt64(binding.targetPath.components.count))
+    for component in binding.targetPath.components { encoder.bytes(component) }
+    encoder.identity(binding.rootIdentity)
+    encoder.uint64(UInt64(binding.parentChain.count))
+    for parent in binding.parentChain { encoder.identity(parent) }
+    encoder.identity(binding.targetIdentity)
+    encoder.uint64(UInt64(binding.inheritedProviderBoundaryByComponent.count))
+    for inherited in binding.inheritedProviderBoundaryByComponent {
+      encoder.uint64(inherited ? 1 : 0)
+    }
   }
   encoder.uint64(UInt64(fileObjects.count))
   for file in fileObjects {
