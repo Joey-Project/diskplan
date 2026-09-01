@@ -407,6 +407,72 @@ func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
 }
 
 @Test
+func descriptorProviderProbeTreatsCanonicalRootAsDescriptorBoundLocal() throws {
+  let rootDescriptor = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  let descriptor = try #require(rootDescriptor >= 0 ? rootDescriptor : nil)
+  defer { close(descriptor) }
+  let identityStarts = LockedCounter()
+  let boundaryProbe = FileProviderBoundaryProbe(
+    operations: FileProviderProbeOperations(
+      startIdentity: { _, completion in
+        identityStarts.increment()
+        completion(
+          .known(ProviderIdentity(itemIdentifier: "unexpected", domainIdentifier: "unexpected")))
+      }))
+
+  let outcome = DescriptorFileProviderBoundaryProbe(boundaryProbe: boundaryProbe).probe(
+    fileDescriptor: descriptor,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100))
+
+  guard case .evidence(let evidence) = outcome else {
+    Issue.record("expected descriptor-bound root evidence, got \(outcome)")
+    return
+  }
+  #expect(identityStarts.value == 0)
+  #expect(evidence.identityDisposition == .identifierAbsent)
+  #expect(evidence.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
+func descriptorProviderProbeFailsClosedWhenRootPostflightPolicyChanges() throws {
+  let rootDescriptor = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+  let descriptor = try #require(rootDescriptor >= 0 ? rootDescriptor : nil)
+  defer { close(descriptor) }
+  let reads = LockedCounter()
+  let installer = MaterializationPolicyInstaller(
+    setOff: { (0, 0) },
+    readBack: {
+      reads.increment()
+      let value =
+        reads.value < 5
+        ? Int32(IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+        : Int32(IOPOL_MATERIALIZE_DATALESS_FILES_ON)
+      return (value, 0)
+    })
+  let policy = try #require(installer.installBeforePathAccess().value)
+  let identityStarts = LockedCounter()
+  let boundaryProbe = FileProviderBoundaryProbe(
+    operations: FileProviderProbeOperations(
+      startIdentity: { _, completion in
+        identityStarts.increment()
+        completion(.identifierAbsent)
+      }))
+
+  let outcome = DescriptorFileProviderBoundaryProbe(boundaryProbe: boundaryProbe).probe(
+    fileDescriptor: descriptor,
+    policy: policy,
+    timeout: .milliseconds(100))
+
+  guard case .rejected(.policyUnavailable(let status, _, _)) = outcome else {
+    Issue.record("expected root postflight policy rejection, got \(outcome)")
+    return
+  }
+  #expect(status == .inconsistent)
+  #expect(identityStarts.value == 0)
+}
+
+@Test
 func boundProviderProbeTypesIdentityTimeoutWithoutMetadataWork() throws {
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }

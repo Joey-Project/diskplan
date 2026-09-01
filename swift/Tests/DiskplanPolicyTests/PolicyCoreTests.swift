@@ -734,7 +734,7 @@ func storageGraphInvalidDiagnosticsArePermutationInvariant() throws {
   let owner = storageCandidate("owner", ["owner"], 1)
   let outsidePath = try RawTargetPath(components: [Data("outside".utf8)])
   let invalidFiles = ["z-file", "a-file"].map { fileID in
-    FileObjectNode(
+    return FileObjectNode(
       provenance: graphProvenance(),
       id: fileID,
       observedOwners: [FileOwnerLink(candidateID: owner.id, path: outsidePath)],
@@ -2203,6 +2203,7 @@ func releaseGraphManifestRejectsSlicesMixesDuplicatesAndMissingGroups() throws {
     provenance: secondGroup.provenance,
     id: secondGroup.id,
     ownerFileObjectIDs: secondGroup.ownerFileObjectIDs,
+    cloneIdentity: secondGroup.cloneIdentity,
     cloneRefCount: secondGroup.cloneRefCount,
     sharedBytes: .known(201),
     snapshotBlocker: secondGroup.snapshotBlocker
@@ -2610,6 +2611,7 @@ func completeReleaseLineageIgnoresReferenceEpochButBindsSemanticTopology() throw
         ownerFileObjectIDs: originalGroup.ownerFileObjectIDs.map {
           $0 == "file-a" ? "file-a-v2" : $0
         },
+        cloneIdentity: originalGroup.cloneIdentity,
         cloneRefCount: originalGroup.cloneRefCount,
         sharedBytes: originalGroup.sharedBytes,
         snapshotBlocker: originalGroup.snapshotBlocker
@@ -2678,6 +2680,7 @@ func releaseTopologyEncodingCanonicalizesEquivalentArrayOrders() throws {
   let forward = ReleaseTopologyExpectation(
     allocationGroupID: "group",
     fileObjects: [first, second],
+    cloneIdentity: .known(ReleaseCloneIdentity(device: 1, cloneID: 44)),
     cloneRefCount: .known(4),
     sharedBytes: .known(100),
     snapshotBlocker: .known(false)
@@ -2685,11 +2688,22 @@ func releaseTopologyEncodingCanonicalizesEquivalentArrayOrders() throws {
   let reverse = ReleaseTopologyExpectation(
     allocationGroupID: "group",
     fileObjects: [second, first],
+    cloneIdentity: .known(ReleaseCloneIdentity(device: 1, cloneID: 44)),
     cloneRefCount: .known(4),
     sharedBytes: .known(100),
     snapshotBlocker: .known(false)
   )
   #expect(encodeReleaseTopologyExpectation(forward) == encodeReleaseTopologyExpectation(reverse))
+  let substitutedClone = ReleaseTopologyExpectation(
+    allocationGroupID: "group",
+    fileObjects: [first, second],
+    cloneIdentity: .known(ReleaseCloneIdentity(device: 1, cloneID: 45)),
+    cloneRefCount: .known(4),
+    sharedBytes: .known(100),
+    snapshotBlocker: .known(false))
+  #expect(
+    encodeReleaseTopologyExpectation(forward)
+      != encodeReleaseTopologyExpectation(substitutedClone))
 }
 
 @Test
@@ -3818,14 +3832,52 @@ private func allocationGroup(
   bytes: UInt64,
   facts: FrozenGlobalFacts = globalFacts()
 ) -> AllocationGroupNode {
-  AllocationGroupNode(
+  let cloneIdentity: Observation<ReleaseCloneIdentity> =
+    refCount == 1
+    ? .absent
+    : .known(
+      ReleaseCloneIdentity(
+        device: 1,
+        cloneID: id.utf8.reduce(UInt64(1)) { $0 &* 31 &+ UInt64($1) }))
+  return AllocationGroupNode(
     provenance: graphProvenance(facts: facts),
     id: id,
     ownerFileObjectIDs: owners,
+    cloneIdentity: cloneIdentity,
     cloneRefCount: .known(refCount),
     sharedBytes: .known(bytes),
     snapshotBlocker: .known(false)
   )
+}
+
+private func descendantOwnerNamespace(
+  owner: StorageCandidate,
+  link: FileOwnerLink,
+  leafObject: UInt64
+) -> FileOwnerNamespaceExpectation {
+  let candidateSeal = NamespaceSealEvidence(
+    trustedNamespace: owner.namespaceBinding.trustedNamespace,
+    accessPolicy: owner.evidence.accessPolicy,
+    aclDigest: owner.evidence.aclDigest,
+    providerBoundary: owner.evidence.providerState,
+    mountIdentity: owner.evidence.targetMountIdentity)
+  let namespace = try! ProtectedNamespaceBinding(
+    rawRoot: owner.namespaceBinding.rawRoot,
+    rootIdentity: owner.namespaceBinding.rootIdentity,
+    rootSeal: owner.namespaceBinding.rootSeal,
+    targetPath: link.path,
+    targetIdentity: ObjectIdentity(
+      device: owner.targetIdentity.device,
+      object: leafObject,
+      generation: .known(1),
+      type: .regularFile),
+    parentChain: owner.namespaceBinding.parentChain + [
+      ParentNamespaceBinding(
+        relativePath: owner.target,
+        identity: owner.targetIdentity,
+        seal: candidateSeal)
+    ])
+  return FileOwnerNamespaceExpectation(link: link, namespaceBinding: namespace)
 }
 
 private func graphProvenance(
@@ -3891,7 +3943,7 @@ private func twoGroupStorageGraph(
   let d = storageCandidate("d", ["d"], 40, facts: facts)
   let candidates = [a, b, c, d]
   let files = candidates.map { candidate in
-    FileObjectNode(
+    return FileObjectNode(
       provenance: graphProvenance(facts: facts),
       id: "file-\(candidate.id)",
       observedOwners: [
@@ -3936,10 +3988,14 @@ private func overlappingReleaseComponentGraph(
     owner: StorageCandidate,
     path: RawTargetPath? = nil
   ) -> FileObjectNode {
-    FileObjectNode(
+    let resolvedPath = path ?? owner.target
+    let link = FileOwnerLink(candidateID: owner.id, path: resolvedPath)
+    return FileObjectNode(
       provenance: graphProvenance(facts: facts),
       id: id,
-      observedOwners: [FileOwnerLink(candidateID: owner.id, path: path ?? owner.target)],
+      observedOwners: [link],
+      ownerNamespaces: resolvedPath == owner.target
+        ? [] : [descendantOwnerNamespace(owner: owner, link: link, leafObject: 10_000)],
       linkCount: .known(1)
     )
   }
@@ -3979,6 +4035,12 @@ private func manyConnectedReleaseGroupsGraph(
       provenance: graphProvenance(facts: facts),
       id: "file-\(index)",
       observedOwners: [FileOwnerLink(candidateID: owner.id, path: path)],
+      ownerNamespaces: [
+        descendantOwnerNamespace(
+          owner: owner,
+          link: FileOwnerLink(candidateID: owner.id, path: path),
+          leafObject: UInt64(10_000 + index))
+      ],
       linkCount: .known(1)
     )
   }
@@ -4130,6 +4192,7 @@ private func replaceGroup(
         provenance: old.provenance,
         id: old.id,
         ownerFileObjectIDs: old.ownerFileObjectIDs,
+        cloneIdentity: old.cloneIdentity,
         cloneRefCount: refCount ?? old.cloneRefCount,
         sharedBytes: sharedBytes ?? old.sharedBytes,
         snapshotBlocker: snapshot ?? old.snapshotBlocker

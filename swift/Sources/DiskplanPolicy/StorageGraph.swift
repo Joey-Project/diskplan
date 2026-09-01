@@ -164,18 +164,41 @@ public struct FileObjectNode: Equatable, Sendable {
   public let provenance: GraphObservationProvenance
   public let id: String
   public let observedOwners: [FileOwnerLink]
+  public let ownerNamespaces: [FileOwnerNamespaceExpectation]
   public let linkCount: Observation<UInt32>
 
   public init(
     provenance: GraphObservationProvenance,
     id: String,
     observedOwners: [FileOwnerLink],
+    ownerNamespaces: [FileOwnerNamespaceExpectation] = [],
     linkCount: Observation<UInt32>
   ) {
     self.provenance = provenance
     self.id = id
     self.observedOwners = observedOwners
+    self.ownerNamespaces = ownerNamespaces
     self.linkCount = linkCount
+  }
+}
+
+public struct ReleaseCloneIdentity: Equatable, Hashable, Sendable {
+  public let device: UInt64
+  public let cloneID: UInt64
+
+  public init(device: UInt64, cloneID: UInt64) {
+    self.device = device
+    self.cloneID = cloneID
+  }
+}
+
+public struct FileOwnerNamespaceExpectation: Equatable, Sendable {
+  public let link: FileOwnerLink
+  public let namespaceBinding: ProtectedNamespaceBinding
+
+  public init(link: FileOwnerLink, namespaceBinding: ProtectedNamespaceBinding) {
+    self.link = link
+    self.namespaceBinding = namespaceBinding
   }
 }
 
@@ -183,6 +206,7 @@ public struct AllocationGroupNode: Equatable, Sendable {
   public let provenance: GraphObservationProvenance
   public let id: String
   public let ownerFileObjectIDs: [String]
+  public let cloneIdentity: Observation<ReleaseCloneIdentity>
   public let cloneRefCount: Observation<UInt32>
   public let sharedBytes: Observation<UInt64>
   public let snapshotBlocker: Observation<Bool>
@@ -191,6 +215,7 @@ public struct AllocationGroupNode: Equatable, Sendable {
     provenance: GraphObservationProvenance,
     id: String,
     ownerFileObjectIDs: [String],
+    cloneIdentity: Observation<ReleaseCloneIdentity> = .absent,
     cloneRefCount: Observation<UInt32>,
     sharedBytes: Observation<UInt64>,
     snapshotBlocker: Observation<Bool>
@@ -198,6 +223,7 @@ public struct AllocationGroupNode: Equatable, Sendable {
     self.provenance = provenance
     self.id = id
     self.ownerFileObjectIDs = ownerFileObjectIDs
+    self.cloneIdentity = cloneIdentity
     self.cloneRefCount = cloneRefCount
     self.sharedBytes = sharedBytes
     self.snapshotBlocker = snapshotBlocker
@@ -211,6 +237,7 @@ public enum ReleaseBlocker: Equatable, Sendable {
   case duplicateOwnerPath(String)
   case hardlinkOwnerIncomplete(String)
   case cloneOwnerIncomplete(String)
+  case ownerNamespaceIncomplete(String)
   case ownerNotSelected(String)
   case unsafeOwner(String)
   case providerOwner(String)
@@ -241,11 +268,25 @@ public struct EvaluatedReleaseSet: Equatable, Sendable {
 public struct FileTopologyExpectation: Equatable, Sendable {
   public let fileObjectID: String
   public let owners: [FileOwnerLink]
+  public let ownerNamespaces: [FileOwnerNamespaceExpectation]
   public let linkCount: Observation<UInt32>
+
+  public init(
+    fileObjectID: String,
+    owners: [FileOwnerLink],
+    ownerNamespaces: [FileOwnerNamespaceExpectation] = [],
+    linkCount: Observation<UInt32>
+  ) {
+    self.fileObjectID = fileObjectID
+    self.owners = owners
+    self.ownerNamespaces = ownerNamespaces
+    self.linkCount = linkCount
+  }
 
   public static func == (lhs: Self, rhs: Self) -> Bool {
     Data(lhs.fileObjectID.utf8) == Data(rhs.fileObjectID.utf8)
       && lhs.owners == rhs.owners
+      && lhs.ownerNamespaces == rhs.ownerNamespaces
       && lhs.linkCount == rhs.linkCount
   }
 }
@@ -253,13 +294,31 @@ public struct FileTopologyExpectation: Equatable, Sendable {
 public struct ReleaseTopologyExpectation: Equatable, Sendable {
   public let allocationGroupID: String
   public let fileObjects: [FileTopologyExpectation]
+  public let cloneIdentity: Observation<ReleaseCloneIdentity>
   public let cloneRefCount: Observation<UInt32>
   public let sharedBytes: Observation<UInt64>
   public let snapshotBlocker: Observation<Bool>
 
+  public init(
+    allocationGroupID: String,
+    fileObjects: [FileTopologyExpectation],
+    cloneIdentity: Observation<ReleaseCloneIdentity> = .absent,
+    cloneRefCount: Observation<UInt32>,
+    sharedBytes: Observation<UInt64>,
+    snapshotBlocker: Observation<Bool>
+  ) {
+    self.allocationGroupID = allocationGroupID
+    self.fileObjects = fileObjects
+    self.cloneIdentity = cloneIdentity
+    self.cloneRefCount = cloneRefCount
+    self.sharedBytes = sharedBytes
+    self.snapshotBlocker = snapshotBlocker
+  }
+
   public static func == (lhs: Self, rhs: Self) -> Bool {
     Data(lhs.allocationGroupID.utf8) == Data(rhs.allocationGroupID.utf8)
       && lhs.fileObjects == rhs.fileObjects
+      && lhs.cloneIdentity == rhs.cloneIdentity
       && lhs.cloneRefCount == rhs.cloneRefCount
       && lhs.sharedBytes == rhs.sharedBytes
       && lhs.snapshotBlocker == rhs.snapshotBlocker
@@ -371,6 +430,12 @@ public struct StorageReleaseGraph: Equatable, Sendable {
       guard uniqueOwners.count == file.observedOwners.count else {
         throw PolicyModelError.invalidStorageGraph("duplicate-file-owner:\(file.id)")
       }
+      let namespaceLinks = file.ownerNamespaces.map(\.link)
+      guard Set(namespaceLinks).count == namespaceLinks.count,
+        Set(namespaceLinks).isSubset(of: uniqueOwners)
+      else {
+        throw PolicyModelError.invalidStorageGraph("invalid-owner-namespace:\(file.id)")
+      }
       if case .known(let count) = file.linkCount {
         guard count > 0, Int(count) >= uniqueOwners.count else {
           throw PolicyModelError.invalidStorageGraph("impossible-link-count:\(file.id)")
@@ -391,6 +456,13 @@ public struct StorageReleaseGraph: Equatable, Sendable {
         }
         ownerFileIDByPath[owner] = file.id
       }
+      for expectation in file.ownerNamespaces {
+        guard let candidate = candidateByID[Data(expectation.link.candidateID.utf8)],
+          ownerNamespaceIsBound(expectation, to: candidate)
+        else {
+          throw PolicyModelError.invalidStorageGraph("owner-namespace-outside-candidate:\(file.id)")
+        }
+      }
     }
     var referencedFileIDs = Set<Data>()
     for group in canonicalGroups {
@@ -408,6 +480,18 @@ public struct StorageReleaseGraph: Equatable, Sendable {
         guard count > 0, Int(count) >= uniqueOwners.count else {
           throw PolicyModelError.invalidStorageGraph("impossible-clone-count:\(group.id)")
         }
+      }
+      switch (group.cloneIdentity, group.cloneRefCount) {
+      case (.known(let identity), .known(let count)):
+        guard identity.cloneID > 0, count > 1 else {
+          throw PolicyModelError.invalidStorageGraph("invalid-clone-identity:\(group.id)")
+        }
+      case (.absent, .known(1)):
+        break
+      case (.unknown, _), (.unreadable, _), (.failed, _):
+        break
+      default:
+        throw PolicyModelError.invalidStorageGraph("invalid-clone-identity:\(group.id)")
       }
       referencedFileIDs.formUnion(uniqueOwners)
     }
@@ -440,6 +524,13 @@ public struct StorageReleaseGraph: Equatable, Sendable {
           ownerEncoder.data(owner.path.bindingBytes)
           return ownerEncoder.data
         }
+        nested.array(file.ownerNamespaces.sorted(by: ownerNamespacePrecedes)) { owner in
+          var ownerEncoder = PolicyBindingEncoder()
+          ownerEncoder.string(owner.link.candidateID)
+          ownerEncoder.data(owner.link.path.bindingBytes)
+          ownerEncoder.data(owner.namespaceBinding.bindingBytes)
+          return ownerEncoder.data
+        }
         nested.observation(file.linkCount) { $0.uint64(UInt64($1)) }
         return nested.data
       }
@@ -449,6 +540,10 @@ public struct StorageReleaseGraph: Equatable, Sendable {
         nested.string(group.id)
         nested.array(group.ownerFileObjectIDs.sorted(by: rawStringPrecedesForGraph)) {
           Data($0.utf8)
+        }
+        nested.observation(group.cloneIdentity) { encoder, identity in
+          encoder.uint64(identity.device)
+          encoder.uint64(identity.cloneID)
         }
         nested.observation(group.cloneRefCount) { $0.uint64(UInt64($1)) }
         nested.observation(group.sharedBytes) { $0.uint64($1) }
@@ -584,15 +679,43 @@ public struct StorageReleaseGraph: Equatable, Sendable {
           }
           continue
         }
+        let explicitNamespaces = Dictionary(
+          uniqueKeysWithValues: file.ownerNamespaces.map { ($0.link, $0) })
+        let resolvedNamespaces = file.observedOwners.compactMap {
+          owner
+            -> FileOwnerNamespaceExpectation? in
+          if let explicit = explicitNamespaces[owner] { return explicit }
+          guard let candidate = candidateByID[Data(owner.candidateID.utf8)],
+            owner.path == candidate.target
+          else { return nil }
+          return FileOwnerNamespaceExpectation(
+            link: owner, namespaceBinding: candidate.namespaceBinding)
+        }
+        if resolvedNamespaces.count != file.observedOwners.count
+          || !resolvedNamespaces.allSatisfy({ expectation in
+            guard let candidate = candidateByID[Data(expectation.link.candidateID.utf8)] else {
+              return false
+            }
+            return ownerNamespaceIsBound(expectation, to: candidate)
+          })
+        {
+          blockers.append(.ownerNamespaceIncomplete(file.id))
+        }
         for owner in file.observedOwners {
           owners[Data(owner.candidateID.utf8)] = owner.candidateID
         }
       }
-      if case .known(let refCount) = group.cloneRefCount,
-        Int(refCount) == uniqueFileIDs.count
+      let cloneBindingComplete: Bool
+      if uniqueFileIDs.count == 1 {
+        cloneBindingComplete = group.cloneIdentity == .absent && group.cloneRefCount == .known(1)
+      } else if case .known(let identity) = group.cloneIdentity,
+        case .known(let refCount) = group.cloneRefCount
       {
-        // Clone ownership is only one independent release-set gate.
+        cloneBindingComplete = identity.cloneID > 0 && Int(refCount) == uniqueFileIDs.count
       } else {
+        cloneBindingComplete = false
+      }
+      if !cloneBindingComplete {
         blockers.append(.cloneOwnerIncomplete(group.id))
       }
 
@@ -638,9 +761,12 @@ public struct StorageReleaseGraph: Equatable, Sendable {
               return FileTopologyExpectation(
                 fileObjectID: fileIDByKey[fileID]!,
                 owners: file.observedOwners.sorted(by: ownerLinkPrecedes),
+                ownerNamespaces: resolvedOwnerNamespaces(
+                  file: file, candidates: candidateByID),
                 linkCount: file.linkCount
               )
             },
+            cloneIdentity: group.cloneIdentity,
             cloneRefCount: group.cloneRefCount,
             sharedBytes: group.sharedBytes,
             snapshotBlocker: group.snapshotBlocker
@@ -712,6 +838,61 @@ extension RawTargetPath {
     encoder.array(components) { $0 }
     return encoder.data
   }
+}
+
+private func resolvedOwnerNamespaces(
+  file: FileObjectNode,
+  candidates: [Data: StorageCandidate]
+) -> [FileOwnerNamespaceExpectation] {
+  let explicit = Dictionary(uniqueKeysWithValues: file.ownerNamespaces.map { ($0.link, $0) })
+  return file.observedOwners.compactMap { owner in
+    if let expectation = explicit[owner] { return expectation }
+    guard let candidate = candidates[Data(owner.candidateID.utf8)], owner.path == candidate.target
+    else { return nil }
+    return FileOwnerNamespaceExpectation(link: owner, namespaceBinding: candidate.namespaceBinding)
+  }.sorted(by: ownerNamespacePrecedes)
+}
+
+private func ownerNamespaceIsBound(
+  _ expectation: FileOwnerNamespaceExpectation,
+  to candidate: StorageCandidate
+) -> Bool {
+  let namespace = expectation.namespaceBinding
+  let candidateNamespace = candidate.namespaceBinding
+  guard namespace.targetPath == expectation.link.path,
+    namespace.rawRoot == candidateNamespace.rawRoot,
+    namespace.rootIdentity == candidateNamespace.rootIdentity,
+    namespace.rootSeal == candidateNamespace.rootSeal,
+    namespace.targetPath.isWithin(candidate.target)
+  else { return false }
+
+  if namespace.targetPath == candidate.target {
+    return namespace == candidateNamespace
+  }
+
+  guard candidate.targetIdentity.type == .directory else { return false }
+  let candidateDepth = candidate.target.components.count
+  let expectedCandidateSeal = NamespaceSealEvidence(
+    trustedNamespace: candidateNamespace.trustedNamespace,
+    accessPolicy: candidate.evidence.accessPolicy,
+    aclDigest: candidate.evidence.aclDigest,
+    providerBoundary: candidate.evidence.providerState,
+    mountIdentity: candidate.evidence.targetMountIdentity)
+  guard Array(namespace.parentChain.prefix(candidateDepth - 1)) == candidateNamespace.parentChain,
+    namespace.parentChain[candidateDepth - 1]
+      == ParentNamespaceBinding(
+        relativePath: candidate.target,
+        identity: candidate.targetIdentity,
+        seal: expectedCandidateSeal)
+  else { return false }
+  return true
+}
+
+private func ownerNamespacePrecedes(
+  _ lhs: FileOwnerNamespaceExpectation,
+  _ rhs: FileOwnerNamespaceExpectation
+) -> Bool {
+  ownerLinkPrecedes(lhs.link, rhs.link)
 }
 
 private func ownerLinkPrecedes(_ lhs: FileOwnerLink, _ rhs: FileOwnerLink) -> Bool {
