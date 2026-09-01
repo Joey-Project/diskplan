@@ -938,7 +938,7 @@ func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
     waiverConsents: [],
     userNotes: []
   )
-  #expect(throws: PolicyModelError.actionNotStageable(discard.id)) {
+  #expect(throws: PolicyModelError.actionNotStageable(remove.id)) {
     try DecisionOverlayValidator.validate(overlay, against: plan)
   }
 

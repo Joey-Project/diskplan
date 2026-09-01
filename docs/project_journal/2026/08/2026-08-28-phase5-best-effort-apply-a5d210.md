@@ -293,3 +293,12 @@ superseded_by:
   action order, while the stale assertion expected the discard action ID. The successor asserts
   the exact remove ID and preserves the collector-not-called proof. Policy and serial full gates
   were not started for this failed head.
+- India execution validation of successor `22085b87c79c161521aa546509f17124844799ef`
+  passed all 152 tests; the bounded supervisor completed in 22.613 seconds, emitted 43,594 bytes
+  with SHA-256 prefix `8bc66b75`, and verified a quiescent process group. The focused policy gate
+  then compiled and ran 66 tests; one assertion produced one issue after the bounded supervisor
+  completed in 7.370 seconds, emitted 12,827 bytes with SHA-256 prefix `e3375527`, and verified a
+  quiescent process group. It was the PolicyCore counterpart of the corrected execution fixture:
+  canonical evaluated-action order rejected the blocked dependent remove action, while the stale
+  assertion expected the discard action ID. The successor updates only that test expectation;
+  production behavior is unchanged. The serial full gate was not started for this failed head.
