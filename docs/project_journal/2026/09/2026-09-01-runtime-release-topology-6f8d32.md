@@ -169,3 +169,20 @@ superseded_by:
   supervisor in 24.244 seconds. The supervisor verified the process group, reported a quiescent
   exit, and retained output SHA-256
   `12946d8776327125b37d4a522152d6c11852216d1de5ec7427c7d6497b9ea71c`.
+- Production base `381ab8c14a383662a9f0f20945c7dc421c76e9bb` was absorbed without conflicts
+  through signed no-fast-forward merge `a47f5b0fddd66d21191f7eb72491ee823dc911c9`; the merge
+  retains `19f752d75641303d621b4a28ad830d4554d9e965` and the exact production base as its two
+  parents. On that merged tree, the three focused canonical-root and typed-consensus regressions
+  passed with retained output SHA-256
+  `0bf4daeea5fbfd05fac777c94000998bcf70214545c3f35e79a4c2bf034847fa`.
+- The first complete post-merge `DiskplanEngineCoreTests` run passed 177 of 179 tests; two
+  unrelated concurrent runtime-policy deadline tests failed. Both passed immediately in an exact
+  focused rerun (retained output SHA-256
+  `abe6c4e5e7918b5339b06e4a971b93e45fcdf5202ac0f4eabcf189b48889795e`), and the complete
+  suite then passed all 179 tests with SHA-256
+  `54c995bbddd6ee8c38be915ae7c22301097330ecba4de375df29d4e145573920`.
+- All 66 `DiskplanPolicyTests` passed with retained output SHA-256
+  `933320ca9a6ba1e0bd1e4a6fe06c11671baac58384a6450e49d2aa4c548d93f0`; the final build
+  passed with SHA-256 `c83f8bcdf414ec601dd42da86342596666119297f394f243309c4a968c734ccf`.
+  Strict `swift-format` lint produced no diagnostics. Every command ran under the bounded
+  supervisor, which verified the target process group and reported a quiescent exit.
