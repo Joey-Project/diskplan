@@ -1151,6 +1151,191 @@ import Testing
   #expect(rejection.code == .invalidState)
 }
 
+@Test func controllerExecutionBackendIsAbsentFailClosed() throws {
+  let controller = RuntimeSessionController()
+  #expect(!controller.supportedCapabilities.contains("dry-run-projection-v1"))
+  #expect(!controller.supportedCapabilities.contains("execution-stream-v1"))
+  let output = AuthorityTestOutput()
+  let broker = SerialEventBroker { output.append($0) }
+  let authority = RuntimeBusinessAuthorityState()
+  var request = Diskplan_V1_PrepareDryRunRequest()
+  request.requestID = 1
+  #expect(authority.claim(.prepareDryRun(request))?.code == nil)
+  try controller.handle(
+    .prepareDryRun(request),
+    responder: RuntimeBusinessResponder(
+      broker: broker,
+      request: .prepareDryRun(request),
+      runtimeSessionID: Data("runtime-session".utf8),
+      authority: authority
+    )
+  )
+  try broker.finish()
+  guard case .runtimeRejected(let rejection)? = output.runtimeEvents().last?.body else {
+    Issue.record("expected typed unavailable rejection")
+    return
+  }
+  #expect(rejection.code == .businessUnsupported)
+}
+
+@Test func controllerDryRunRequiresTheExactLiveOverlayBinding() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: false)
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  var stale = Diskplan_V1_PrepareDryRunRequest()
+  stale.requestID = 3
+  stale.projectionID = fixture.plan.projectionID
+  stale.overlayID = fixture.overlay.overlayID
+  stale.overlayRevision = fixture.overlay.revision + 1
+  stale.overlaySha256 = fixture.overlay.overlaySha256
+  #expect(fixture.authority.claim(.prepareDryRun(stale))?.code == nil)
+  try fixture.controller.handle(
+    .prepareDryRun(stale),
+    responder: fixture.responder(.prepareDryRun(stale))
+  )
+  #expect(backend.dryRunCount == 0)
+
+  var current = stale
+  current.requestID = 4
+  current.overlayRevision = fixture.overlay.revision
+  #expect(fixture.authority.claim(.prepareDryRun(current))?.code == nil)
+  try fixture.controller.handle(
+    .prepareDryRun(current),
+    responder: fixture.responder(.prepareDryRun(current))
+  )
+  #expect(
+    await runtimeEventually {
+      fixture.output.runtimeEvents().contains { event in
+        guard case .dryRunProjection(let projection)? = event.body else { return false }
+        return projection.manifest.projectionID == fixture.plan.projectionID
+          && projection.manifest.overlayID == fixture.overlay.overlayID
+          && projection.manifest.overlayRevision == fixture.overlay.revision
+      }
+    })
+  #expect(backend.dryRunCount == 1)
+}
+
+@Test func controllerConfirmCancelAndReplayShareOneSealedExecution() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: true)
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer { try? fixture.broker.finish() }
+  let review = try await prepareRuntimePositiveReview(fixture)
+
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = 4
+  confirmation.applyReviewID = review.applyReviewID
+  confirmation.reviewBindingSha256 = review.reviewBindingSha256
+  confirmation.confirmedForceActionIds = review.forceWarningActionIds
+  #expect(fixture.authority.claim(.confirmApply(confirmation))?.code == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  #expect(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == backend.executionID
+    })
+
+  var wrongCancellation = Diskplan_V1_CancelExecutionRequest()
+  wrongCancellation.requestID = 5
+  wrongCancellation.executionID.value = Data("wrong-execution".utf8)
+  #expect(fixture.authority.claim(.cancelExecution(wrongCancellation))?.code == .staleBinding)
+  #expect(backend.cancelCount == 0)
+
+  var cancellation = Diskplan_V1_CancelExecutionRequest()
+  cancellation.requestID = 6
+  cancellation.executionID.value = backend.executionID
+  #expect(fixture.authority.claim(.cancelExecution(cancellation))?.code == nil)
+  try fixture.controller.handle(
+    .cancelExecution(cancellation),
+    responder: fixture.responder(.cancelExecution(cancellation))
+  )
+  #expect(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == nil
+        && backend.cancelCount == 1
+    })
+  let confirmationRequestID = confirmation.requestID
+  let cancellationRequestID = cancellation.requestID
+  #expect(
+    await runtimeEventually {
+      fixture.output.runtimeEvents().contains { event in
+        guard event.requestID == confirmationRequestID,
+          case .executionStreamEvent(let streamEvent)? = event.body
+        else { return false }
+        if case .applyFinished? = streamEvent.body { return true }
+        return false
+      }
+        && fixture.output.runtimeEvents().contains { event in
+          guard event.requestID == cancellationRequestID,
+            case .executionStreamEvent(let streamEvent)? = event.body
+          else { return false }
+          if case .applyFinished? = streamEvent.body { return true }
+          return false
+        }
+    })
+
+  var replay = confirmation
+  replay.requestID = 7
+  #expect(fixture.authority.claim(.confirmApply(replay))?.code == .staleBinding)
+  #expect(backend.startCount == 1)
+
+  let events = fixture.output.runtimeEvents()
+  let confirmStream: [Diskplan_V1_ExecutionStreamEvent] =
+    events
+    .filter { $0.requestID == confirmation.requestID }
+    .compactMap { runtimeEvent -> Diskplan_V1_ExecutionStreamEvent? in
+      guard case .executionStreamEvent(let event)? = runtimeEvent.body else { return nil }
+      return event
+    }
+  let cancelStream: [Diskplan_V1_ExecutionStreamEvent] =
+    events
+    .filter { $0.requestID == cancellation.requestID }
+    .compactMap { runtimeEvent -> Diskplan_V1_ExecutionStreamEvent? in
+      guard case .executionStreamEvent(let event)? = runtimeEvent.body else { return nil }
+      return event
+    }
+  #expect(!confirmStream.isEmpty)
+  #expect(confirmStream == cancelStream)
+  #expect(confirmStream.last?.applyFinished != nil)
+  let cancellationAcknowledgementCount = confirmStream.filter { event in
+    if case .cancellationAcknowledged? = event.body { return true }
+    return false
+  }.count
+  #expect(cancellationAcknowledgementCount == 1)
+  _ = try SealedRuntimeWire.sealExecutionStream(
+    confirmStream,
+    requiredForceWarningActionIDs: review.forceWarningActionIds
+  )
+}
+
+@Test func controllerTeardownCancelsAndWaitsForRetainedExecution() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: true)
+  let fixture = try runtimePositiveFixture(backend: backend)
+  let review = try await prepareRuntimePositiveReview(fixture)
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = 4
+  confirmation.applyReviewID = review.applyReviewID
+  confirmation.reviewBindingSha256 = review.reviewBindingSha256
+  #expect(fixture.authority.claim(.confirmApply(confirmation))?.code == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  #expect(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == backend.executionID
+    })
+
+  fixture.controller.stopAndWait()
+  #expect(backend.cancelCount == 1)
+  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
+  try fixture.broker.finish()
+}
+
 @Test func equalCloneIDsOnDifferentDevicesRemainSeparateAllocationGroups() throws {
   let accumulator = BoundedAuthorityEvidenceAccumulator()
   for (rootID, directoryObject, fileObject, device) in [
@@ -2290,6 +2475,382 @@ private func authorityScanResult(
     globalFacts: .publicEvidenceUnavailable,
     processActivity: processActivity
   )
+}
+
+private final class RuntimePositiveFixture: @unchecked Sendable {
+  let controller: RuntimeSessionController
+  let authority: RuntimeBusinessAuthorityState
+  let broker: SerialEventBroker
+  let output: AuthorityTestOutput
+  let plan: Diskplan_V1_PlanProjectionManifest
+  let overlay: Diskplan_V1_DecisionOverlayAcknowledged
+
+  init(
+    controller: RuntimeSessionController,
+    authority: RuntimeBusinessAuthorityState,
+    broker: SerialEventBroker,
+    output: AuthorityTestOutput,
+    plan: Diskplan_V1_PlanProjectionManifest,
+    overlay: Diskplan_V1_DecisionOverlayAcknowledged
+  ) {
+    self.controller = controller
+    self.authority = authority
+    self.broker = broker
+    self.output = output
+    self.plan = plan
+    self.overlay = overlay
+  }
+
+  func responder(_ request: RuntimeBusinessRequest) -> RuntimeBusinessResponder {
+    RuntimeBusinessResponder(
+      broker: broker,
+      request: request,
+      runtimeSessionID: Data("runtime-session".utf8),
+      authority: authority
+    )
+  }
+}
+
+private func runtimePositiveFixture(
+  backend: RuntimePositiveBackend
+) throws -> RuntimePositiveFixture {
+  let result = authorityScanResult()
+  let session = seededAuthoritySession(result: result)
+  try session.finalize(result)
+  let controller = RuntimeSessionController(executionBackend: backend)
+  let finalEvidence = Data(repeating: 0x71, count: 32)
+  let checkpointID = Data(finalEvidence.map { String(format: "%02x", $0) }.joined().utf8)
+  controller.publishFinalizedReceipt(
+    RuntimeFinalizedScanReceipt(
+      scanSessionID: Data("positive-scan".utf8),
+      checkpointID: checkpointID,
+      finalEvidenceSHA256: finalEvidence,
+      checkpointEvidenceSHA256: Data(repeating: 0x72, count: 32),
+      isPartial: false,
+      authoritySession: session
+    ))
+  let output = AuthorityTestOutput()
+  let broker = SerialEventBroker { output.append($0) }
+  let authority = RuntimeBusinessAuthorityState()
+  var build = Diskplan_V1_BuildPlanRequest()
+  build.requestID = 1
+  build.scanSessionID.value = Data("positive-scan".utf8)
+  build.scanCheckpointID.value = checkpointID
+  build.scanEvidenceSha256.value = finalEvidence
+  build.agentMode = .off
+  try #require(authority.claim(.buildPlan(build)) == nil)
+  try controller.handle(
+    .buildPlan(build),
+    responder: RuntimeBusinessResponder(
+      broker: broker,
+      request: .buildPlan(build),
+      runtimeSessionID: Data("runtime-session".utf8),
+      authority: authority
+    )
+  )
+  let manifests: [Diskplan_V1_PlanProjectionManifest] = output.runtimeEvents().compactMap {
+    event -> Diskplan_V1_PlanProjectionManifest? in
+    guard case .planProjection(let projection)? = event.body else { return nil }
+    return projection.manifest
+  }
+  let plan = try #require(manifests.last)
+
+  var preset = Diskplan_V1_ApplyBatchSelectionPresetEdit()
+  preset.preset = .safeStageableWithoutWaiver
+  var edit = Diskplan_V1_DecisionOverlayEdit()
+  edit.kind = .applyBatchSelectionPreset
+  edit.edit = .applyBatchSelectionPreset(preset)
+  var request = Diskplan_V1_DecisionOverlayEditRequest()
+  request.requestID = 2
+  request.projectionID = plan.projectionID
+  request.baseRevision = 0
+  request.edits = [edit]
+  try #require(authority.claim(.editDecisionOverlay(request)) == nil)
+  try controller.handle(
+    .editDecisionOverlay(request),
+    responder: RuntimeBusinessResponder(
+      broker: broker,
+      request: .editDecisionOverlay(request),
+      runtimeSessionID: Data("runtime-session".utf8),
+      authority: authority
+    )
+  )
+  let overlays: [Diskplan_V1_DecisionOverlayAcknowledged] = output.runtimeEvents().compactMap {
+    event -> Diskplan_V1_DecisionOverlayAcknowledged? in
+    guard case .decisionOverlayAcknowledged(let overlay)? = event.body else { return nil }
+    return overlay
+  }
+  let overlay = try #require(overlays.last)
+  return RuntimePositiveFixture(
+    controller: controller,
+    authority: authority,
+    broker: broker,
+    output: output,
+    plan: plan,
+    overlay: overlay
+  )
+}
+
+private func prepareRuntimePositiveReview(
+  _ fixture: RuntimePositiveFixture
+) async throws -> Diskplan_V1_ApplyReviewProjection {
+  var request = Diskplan_V1_PrepareApplyReviewRequest()
+  request.requestID = 3
+  request.projectionID = fixture.plan.projectionID
+  request.overlayID = fixture.overlay.overlayID
+  request.overlayRevision = fixture.overlay.revision
+  request.overlaySha256 = fixture.overlay.overlaySha256
+  try #require(fixture.authority.claim(.prepareApplyReview(request)) == nil)
+  try fixture.controller.handle(
+    .prepareApplyReview(request),
+    responder: fixture.responder(.prepareApplyReview(request))
+  )
+  let ready = await runtimeEventually {
+    fixture.controller.preparedApplyReviewIDForTesting() != nil
+  }
+  try #require(ready)
+  let reviews: [Diskplan_V1_ApplyReviewProjection] = fixture.output.runtimeEvents().compactMap {
+    event -> Diskplan_V1_ApplyReviewProjection? in
+    guard case .applyReviewProjection(let projection)? = event.body else { return nil }
+    return projection
+  }
+  return try #require(reviews.last)
+}
+
+private func runtimeEventually(
+  _ predicate: @escaping @Sendable () -> Bool
+) async -> Bool {
+  for _ in 0..<500 {
+    if predicate() { return true }
+    try? await Task.sleep(for: .milliseconds(2))
+  }
+  return predicate()
+}
+
+private final class RuntimePositiveAuthority: RuntimePreparedApplyAuthority, @unchecked Sendable {
+  private let lock = NSLock()
+  private var consumed = false
+
+  func consume() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !consumed else { return false }
+    consumed = true
+    return true
+  }
+}
+
+private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked Sendable {
+  let executionID = Data("positive-execution".utf8)
+  private let lock = NSLock()
+  private let waitForCancellation: Bool
+  private var starts = 0
+  private var cancellations = 0
+  private var dryRuns = 0
+
+  var startCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return starts
+  }
+
+  var cancelCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return cancellations
+  }
+
+  var dryRunCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return dryRuns
+  }
+
+  init(waitForCancellation: Bool) {
+    self.waitForCancellation = waitForCancellation
+  }
+
+  func prepareDryRun(
+    context: RuntimeExecutionPlanContext,
+    lifetimeSeconds _: Int64
+  ) async throws -> RuntimePreparedDryRun {
+    recordDryRun()
+    var manifest = Diskplan_V1_DryRunProjectionManifest()
+    manifest.projectionID = context.planManifest.projectionID
+    manifest.planSha256 = context.planManifest.planSha256
+    manifest.overlayID = context.overlayProjection.overlayID
+    manifest.overlayRevision = context.overlayProjection.revision
+    manifest.overlaySha256 = context.overlayProjection.overlaySha256
+    manifest.planID = context.planManifest.planID
+    manifest.evidenceID = context.planManifest.evidenceID
+    manifest.evidenceSha256 = context.planManifest.evidenceSha256
+    manifest.scanSessionID = context.planManifest.scanSessionID
+    manifest.scanCheckpointID = context.planManifest.scanCheckpointID
+    manifest.scanCheckpointEvidenceSha256 = context.planManifest.scanCheckpointEvidenceSha256
+    manifest.dryRunID.value = Data("positive-dry-run".utf8)
+    manifest.epoch = runtimePositiveEpoch()
+    manifest.current = true
+    manifest.currentBindingSha256.value = Data(repeating: 0x81, count: 32)
+    return RuntimePreparedDryRun(
+      payload: Diskplan_V1_DryRunProjectionPayload(),
+      manifest: manifest
+    )
+  }
+
+  func prepareApplyReview(
+    context: RuntimeExecutionPlanContext,
+    lifetimeSeconds _: Int64
+  ) async throws -> RuntimePreparedApplyReview {
+    var projection = Diskplan_V1_ApplyReviewProjection()
+    projection.applyReviewID.value = Data("positive-review".utf8)
+    projection.projectionID = context.planManifest.projectionID
+    projection.planSha256 = context.planManifest.planSha256
+    projection.overlayID = context.overlayProjection.overlayID
+    projection.overlayRevision = context.overlayProjection.revision
+    projection.overlaySha256 = context.overlayProjection.overlaySha256
+    projection.selectedActionCount = context.overlayProjection.selectedActionCount
+    projection.planID = context.planManifest.planID
+    projection.evidenceID = context.planManifest.evidenceID
+    projection.evidenceSha256 = context.planManifest.evidenceSha256
+    projection.scanSessionID = context.planManifest.scanSessionID
+    projection.scanCheckpointID = context.planManifest.scanCheckpointID
+    projection.scanCheckpointEvidenceSha256 = context.planManifest.scanCheckpointEvidenceSha256
+    projection.epoch = runtimePositiveEpoch()
+    projection.currentBindingSha256.value = Data(repeating: 0x82, count: 32)
+    projection.reviewBindingSha256.value = Data(repeating: 0x83, count: 32)
+    return RuntimePreparedApplyReview(
+      projection: projection,
+      authority: RuntimePositiveAuthority()
+    )
+  }
+
+  func startApply(
+    authority: any RuntimePreparedApplyAuthority,
+    confirmation: RuntimeApplyConfirmation,
+    context: RuntimeExecutionPlanContext
+  ) async throws -> any RuntimeExecutionRun {
+    guard let authority = authority as? RuntimePositiveAuthority,
+      authority.consume()
+    else { throw RuntimePositiveBackendError.replayed }
+    recordStart()
+    let cancellation: @Sendable () -> Void = { [weak self] in
+      self?.recordCancellation()
+    }
+    return RuntimePositiveRun(
+      executionID: executionID,
+      review: confirmation.review,
+      context: context,
+      waitForCancellation: waitForCancellation,
+      cancellation: cancellation
+    )
+  }
+
+  private func recordDryRun() {
+    lock.lock()
+    dryRuns += 1
+    lock.unlock()
+  }
+
+  private func recordStart() {
+    lock.lock()
+    starts += 1
+    lock.unlock()
+  }
+
+  private func recordCancellation() {
+    lock.lock()
+    cancellations += 1
+    lock.unlock()
+  }
+}
+
+private enum RuntimePositiveBackendError: Error {
+  case replayed
+}
+
+private final class RuntimePositiveRun: RuntimeExecutionRun, @unchecked Sendable {
+  let executionID: Data
+  let applyStarted: Diskplan_V1_ExecutionStreamEvent
+  private let condition = NSCondition()
+  private let terminal: Diskplan_V1_ExecutionStreamEvent
+  private let cancellation: @Sendable () -> Void
+  private var released: Bool
+  private var cancellationObserved = false
+
+  init(
+    executionID: Data,
+    review: Diskplan_V1_ApplyReviewProjection,
+    context: RuntimeExecutionPlanContext,
+    waitForCancellation: Bool,
+    cancellation: @escaping @Sendable () -> Void
+  ) {
+    self.executionID = executionID
+    self.cancellation = cancellation
+    released = !waitForCancellation
+    var started = Diskplan_V1_ApplyStartedProjection()
+    started.epoch = review.epoch
+    started.applyReviewID = review.applyReviewID
+    started.projectionID = review.projectionID
+    started.planSha256 = review.planSha256
+    started.overlayID = review.overlayID
+    started.overlaySha256 = review.overlaySha256
+    started.reviewBindingSha256 = review.reviewBindingSha256
+    started.selectedActionCount = review.selectedActionCount
+    started.planID = review.planID
+    started.evidenceID = review.evidenceID
+    started.evidenceSha256 = review.evidenceSha256
+    started.currentBindingSha256 = review.currentBindingSha256
+    started.revalidationSha256 = review.revalidationSha256
+    started.overlayRevision = review.overlayRevision
+    started.scanSessionID = review.scanSessionID
+    started.scanCheckpointID = review.scanCheckpointID
+    started.scanCheckpointEvidenceSha256 = review.scanCheckpointEvidenceSha256
+    var startEvent = Diskplan_V1_ExecutionStreamEvent()
+    startEvent.executionID.value = executionID
+    startEvent.body = .applyStarted(started)
+    applyStarted = startEvent
+
+    var finished = Diskplan_V1_ApplyFinishedProjection()
+    finished.applyReviewID = review.applyReviewID
+    finished.reviewBindingSha256 = review.reviewBindingSha256
+    var terminalEvent = Diskplan_V1_ExecutionStreamEvent()
+    terminalEvent.executionID.value = executionID
+    terminalEvent.body = .applyFinished(finished)
+    terminal = terminalEvent
+    _ = context
+  }
+
+  func remainingEvents() async throws -> [Diskplan_V1_ExecutionStreamEvent] {
+    while true {
+      if isReleased() { return [terminal] }
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+  }
+
+  private func isReleased() -> Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    return released
+  }
+
+  func cancel() {
+    condition.lock()
+    let first = !cancellationObserved
+    cancellationObserved = true
+    released = true
+    condition.broadcast()
+    condition.unlock()
+    if first { cancellation() }
+  }
+}
+
+private func runtimePositiveEpoch() -> Diskplan_V1_ExecutionEpochProjection {
+  var epoch = Diskplan_V1_ExecutionEpochProjection()
+  epoch.epochID.value = Data("positive-epoch".utf8)
+  epoch.semanticReferenceTimeSeconds = 100
+  epoch.issuedAtSeconds = 100
+  epoch.deadlineSeconds = 400
+  return epoch
 }
 
 private func authorityNode(

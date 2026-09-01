@@ -121,7 +121,11 @@ public enum EngineServer {
     let runtimeSessionID = Data(UUID().uuidString.lowercased().utf8)
     let runtimeAuthority = RuntimeBusinessAuthorityState()
     var requestIDHighWaterMark: UInt64 = 0
-    defer { coordinator.stopAndWait() }
+    let runtimeLifecycle = runtimeHandler as? any RuntimeBusinessLifecycle
+    defer {
+      coordinator.stopAndWait()
+      runtimeLifecycle?.stopAndWait()
+    }
 
     while let payload = try FrameCodec.read(from: input) {
       let request: Diskplan_V1_Envelope
@@ -282,6 +286,7 @@ public enum EngineServer {
       }
     }
     coordinator.stopAndWait()
+    runtimeLifecycle?.stopAndWait()
     try broker.finish()
   }
 
@@ -318,16 +323,6 @@ public enum EngineServer {
         runtimeSessionID: runtimeSessionID,
         code: .malformedRequest,
         summary: "envelope sequence must equal request_id",
-        broker: broker
-      )
-      return
-    }
-    if case .cancelExecution = request {
-      try rejectRuntime(
-        requestID: request.requestID,
-        runtimeSessionID: runtimeSessionID,
-        code: .businessUnsupported,
-        summary: "midstream execution cancellation is not supported by the batch runtime",
         broker: broker
       )
       return

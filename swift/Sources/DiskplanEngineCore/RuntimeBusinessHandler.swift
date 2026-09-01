@@ -48,6 +48,10 @@ public protocol RuntimeBusinessHandler: AnyObject {
   ) throws
 }
 
+protocol RuntimeBusinessLifecycle: AnyObject {
+  func stopAndWait()
+}
+
 /// A sealed engine-authored response. Its private payload prevents handlers
 /// from injecting arbitrary protobuf oneof values into the transport broker.
 public struct RuntimeBusinessEmission: Sendable {
@@ -305,6 +309,7 @@ private enum RuntimeAuthorityTransition {
   case review(Diskplan_V1_ApplyReviewProjection)
   case executionCompleted(requestID: UInt64, reviewBinding: Data)
   case executionAborted(requestID: UInt64, reviewBinding: Data)
+  case cancellationCompleted(requestID: UInt64)
 
   var consumesExecutionClaim: Bool {
     switch self {
@@ -317,6 +322,7 @@ private enum RuntimeAuthorityTransition {
 private struct RuntimeExecutionClaim {
   let requestID: UInt64
   let reviewBinding: Data
+  var executionID: Data?
 }
 
 private struct PreparedRuntimeEmission {
@@ -430,6 +436,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private var review: Diskplan_V1_ApplyReviewProjection?
   private var consumedReviewBindings: Set<Data> = []
   private var executionClaim: RuntimeExecutionClaim?
+  private var activeCancellationRequestID: UInt64?
   private var activeRequestID: UInt64?
   private var activeEmissionToken: RuntimeAuthorityEmissionToken?
 
@@ -443,6 +450,15 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     code: Diskplan_V1_RuntimeRejectCode, summary: String
   )? {
     withLock {
+      if case .cancelExecution(let cancellation) = request {
+        guard activeCancellationRequestID == nil,
+          let executionClaim,
+          let executionID = executionClaim.executionID,
+          executionID == cancellation.executionID.value
+        else { return (.staleBinding, "cancellation differs from the active execution") }
+        activeCancellationRequestID = request.requestID
+        return nil
+      }
       if activeRequestID != nil {
         return (.invalidState, "another runtime authority request is still active")
       }
@@ -463,11 +479,109 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         else { return (.staleBinding, "apply confirmation differs from the live review") }
         executionClaim = RuntimeExecutionClaim(
           requestID: request.requestID,
-          reviewBinding: review.reviewBindingSha256.value
+          reviewBinding: review.reviewBindingSha256.value,
+          executionID: nil
         )
       }
       activeRequestID = request.requestID
       return nil
+    }
+  }
+
+  fileprivate func registerExecution(
+    _ executionID: Data,
+    for request: RuntimeBusinessRequest
+  ) throws {
+    try withLock {
+      guard case .confirmApply = request,
+        activeRequestID == request.requestID,
+        executionClaim?.requestID == request.requestID,
+        executionClaim?.executionID == nil,
+        !executionID.isEmpty,
+        executionID.count <= SealedRuntimeWire.maximumOpaqueIdentifierBytes
+      else { throw invalidState("execution registration has no exact confirmation claim") }
+      executionClaim?.executionID = executionID
+    }
+  }
+
+  fileprivate func validateExecutionPrefix(
+    _ events: [Diskplan_V1_ExecutionStreamEvent],
+    for request: RuntimeBusinessRequest,
+    negotiatedProtocolMinor: UInt32
+  ) throws -> [Diskplan_V1_ExecutionStreamEvent] {
+    try withLock {
+      guard requestIsActive(request), let plan, let overlay, let review,
+        let executionID = executionClaim?.executionID,
+        !events.isEmpty,
+        events.allSatisfy({ $0.executionID.value == executionID }),
+        !events.contains(where: {
+          if case .applyFinished? = $0.body { return true }
+          return false
+        })
+      else { throw invalidState("execution prefix has no live registered predecessor") }
+      var indexed = events
+      for index in indexed.indices {
+        indexed[index].executionEventIndex = UInt64(index + 1)
+      }
+      try validateExecutionPrefixBodies(
+        indexed,
+        plan: plan,
+        overlay: overlay,
+        review: review,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+      let acknowledgesCancellation = indexed.contains { event in
+        if case .cancellationAcknowledged? = event.body { return true }
+        return false
+      }
+      guard !acknowledgesCancellation || activeCancellationRequestID != nil else {
+        throw invalidState("execution cancellation acknowledgement has no active request")
+      }
+      return indexed
+    }
+  }
+
+  fileprivate func authorizeExecutionTerminal(
+    _ events: [Diskplan_V1_ExecutionStreamEvent],
+    sentPrefix: [Diskplan_V1_ExecutionStreamEvent],
+    for request: RuntimeBusinessRequest,
+    negotiatedProtocolMinor: UInt32
+  ) throws -> RuntimeAuthorityEmissionTransaction {
+    try withLock {
+      guard requestIsActive(request), let plan, let overlay, let review,
+        let executionClaim,
+        executionClaim.executionID != nil
+      else { throw invalidState("execution terminal has no live registered predecessor") }
+      let sealed = try SealedRuntimeWire.sealExecutionStream(
+        events,
+        requiredForceWarningActionIDs: review.forceWarningActionIds,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+      guard sealed.count > sentPrefix.count,
+        Array(sealed.prefix(sentPrefix.count)) == sentPrefix
+      else { throw invalidState("execution terminal differs from its transmitted prefix") }
+      try validateExecution(sealed, plan: plan, overlay: overlay, review: review)
+      let transition: RuntimeAuthorityTransition
+      switch request {
+      case .confirmApply:
+        transition = .executionCompleted(
+          requestID: request.requestID,
+          reviewBinding: executionClaim.reviewBinding
+        )
+      case .cancelExecution:
+        transition = .cancellationCompleted(requestID: request.requestID)
+      default:
+        throw invalidState("execution terminal differs from request kind")
+      }
+      return try beginEmission(
+        PreparedRuntimeEmission(
+          bodies: sealed.dropFirst(sentPrefix.count).map {
+            .executionStreamEvent($0)
+          },
+          transition: transition
+        ),
+        request: request
+      )
     }
   }
 
@@ -503,7 +617,11 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
 
   fileprivate func commit(_ transaction: RuntimeAuthorityEmissionTransaction) throws {
     try withLock {
-      guard activeRequestID == transaction.requestID,
+      guard
+        transitionRequestIsActive(
+          transaction.prepared.transition,
+          requestID: transaction.requestID
+        ),
         activeEmissionToken === transaction.token
       else { throw invalidState("runtime emission transaction is no longer active") }
       commitUnderLock(transaction.prepared.transition, requestID: transaction.requestID)
@@ -513,7 +631,11 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
 
   fileprivate func abort(_ transaction: RuntimeAuthorityEmissionTransaction) {
     withLock {
-      guard activeRequestID == transaction.requestID,
+      guard
+        transitionRequestIsActive(
+          transaction.prepared.transition,
+          requestID: transaction.requestID
+        ),
         activeEmissionToken === transaction.token
       else { return }
       activeEmissionToken = nil
@@ -528,7 +650,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     _ prepared: PreparedRuntimeEmission,
     request: RuntimeBusinessRequest
   ) throws -> RuntimeAuthorityEmissionTransaction {
-    guard activeRequestID == request.requestID else {
+    guard requestIsActive(request) else {
       throw invalidState("runtime request has no active authority claim")
     }
     guard activeEmissionToken == nil else {
@@ -553,7 +675,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     } catch {
       throw invalidState("runtime request uses an unsupported negotiated protocol minor")
     }
-    guard activeRequestID == request.requestID else {
+    guard requestIsActive(request) else {
       throw invalidState("runtime request has no active authority claim")
     }
     if let plan, plan.negotiatedProtocolMinor != negotiatedProtocolMinor {
@@ -692,7 +814,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
           Set(confirmedForce) == Set(review.forceWarningActionIds.map(\.value))
         else { throw stale("apply confirmation differs from live review") }
       case .cancelExecution:
-        throw invalidState("execution cancellation is not supported by this batch runtime")
+        throw invalidState("cancellation must use the registered streaming responder")
       default:
         throw invalidState("execution emission differs from request kind")
       }
@@ -732,7 +854,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   }
 
   private func commitUnderLock(_ transition: RuntimeAuthorityTransition, requestID: UInt64) {
-    guard activeRequestID == requestID else { return }
+    guard transitionRequestIsActive(transition, requestID: requestID) else { return }
     switch transition {
     case .none:
       break
@@ -757,6 +879,10 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       consumedReviewBindings.insert(reviewBinding)
       review = nil
       executionClaim = nil
+    case .cancellationCompleted(let requestID):
+      guard activeCancellationRequestID == requestID else { return }
+      activeCancellationRequestID = nil
+      return
     }
     activeRequestID = nil
   }
@@ -764,6 +890,11 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private func rejectionTransitionUnderLock(
     for request: RuntimeBusinessRequest
   ) -> RuntimeAuthorityTransition {
+    if case .cancelExecution = request,
+      activeCancellationRequestID == request.requestID
+    {
+      return .cancellationCompleted(requestID: request.requestID)
+    }
     guard case .confirmApply = request,
       let executionClaim,
       executionClaim.requestID == request.requestID
@@ -772,6 +903,27 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       requestID: executionClaim.requestID,
       reviewBinding: executionClaim.reviewBinding
     )
+  }
+
+  private func requestIsActive(_ request: RuntimeBusinessRequest) -> Bool {
+    switch request {
+    case .cancelExecution:
+      activeCancellationRequestID == request.requestID
+    default:
+      activeRequestID == request.requestID
+    }
+  }
+
+  private func transitionRequestIsActive(
+    _ transition: RuntimeAuthorityTransition,
+    requestID: UInt64
+  ) -> Bool {
+    switch transition {
+    case .cancellationCompleted:
+      activeCancellationRequestID == requestID
+    default:
+      activeRequestID == requestID
+    }
   }
 
   private func validateSelectedActions(
@@ -984,6 +1136,74 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     }
   }
 
+  private func validateExecutionPrefixBodies(
+    _ events: [Diskplan_V1_ExecutionStreamEvent],
+    plan: RuntimePlanReceipt,
+    overlay: Diskplan_V1_DecisionOverlayAcknowledged,
+    review: Diskplan_V1_ApplyReviewProjection,
+    negotiatedProtocolMinor: UInt32
+  ) throws {
+    guard case .applyStarted(let started)? = events.first?.body,
+      started.applyReviewID == review.applyReviewID,
+      started.projectionID == plan.manifest.projectionID,
+      started.planID == plan.manifest.planID,
+      started.planSha256 == plan.manifest.planSha256,
+      started.evidenceID == plan.manifest.evidenceID,
+      started.evidenceSha256 == plan.manifest.evidenceSha256,
+      started.scanSessionID == plan.manifest.scanSessionID,
+      started.scanCheckpointID == plan.manifest.scanCheckpointID,
+      started.scanCheckpointEvidenceSha256 == plan.manifest.scanCheckpointEvidenceSha256,
+      started.overlayID == overlay.overlayID,
+      started.overlaySha256 == overlay.overlaySha256,
+      started.overlayRevision == overlay.revision,
+      started.selectedActionCount == overlay.selectedActionCount,
+      started.reviewBindingSha256 == review.reviewBindingSha256,
+      started.currentBindingSha256 == review.currentBindingSha256,
+      started.revalidationSha256 == review.revalidationSha256,
+      started.epoch == review.epoch
+    else { throw invalidState("execution start differs from live apply review") }
+    guard
+      events.dropFirst().allSatisfy({ event in
+        guard event.body != nil else { return false }
+        if case .applyStarted? = event.body { return false }
+        return true
+      })
+    else { throw invalidState("execution prefix contains an invalid body") }
+
+    try RuntimeExecutionAuthorityValidator.validateMembership(
+      events: events,
+      planRecords: plan.records,
+      selectedActionIDs: overlay.selectedActionIds
+    )
+    let reviewActions = Dictionary(
+      uniqueKeysWithValues: review.actions.map {
+        ($0.actionID.value, $0.executionPreview)
+      })
+    let warnings = events.compactMap { event -> Data? in
+      guard case .forceRequiredWarning(let warning)? = event.body else { return nil }
+      guard reviewActions[warning.actionID.value] == warning.preview else { return Data() }
+      return warning.actionID.value
+    }
+    guard !warnings.contains(Data()), Set(warnings).count == warnings.count,
+      Set(warnings).isSubset(of: Set(review.forceWarningActionIds.map(\.value)))
+    else { throw invalidState("execution force warning differs from live apply review") }
+    let cancellationCount = events.reduce(0) { count, event in
+      if case .cancellationAcknowledged? = event.body { return count + 1 }
+      return count
+    }
+    guard cancellationCount <= 1 else {
+      throw invalidState("execution prefix contains duplicate cancellation acknowledgement")
+    }
+    for event in events {
+      if case .cancellationAcknowledged(let acknowledgement)? = event.body,
+        acknowledgement.reason.isEmpty
+      {
+        throw invalidState("execution cancellation acknowledgement is empty")
+      }
+    }
+    _ = negotiatedProtocolMinor
+  }
+
   private func matchesPlan(
     _ value: Diskplan_V1_DecisionOverlayAcknowledged,
     _ manifest: Diskplan_V1_PlanProjectionManifest
@@ -1055,6 +1275,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   private let request: RuntimeBusinessRequest
   private let authority: RuntimeBusinessAuthorityState
   private var completed = false
+  private var executionPrefix: [Diskplan_V1_ExecutionStreamEvent] = []
 
   /// The exact protocol minor selected by the version handshake for this
   /// runtime session. Handlers use it to author the closed preview shape.
@@ -1102,6 +1323,53 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     try transmit(transaction)
   }
 
+  func registerExecution(_ executionID: Data) throws {
+    responseLock.lock()
+    defer { responseLock.unlock() }
+    guard !completed, executionPrefix.isEmpty else {
+      throw RuntimeResponderError.alreadyTerminal
+    }
+    try authority.registerExecution(executionID, for: request)
+  }
+
+  func sendExecutionPrefix(
+    _ candidate: [Diskplan_V1_ExecutionStreamEvent]
+  ) throws {
+    responseLock.lock()
+    defer { responseLock.unlock() }
+    guard !completed, candidate.count > executionPrefix.count,
+      Array(candidate.prefix(executionPrefix.count)) == executionPrefix
+    else { throw RuntimeResponderError.alreadyTerminal }
+    let sealed = try authority.validateExecutionPrefix(
+      candidate,
+      for: request,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
+    guard Array(sealed.prefix(executionPrefix.count)) == executionPrefix else {
+      throw RuntimeResponderError.alreadyTerminal
+    }
+    try sendBodies(
+      sealed.dropFirst(executionPrefix.count).map {
+        .executionStreamEvent($0)
+      })
+    executionPrefix = sealed
+  }
+
+  func finishExecution(
+    _ events: [Diskplan_V1_ExecutionStreamEvent]
+  ) throws {
+    responseLock.lock()
+    defer { responseLock.unlock() }
+    guard !completed else { throw RuntimeResponderError.alreadyTerminal }
+    let transaction = try authority.authorizeExecutionTerminal(
+      events,
+      sentPrefix: executionPrefix,
+      for: request,
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
+    try transmit(transaction)
+  }
+
   func rejectHandlerFailure() throws {
     responseLock.lock()
     defer { responseLock.unlock() }
@@ -1141,7 +1409,13 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   }
 
   private func sendPrepared(_ prepared: PreparedRuntimeEmission) throws {
-    let bodies = prepared.bodies
+    try sendBodies(prepared.bodies)
+  }
+
+  private func sendBodies(
+    _ bodies: some Sequence<Diskplan_V1_RuntimeEvent.OneOf_Body>
+  ) throws {
+    let bodies = Array(bodies)
     var envelopeLengths: [Int] = []
     envelopeLengths.reserveCapacity(bodies.count)
     for body in bodies {

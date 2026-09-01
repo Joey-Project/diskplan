@@ -450,7 +450,7 @@ import Testing
   )
 }
 
-@Test func batchRuntimeRejectsMidstreamCancellationTyped() throws {
+@Test func batchRuntimeRejectsUnnegotiatedMidstreamCancellationTyped() throws {
   var cancellation = Diskplan_V1_CancelExecutionRequest()
   cancellation.requestID = 2
   cancellation.executionID.value = Data("execution".utf8)
@@ -464,7 +464,7 @@ import Testing
     Issue.record("expected typed cancellation rejection")
     return
   }
-  #expect(rejected.code == .businessUnsupported)
+  #expect(rejected.code == .capabilityNotNegotiated)
 }
 
 @Test func preclaimConfirmRejectionsNeverUseConsumedReviewCode() throws {
