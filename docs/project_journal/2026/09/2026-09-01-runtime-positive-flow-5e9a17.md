@@ -5,7 +5,7 @@ status: active
 created: 2026-09-01
 updated: 2026-09-01
 branch: wip/runtime-positive-flow
-pr:
+pr: https://github.com/Joey-Project/diskplan/pull/24
 supersedes: []
 superseded_by:
 ---
@@ -35,6 +35,10 @@ superseded_by:
 - A confirmation that arrives after review bytes flush waits for the same publication transaction
   to commit or roll back. It then sees the committed review or a typed stale-binding rejection,
   never the transient active prepare request.
+- Controller-owned async tasks never perform a condition-backed responder flush on the Swift
+  cooperative executor. Blocking responder transactions run on named, joined Foundation threads
+  and resume their owning tasks through checked continuations; synchronous server request paths
+  retain their existing authority and ordering boundaries.
 - The registered execution ID becomes visible through an early `apply_started` prefix. One exact
   cancellation mirrors the same prefix, appends one typed acknowledgement, cancels the retained
   run, and gives both pending requests the same sealed terminal stream.
@@ -82,6 +86,10 @@ superseded_by:
 - Production `DiskplanEngineMain` intentionally does not inject the bridge yet. The repository does
   not expose a production revalidation collector factory, so production apply remains fail-closed
   rather than substituting a fixture collector or bypassing Phase 4 authority.
+- Runtime concurrency fixtures no longer put condition-backed broker, authority, cancellation, or
+  teardown calls in detached Swift tasks. Their one-shot latch broadcasts to every waiter, retains
+  an early signal, and removes cancelled waiters; publication-race fixtures use structured async
+  teardown so gate release, controller join, and broker closure occur on success and failure.
 
 ## Next Steps
 
@@ -203,6 +211,28 @@ superseded_by:
   command then passed all 637 tests in 10.268 supervisor seconds (6.021 test seconds), SHA-256
   `d4de3f4555b570b68293794fac397f29d36f33ac39cd15e23d3f3c5377236746`. Both supervisors verified
   their process groups and ended quiescent; the isolated workspace, `.build`, and logs were removed.
+- The public full-parallel hang was reproduced deterministically on India by setting
+  `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`. The old batch fixture occupied the only cooperative
+  worker in `SerialEventBroker.sendRuntimeBatchAwaitingWrite()` while its dedicated writer waited
+  for the test gate; a second sample showed an async controller task synchronously blocked in
+  `SerialEventBroker.flush()`. After moving async responder transactions and all blocking fixture
+  bridges to joined named threads, the six exact batch, publication, multi-waiter, early-signal,
+  and cancellation regressions passed together in 0.015 test seconds. The bounded supervisor
+  completed in 12.008 seconds with verified process-group quiescence and output SHA-256
+  `f2e6b7f1f38f60bce6cc792489b2a2d00ee7da99dfeae1513ae4ef383bdac2c2`.
+- The exact Foundation command then passed all 639 tests five consecutive times on macOS 26.5.1
+  Apple Silicon. Test runtimes were 5.489, 5.698, 5.883, 5.469, and 5.604 seconds; every bounded
+  supervisor verified its process group and ended quiescent. Retained-output SHA-256 values were
+  `2bbd2c32617dbc2f4b00ee6a4a04925439cc7ded03d431265f236760c2bd7bd4`,
+  `ed85288977361412e1b39a1de599ef897bbbb0c1f27a3fc0bd102e39dfb58c4f`,
+  `7ab54763def06880fce6b4b74ba0f9de5ad75b792542883810faf06d27220db2`,
+  `93a24aa526627c0cc088cd1b2c28989d9725b93d3b997e11db7cf472bac1cebd`, and
+  `5046b305346db58fdf896db994db91467d728705f8cc5c2ebc29c359a24d94b2`.
+- After the final mechanical indentation cleanup, the same six strict-pool regressions passed in
+  0.015 test seconds, followed by all 639 Foundation tests in 5.594 test seconds. Their supervisors
+  again verified process-group quiescence; output SHA-256 values were
+  `1abaa6c717eeb815a036c070412a938166842e192b3147e536d50ef2380c6d3b` and
+  `872e9d5abc64245eb0779d01d89252e912249c889d9d60b55ae3b5ec61ffcd9a`.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races. Bridge
