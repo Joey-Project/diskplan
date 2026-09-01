@@ -250,3 +250,10 @@ superseded_by:
   serial full gate was not started. Focused static review then caught three replacement-binding
   assertions missing the production helper's `quarantine-` failure-code prefix; the successor
   uses the exact typed code without changing production behavior.
+- India focused validation of `a1c0195c1fdf8f88d73415b9e79d77b525a657d7` passed all 117
+  execution tests after 15.023 seconds with a quiescent process group. The serial full gate then
+  ran 191 tests and found one obsolete PolicyCore assertion: it expected an unsequenced dirty-Git
+  remove action to survive until plan validation, while the authoritative action builder now
+  rejects that internally invalid chain immediately. The successor asserts that earlier rejection
+  and retains the valid evidence-rich discard/remove chain to prove both actions remain report-only
+  and cannot be staged or waived. No production validation is weakened.

@@ -773,12 +773,11 @@ func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
     evidence: evidence,
     request: .gitWorktreeDiscardLocalChanges
   )
-  let unsequencedRemove = try makeAction(
-    evidence: evidence,
-    request: .gitWorktreeRemove
-  )
   #expect(throws: PolicyModelError.invalidActionContract) {
-    try makePlan(actions: [unsequencedRemove], evidence: [evidence])
+    try makeAction(
+      evidence: evidence,
+      request: .gitWorktreeRemove
+    )
   }
 
   let remove = try makeAction(
