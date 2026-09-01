@@ -126,21 +126,294 @@ struct RuntimeApplyCaptureBudget: Equatable, Sendable {
   let terminalReserveBytes: UInt64
 }
 
+struct RuntimeSourceEventEstimate: Equatable, Sendable {
+  let projectedEventCount: UInt64
+  let accountedUpperBoundBytes: UInt64
+}
+
+private struct RuntimeSourceBudgetCounter {
+  private static let fixedEventOverhead: UInt64 = 1_024
+  private static let fixedFieldOverhead: UInt64 = 256
+  private static let maximumNestedElementCount = 25_000
+  private static let maximumDynamicBytes = 4_096
+
+  private(set) var accountedBytes = fixedEventOverhead
+  private var nestedElementCount = 0
+
+  mutating func collection(_ count: Int) -> Bool {
+    guard count >= 0,
+      count <= Self.maximumNestedElementCount,
+      nestedElementCount <= Self.maximumNestedElementCount - count
+    else { return false }
+    nestedElementCount += count
+    add(UInt64(count), multipliedBy: Self.fixedFieldOverhead)
+    return accountedBytes != .max
+  }
+
+  mutating func dynamicString(_ value: String) -> Bool {
+    let count = value.utf8.count
+    guard count <= Self.maximumDynamicBytes else { return false }
+    add(Self.fixedFieldOverhead)
+    add(UInt64(count))
+    return accountedBytes != .max
+  }
+
+  mutating func rawComponent(_ value: Data) -> Bool {
+    guard !value.isEmpty, value.count <= Self.maximumDynamicBytes else { return false }
+    add(Self.fixedFieldOverhead)
+    add(UInt64(value.count))
+    return accountedBytes != .max
+  }
+
+  mutating func digest(_ value: Data) -> Bool {
+    guard value.count == 32 else { return false }
+    add(Self.fixedFieldOverhead + 32)
+    return accountedBytes != .max
+  }
+
+  mutating func optionalScalarField(_ present: Bool = true) {
+    if present { add(Self.fixedFieldOverhead) }
+  }
+
+  private mutating func add(_ value: UInt64) {
+    let result = accountedBytes.addingReportingOverflow(value)
+    accountedBytes = result.overflow ? .max : result.partialValue
+  }
+
+  private mutating func add(_ lhs: UInt64, multipliedBy rhs: UInt64) {
+    let product = lhs.multipliedReportingOverflow(by: rhs)
+    guard !product.overflow else {
+      accountedBytes = .max
+      return
+    }
+    add(product.partialValue)
+  }
+}
+
+enum RuntimeSourceEventPreflight {
+  static func estimate(_ event: ExecutionEvent) -> RuntimeSourceEventEstimate? {
+    var counter = RuntimeSourceBudgetCounter()
+    let projectedEventCount: UInt64
+    switch event {
+    case .applyStarted(let epochID):
+      guard counter.dynamicString(epochID) else { return nil }
+      projectedEventCount = 1
+    case .unitStarted(let executionUnit):
+      guard unit(executionUnit, counter: &counter) else { return nil }
+      projectedEventCount = 1
+    case .forceRequiredWarning(let actionID):
+      guard counter.digest(actionID.digest.bytes) else { return nil }
+      projectedEventCount = 1
+    case .stepFinished(let outcome):
+      guard step(outcome, counter: &counter) else { return nil }
+      projectedEventCount = 1
+    case .releasePostVerificationFinished(let outcome):
+      guard release(outcome, counter: &counter) else { return nil }
+      projectedEventCount = 1
+    case .unitFinished(let outcome):
+      guard unitOutcome(outcome, counter: &counter) else { return nil }
+      projectedEventCount =
+        outcome.status == .skippedPrerequisite
+          || (outcome.status == .jitRejected && outcome.jitReport != nil) ? 2 : 1
+    case .auditWriteFailed(let failure):
+      guard counter.dynamicString(failure.code) else { return nil }
+      counter.optionalScalarField(failure.errno != nil)
+      projectedEventCount = 1
+    case .applyFinished:
+      projectedEventCount = 1
+    }
+    let eventOverhead = projectedEventCount.multipliedReportingOverflow(by: 512)
+    let total = counter.accountedBytes.addingReportingOverflow(eventOverhead.partialValue)
+    guard !eventOverhead.overflow, !total.overflow else { return nil }
+    return RuntimeSourceEventEstimate(
+      projectedEventCount: projectedEventCount,
+      accountedUpperBoundBytes: total.partialValue
+    )
+  }
+
+  private static func unit(
+    _ unit: ExecutionUnitID,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    switch unit {
+    case .action(let actionID):
+      counter.digest(actionID.digest.bytes)
+    case .compoundRelease(let allocationGroupIDs):
+      counter.collection(allocationGroupIDs.count)
+        && allocationGroupIDs.allSatisfy { counter.dynamicString($0) }
+    }
+  }
+
+  private static func unitOutcome(
+    _ outcome: ExecutionUnitOutcome,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    guard unit(outcome.id, counter: &counter),
+      counter.collection(outcome.logicalActionIDs.count),
+      outcome.logicalActionIDs.allSatisfy({ counter.digest($0.digest.bytes) }),
+      counter.collection(outcome.prerequisiteActionIDs.count),
+      outcome.prerequisiteActionIDs.allSatisfy({ counter.digest($0.digest.bytes) }),
+      counter.collection(outcome.steps.count),
+      outcome.steps.allSatisfy({ step($0, counter: &counter) }),
+      counter.collection(outcome.releasePostVerification.count),
+      outcome.releasePostVerification.allSatisfy({ release($0, counter: &counter) })
+    else { return false }
+    return outcome.jitReport.map { jit($0, counter: &counter) } ?? true
+  }
+
+  private static func jit(
+    _ report: JITRevalidationReport,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    counter.optionalScalarField(report.captureID != nil)
+    guard counter.collection(report.actionOutcomes.count),
+      report.actionOutcomes.allSatisfy({ outcome in
+        counter.digest(outcome.actionID.digest.bytes)
+          && counter.collection(outcome.findings.count)
+          && outcome.findings.allSatisfy { finding($0, counter: &counter) }
+      }),
+      counter.collection(report.globalFindings.count),
+      report.globalFindings.allSatisfy({ finding($0, counter: &counter) })
+    else { return false }
+    return true
+  }
+
+  private static func finding(
+    _ finding: RevalidationFinding,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    if let actionID = finding.actionID,
+      !counter.digest(actionID.digest.bytes)
+    {
+      return false
+    }
+    guard subject(finding.subject, counter: &counter) else { return false }
+    if let failure = finding.observationFailure {
+      guard counter.dynamicString(failure.code),
+        counter.dynamicString(failure.collector)
+      else { return false }
+    }
+    counter.optionalScalarField(finding.unknownReason != nil)
+    return true
+  }
+
+  private static func subject(
+    _ subject: RevalidationSubject,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    switch subject {
+    case .parentIdentity(let path), .parentAccessPolicy(let path):
+      return counter.collection(path.components.count)
+        && path.components.allSatisfy { counter.rawComponent($0) }
+    case .releaseTopology(let allocationGroupID):
+      return counter.dynamicString(allocationGroupID)
+    case .compoundReleaseUnit(let allocationGroupIDs):
+      return counter.collection(allocationGroupIDs.count)
+        && allocationGroupIDs.allSatisfy { counter.dynamicString($0) }
+    default:
+      counter.optionalScalarField()
+      return true
+    }
+  }
+
+  private static func step(
+    _ outcome: ExecutionStepOutcome,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    guard counter.digest(outcome.actionID.digest.bytes),
+      adapter(outcome.adapterOutcome, counter: &counter),
+      postVerification(outcome.postVerification, counter: &counter)
+    else { return false }
+    return true
+  }
+
+  private static func adapter(
+    _ outcome: AdapterOperationOutcome,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    switch outcome {
+    case .succeeded(let detailCode):
+      return counter.dynamicString(detailCode)
+    case .failed(let failure):
+      return failureDetail(failure, counter: &counter)
+    case .cancelled, .timedOut, .notStarted:
+      counter.optionalScalarField()
+      return true
+    }
+  }
+
+  private static func release(
+    _ outcome: ReleasePostVerificationOutcome,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    counter.dynamicString(outcome.allocationGroupID)
+      && postVerification(outcome.outcome, counter: &counter)
+  }
+
+  private static func postVerification(
+    _ outcome: PostVerificationOutcome,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    switch outcome {
+    case .expectedResidual(let failure):
+      return failureDetail(failure, counter: &counter)
+    case .notSatisfied(let code):
+      return counter.dynamicString(code)
+    case .unreadable(let failure), .failed(let failure):
+      return counter.dynamicString(failure.code) && counter.dynamicString(failure.collector)
+    case .satisfied, .missing, .unknown:
+      counter.optionalScalarField()
+      return true
+    }
+  }
+
+  private static func failureDetail(
+    _ failure: ExecutionAdapterFailure,
+    counter: inout RuntimeSourceBudgetCounter
+  ) -> Bool {
+    guard counter.dynamicString(failure.code) else { return false }
+    counter.optionalScalarField(failure.errno != nil)
+    counter.optionalScalarField(failure.exitStatus != nil)
+    counter.optionalScalarField(failure.terminatingSignal != nil)
+    return true
+  }
+}
+
 struct RuntimeProjectedExecutionBuffer: Sendable {
   private(set) var events: [Diskplan_V1_ExecutionStreamEvent] = []
   private(set) var observedEventCount: UInt64 = 0
   private(set) var observedEncodedBytes: UInt64 = 0
   private var accountedBytes: UInt64
+  private var preflightAccountedBytes: UInt64
   private let budget: RuntimeApplyCaptureBudget
 
   init(budget: RuntimeApplyCaptureBudget = .runtimeDefault) {
     self.budget = budget
     accountedBytes = budget.terminalReserveBytes
+    preflightAccountedBytes = budget.terminalReserveBytes
+  }
+
+  mutating func reserve(_ estimate: RuntimeSourceEventEstimate) -> RuntimeExecutionTailFailure? {
+    guard let nextCount = adding(observedEventCount, estimate.projectedEventCount),
+      let nextBytes = adding(preflightAccountedBytes, estimate.accountedUpperBoundBytes)
+    else { return .projectionLimitExceeded(observedEventCount: .max, observedEncodedBytes: .max) }
+    guard nextCount <= budget.maximumEventCount, nextBytes <= budget.maximumAccountedBytes else {
+      return .projectionLimitExceeded(
+        observedEventCount: nextCount,
+        observedEncodedBytes: nextBytes
+      )
+    }
+    preflightAccountedBytes = nextBytes
+    return nil
   }
 
   mutating func append(
-    _ candidates: [Diskplan_V1_ExecutionStreamEvent]
+    _ candidates: [Diskplan_V1_ExecutionStreamEvent],
+    reservedEstimate: RuntimeSourceEventEstimate
   ) -> RuntimeExecutionTailFailure? {
+    guard UInt64(candidates.count) <= reservedEstimate.projectedEventCount else {
+      return .backendContractViolation
+    }
     for candidate in candidates {
       let encodedCount: UInt64
       do {
@@ -179,7 +452,7 @@ struct RuntimeProjectedExecutionBuffer: Sendable {
   }
 }
 
-private final class RuntimeApplyTaskControl: @unchecked Sendable {
+final class RuntimeApplyTaskControl: @unchecked Sendable {
   private let lock = NSLock()
   private var task: Task<BestEffortApplyReport, Never>?
   private var cancellationRequested = false
@@ -204,7 +477,16 @@ private final class RuntimeApplyTaskControl: @unchecked Sendable {
   }
 }
 
-private actor RuntimeApplyEventCapture: ExecutionEventSink {
+protocol RuntimeExecutionEventProjecting: Sendable {
+  var negotiatedProtocolMinor: UInt32 { get }
+  func project(
+    _ event: ExecutionEvent,
+    executionID: Data,
+    review: Diskplan_V1_ApplyReviewProjection
+  ) -> [Diskplan_V1_ExecutionStreamEvent]
+}
+
+actor RuntimeApplyEventCapture: ExecutionEventSink {
   enum Start: Sendable {
     case started(Diskplan_V1_ExecutionStreamEvent)
     case completed(BestEffortApplyReport)
@@ -213,7 +495,7 @@ private actor RuntimeApplyEventCapture: ExecutionEventSink {
 
   private let executionID: Data
   private let review: Diskplan_V1_ApplyReviewProjection
-  private let projector: RuntimeExecutionProjector
+  private let projector: any RuntimeExecutionEventProjecting
   private let taskControl: RuntimeApplyTaskControl
   private var buffer = RuntimeProjectedExecutionBuffer()
   private var started: Diskplan_V1_ExecutionStreamEvent?
@@ -225,17 +507,27 @@ private actor RuntimeApplyEventCapture: ExecutionEventSink {
   init(
     executionID: Data,
     review: Diskplan_V1_ApplyReviewProjection,
-    projector: RuntimeExecutionProjector,
-    taskControl: RuntimeApplyTaskControl
+    projector: any RuntimeExecutionEventProjecting,
+    taskControl: RuntimeApplyTaskControl,
+    budget: RuntimeApplyCaptureBudget = .runtimeDefault
   ) {
     self.executionID = executionID
     self.review = review
     self.projector = projector
     self.taskControl = taskControl
+    buffer = RuntimeProjectedExecutionBuffer(budget: budget)
   }
 
   func emit(_ event: ExecutionEvent) {
     guard failure == nil else { return }
+    guard let estimate = RuntimeSourceEventPreflight.estimate(event) else {
+      fail(.projectionLimitExceeded(observedEventCount: .max, observedEncodedBytes: .max))
+      return
+    }
+    if let reservationFailure = buffer.reserve(estimate) {
+      fail(reservationFailure)
+      return
+    }
     if started == nil, case .applyStarted(let epochID) = event {
       guard Data(epochID.utf8) == review.epoch.epochID.value else {
         fail(.backendContractViolation)
@@ -246,7 +538,7 @@ private actor RuntimeApplyEventCapture: ExecutionEventSink {
         fail(.backendContractViolation)
         return
       }
-      guard let projectionFailure = buffer.append(projected) else {
+      guard let projectionFailure = buffer.append(projected, reservedEstimate: estimate) else {
         started = projected[0]
         resumeStartWaiters(.started(projected[0]))
         return
@@ -267,7 +559,7 @@ private actor RuntimeApplyEventCapture: ExecutionEventSink {
       return
     }
     let projected = projector.project(event, executionID: executionID, review: review)
-    if let projectionFailure = buffer.append(projected) {
+    if let projectionFailure = buffer.append(projected, reservedEstimate: estimate) {
       fail(projectionFailure)
     } else if case .applyFinished = event {
       terminalSeen = true
@@ -299,7 +591,7 @@ private actor RuntimeApplyEventCapture: ExecutionEventSink {
       applyStarted: started,
       remainingEvents: Array(buffer.events.dropFirst()),
       requiredForceWarningActionIDs: review.forceWarningActionIds,
-      negotiatedProtocolMinor: projector.context.negotiatedProtocolMinor
+      negotiatedProtocolMinor: projector.negotiatedProtocolMinor
     )
     return RuntimeExecutionTail.outcome(authoritativeProjection: projection)
   }
@@ -777,6 +1069,10 @@ struct RuntimeExecutionProjector: Sendable {
     event.body = body
     return event
   }
+}
+
+extension RuntimeExecutionProjector: RuntimeExecutionEventProjecting {
+  var negotiatedProtocolMinor: UInt32 { context.negotiatedProtocolMinor }
 }
 
 struct RuntimeReleaseSetDomainBinding: Equatable, Sendable {

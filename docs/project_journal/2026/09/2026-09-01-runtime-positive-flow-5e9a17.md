@@ -56,10 +56,18 @@ superseded_by:
   projection. The capture retains only projected events under a 25,000-event, 32 MiB in-memory
   budget with 512 bytes of per-event accounting and a 4 KiB terminal reserve; overflow clears the
   buffer and requests coordinator cancellation exactly once.
+- Before protobuf construction, source-event preflight traverses every projected nested collection,
+  validates digest, raw-component, and dynamic-string lengths, and reserves a saturating
+  fixed-overhead upper bound against the remaining capture budget. An oversized single JIT event
+  therefore fails before its projector or serializer can allocate the report projection.
 - Apply launch distinguishes a started run from an authoritative pre-mutation start-failure
   terminal. A started stream whose bounded projection cannot be completed is retained as an
   EngineCore typed tail failure for the protocol 1.6 terminal mapper and is never projected as a
   generic runtime rejection.
+- Failed-tail abort now uses the same authority transaction discipline as a normal terminal. It
+  retains the active run, waits for any admitted cancellation responder, jointly consumes confirm
+  and cancel claims without wire output, and clears controller state only after the transaction
+  commits.
 - Production `DiskplanEngineMain` intentionally does not inject the bridge yet. The repository does
   not expose a production revalidation collector factory, so production apply remains fail-closed
   rather than substituting a fixture collector or bypassing Phase 4 authority.
@@ -114,6 +122,12 @@ superseded_by:
   reached. Log:
   `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-composition-9-retry2.log`;
   bounded output SHA-256: `11f3c9cf35d1cb73825b8365bb8f6260c922c8edbcf06dfddec2f2f48410e888`.
+- India targeted P1 closure ran the combined Execution and EngineCore filters under the same
+  900-second process-group deadline and 2 MiB retained-log quota. All 274 tests passed in 15.182
+  seconds; process-group verification and post-run quiescence passed, and the quota was not
+  reached. Log:
+  `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-p1-rereview-retry4.log`;
+  bounded output SHA-256: `3ea1f178344e73ca6a6c234523297f4cbc3a41f57262dcc5e4bb59a8a5a32fae`.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races. Bridge

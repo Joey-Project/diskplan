@@ -317,7 +317,11 @@ private enum RuntimeAuthorityTransition {
     cancellationRequestID: UInt64?
   )
   case executionStartFailed(requestID: UInt64, reviewBinding: Data)
-  case executionAborted(requestID: UInt64, reviewBinding: Data)
+  case executionAborted(
+    requestID: UInt64,
+    reviewBinding: Data,
+    cancellationRequestID: UInt64?
+  )
   case cancellationCompleted(requestID: UInt64)
 
   var consumesExecutionClaim: Bool {
@@ -710,27 +714,45 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     withLock { rejectionTransitionUnderLock(for: request) }
   }
 
-  fileprivate func abortExecutionStreamWithoutEmission(
+  fileprivate func authorizeExecutionAbortWithoutEmission(
     for request: RuntimeBusinessRequest,
     cancellationRequest: RuntimeBusinessRequest?
-  ) throws {
+  ) throws -> RuntimeAuthorityEmissionTransaction {
     try withLock {
       guard case .confirmApply = request, requestIsActive(request), activeEmissionToken == nil,
         let executionClaim,
-        executionClaim.requestID == request.requestID
+        executionClaim.requestID == request.requestID,
+        executionClaim.executionID != nil,
+        executionClaim.phase == .registered
       else { throw invalidState("execution abort has no live confirmation claim") }
+      let cancellationRequestID: UInt64?
       if let cancellationRequest {
         guard case .cancelExecution = cancellationRequest,
           activeCancellationRequestID == cancellationRequest.requestID
         else { throw invalidState("execution abort has no exact cancellation claim") }
+        cancellationRequestID = cancellationRequest.requestID
       } else if activeCancellationRequestID != nil {
-        throw invalidState("execution abort omits a live cancellation claim")
+        throw RuntimeTerminalCommitError.pendingCancellation
+      } else {
+        cancellationRequestID = nil
       }
-      consumedReviewBindings.insert(executionClaim.reviewBinding)
-      review = nil
-      self.executionClaim = nil
-      activeRequestID = nil
-      activeCancellationRequestID = nil
+      self.executionClaim?.phase = .finishing
+      do {
+        return try beginEmission(
+          PreparedRuntimeEmission(
+            bodies: [],
+            transition: .executionAborted(
+              requestID: request.requestID,
+              reviewBinding: executionClaim.reviewBinding,
+              cancellationRequestID: cancellationRequestID
+            )
+          ),
+          request: request
+        )
+      } catch {
+        self.executionClaim?.phase = .registered
+        throw error
+      }
     }
   }
 
@@ -773,6 +795,8 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         executionClaim?.phase = .registered
       } else if case .executionStartFailed = transaction.prepared.transition {
         executionClaim?.phase = .unregistered
+      } else if case .executionAborted = transaction.prepared.transition {
+        executionClaim?.phase = .registered
       }
     }
   }
@@ -797,6 +821,12 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
 
   func liveApplyReviewIDForTesting() -> Data? {
     withLock { review?.applyReviewID.value }
+  }
+
+  func hasActiveRuntimeClaimsForTesting() -> Bool {
+    withLock {
+      activeRequestID != nil || activeCancellationRequestID != nil || executionClaim != nil
+    }
   }
 
   private func beginEmission(
@@ -1035,14 +1065,22 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       review = nil
       executionClaim = nil
       if cancellationRequestID != nil { activeCancellationRequestID = nil }
-    case .executionStartFailed(let requestID, let reviewBinding),
-      .executionAborted(let requestID, let reviewBinding):
+    case .executionStartFailed(let requestID, let reviewBinding):
       guard executionClaim?.requestID == requestID,
         executionClaim?.reviewBinding == reviewBinding
       else { return }
       consumedReviewBindings.insert(reviewBinding)
       review = nil
       executionClaim = nil
+    case .executionAborted(let requestID, let reviewBinding, let cancellationRequestID):
+      guard executionClaim?.requestID == requestID,
+        executionClaim?.reviewBinding == reviewBinding,
+        cancellationRequestID == nil || activeCancellationRequestID == cancellationRequestID
+      else { return }
+      consumedReviewBindings.insert(reviewBinding)
+      review = nil
+      executionClaim = nil
+      if cancellationRequestID != nil { activeCancellationRequestID = nil }
     case .cancellationCompleted(let requestID):
       guard activeCancellationRequestID == requestID else { return }
       activeCancellationRequestID = nil
@@ -1065,7 +1103,8 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     else { return .none }
     return .executionAborted(
       requestID: executionClaim.requestID,
-      reviewBinding: executionClaim.reviewBinding
+      reviewBinding: executionClaim.reviewBinding,
+      cancellationRequestID: nil
     )
   }
 
@@ -1085,7 +1124,8 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     switch transition {
     case .cancellationCompleted:
       activeCancellationRequestID == requestID
-    case .executionCompleted(_, _, let cancellationRequestID):
+    case .executionCompleted(_, _, let cancellationRequestID),
+      .executionAborted(_, _, let cancellationRequestID):
       activeRequestID == requestID
         && (cancellationRequestID == nil || activeCancellationRequestID == cancellationRequestID)
     default:
@@ -1628,12 +1668,18 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     guard !completed, cancellationResponder?.completed != true else {
       throw RuntimeResponderError.alreadyTerminal
     }
-    try authority.abortExecutionStreamWithoutEmission(
+    let transaction = try authority.authorizeExecutionAbortWithoutEmission(
       for: request,
       cancellationRequest: cancellationResponder?.request
     )
-    completed = true
-    cancellationResponder?.completed = true
+    do {
+      try authority.commit(transaction)
+      completed = true
+      cancellationResponder?.completed = true
+    } catch {
+      authority.abort(transaction)
+      throw error
+    }
   }
 
   func rejectHandlerFailure() throws {

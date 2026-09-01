@@ -317,10 +317,14 @@ func runtimeProjectedExecutionBufferRejectsEventCountOverflow() throws {
   let encodedBytes = UInt64(
     try first.serializedData().count + second.serializedData().count
   )
+  let estimate = RuntimeSourceEventEstimate(
+    projectedEventCount: 1,
+    accountedUpperBoundBytes: encodedBytes
+  )
 
-  #expect(buffer.append([first]) == nil)
+  #expect(buffer.append([first], reservedEstimate: estimate) == nil)
   #expect(
-    buffer.append([second])
+    buffer.append([second], reservedEstimate: estimate)
       == .projectionLimitExceeded(
         observedEventCount: 2,
         observedEncodedBytes: encodedBytes
@@ -341,14 +345,72 @@ func runtimeProjectedExecutionBufferRejectsSerializedMemoryOverflow() throws {
       perEventOverheadBytes: 512,
       terminalReserveBytes: 0
     ))
+  let estimate = RuntimeSourceEventEstimate(
+    projectedEventCount: 1,
+    accountedUpperBoundBytes: encodedBytes
+  )
 
   #expect(
-    buffer.append([event])
+    buffer.append([event], reservedEstimate: estimate)
       == .projectionLimitExceeded(
         observedEventCount: 1,
         observedEncodedBytes: encodedBytes
       ))
   #expect(buffer.events.isEmpty)
+}
+
+@Test
+func runtimeCaptureRejectsOversizedSingleJITEventBeforeProjectionOrSerialization() async throws {
+  let fixture = try Fixture()
+  let base = try RuntimeExecutionProjector(
+    context: runtimeContext(fixture),
+    nextID: { Data("preflight-event".utf8) }
+  )
+  let projector = RuntimeCountingExecutionProjector(base: base)
+  var review = Diskplan_V1_ApplyReviewProjection()
+  review.epoch.epochID.value = Data("preflight-epoch".utf8)
+  let capture = RuntimeApplyEventCapture(
+    executionID: Data("preflight-execution".utf8),
+    review: review,
+    projector: projector,
+    taskControl: RuntimeApplyTaskControl()
+  )
+  await capture.emit(.applyStarted(epochID: "preflight-epoch"))
+  #expect(projector.callCount == 1)
+
+  let finding = RevalidationFinding(
+    actionID: fixture.action.id,
+    subject: .collector,
+    kind: .collectionFailed
+  )
+  let report = JITRevalidationReport(
+    captureID: nil,
+    oneShotNonce: Data("nonce".utf8),
+    actionOutcomes: [],
+    globalFindings: Array(repeating: finding, count: 25_001)
+  )
+  let outcome = ExecutionUnitOutcome(
+    id: .action(fixture.action.id),
+    logicalActionIDs: [fixture.action.id],
+    prerequisiteActionIDs: [],
+    status: .jitRejected,
+    jitReport: report,
+    steps: []
+  )
+  await capture.emit(.unitFinished(outcome))
+  let tail = await capture.tailOutcome(
+    for: BestEffortApplyReport(
+      manifest: nil,
+      startFailure: nil,
+      unitOutcomes: [],
+      auditFailures: []
+    ))
+
+  guard case .failed(.projectionLimitExceeded) = tail else {
+    Issue.record("expected source preflight limit failure")
+    return
+  }
+  #expect(projector.callCount == 1)
 }
 
 private func productionTestComposition(
@@ -487,6 +549,38 @@ private func lowercaseHex(_ bytes: Data) -> Data {
 
 private enum RuntimeCompositionTestError: Error {
   case finalDescriptorUnavailable
+}
+
+private final class RuntimeCountingExecutionProjector: RuntimeExecutionEventProjecting,
+  @unchecked Sendable
+{
+  let negotiatedProtocolMinor: UInt32
+
+  private let base: RuntimeExecutionProjector
+  private let lock = NSLock()
+  private var calls = 0
+
+  init(base: RuntimeExecutionProjector) {
+    self.base = base
+    negotiatedProtocolMinor = base.negotiatedProtocolMinor
+  }
+
+  var callCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return calls
+  }
+
+  func project(
+    _ event: ExecutionEvent,
+    executionID: Data,
+    review: Diskplan_V1_ApplyReviewProjection
+  ) -> [Diskplan_V1_ExecutionStreamEvent] {
+    lock.lock()
+    calls += 1
+    lock.unlock()
+    return base.project(event, executionID: executionID, review: review)
+  }
 }
 
 extension Optional where Wrapped == Diskplan_V1_ExecutionStreamEvent.OneOf_Body {

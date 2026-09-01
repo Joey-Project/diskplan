@@ -1712,6 +1712,68 @@ import Testing
   #expect(fixture.authority.liveApplyReviewIDForTesting() == nil)
 }
 
+@Test func failedTailWaitsForConcurrentCancellationResponderBeforeJointAbort() async throws {
+  let backend = RuntimePositiveBackend(
+    waitForCancellation: true,
+    producesInvalidTail: true
+  )
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  defer {
+    writer.release()
+    backend.releaseTailForTesting()
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  try #require(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == backend.executionID
+    })
+
+  writer.block(at: .applyStarted)
+  var cancellation = Diskplan_V1_CancelExecutionRequest()
+  cancellation.requestID = 5
+  cancellation.executionID.value = backend.executionID
+  try #require(fixture.authority.claim(.cancelExecution(cancellation)) == nil)
+  let cancellationTask = Task.detached {
+    try fixture.controller.handle(
+      .cancelExecution(cancellation),
+      responder: fixture.responder(.cancelExecution(cancellation))
+    )
+  }
+  try #require(writer.waitUntilBlocked())
+
+  backend.releaseTailForTesting()
+  #expect(
+    await runtimeEventually {
+      backend.cancelCount == 1
+    })
+
+  writer.release()
+  try await cancellationTask.value
+  #expect(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == nil
+        && !fixture.authority.hasActiveRuntimeClaimsForTesting()
+    })
+  #expect(backend.cancelCount == 1)
+  #expect(backend.tailAwaitCount == 1)
+  #expect(fixture.authority.liveApplyReviewIDForTesting() == nil)
+  #expect(
+    !fixture.output.runtimeEvents().contains { event in
+      guard case .executionStreamEvent(let stream)? = event.body else { return false }
+      if case .applyFinished? = stream.body { return true }
+      return false
+    })
+}
+
 @Test func controllerEmitsExactApplyStartFailureTerminalWithoutStartingRun() async throws {
   let backend = RuntimePositiveBackend(
     waitForCancellation: false,
@@ -3262,6 +3324,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   private var dryRuns = 0
   private var tailAwaits = 0
   private var reviewPreparationCount = 0
+  private var tailSource: RuntimePositiveTailSource?
 
   var startCount: Int {
     lock.lock()
@@ -3390,6 +3453,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
       waitForCancellation: waitForCancellation,
       producesInvalidTail: producesInvalidTail
     )
+    lock.withLock { tailSource = source }
     return .started(
       try await RuntimeExecutionRunHandle.start(
         executionID: executionID,
@@ -3410,6 +3474,11 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     lock.lock()
     dryRuns += 1
     lock.unlock()
+  }
+
+  func releaseTailForTesting() {
+    let source = lock.withLock { tailSource }
+    source?.release()
   }
 
   private func nextReviewID() -> Data {

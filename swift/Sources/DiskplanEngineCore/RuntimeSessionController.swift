@@ -602,18 +602,38 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
 
     let outcome = await run.awaitTail()
     guard case .sealed(let tail) = outcome else {
-      run.cancel()
-      _ = await run.awaitTail()
-      let cancellationResponder = cancellationResponder(for: run)
-      clearActiveExecution(run)
-      try? fallbackResponder.abortExecutionStreamWithoutEmission(
-        mirroredTo: cancellationResponder
-      )
+      await abortFailedExecution(run: run, fallbackResponder: fallbackResponder)
       return
     }
     while !Task.isCancelled {
       do {
         try finishExecution(run: run, tail: tail)
+        return
+      } catch RuntimeTerminalCommitError.pendingCancellation {
+        await Task.yield()
+      } catch {
+        run.cancel()
+        _ = await run.awaitTail()
+        return
+      }
+    }
+    run.cancel()
+    _ = await run.awaitTail()
+  }
+
+  private func abortFailedExecution(
+    run: RuntimeExecutionRunHandle,
+    fallbackResponder: RuntimeBusinessResponder
+  ) async {
+    run.cancel()
+    _ = await run.awaitTail()
+    while !Task.isCancelled {
+      let cancellationResponder = cancellationResponder(for: run)
+      do {
+        try fallbackResponder.abortExecutionStreamWithoutEmission(
+          mirroredTo: cancellationResponder
+        )
+        clearActiveExecution(run)
         return
       } catch RuntimeTerminalCommitError.pendingCancellation {
         await Task.yield()
