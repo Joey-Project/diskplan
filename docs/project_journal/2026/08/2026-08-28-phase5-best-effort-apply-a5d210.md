@@ -277,3 +277,11 @@ superseded_by:
   deterministic policy diagnostics, and DEBUG-only test authority changes. The earlier India
   evidence predates this merge, so the signed merge head requires fresh targeted and serial full
   Swift gates.
+- India execution validation of merge head `64f9dcec4ebd5124125be10fefc09e81e5a4580f`
+  stopped during test compilation after 14.949 seconds; no tests ran, the bounded supervisor
+  emitted 20,256 bytes with SHA-256 prefix `6c77351f`, and verified a quiescent process group.
+  Production sources compiled far enough for every reported error to be a stale Phase 5 test API:
+  one removed caller-supplied display tier and four pre-manifest `releaseSets: []` plan
+  initializers. The successor uses the integration authority's derived display tier and
+  `releaseGraphBundle: nil` for plans without release topology. Policy and serial full gates were
+  not started for the failed merge head.

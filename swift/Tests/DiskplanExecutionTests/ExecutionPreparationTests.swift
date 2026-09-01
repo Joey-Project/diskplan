@@ -740,7 +740,7 @@ func dirtyDiscardRemovePreparationRemainsReportOnly() async throws {
     globalFacts: facts,
     evidenceSnapshots: [evidence],
     actions: [discard, remove],
-    releaseSets: []
+    releaseGraphBundle: nil
   )
   let overlay = DecisionOverlay.create(
     plan: plan,
@@ -845,7 +845,7 @@ func typedUnknownRecoverabilityConsentRevalidatesAcrossFreshCapture() async thro
     globalFacts: facts,
     evidenceSnapshots: [evidence],
     actions: [action],
-    releaseSets: []
+    releaseGraphBundle: nil
   )
   let overlay = DecisionOverlay.create(
     plan: plan,
@@ -910,7 +910,7 @@ func typedUnknownRecoverabilityRejectsSemanticSourceDrift() async throws {
     globalFacts: facts,
     evidenceSnapshots: [evidence],
     actions: [action],
-    releaseSets: []
+    releaseGraphBundle: nil
   )
   let overlay = DecisionOverlay.create(
     plan: plan,
@@ -988,7 +988,7 @@ func unknownRecoverabilityAbsentUnreadableAndFailedRemainDistinct() async throws
     globalFacts: facts,
     evidenceSnapshots: [evidence],
     actions: [action],
-    releaseSets: []
+    releaseGraphBundle: nil
   )
   let overlay = DecisionOverlay.create(
     plan: plan, selectedActionIDs: [action.id], waiverConsents: consents, userNotes: [])
