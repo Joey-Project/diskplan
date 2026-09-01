@@ -12,6 +12,7 @@ public final class EngineExecutionComposition: @unchecked Sendable {
   private let collector: EngineRevalidationCollector
   private let eventSink: any ExecutionEventSink
   private let auditSink: (any ExecutionAuditSink)?
+  private let injectedClock: (@Sendable () -> Int64)?
 
   public init(
     collector: EngineRevalidationCollector,
@@ -26,6 +27,7 @@ public final class EngineExecutionComposition: @unchecked Sendable {
     self.collector = collector
     self.eventSink = eventSink
     self.auditSink = auditSink
+    injectedClock = nil
     preparation = ExecutionPreparationEngine(collector: collector)
     applyCoordinator = BestEffortApplyCoordinator(
       adapter: adapter,
@@ -36,12 +38,43 @@ public final class EngineExecutionComposition: @unchecked Sendable {
     )
   }
 
+  init(
+    collector: EngineRevalidationCollector,
+    eventSink: any ExecutionEventSink,
+    auditSink: (any ExecutionAuditSink)? = nil,
+    clock: @escaping @Sendable () -> Int64
+  ) {
+    let adapter = ProductionExecutionAdapter(
+      genericRemove: PosixRemoveAdapter(),
+      gitWorktree: GitWorktreeQuarantineAdapter()
+    )
+    self.adapter = adapter
+    self.eventSink = eventSink
+    self.auditSink = auditSink
+    injectedClock = clock
+    preparation = ExecutionPreparationEngine(collector: collector, clock: clock)
+    applyCoordinator = BestEffortApplyCoordinator(
+      adapter: adapter,
+      eventSink: eventSink,
+      auditSink: auditSink,
+      clock: clock
+    )
+  }
+
   /// Creates one coordinator whose events remain visible to the configured shell sink while an
   /// executable composition root observes the exact same authoritative Phase 5 stream.
   public func makeApplyCoordinator(
     observing observer: any ExecutionEventSink
   ) -> BestEffortApplyCoordinator {
-    BestEffortApplyCoordinator(
+    if let injectedClock {
+      return BestEffortApplyCoordinator(
+        adapter: adapter,
+        eventSink: TeeExecutionEventSink(primary: eventSink, observer: observer),
+        auditSink: auditSink,
+        clock: injectedClock
+      )
+    }
+    return BestEffortApplyCoordinator(
       adapter: adapter,
       eventSink: TeeExecutionEventSink(primary: eventSink, observer: observer),
       auditSink: auditSink,

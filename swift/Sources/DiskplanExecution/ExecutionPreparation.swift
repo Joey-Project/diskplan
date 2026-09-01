@@ -40,6 +40,19 @@ public actor ExecutionPreparationEngine {
   }
 
   init(
+    collector: EngineRevalidationCollector,
+    randomBytes: @escaping @Sendable (Int) throws -> Data = { count in
+      var generator = SystemRandomNumberGenerator()
+      return Data((0..<count).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+    },
+    clock: @escaping @Sendable () -> Int64
+  ) {
+    self.collector = collector
+    self.randomBytes = randomBytes
+    self.clock = clock
+  }
+
+  init(
     evidenceSource: any RevalidationEvidenceSource,
     jitEvidenceSource: (any JITRevalidationEvidenceSource)? = nil,
     randomBytes: @escaping @Sendable (Int) throws -> Data,
