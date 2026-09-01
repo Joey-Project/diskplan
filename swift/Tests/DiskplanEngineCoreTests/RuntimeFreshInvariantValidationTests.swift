@@ -12,11 +12,12 @@ import Testing
   )
   let evidence = invariantEvidence(candidateID: "survivor", namespace: survivorNamespace)
   let result = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [invariantDuplicateExpectation(evidence)],
     duplicateSurvivors: [
       RuntimeFreshDuplicateSurvivor(
         groupID: "duplicates",
         candidateID: "survivor",
-        immutable: evidence,
+        currentMemberCandidateIDs: ["survivor", "duplicate"],
         current: evidence
       )
     ],
@@ -35,8 +36,8 @@ import Testing
   )
 
   #expect(result.isSatisfied)
-  #expect(result.duplicateSurvivorsPreserved.observation == .known(true))
-  #expect(result.terminalNamespacesExclusive.observation == .known(true))
+  #expect(result.duplicateSurvivorsPreserved.verdict == .satisfied)
+  #expect(result.terminalNamespacesExclusive.verdict == .satisfied)
 }
 
 @Test func survivorContinuityRejectsIdentityContentAndAccessChangesIndependently() throws {
@@ -64,18 +65,19 @@ import Testing
   )
 
   let result = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [invariantDuplicateExpectation(immutable)],
     duplicateSurvivors: [
       RuntimeFreshDuplicateSurvivor(
         groupID: "duplicates",
         candidateID: "survivor",
-        immutable: immutable,
+        currentMemberCandidateIDs: ["survivor", "duplicate"],
         current: current
       )
     ],
     terminalMutations: []
   )
 
-  #expect(result.duplicateSurvivorsPreserved.observation == .known(false))
+  #expect(!result.duplicateSurvivorsPreserved.isSatisfied)
   #expect(
     result.duplicateSurvivorsPreserved.findings.contains {
       $0.component == .survivorIdentity
@@ -122,11 +124,12 @@ import Testing
       mountIdentity: immutable.mountIdentity
     )
     let result = RuntimeFreshInvariantValidator.validate(
+      immutableDuplicateGroups: [invariantDuplicateExpectation(immutable)],
       duplicateSurvivors: [
         RuntimeFreshDuplicateSurvivor(
           groupID: "duplicates",
           candidateID: "survivor",
-          immutable: immutable,
+          currentMemberCandidateIDs: ["survivor", "duplicate"],
           current: current
         )
       ],
@@ -185,11 +188,12 @@ import Testing
 
   for (index, mutation) in mutations.enumerated() {
     let result = RuntimeFreshInvariantValidator.validate(
+      immutableDuplicateGroups: [invariantDuplicateExpectation(evidence)],
       duplicateSurvivors: [
         RuntimeFreshDuplicateSurvivor(
           groupID: "duplicates",
           candidateID: "survivor",
-          immutable: evidence,
+          currentMemberCandidateIDs: ["survivor", "duplicate"],
           current: evidence
         )
       ],
@@ -236,6 +240,7 @@ import Testing
 
   for pair in [(directoryAliasA, directoryAliasB), (regularAliasA, regularAliasB)] {
     let result = RuntimeFreshInvariantValidator.validate(
+      immutableDuplicateGroups: [],
       duplicateSurvivors: [],
       terminalMutations: [
         RuntimeFreshTerminalMutation(
@@ -244,7 +249,7 @@ import Testing
           actionID: invariantActionID(2), namespace: .known(pair.1)),
       ]
     )
-    #expect(result.terminalNamespacesExclusive.observation == .known(false))
+    #expect(!result.terminalNamespacesExclusive.isSatisfied)
     #expect(
       result.terminalNamespacesExclusive.findings.contains {
         $0.rejection == .mismatch(.overlappingTerminalMutation)
@@ -263,30 +268,205 @@ import Testing
   let releaseID = invariantActionID(2)
 
   let allowed = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [],
     duplicateSurvivors: [],
     terminalMutations: [
       RuntimeFreshTerminalMutation(actionID: ownerID, namespace: .known(namespace)),
       RuntimeFreshTerminalMutation(
         actionID: releaseID,
         namespace: .known(namespace),
-        kind: .releaseComposite(ownerActionIDs: [ownerID])
+        kind: .releaseComposite(
+          ownerBindings: [
+            RuntimeFreshReleaseOwnerMutationBinding(
+              actionID: ownerID,
+              namespace: namespace
+            )
+          ]
+        )
       ),
     ]
   )
-  #expect(allowed.terminalNamespacesExclusive.observation == .known(true))
+  #expect(allowed.terminalNamespacesExclusive.verdict == .satisfied)
 
   let unrelated = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [],
     duplicateSurvivors: [],
     terminalMutations: [
       RuntimeFreshTerminalMutation(actionID: ownerID, namespace: .known(namespace)),
       RuntimeFreshTerminalMutation(
         actionID: releaseID,
         namespace: .known(namespace),
-        kind: .releaseComposite(ownerActionIDs: [invariantActionID(9)])
+        kind: .releaseComposite(
+          ownerBindings: [
+            RuntimeFreshReleaseOwnerMutationBinding(
+              actionID: invariantActionID(9),
+              namespace: namespace
+            )
+          ]
+        )
       ),
     ]
   )
-  #expect(unrelated.terminalNamespacesExclusive.observation == .known(false))
+  #expect(!unrelated.terminalNamespacesExclusive.isSatisfied)
+}
+
+@Test func releaseReplacementRejectsNonExactOwnerNamespaceAndIdentityAliases() throws {
+  let exactOwner = try invariantNamespace(
+    root: "/fixture",
+    target: ["parent", "release-owner"],
+    targetIdentity: invariantIdentity(70, type: .regularFile),
+    parentIdentities: [invariantIdentity(71, type: .directory)]
+  )
+  let nonExactOwners = [
+    try invariantNamespace(
+      root: "/fixture",
+      target: ["parent"],
+      targetIdentity: invariantIdentity(71, type: .directory)
+    ),
+    try invariantNamespace(
+      root: "/alias",
+      target: ["identity-alias"],
+      targetIdentity: invariantIdentity(70, type: .regularFile),
+      rootIdentity: invariantIdentity(80, type: .directory)
+    ),
+  ]
+  let ownerID = invariantActionID(1)
+
+  for currentOwner in nonExactOwners {
+    let result = RuntimeFreshInvariantValidator.validate(
+      immutableDuplicateGroups: [],
+      duplicateSurvivors: [],
+      terminalMutations: [
+        RuntimeFreshTerminalMutation(actionID: ownerID, namespace: .known(currentOwner)),
+        RuntimeFreshTerminalMutation(
+          actionID: invariantActionID(2),
+          namespace: .known(exactOwner),
+          kind: .releaseComposite(
+            ownerBindings: [
+              RuntimeFreshReleaseOwnerMutationBinding(
+                actionID: ownerID,
+                namespace: exactOwner
+              )
+            ]
+          )
+        ),
+      ]
+    )
+
+    #expect(
+      result.terminalNamespacesExclusive.findings.contains {
+        $0.rejection == .mismatch(.overlappingTerminalMutation)
+      }
+    )
+  }
+}
+
+@Test func immutableDuplicateGroupsRejectMissingUnrelatedAndChangedFreshDeclarations() throws {
+  let namespace = try invariantNamespace(
+    root: "/fixture",
+    target: ["survivor"],
+    targetIdentity: invariantIdentity(10, type: .regularFile)
+  )
+  let evidence = invariantEvidence(candidateID: "survivor", namespace: namespace)
+  let expected = invariantDuplicateExpectation(evidence)
+
+  let missing = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [expected],
+    duplicateSurvivors: [],
+    terminalMutations: []
+  )
+  #expect(
+    missing.duplicateSurvivorsPreserved.findings.contains {
+      $0.component == .duplicateGroup && $0.rejection == .missing
+    }
+  )
+
+  let unrelatedEvidence = invariantEvidence(candidateID: "other", namespace: namespace)
+  let unrelated = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [expected],
+    duplicateSurvivors: [
+      RuntimeFreshDuplicateSurvivor(
+        groupID: "unrelated",
+        candidateID: "other",
+        currentMemberCandidateIDs: ["other", "other-copy"],
+        current: unrelatedEvidence
+      )
+    ],
+    terminalMutations: []
+  )
+  #expect(
+    unrelated.duplicateSurvivorsPreserved.findings.contains {
+      $0.rejection == .mismatch(.duplicateGroupSetChanged)
+    }
+  )
+
+  let changedMembers = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [expected],
+    duplicateSurvivors: [
+      RuntimeFreshDuplicateSurvivor(
+        groupID: "duplicates",
+        candidateID: "survivor",
+        currentMemberCandidateIDs: ["duplicate"],
+        current: evidence
+      )
+    ],
+    terminalMutations: []
+  )
+  #expect(
+    changedMembers.duplicateSurvivorsPreserved.findings.contains {
+      $0.rejection == .mismatch(.duplicateMemberSetChanged)
+    }
+  )
+  #expect(
+    changedMembers.duplicateSurvivorsPreserved.findings.contains {
+      $0.rejection == .mismatch(.designatedSurvivorNotMember)
+    }
+  )
+}
+
+@Test func authoritativeVerdictRetainsMixedTypedFailures() throws {
+  let namespace = try invariantNamespace(
+    root: "/fixture",
+    target: ["survivor"],
+    targetIdentity: invariantIdentity(10, type: .regularFile)
+  )
+  let immutable = invariantEvidence(candidateID: "survivor", namespace: namespace)
+  let failure = ObservationFailure(code: "collector-failed", collector: "fresh-invariant")
+  let current = RuntimeFreshInvariantEvidence(
+    candidateID: "survivor",
+    namespace: .known(
+      try invariantNamespace(
+        root: "/fixture",
+        target: ["survivor"],
+        targetIdentity: invariantIdentity(99, type: .regularFile)
+      )
+    ),
+    identity: .known(invariantIdentity(99, type: .regularFile)),
+    content: immutable.content,
+    accessPolicy: .failed(failure),
+    aclDigest: immutable.aclDigest,
+    providerState: immutable.providerState,
+    mountIdentity: immutable.mountIdentity
+  )
+  let result = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [invariantDuplicateExpectation(immutable)],
+    duplicateSurvivors: [
+      RuntimeFreshDuplicateSurvivor(
+        groupID: "duplicates",
+        candidateID: "survivor",
+        currentMemberCandidateIDs: ["survivor", "duplicate"],
+        current: current
+      )
+    ],
+    terminalMutations: []
+  )
+
+  guard case .rejected(let findings) = result.duplicateSurvivorsPreserved.verdict else {
+    Issue.record("expected authoritative typed rejection")
+    return
+  }
+  #expect(findings.contains { $0.rejection == .mismatch(.objectIdentityChanged) })
+  #expect(findings.contains { $0.rejection == .failed(failure) })
 }
 
 @Test func terminalUnavailableNamespaceAndConflictingSurvivorsFailClosed() throws {
@@ -298,11 +478,27 @@ import Testing
   let first = invariantEvidence(candidateID: "first", namespace: namespace)
   let second = invariantEvidence(candidateID: "second", namespace: namespace)
   let result = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [
+      RuntimeFreshDuplicateGroupExpectation(
+        groupID: "duplicates",
+        memberCandidateIDs: ["first", "second"],
+        survivorCandidateID: "first",
+        immutableSurvivor: first
+      )
+    ],
     duplicateSurvivors: [
       RuntimeFreshDuplicateSurvivor(
-        groupID: "duplicates", candidateID: "first", immutable: first, current: first),
+        groupID: "duplicates",
+        candidateID: "first",
+        currentMemberCandidateIDs: ["first", "second"],
+        current: first
+      ),
       RuntimeFreshDuplicateSurvivor(
-        groupID: "duplicates", candidateID: "second", immutable: second, current: second),
+        groupID: "duplicates",
+        candidateID: "second",
+        currentMemberCandidateIDs: ["first", "second"],
+        current: second
+      ),
     ],
     terminalMutations: [
       RuntimeFreshTerminalMutation(
@@ -310,13 +506,17 @@ import Testing
     ]
   )
 
-  #expect(result.duplicateSurvivorsPreserved.observation == .known(false))
+  #expect(!result.duplicateSurvivorsPreserved.isSatisfied)
   #expect(
     result.duplicateSurvivorsPreserved.findings.contains {
       $0.rejection == .mismatch(.conflictingDesignatedSurvivor)
     }
   )
-  #expect(result.terminalNamespacesExclusive.observation == .unknown(.incompleteCoverage))
+  #expect(
+    result.terminalNamespacesExclusive.findings.contains {
+      $0.rejection == .unknown(.incompleteCoverage)
+    }
+  )
 }
 
 @Test func duplicateSurvivorRegistrationCannotMasqueradeAsOneSurvivor() throws {
@@ -329,16 +529,17 @@ import Testing
   let duplicate = RuntimeFreshDuplicateSurvivor(
     groupID: "duplicates",
     candidateID: "survivor",
-    immutable: evidence,
+    currentMemberCandidateIDs: ["survivor", "duplicate"],
     current: evidence
   )
 
   let result = RuntimeFreshInvariantValidator.validate(
+    immutableDuplicateGroups: [invariantDuplicateExpectation(evidence)],
     duplicateSurvivors: [duplicate, duplicate],
     terminalMutations: []
   )
 
-  #expect(result.duplicateSurvivorsPreserved.observation == .known(false))
+  #expect(!result.duplicateSurvivorsPreserved.isSatisfied)
   #expect(
     result.duplicateSurvivorsPreserved.findings.contains {
       $0.rejection == .mismatch(.conflictingDesignatedSurvivor)
@@ -359,6 +560,17 @@ private func invariantEvidence(
     aclDigest: .known(invariantDigest(3)),
     providerState: .known(.local),
     mountIdentity: .known("mount-a")
+  )
+}
+
+private func invariantDuplicateExpectation(
+  _ immutableSurvivor: RuntimeFreshInvariantEvidence
+) -> RuntimeFreshDuplicateGroupExpectation {
+  RuntimeFreshDuplicateGroupExpectation(
+    groupID: "duplicates",
+    memberCandidateIDs: ["survivor", "duplicate"],
+    survivorCandidateID: "survivor",
+    immutableSurvivor: immutableSurvivor
   )
 }
 

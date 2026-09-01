@@ -48,25 +48,54 @@ package struct RuntimeFreshInvariantEvidence: Equatable, Sendable {
 package struct RuntimeFreshDuplicateSurvivor: Equatable, Sendable {
   package let groupID: String
   package let candidateID: String
-  package let immutable: RuntimeFreshInvariantEvidence
+  package let currentMemberCandidateIDs: [String]
   package let current: RuntimeFreshInvariantEvidence
 
   package init(
     groupID: String,
     candidateID: String,
-    immutable: RuntimeFreshInvariantEvidence,
+    currentMemberCandidateIDs: [String],
     current: RuntimeFreshInvariantEvidence
   ) {
     self.groupID = groupID
     self.candidateID = candidateID
-    self.immutable = immutable
+    self.currentMemberCandidateIDs = currentMemberCandidateIDs
     self.current = current
+  }
+}
+
+package struct RuntimeFreshDuplicateGroupExpectation: Equatable, Sendable {
+  package let groupID: String
+  package let memberCandidateIDs: [String]
+  package let survivorCandidateID: String
+  package let immutableSurvivor: RuntimeFreshInvariantEvidence
+
+  package init(
+    groupID: String,
+    memberCandidateIDs: [String],
+    survivorCandidateID: String,
+    immutableSurvivor: RuntimeFreshInvariantEvidence
+  ) {
+    self.groupID = groupID
+    self.memberCandidateIDs = memberCandidateIDs
+    self.survivorCandidateID = survivorCandidateID
+    self.immutableSurvivor = immutableSurvivor
+  }
+}
+
+package struct RuntimeFreshReleaseOwnerMutationBinding: Equatable, Sendable {
+  package let actionID: ActionID
+  package let namespace: ProtectedNamespaceBinding
+
+  package init(actionID: ActionID, namespace: ProtectedNamespaceBinding) {
+    self.actionID = actionID
+    self.namespace = namespace
   }
 }
 
 package enum RuntimeFreshTerminalMutationKind: Equatable, Sendable {
   case ordinary
-  case releaseComposite(ownerActionIDs: [ActionID])
+  case releaseComposite(ownerBindings: [RuntimeFreshReleaseOwnerMutationBinding])
 }
 
 package struct RuntimeFreshTerminalMutation: Equatable, Sendable {
@@ -129,6 +158,9 @@ package enum RuntimeFreshInvariantMismatch: String, Equatable, Sendable {
   case namespaceTrustChanged
   case namespaceStructureChanged
   case duplicateTerminalAction
+  case duplicateGroupSetChanged
+  case duplicateMemberSetChanged
+  case designatedSurvivorNotMember
   case overlappingTerminalMutation
   case survivorNamespaceMutated
 }
@@ -160,42 +192,24 @@ package struct RuntimeFreshInvariantFinding: Equatable, Sendable {
   }
 }
 
+package enum RuntimeFreshInvariantVerdict: Equatable, Sendable {
+  case satisfied
+  case rejected([RuntimeFreshInvariantFinding])
+}
+
 package struct RuntimeFreshInvariantOutcome: Equatable, Sendable {
-  package let findings: [RuntimeFreshInvariantFinding]
+  package let verdict: RuntimeFreshInvariantVerdict
 
-  package var isSatisfied: Bool { findings.isEmpty }
-
-  /// Compatibility projection for the existing execution preparation boundary. Detailed
-  /// diagnostics remain in `findings`; this projection never turns an unavailable proof into
-  /// a successful invariant.
-  package var observation: Observation<Bool> {
-    if findings.isEmpty { return .known(true) }
-    if findings.contains(where: {
-      if case .mismatch = $0.rejection { return true }
-      return false
-    }) {
-      return .known(false)
-    }
-    if let failure = findings.compactMap({ finding -> ObservationFailure? in
-      if case .failed(let failure) = finding.rejection { return failure }
-      return nil
-    }).first {
-      return .failed(failure)
-    }
-    if let failure = findings.compactMap({ finding -> ObservationFailure? in
-      if case .unreadable(let failure) = finding.rejection { return failure }
-      return nil
-    }).first {
-      return .unreadable(failure)
-    }
-    if let reason = findings.compactMap({ finding -> UnknownReason? in
-      if case .unknown(let reason) = finding.rejection { return reason }
-      return nil
-    }).first {
-      return .unknown(reason)
-    }
-    return .absent
+  package init(findings: [RuntimeFreshInvariantFinding]) {
+    verdict = findings.isEmpty ? .satisfied : .rejected(findings)
   }
+
+  package var findings: [RuntimeFreshInvariantFinding] {
+    guard case .rejected(let findings) = verdict else { return [] }
+    return findings
+  }
+
+  package var isSatisfied: Bool { verdict == .satisfied }
 }
 
 package struct RuntimeFreshInvariantValidation: Equatable, Sendable {
@@ -211,12 +225,14 @@ package struct RuntimeFreshInvariantValidation: Equatable, Sendable {
 /// independent input to release-topology validation and deliberately does not participate here.
 package enum RuntimeFreshInvariantValidator {
   package static func validate(
+    immutableDuplicateGroups: [RuntimeFreshDuplicateGroupExpectation],
     duplicateSurvivors: [RuntimeFreshDuplicateSurvivor],
     terminalMutations: [RuntimeFreshTerminalMutation]
   ) -> RuntimeFreshInvariantValidation {
     let terminals = terminalMutations.sorted { $0.actionID < $1.actionID }
     let terminalResult = validateTerminalNamespaces(terminals)
     let survivorResult = validateDuplicateSurvivors(
+      immutableDuplicateGroups.sorted(by: duplicateExpectationPrecedes),
       duplicateSurvivors.sorted(by: survivorPrecedes),
       terminals: terminals
     )
@@ -227,32 +243,91 @@ package enum RuntimeFreshInvariantValidator {
   }
 
   private static func validateDuplicateSurvivors(
+    _ expectations: [RuntimeFreshDuplicateGroupExpectation],
     _ survivors: [RuntimeFreshDuplicateSurvivor],
     terminals: [RuntimeFreshTerminalMutation]
   ) -> [RuntimeFreshInvariantFinding] {
     var findings: [RuntimeFreshInvariantFinding] = []
-    let grouped = Dictionary(grouping: survivors, by: { Data($0.groupID.utf8) })
+    let expectedByGroup = Dictionary(grouping: expectations, by: { Data($0.groupID.utf8) })
+    let currentByGroup = Dictionary(grouping: survivors, by: { Data($0.groupID.utf8) })
+    let allGroupKeys = Set(expectedByGroup.keys).union(currentByGroup.keys).sorted {
+      $0.lexicographicallyPrecedes($1)
+    }
 
-    for groupKey in grouped.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
-      guard let members = grouped[groupKey], let first = members.first else { continue }
-      let candidateIDs = Set(members.map { Data($0.candidateID.utf8) })
-      if members.count != 1 || candidateIDs.count != 1 {
+    for groupKey in allGroupKeys {
+      let expectedMatches = expectedByGroup[groupKey] ?? []
+      let currentMatches = currentByGroup[groupKey] ?? []
+      let displayGroup = expectedMatches.first?.groupID ?? currentMatches.first?.groupID ?? ""
+
+      guard expectedMatches.count == 1, let expected = expectedMatches.first else {
         findings.append(
           finding(
             .duplicateSurvivorsPreserved,
             .duplicateGroup,
-            first.groupID,
-            .mismatch(.conflictingDesignatedSurvivor)
+            displayGroup,
+            .mismatch(.duplicateGroupSetChanged)
+          )
+        )
+        continue
+      }
+      guard currentMatches.count == 1, let survivor = currentMatches.first else {
+        findings.append(
+          finding(
+            .duplicateSurvivorsPreserved,
+            .duplicateGroup,
+            displayGroup,
+            currentMatches.isEmpty ? .missing : .mismatch(.conflictingDesignatedSurvivor)
           )
         )
         continue
       }
 
-      let survivor = first
-      let subject = survivorSubject(survivor)
-      if !rawStringEqual(survivor.candidateID, survivor.immutable.candidateID)
-        || !rawStringEqual(survivor.candidateID, survivor.current.candidateID)
+      let expectedMembers = Set(expected.memberCandidateIDs.map { Data($0.utf8) })
+      let currentMembers = Set(survivor.currentMemberCandidateIDs.map { Data($0.utf8) })
+      let survivorID = Data(expected.survivorCandidateID.utf8)
+      if expected.memberCandidateIDs.isEmpty
+        || expectedMembers.count != expected.memberCandidateIDs.count
+        || !expectedMembers.contains(survivorID)
       {
+        findings.append(
+          finding(
+            .duplicateSurvivorsPreserved,
+            .duplicateGroup,
+            displayGroup,
+            .mismatch(.designatedSurvivorNotMember)
+          )
+        )
+        continue
+      }
+      if survivor.currentMemberCandidateIDs.isEmpty
+        || currentMembers.count != survivor.currentMemberCandidateIDs.count
+        || currentMembers != expectedMembers
+      {
+        findings.append(
+          finding(
+            .duplicateSurvivorsPreserved,
+            .duplicateGroup,
+            displayGroup,
+            .mismatch(.duplicateMemberSetChanged)
+          )
+        )
+      }
+      if !currentMembers.contains(survivorID)
+        || !rawStringEqual(survivor.candidateID, expected.survivorCandidateID)
+        || !rawStringEqual(expected.survivorCandidateID, expected.immutableSurvivor.candidateID)
+      {
+        findings.append(
+          finding(
+            .duplicateSurvivorsPreserved,
+            .survivorRegistration,
+            displayGroup,
+            .mismatch(.designatedSurvivorNotMember)
+          )
+        )
+      }
+
+      let subject = survivorSubject(survivor)
+      if !rawStringEqual(survivor.candidateID, survivor.current.candidateID) {
         findings.append(
           finding(
             .duplicateSurvivorsPreserved,
@@ -265,7 +340,7 @@ package enum RuntimeFreshInvariantValidator {
 
       findings.append(
         contentsOf: validateSurvivorContinuity(
-          immutable: survivor.immutable,
+          immutable: expected.immutableSurvivor,
           current: survivor.current,
           subject: subject
         )
@@ -471,7 +546,14 @@ package enum RuntimeFreshInvariantValidator {
         let left = known[leftIndex]
         let right = known[rightIndex]
         guard namespacesMaySemanticallyOverlap(left.1, right.1) else { continue }
-        guard exactReleaseReplacement(left.0, right.0) else {
+        guard
+          exactReleaseReplacement(
+            left.0,
+            namespace: left.1,
+            right.0,
+            namespace: right.1
+          )
+        else {
           findings.append(
             finding(
               .terminalNamespacesExclusive,
@@ -730,16 +812,35 @@ package enum RuntimeFreshInvariantValidator {
 
   private static func exactReleaseReplacement(
     _ lhs: RuntimeFreshTerminalMutation,
-    _ rhs: RuntimeFreshTerminalMutation
+    namespace lhsNamespace: ProtectedNamespaceBinding,
+    _ rhs: RuntimeFreshTerminalMutation,
+    namespace rhsNamespace: ProtectedNamespaceBinding
   ) -> Bool {
     switch (lhs.kind, rhs.kind) {
     case (.releaseComposite(let owners), .ordinary):
-      return owners.contains(rhs.actionID)
+      return exactOwnerBinding(
+        actionID: rhs.actionID,
+        namespace: rhsNamespace,
+        ownerBindings: owners
+      )
     case (.ordinary, .releaseComposite(let owners)):
-      return owners.contains(lhs.actionID)
+      return exactOwnerBinding(
+        actionID: lhs.actionID,
+        namespace: lhsNamespace,
+        ownerBindings: owners
+      )
     default:
       return false
     }
+  }
+
+  private static func exactOwnerBinding(
+    actionID: ActionID,
+    namespace: ProtectedNamespaceBinding,
+    ownerBindings: [RuntimeFreshReleaseOwnerMutationBinding]
+  ) -> Bool {
+    let matches = ownerBindings.filter { $0.actionID == actionID }
+    return matches.count == 1 && matches[0].namespace == namespace
   }
 
   private static func namespacesMaySemanticallyOverlap(
@@ -787,6 +888,13 @@ package enum RuntimeFreshInvariantValidator {
     let rightGroup = Data(rhs.groupID.utf8)
     if leftGroup != rightGroup { return leftGroup.lexicographicallyPrecedes(rightGroup) }
     return Data(lhs.candidateID.utf8).lexicographicallyPrecedes(Data(rhs.candidateID.utf8))
+  }
+
+  private static func duplicateExpectationPrecedes(
+    _ lhs: RuntimeFreshDuplicateGroupExpectation,
+    _ rhs: RuntimeFreshDuplicateGroupExpectation
+  ) -> Bool {
+    Data(lhs.groupID.utf8).lexicographicallyPrecedes(Data(rhs.groupID.utf8))
   }
 
   private static func survivorSubject(_ survivor: RuntimeFreshDuplicateSurvivor) -> String {
