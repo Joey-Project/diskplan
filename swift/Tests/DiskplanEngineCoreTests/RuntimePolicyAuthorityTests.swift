@@ -641,7 +641,7 @@ import Testing
     runtimeSessionID: Data("reservation-session".utf8),
     body: .executionStreamEvent(started)
   )
-  try #require(writer.waitUntilBlocked())
+  try #require(await writer.waitUntilBlocked())
 
   var acknowledgement = Diskplan_V1_ExecutionCancellationAcknowledgedProjection()
   acknowledgement.reason = "reservation-fixture"
@@ -660,14 +660,16 @@ import Testing
     batchStarted.set()
     try broker.sendRuntimeBatchAwaitingWrite(batchRecords)
   }
-  try #require(batchStarted.wait(timeout: 1))
+  try #require(await batchStarted.waitUntilSet())
   try #require(
     await runtimeEventually {
       broker.runtimeBatchReservationCountForTesting() == 1
     })
 
+  let producerStarted = AuthorityTestFlag()
   let producerFinished = AuthorityTestFlag()
   let producer = Task.detached {
+    producerStarted.set()
     for offset in 0..<128 {
       var rejection = Diskplan_V1_RuntimeRejected()
       rejection.code = .invalidState
@@ -680,7 +682,8 @@ import Testing
     }
     producerFinished.set()
   }
-  #expect(!producerFinished.wait(timeout: 0.05))
+  try #require(await producerStarted.waitUntilSet())
+  #expect(!producerFinished.value)
 
   writer.release()
   try await batch.value
@@ -1567,7 +1570,7 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     .confirmApply(confirmation),
     responder: fixture.responder(.confirmApply(confirmation))
   )
-  try #require(startGate.waitUntilEntered())
+  try #require(await startGate.waitUntilEntered())
 
   let teardown = Task.detached { fixture.controller.stopAndWait() }
   try #require(
@@ -1607,7 +1610,7 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     .prepareApplyReview(request),
     responder: fixture.responder(.prepareApplyReview(request))
   )
-  try #require(commitGate.waitUntilEntered())
+  try #require(await commitGate.waitUntilEntered())
   let reviews: [Diskplan_V1_ApplyReviewProjection] =
     fixture.output.runtimeEvents().compactMap { event in
       guard case .applyReviewProjection(let projection)? = event.body else { return nil }
@@ -1624,8 +1627,8 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     claimFinished.set()
     return rejection
   }
-  try #require(claimStarted.wait(timeout: 2))
-  #expect(!claimFinished.wait(timeout: 0.05))
+  try #require(await claimStarted.waitUntilSet())
+  #expect(!claimFinished.value)
 
   commitGate.open()
   let rejection = await claim.value
@@ -1651,7 +1654,7 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
   )
   let fixture = try runtimePositiveFixture(
     backend: backend,
-    reviewCommitHook: { try commitHook.call() }
+    reviewCommitHook: { try await commitHook.call() }
   )
   defer {
     commitHook.open()
@@ -1672,7 +1675,7 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     .prepareApplyReview(requestB),
     responder: fixture.responder(.prepareApplyReview(requestB))
   )
-  try #require(commitHook.waitUntilEntered())
+  try #require(await commitHook.waitUntilEntered())
   #expect(fixture.controller.preparedApplyReviewIDForTesting() == reviewBID)
 
   let confirmation = runtimePositiveConfirmation(reviewA, requestID: 5)
@@ -1684,8 +1687,8 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     claimFinished.set()
     return rejection
   }
-  try #require(claimStarted.wait(timeout: 2))
-  #expect(!claimFinished.wait(timeout: 0.05))
+  try #require(await claimStarted.waitUntilSet())
+  #expect(!claimFinished.value)
 
   commitHook.open()
   #expect((await claim.value)?.code == nil)
@@ -1710,6 +1713,11 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
   let backend = RuntimePositiveBackend(waitForCancellation: false)
   let writer = RuntimePositiveWriter()
   let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  defer {
+    writer.release()
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
   writer.observeInstalledReview()
   writer.block(at: .applyReview)
   writer.fail(at: .applyReview)
@@ -1725,7 +1733,7 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     .prepareApplyReview(request),
     responder: fixture.responder(.prepareApplyReview(request))
   )
-  try #require(writer.waitUntilBlocked())
+  try #require(await writer.waitUntilBlocked())
   #expect(writer.sawInstalledReview)
   #expect(fixture.controller.preparedApplyReviewIDForTesting() != nil)
 
@@ -1741,8 +1749,8 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     claimFinished.set()
     return rejection
   }
-  try #require(claimStarted.wait(timeout: 2))
-  #expect(!claimFinished.wait(timeout: 0.05))
+  try #require(await claimStarted.waitUntilSet())
+  #expect(!claimFinished.value)
 
   writer.release()
   #expect((await claim.value)?.code == .staleBinding)
@@ -1750,7 +1758,6 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     await runtimeEventually {
       fixture.controller.preparedApplyReviewIDForTesting() == nil
     })
-  fixture.controller.stopAndWait()
   #expect(backend.startCount == 0)
   #expect(throws: (any Error).self) { try fixture.broker.finish() }
 }
@@ -2005,7 +2012,7 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     .confirmApply(confirmation),
     responder: fixture.responder(.confirmApply(confirmation))
   )
-  try #require(writer.waitUntilBlocked())
+  try #require(await writer.waitUntilBlocked())
 
   var cancellation = Diskplan_V1_CancelExecutionRequest()
   cancellation.requestID = 5
@@ -2216,7 +2223,7 @@ private func controllerEmitsSealedExecutionFailureForEveryTailFailure(
       responder: fixture.responder(.cancelExecution(cancellationRequest))
     )
   }
-  try #require(writer.waitUntilBlocked())
+  try #require(await writer.waitUntilBlocked())
 
   backend.releaseTailForTesting()
   #expect(
@@ -3290,8 +3297,54 @@ private final class AuthorityTestGate: @unchecked Sendable {
   }
 }
 
+private final class RuntimePositiveOneShotSignal: @unchecked Sendable {
+  private let lock = NSLock()
+  private let stream: AsyncStream<Void>
+  private let continuation: AsyncStream<Void>.Continuation
+  private var signaled = false
+
+  init() {
+    let pair = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    stream = pair.stream
+    continuation = pair.continuation
+  }
+
+  var value: Bool {
+    lock.withLock { signaled }
+  }
+
+  func signal() {
+    let shouldResume = lock.withLock {
+      guard !signaled else { return false }
+      signaled = true
+      return true
+    }
+    guard shouldResume else { return }
+    continuation.yield()
+    continuation.finish()
+  }
+
+  func wait(timeout: Duration = .seconds(2)) async -> Bool {
+    if value { return true }
+    return await withTaskGroup(of: Bool.self) { group in
+      group.addTask { [stream] in
+        for await _ in stream { return true }
+        return self.value
+      }
+      group.addTask {
+        try? await Task.sleep(for: timeout)
+        return self.value
+      }
+      let result = await group.next() ?? false
+      group.cancelAll()
+      return result
+    }
+  }
+}
+
 private final class AuthorityTestFlag: @unchecked Sendable {
   private let condition = NSCondition()
+  private let asyncSignal = RuntimePositiveOneShotSignal()
   private var isSet = false
 
   func set() {
@@ -3299,6 +3352,17 @@ private final class AuthorityTestFlag: @unchecked Sendable {
     isSet = true
     condition.broadcast()
     condition.unlock()
+    asyncSignal.signal()
+  }
+
+  var value: Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    return isSet
+  }
+
+  func waitUntilSet() async -> Bool {
+    await asyncSignal.wait()
   }
 
   func wait(timeout: TimeInterval) -> Bool {
@@ -3310,37 +3374,23 @@ private final class AuthorityTestFlag: @unchecked Sendable {
     }
     return true
   }
-
 }
 
 private final class RuntimePositiveGate: @unchecked Sendable {
-  private let condition = NSCondition()
-  private var entered = false
-  private var isOpen = false
+  private let enteredSignal = RuntimePositiveOneShotSignal()
+  private let openedSignal = RuntimePositiveOneShotSignal()
 
-  func wait() {
-    condition.lock()
-    entered = true
-    condition.broadcast()
-    while !isOpen { condition.wait() }
-    condition.unlock()
+  func wait() async {
+    enteredSignal.signal()
+    _ = await openedSignal.wait()
   }
 
-  func waitUntilEntered(timeout: TimeInterval = 2) -> Bool {
-    condition.lock()
-    defer { condition.unlock() }
-    let deadline = Date(timeIntervalSinceNow: timeout)
-    while !entered {
-      guard condition.wait(until: deadline) else { return entered }
-    }
-    return true
+  func waitUntilEntered() async -> Bool {
+    await enteredSignal.wait()
   }
 
   func open() {
-    condition.lock()
-    isOpen = true
-    condition.broadcast()
-    condition.unlock()
+    openedSignal.signal()
   }
 }
 
@@ -3349,45 +3399,33 @@ private enum RuntimePositiveCommitHookError: Error {
 }
 
 private final class RuntimePositiveFailingCommitHook: @unchecked Sendable {
-  private let condition = NSCondition()
+  private let lock = NSLock()
+  private let enteredSignal = RuntimePositiveOneShotSignal()
+  private let openedSignal = RuntimePositiveOneShotSignal()
   private let failingInvocation: Int
   private var invocationCount = 0
-  private var entered = false
-  private var isOpen = false
 
   init(failingInvocation: Int) {
     self.failingInvocation = failingInvocation
   }
 
-  func call() throws {
-    condition.lock()
-    invocationCount += 1
-    guard invocationCount == failingInvocation else {
-      condition.unlock()
-      return
+  func call() async throws {
+    let shouldFail = lock.withLock {
+      invocationCount += 1
+      return invocationCount == failingInvocation
     }
-    entered = true
-    condition.broadcast()
-    while !isOpen { condition.wait() }
-    condition.unlock()
+    guard shouldFail else { return }
+    enteredSignal.signal()
+    _ = await openedSignal.wait()
     throw RuntimePositiveCommitHookError.injected
   }
 
-  func waitUntilEntered(timeout: TimeInterval = 2) -> Bool {
-    condition.lock()
-    defer { condition.unlock() }
-    let deadline = Date(timeIntervalSinceNow: timeout)
-    while !entered {
-      guard condition.wait(until: deadline) else { return entered }
-    }
-    return true
+  func waitUntilEntered() async -> Bool {
+    await enteredSignal.wait()
   }
 
   func open() {
-    condition.lock()
-    isOpen = true
-    condition.broadcast()
-    condition.unlock()
+    openedSignal.signal()
   }
 }
 
@@ -3585,11 +3623,11 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
   weak var controller: RuntimeSessionController?
 
   private let condition = NSCondition()
+  private let blockedSignal = RuntimePositiveOneShotSignal()
   private var failurePoint: RuntimePositiveWritePoint?
   private var failureOccurrence = 1
   private var writeCounts: [RuntimePositiveWritePoint: Int] = [:]
   private var blockingPoint: RuntimePositiveWritePoint?
-  private var blocked = false
   private var released = false
   private var injectedFailure = false
   private var observeReviewInstallation = false
@@ -3615,14 +3653,8 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
     condition.unlock()
   }
 
-  func waitUntilBlocked(timeout: TimeInterval = 2) -> Bool {
-    condition.lock()
-    defer { condition.unlock() }
-    let deadline = Date(timeIntervalSinceNow: timeout)
-    while !blocked {
-      guard condition.wait(until: deadline) else { return blocked }
-    }
-    return true
+  func waitUntilBlocked() async -> Bool {
+    await blockedSignal.wait()
   }
 
   func release() {
@@ -3652,8 +3684,8 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
       observedInstalledReview = controller?.preparedApplyReviewIDForTesting() != nil
     }
     if let blockingPoint, point == blockingPoint {
-      blocked = true
       condition.broadcast()
+      blockedSignal.signal()
       while !released { condition.wait() }
     }
     let shouldFail =
@@ -3684,7 +3716,7 @@ private func runtimePositiveFixture(
   backend: RuntimePositiveBackend,
   writer: RuntimePositiveWriter? = nil,
   reviewCommitGate: RuntimePositiveGate? = nil,
-  reviewCommitHook: (@Sendable () throws -> Void)? = nil,
+  reviewCommitHook: (@Sendable () async throws -> Void)? = nil,
   negotiatedProtocolMinor: UInt32 = protocolMinor
 ) throws -> RuntimePositiveFixture {
   let result = authorityScanResult()
@@ -3711,8 +3743,8 @@ private func runtimePositiveFixture(
       output.append(data)
     }
   }
-  let gateHook: (@Sendable () throws -> Void)? = reviewCommitGate.map { gate in
-    { @Sendable in gate.wait() }
+  let gateHook: (@Sendable () async throws -> Void)? = reviewCommitGate.map { gate in
+    { @Sendable in await gate.wait() }
   }
   let authority = RuntimeBusinessAuthorityState(
     reviewCommitHookForTesting: reviewCommitHook ?? gateHook
@@ -3961,7 +3993,9 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     confirmation: RuntimeApplyConfirmation,
     context: RuntimeExecutionPlanContext
   ) async throws -> RuntimeApplyLaunchResult {
-    startGate?.wait()
+    if let startGate {
+      await startGate.wait()
+    }
     recordStart()
     if let startFailure {
       var finished = Diskplan_V1_ApplyFinishedProjection()

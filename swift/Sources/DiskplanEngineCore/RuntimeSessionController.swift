@@ -462,7 +462,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
           authority: authority
         )
         let publication = PreparedApplyPublication(candidate)
-        let installed = try responder.sendApplyReview(
+        let installed = try await responder.sendApplyReview(
           try .applyReview(
             sealed,
             negotiatedProtocolMinor: responder.negotiatedProtocolMinor

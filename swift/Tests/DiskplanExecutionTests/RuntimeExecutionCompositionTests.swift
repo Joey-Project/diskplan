@@ -1,4 +1,5 @@
 import DiskplanCore
+@_spi(DiskplanEngine) @testable import DiskplanExecution
 import DiskplanPolicy
 import DiskplanProto
 import Foundation
@@ -6,7 +7,6 @@ import Testing
 
 @testable import DiskplanEngine
 @testable import DiskplanEngineCore
-@_spi(DiskplanEngine) @testable import DiskplanExecution
 
 @Test
 func runtimeCompositionProjectsCurrentDryRunFromAuthoritativePreparation() async throws {
@@ -473,7 +473,8 @@ private func productionTestComposition(
   )
   return EngineExecutionComposition(
     collector: collector,
-    eventSink: NoOpExecutionEventSink()
+    eventSink: NoOpExecutionEventSink(),
+    clock: { 100 }
   )
 }
 
