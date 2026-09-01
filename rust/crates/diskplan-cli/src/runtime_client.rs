@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use diskplan_proto::diskplan::v1::{
-    BatchSelectionPreset, DecisionEditKind, DecisionOverlayAcknowledged, DecisionOverlayEdit,
-    DecisionOverlayEditRequest, DecisionOverlayRejected, Digest256, DryRunProjection,
-    OpaqueIdentifier, PlanProjectionManifest, PrepareDryRunRequest, RuntimeRejectCode,
-    RuntimeRejected, decision_overlay_edit, runtime_event,
+    ApplyReviewProjection, BatchSelectionPreset, DecisionEditKind, DecisionOverlayAcknowledged,
+    DecisionOverlayEdit, DecisionOverlayEditRequest, DecisionOverlayRejected, Digest256,
+    DryRunProjection, OpaqueIdentifier, PlanProjectionManifest, PrepareApplyReviewRequest,
+    PrepareDryRunRequest, RuntimeRejectCode, RuntimeRejected, decision_overlay_edit, runtime_event,
 };
 use diskplan_proto::runtime::{
     MAXIMUM_PLAN_PROJECTION_MANIFEST_BYTES, MAXIMUM_PLAN_PROJECTION_RAW_BYTES,
@@ -37,6 +37,15 @@ pub enum RuntimeClientError {
 
 impl RuntimeClientError {
     pub fn is_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::Rejected { code, .. }
+                if *code == RuntimeRejectCode::CapabilityNotNegotiated as i32
+                    || *code == RuntimeRejectCode::BusinessUnsupported as i32
+        )
+    }
+
+    pub fn permits_agent_fallback(&self) -> bool {
         matches!(
             self,
             Self::Rejected { code, .. }
@@ -379,6 +388,23 @@ pub fn prepare_dry_run(
     }
 }
 
+pub fn prepare_apply_review(
+    session: &mut EngineSession,
+    request: PrepareApplyReviewRequest,
+    chain: &mut RuntimeChainVerifier,
+) -> Result<ApplyReviewProjection, RuntimeClientError> {
+    let request_id = request.request_id;
+    session.send_prepare_apply_review_request(request)?;
+    let event = runtime_event_for_request(session, request_id, "apply review")?;
+    match event.body {
+        Some(runtime_event::Body::ApplyReviewProjection(projection)) => chain
+            .verify_apply_review(&projection.encode_to_vec())
+            .map_err(Into::into),
+        Some(runtime_event::Body::RuntimeRejected(rejected)) => Err(runtime_rejected(rejected)),
+        _ => Err(RuntimeClientError::Unexpected("apply review")),
+    }
+}
+
 fn verify_dry_run(
     chain: &RuntimeChainVerifier,
     projection: DryRunProjection,
@@ -521,5 +547,30 @@ mod tests {
             verify_overlay_transition(0, &[edit], None, &acknowledged),
             Err(RuntimeClientError::Binding(_))
         ));
+    }
+
+    #[test]
+    fn only_typed_agent_unavailability_permits_deterministic_fallback() {
+        for code in [
+            RuntimeRejectCode::CapabilityNotNegotiated,
+            RuntimeRejectCode::BusinessUnsupported,
+        ] {
+            assert!(
+                RuntimeClientError::Rejected {
+                    code: code as i32,
+                    summary: "agent provider unavailable".into(),
+                }
+                .permits_agent_fallback()
+            );
+        }
+
+        assert!(
+            !RuntimeClientError::Rejected {
+                code: RuntimeRejectCode::InvalidState as i32,
+                summary: "invalid request".into(),
+            }
+            .permits_agent_fallback()
+        );
+        assert!(!RuntimeClientError::Binding("mismatch").permits_agent_fallback());
     }
 }

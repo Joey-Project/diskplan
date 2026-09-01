@@ -12,5 +12,5 @@ expression: "snapshot(&state, 40, 12)"
 │Ready • 8 • ready                     │
 └──────────────────────────────────────┘
 ────────────────────────────────────────
-q cancel  r resume + invalidate  ? help
+q cancel  r resume + invalidate  F freez
 provisional plan ready

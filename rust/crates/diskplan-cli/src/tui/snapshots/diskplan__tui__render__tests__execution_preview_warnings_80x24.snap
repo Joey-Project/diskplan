@@ -8,9 +8,9 @@ expression: execution_snapshot
 ┌ Plan-first • Execution Preview ──────────────────────────────────────────────┐
 │Plan plan-runtime-0001 • 1 staged                                             │
 │FINAL WARNING final-force • engine finalized force and residual path-race war…│
-│Engine-issued execution DAG order and prerequisite status                     │
-│Commands and argv remain engine-owned and are never composed by the TUI.      │
-│1. unit unit-remove-cache • Remove cache as one engine execution unit • prere…│
+│Engine-issued ordered action review and postconditions                        │
+│Displayed commands and argv come from the engine and are never composed by th…│
+│1. unit unit-remove-cache • Remove cache as one engine execution unit • postc…│
 │covers logical action action-cache-1                                          │
 │                                                                              │
 │                                                                              │

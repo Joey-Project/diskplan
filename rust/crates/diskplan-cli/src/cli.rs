@@ -4,15 +4,22 @@ use std::path::{Path, PathBuf};
 
 use crate::batch::{BatchOptions, BatchProfile, PlanningAgentMode};
 
-pub const USAGE: &str = "usage: diskplan [--handshake] [diskplan-engine]\n       diskplan --batch --profile full-audit --dry-run --no-history --no-audit-file [--agent-mode off|ask|auto] --root <absolute-path>";
+pub const USAGE: &str = "usage: diskplan [--profile standard|full-audit] [--agent-mode off|ask|auto] [diskplan-engine]\n       diskplan --handshake [diskplan-engine]\n       diskplan --batch --profile standard|full-audit --dry-run --no-history --no-audit-file [--agent-mode off|ask|auto] --root <absolute-path>";
 const MAXIMUM_ROOT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandLine {
     VersionJson,
     Handshake { engine: Option<PathBuf> },
-    Interactive { engine: Option<PathBuf> },
+    Interactive(InteractiveOptions),
     Batch(BatchOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InteractiveOptions {
+    pub engine: Option<PathBuf>,
+    pub profile: BatchProfile,
+    pub agent_mode: PlanningAgentMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,17 +40,66 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<CommandLine, Us
     }
 
     match args.as_slice() {
-        [] => Ok(CommandLine::Interactive { engine: None }),
+        [] => Ok(CommandLine::Interactive(InteractiveOptions {
+            engine: None,
+            profile: BatchProfile::Standard,
+            agent_mode: PlanningAgentMode::Ask,
+        })),
         [flag] if flag == "--version-json" => Ok(CommandLine::VersionJson),
         [flag] if flag == "--handshake" => Ok(CommandLine::Handshake { engine: None }),
         [flag, engine] if flag == "--handshake" => Ok(CommandLine::Handshake {
             engine: Some(PathBuf::from(engine)),
         }),
-        [engine] if !is_option(engine) => Ok(CommandLine::Interactive {
+        [engine] if !is_option(engine) => Ok(CommandLine::Interactive(InteractiveOptions {
             engine: Some(PathBuf::from(engine)),
-        }),
-        _ => Err(usage_error("unknown or incompatible arguments")),
+            profile: BatchProfile::Standard,
+            agent_mode: PlanningAgentMode::Ask,
+        })),
+        _ => parse_interactive(args),
     }
+}
+
+fn parse_interactive(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
+    let mut profile = BatchProfile::Standard;
+    let mut profile_seen = false;
+    let mut agent_mode = PlanningAgentMode::Ask;
+    let mut agent_mode_seen = false;
+    let mut engine = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_os_str() {
+            value if value == "--profile" => {
+                if profile_seen {
+                    return Err(usage_error("duplicate --profile"));
+                }
+                profile_seen = true;
+                index += 1;
+                profile = parse_profile(
+                    args.get(index)
+                        .ok_or_else(|| usage_error("--profile needs a value"))?,
+                )?;
+            }
+            value if value == "--agent-mode" => {
+                if agent_mode_seen {
+                    return Err(usage_error("duplicate --agent-mode"));
+                }
+                agent_mode_seen = true;
+                index += 1;
+                agent_mode = parse_agent_mode(
+                    args.get(index)
+                        .ok_or_else(|| usage_error("--agent-mode needs a value"))?,
+                )?;
+            }
+            value if !is_option(value) && engine.is_none() => engine = Some(PathBuf::from(value)),
+            _ => return Err(usage_error("unknown or incompatible arguments")),
+        }
+        index += 1;
+    }
+    Ok(CommandLine::Interactive(InteractiveOptions {
+        engine,
+        profile,
+        agent_mode,
+    }))
 }
 
 fn parse_batch(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
@@ -74,10 +130,7 @@ fn parse_batch(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
                 let value = args
                     .get(index)
                     .ok_or_else(|| usage_error("--profile needs a value"))?;
-                if value != "full-audit" {
-                    return Err(usage_error("batch supports only the full-audit profile"));
-                }
-                profile = Some(BatchProfile::FullAudit);
+                profile = Some(parse_profile(value)?);
             }
             value if value == "--agent-mode" => {
                 if agent_mode.is_some() {
@@ -87,12 +140,7 @@ fn parse_batch(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
                 let value = args
                     .get(index)
                     .ok_or_else(|| usage_error("--agent-mode needs a value"))?;
-                agent_mode = Some(match value.as_os_str() {
-                    value if value == "off" => PlanningAgentMode::Off,
-                    value if value == "ask" => PlanningAgentMode::Ask,
-                    value if value == "auto" => PlanningAgentMode::Auto,
-                    _ => return Err(usage_error("--agent-mode must be off, ask, or auto")),
-                });
+                agent_mode = Some(parse_agent_mode(value)?);
             }
             value if value == "--root" => {
                 if root.is_some() {
@@ -115,7 +163,7 @@ fn parse_batch(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
             "batch requires --dry-run --no-history --no-audit-file",
         ));
     }
-    let profile = profile.ok_or_else(|| usage_error("batch requires --profile full-audit"))?;
+    let profile = profile.ok_or_else(|| usage_error("batch requires --profile"))?;
     let root = root.ok_or_else(|| usage_error("batch requires exactly one --root"))?;
 
     Ok(CommandLine::Batch(BatchOptions {
@@ -123,6 +171,23 @@ fn parse_batch(args: Vec<OsString>) -> Result<CommandLine, UsageError> {
         root,
         agent_mode: agent_mode.unwrap_or_default(),
     }))
+}
+
+fn parse_profile(value: &OsStr) -> Result<BatchProfile, UsageError> {
+    match value {
+        value if value == "standard" => Ok(BatchProfile::Standard),
+        value if value == "full-audit" => Ok(BatchProfile::FullAudit),
+        _ => Err(usage_error("--profile must be standard or full-audit")),
+    }
+}
+
+fn parse_agent_mode(value: &OsStr) -> Result<PlanningAgentMode, UsageError> {
+    match value {
+        value if value == "off" => Ok(PlanningAgentMode::Off),
+        value if value == "ask" => Ok(PlanningAgentMode::Ask),
+        value if value == "auto" => Ok(PlanningAgentMode::Auto),
+        _ => Err(usage_error("--agent-mode must be off, ask, or auto")),
+    }
 }
 
 fn set_once(value: &mut bool, duplicate: &'static str) -> Result<(), UsageError> {
@@ -237,7 +302,7 @@ mod tests {
             vec![
                 OsString::from("--batch"),
                 OsString::from("--profile"),
-                OsString::from("standard"),
+                OsString::from("quick"),
             ],
             exact_batch(OsString::from("relative")),
         ] {
@@ -247,11 +312,36 @@ mod tests {
 
     #[test]
     fn legacy_modes_remain_narrow() {
-        assert_eq!(parse([]), Ok(CommandLine::Interactive { engine: None }));
+        assert_eq!(
+            parse([]),
+            Ok(CommandLine::Interactive(InteractiveOptions {
+                engine: None,
+                profile: BatchProfile::Standard,
+                agent_mode: PlanningAgentMode::Ask,
+            }))
+        );
         assert_eq!(
             parse([OsString::from("--handshake")]),
             Ok(CommandLine::Handshake { engine: None })
         );
         assert!(parse([OsString::from("--version-json"), OsString::from("x")]).is_err());
+    }
+
+    #[test]
+    fn interactive_profile_and_agent_mode_are_configurable_with_safe_defaults() {
+        assert_eq!(
+            parse([
+                OsString::from("--profile"),
+                OsString::from("full-audit"),
+                OsString::from("--agent-mode"),
+                OsString::from("off"),
+                OsString::from("/tmp/diskplan-engine"),
+            ]),
+            Ok(CommandLine::Interactive(InteractiveOptions {
+                engine: Some(PathBuf::from("/tmp/diskplan-engine")),
+                profile: BatchProfile::FullAudit,
+                agent_mode: PlanningAgentMode::Off,
+            }))
+        );
     }
 }

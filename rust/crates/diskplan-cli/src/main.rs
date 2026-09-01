@@ -20,7 +20,8 @@ async fn main() {
     let batch_mode = matches!(&command, CommandLine::Batch(_));
 
     let engine = match &command {
-        CommandLine::Handshake { engine } | CommandLine::Interactive { engine } => engine.clone(),
+        CommandLine::Handshake { engine } => engine.clone(),
+        CommandLine::Interactive(options) => options.engine.clone(),
         CommandLine::Batch(_) | CommandLine::VersionJson => None,
     };
     let engine = match engine {
@@ -43,8 +44,16 @@ async fn main() {
                 std::process::exit(1);
             }
         },
-        CommandLine::Interactive { .. } => {
-            if let Err(error) = diskplan::tui::run_bound(&bound_engine).await {
+        CommandLine::Interactive(options) => {
+            if let Err(error) = diskplan::tui::run_bound_with_options(
+                &bound_engine,
+                diskplan::tui::InteractiveRuntimeOptions {
+                    profile: options.profile,
+                    agent_mode: options.agent_mode,
+                },
+            )
+            .await
+            {
                 eprintln!("diskplan: {error}");
                 std::process::exit(1);
             }

@@ -173,4 +173,7 @@ pub enum Effect {
 pub enum PlanCommand {
     EditStage(OverlayStageEdit),
     Prepare(PlanIntentKind),
+    ConfirmApply,
+    DismissApplyReview,
+    CancelExecution,
 }
