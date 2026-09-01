@@ -24,7 +24,8 @@ func descriptorBoundReleaseMintsEngineReceiptFromFreshCurrentCapture() async thr
   #expect(receipt.allocationGroupID == fixture.groupID)
   #expect(receipt.captureID == testDigest(240))
   #expect(receipt.executionBindingHash == fixture.execution.executionBindingHash)
-  #expect(receipt.componentID == fixture.execution.componentID)
+  let collectedComponentID = await topology.requests.first?.componentID
+  #expect(receipt.componentID == collectedComponentID)
   #expect(receipt.epochID == fixture.execution.epoch.epochID)
   #expect(receipt.releasedFileObjectIDs == [Data("file-object-a".utf8)])
 }
@@ -120,6 +121,53 @@ func accessSealIncludesACLAndMountIdentity() throws {
 }
 
 @Test
+func accessSealRejectsInCollectionPolicyDrift() throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  let mutator = OneShotDescriptorModeMutator(mode: 0o700)
+  let probe = POSIXReleasePostverificationDescriptorProbe { descriptor in
+    mutator.mutate(descriptor)
+  }
+
+  guard case .failed(let failure) = probe.namespaceSeal(
+    descriptor: fixture.namespaceDescriptor
+  ) else {
+    Issue.record("expected in-collection access drift to fail")
+    return
+  }
+  #expect(failure.code == "namespace-access-changed-during-seal")
+}
+
+@Test
+func manifestHandleRejectsCallerReplacementAndComponentShrink() throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  let topology = RecordingReleaseTopologySource(mode: .released)
+  let core = testCore(topology)
+  let authorizedOwner = fixture.ownerLocator()
+  let replacement = ReleasePostverificationOwnerLocator(
+    actionID: authorizedOwner.actionID,
+    candidateID: "caller-replacement",
+    expectedIdentity: authorizedOwner.expectedIdentity,
+    namespace: authorizedOwner.namespace,
+    rawLeafName: authorizedOwner.rawLeafName
+  )
+  #expect(throws: ReleasePostverificationFreezeError.componentBindingMismatch) {
+    try core.freeze(
+      fixture.request(owner: replacement, authorizedOwner: authorizedOwner)
+    )
+  }
+
+  let first = fixture.groupExpectation()
+  let second = fixture.groupExpectation(id: "allocation-group-b")
+  #expect(throws: ReleasePostverificationFreezeError.componentBindingMismatch) {
+    try core.freeze(
+      fixture.request(groups: [first], authorizedGroups: [first, second])
+    )
+  }
+}
+
+@Test
 func parentAndRootReplacementCannotUseMissingLeafInNewTree() async throws {
   let parentFixture = try ReleasePostverificationFixture()
   defer { parentFixture.cleanUp() }
@@ -169,6 +217,65 @@ func ownerReplacementStillRequiresTopologyCapture() async throws {
   }
   #expect(current != fixture.ownerIdentity)
   #expect(report.groups.first?.outcome == .rejected(.topologyMissing))
+}
+
+@Test
+func topologyCaptureCannotRaceOwnerReappearance() async throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  let topology = RecordingReleaseTopologySource(mode: .released) {
+    try Data("reappeared".utf8).write(to: fixture.owner)
+  }
+  let core = testCore(topology)
+  let frozen = try core.freeze(fixture.request())
+  try fixture.removeOwner()
+
+  let report = await core.postverify(frozen)
+
+  #expect(
+    report.groups.allSatisfy {
+      $0.outcome == .rejected(.ownerSlotChangedAfterTopology(fixture.actionID))
+    }
+  )
+}
+
+@Test
+func topologyCaptureCannotRaceNamespaceAccessOrContainmentReplacement() async throws {
+  let accessFixture = try ReleasePostverificationFixture()
+  defer { accessFixture.cleanUp() }
+  let accessTopology = RecordingReleaseTopologySource(mode: .released) {
+    try accessFixture.changeNamespaceMode(to: 0o700)
+  }
+  let accessCore = testCore(accessTopology)
+  let accessFrozen = try accessCore.freeze(accessFixture.request())
+  try accessFixture.removeOwner()
+  let accessReport = await accessCore.postverify(accessFrozen)
+  #expect(
+    accessReport.groups.allSatisfy {
+      $0.outcome == .rejected(
+        .namespaceAccessMismatch(accessFixture.actionID, .parentChain(index: 0))
+      )
+    }
+  )
+
+  let replacementFixture = try ReleasePostverificationFixture()
+  defer { replacementFixture.cleanUp() }
+  let replacementTopology = RecordingReleaseTopologySource(mode: .released) {
+    try replacementFixture.replaceNamespaceWithEmptyDirectory()
+  }
+  let replacementCore = testCore(replacementTopology)
+  let replacementFrozen = try replacementCore.freeze(replacementFixture.request())
+  try replacementFixture.removeOwner()
+  let replacementReport = await replacementCore.postverify(replacementFrozen)
+  #expect(
+    replacementReport.groups.allSatisfy {
+      $0.outcome == .rejected(
+        .namespaceContainmentMismatch(
+          replacementFixture.actionID, .parentChain(index: 0)
+        )
+      )
+    }
+  )
 }
 
 @Test
@@ -354,10 +461,10 @@ func fileObjectIDsUseRawUTF8Equality() async throws {
 }
 
 @Test
-func topologyReceivesPerCallCLOEXECBorrowedDescriptorsAndReuseIsNotClosed() async throws {
+func topologyCollectorReceivesOpaqueCLOEXECDescriptorCapabilities() async throws {
   let fixture = try ReleasePostverificationFixture()
   defer { fixture.cleanUp() }
-  let topology = RecordingReleaseTopologySource(mode: .closeAndReuseFirstDescriptor)
+  let topology = RecordingReleaseTopologySource(mode: .released)
   let core = testCore(topology)
   let frozen = try core.freeze(fixture.request())
   let componentDescriptors = frozen.ownedDescriptorValues
@@ -365,25 +472,13 @@ func topologyReceivesPerCallCLOEXECBorrowedDescriptorsAndReuseIsNotClosed() asyn
 
   let report = await core.postverify(frozen)
 
-  guard
-    case .rejected(.topologyCollectorFailed(let failure)) =
-      report.groups.first?.outcome
-  else {
-    Issue.record("expected borrowed descriptor ownership violation")
+  guard case .allocationGroupReleased = report.groups.first?.outcome else {
+    Issue.record("expected topology release")
     return
   }
-  #expect(failure.code == "borrowed-descriptor-ownership-violated")
-  let borrowedFlags = await topology.borrowedDescriptorFlags
-  #expect(!borrowedFlags.isEmpty)
-  #expect(borrowedFlags.allSatisfy { $0 & FD_CLOEXEC != 0 })
-  #expect(await topology.ownerships.allSatisfy { $0 == .borrowedUntilTopologyCallReturns })
-  guard let reusedDescriptor = await topology.reusedDescriptor else {
-    Issue.record("expected descriptor reuse fixture")
-    return
-  }
-  var value = stat()
-  #expect(Darwin.fstat(reusedDescriptor, &value) == 0)
-  _ = Darwin.close(reusedDescriptor)
+  #expect(await topology.allDescriptorsCloseOnExec)
+  #expect(await topology.descriptorCount(for: fixture.actionID) == 2)
+  #expect(await topology.requests.first?.owners.first?.namespaceComponentCount == 2)
   for descriptor in componentDescriptors {
     errno = 0
     #expect(Darwin.fcntl(descriptor, F_GETFD) == -1)
@@ -402,11 +497,7 @@ func duplicateOwnerAndRepeatedConsumptionFailClosed() async throws {
     throws: ReleasePostverificationFreezeError.duplicateOwner(fixture.actionID)
   ) {
     try core.freeze(
-      ReleasePostverificationComponentRequest(
-        execution: fixture.execution,
-        owners: [owner, owner],
-        groups: [fixture.groupExpectation()]
-      )
+      fixture.request(actualOwners: [owner, owner])
     )
   }
 
@@ -435,7 +526,7 @@ private enum InvalidCaptureMode: CaseIterable, Sendable {
   case jitCapture
 }
 
-private actor RecordingReleaseTopologySource: ReleasePostverificationTopologySource {
+private final class RecordingReleaseTopologySource: @unchecked Sendable {
   enum Mode: Sendable {
     case released
     case missing
@@ -443,33 +534,31 @@ private actor RecordingReleaseTopologySource: ReleasePostverificationTopologySou
     case invalidCapture(InvalidCaptureMode)
     case groupStillAllocated(String)
     case rawFileObjectOverride(Data)
-    case closeAndReuseFirstDescriptor
   }
 
-  let mode: Mode
-  private(set) var requests: [ReleasePostverificationTopologyRequest] = []
-  private(set) var borrowedDescriptorFlags: [Int32] = []
-  private(set) var ownerships: [BorrowedReleaseDescriptorOwnership] = []
-  private(set) var reusedDescriptor: Int32?
-  var requestCount: Int { requests.count }
+  private actor State {
+    var requests: [ReleasePostverificationTopologyRequest] = []
+    var allDescriptorsCloseOnExec = true
+    var descriptorCounts: [ActionID: Int] = [:]
+    var requestCount: Int { requests.count }
 
-  init(mode: Mode) { self.mode = mode }
-
-  func collectReleaseTopology(
-    for request: ReleasePostverificationTopologyRequest
-  ) async throws -> Observation<CurrentReleaseTopologyCapture> {
-    requests.append(request)
-    let descriptors = request.owners.flatMap(\.namespaceDescriptors)
-    ownerships.append(contentsOf: descriptors.map(\.ownership))
-    borrowedDescriptorFlags.append(
-      contentsOf: descriptors.map { Darwin.fcntl($0.rawValue, F_GETFD) }
-    )
+    func collect(
+      mode: Mode,
+      hook: (@Sendable () throws -> Void)?,
+      operation: EngineReleaseTopologyCollectionOperation
+    ) async throws -> Observation<CurrentReleaseTopologyCapture> {
+      let request = operation.request
+      requests.append(request)
+      allDescriptorsCloseOnExec =
+        allDescriptorsCloseOnExec && operation.allNamespaceDescriptorsAreCloseOnExec()
+      for owner in request.owners {
+        descriptorCounts[owner.actionID] = operation.namespaceDescriptorCount(
+          for: owner.actionID
+        )
+      }
+      try hook?()
     if case .throwFailure = mode { throw TestTopologySourceError.failed }
     if case .missing = mode { return .absent }
-    if case .closeAndReuseFirstDescriptor = mode, let first = descriptors.first {
-      _ = Darwin.close(first.rawValue)
-      reusedDescriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
-    }
 
     var captureID = testDigest(240)
     var executionBindingHash = request.executionBindingHash
@@ -531,6 +620,31 @@ private actor RecordingReleaseTopologySource: ReleasePostverificationTopologySou
         groups: groups
       )
     )
+    }
+  }
+
+  let collector: EngineReleasePostverificationTopologyCollector
+  private let state: State
+
+  init(mode: Mode, duringCollection: (@Sendable () throws -> Void)? = nil) {
+    let state = State()
+    self.state = state
+    collector = EngineReleasePostverificationTopologyCollector { operation in
+      try await state.collect(mode: mode, hook: duringCollection, operation: operation)
+    }
+  }
+
+  var requests: [ReleasePostverificationTopologyRequest] {
+    get async { await state.requests }
+  }
+
+  var requestCount: Int { get async { await state.requestCount } }
+  var allDescriptorsCloseOnExec: Bool {
+    get async { await state.allDescriptorsCloseOnExec }
+  }
+
+  func descriptorCount(for actionID: ActionID) async -> Int {
+    await state.descriptorCounts[actionID] ?? 0
   }
 }
 
@@ -540,6 +654,25 @@ private enum ScriptedNamespaceFailure: CaseIterable, Sendable {
   case collectorFailure
   case identityMismatch
   case accessMismatch
+}
+
+private final class OneShotDescriptorModeMutator: @unchecked Sendable {
+  private let lock = NSLock()
+  private let mode: mode_t
+  private var didMutate = false
+
+  init(mode: mode_t) { self.mode = mode }
+
+  func mutate(_ descriptor: Int32) {
+    lock.lock()
+    guard !didMutate else {
+      lock.unlock()
+      return
+    }
+    didMutate = true
+    lock.unlock()
+    _ = Darwin.fchmod(descriptor, mode)
+  }
 }
 
 private final class SwitchableReleaseDescriptorProbe: @unchecked Sendable,
@@ -627,7 +760,7 @@ private final class SwitchableReleaseDescriptorProbe: @unchecked Sendable,
   }
 }
 
-private final class ReleasePostverificationFixture {
+private final class ReleasePostverificationFixture: @unchecked Sendable {
   let container: URL
   let root: URL
   let namespace: URL
@@ -702,7 +835,6 @@ private final class ReleasePostverificationFixture {
     )
     execution = ReleasePostverificationExecutionBinding(
       executionBindingHash: testDigest(3),
-      componentID: testDigest(4),
       epoch: try ExecutionEpochContext(
         epochID: "epoch-release",
         semanticReferenceTimeSeconds: 100,
@@ -760,12 +892,22 @@ private final class ReleasePostverificationFixture {
 
   func request(
     owner: ReleasePostverificationOwnerLocator? = nil,
-    groups: [ReleasePostverificationGroupExpectation]? = nil
-  ) -> ReleasePostverificationComponentRequest {
-    ReleasePostverificationComponentRequest(
+    actualOwners: [ReleasePostverificationOwnerLocator]? = nil,
+    groups: [ReleasePostverificationGroupExpectation]? = nil,
+    authorizedOwner: ReleasePostverificationOwnerLocator? = nil,
+    authorizedGroups: [ReleasePostverificationGroupExpectation]? = nil
+  ) throws -> ReleasePostverificationComponentRequest {
+    let resolvedOwners = actualOwners ?? [owner ?? ownerLocator()]
+    let resolvedGroups = groups ?? [groupExpectation()]
+    let handle = try testManifestAuthority.authorize(
       execution: execution,
-      owners: [owner ?? ownerLocator()],
-      groups: groups ?? [groupExpectation()]
+      owners: authorizedOwner.map { [$0] } ?? resolvedOwners,
+      groups: authorizedGroups ?? resolvedGroups
+    )
+    return ReleasePostverificationComponentRequest(
+      componentHandle: handle,
+      owners: resolvedOwners,
+      groups: resolvedGroups
     )
   }
 
@@ -836,12 +978,15 @@ private func testCore(
     POSIXReleasePostverificationDescriptorProbe()
 ) -> DescriptorBoundReleasePostverificationCore {
   DescriptorBoundReleasePostverificationCore(
-    topologySource: source,
+    manifestAuthority: testManifestAuthority,
+    topologyCollector: source.collector,
     descriptorProbe: descriptorProbe,
     nowSeconds: { 200 },
     nonceGenerator: { Data(repeating: 9, count: 32) }
   )
 }
+
+private let testManifestAuthority = EngineReleasePostverificationManifestAuthority()
 
 private func testDigest(_ byte: UInt8) -> PolicyDigest {
   try! PolicyDigest(bytes: Data(repeating: byte, count: 32))
