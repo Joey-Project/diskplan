@@ -85,11 +85,17 @@ package struct RuntimeFreshDuplicateGroupExpectation: Equatable, Sendable {
 
 package struct RuntimeFreshReleaseOwnerMutationBinding: Equatable, Sendable {
   package let actionID: ActionID
-  package let namespace: ProtectedNamespaceBinding
+  package let ownerNamespace: ProtectedNamespaceBinding
+  package let compositeNamespace: ProtectedNamespaceBinding
 
-  package init(actionID: ActionID, namespace: ProtectedNamespaceBinding) {
+  package init(
+    actionID: ActionID,
+    ownerNamespace: ProtectedNamespaceBinding,
+    compositeNamespace: ProtectedNamespaceBinding
+  ) {
     self.actionID = actionID
-    self.namespace = namespace
+    self.ownerNamespace = ownerNamespace
+    self.compositeNamespace = compositeNamespace
   }
 }
 
@@ -820,13 +826,15 @@ package enum RuntimeFreshInvariantValidator {
     case (.releaseComposite(let owners), .ordinary):
       return exactOwnerBinding(
         actionID: rhs.actionID,
-        namespace: rhsNamespace,
+        ownerNamespace: rhsNamespace,
+        compositeNamespace: lhsNamespace,
         ownerBindings: owners
       )
     case (.ordinary, .releaseComposite(let owners)):
       return exactOwnerBinding(
         actionID: lhs.actionID,
-        namespace: lhsNamespace,
+        ownerNamespace: lhsNamespace,
+        compositeNamespace: rhsNamespace,
         ownerBindings: owners
       )
     default:
@@ -836,11 +844,14 @@ package enum RuntimeFreshInvariantValidator {
 
   private static func exactOwnerBinding(
     actionID: ActionID,
-    namespace: ProtectedNamespaceBinding,
+    ownerNamespace: ProtectedNamespaceBinding,
+    compositeNamespace: ProtectedNamespaceBinding,
     ownerBindings: [RuntimeFreshReleaseOwnerMutationBinding]
   ) -> Bool {
     let matches = ownerBindings.filter { $0.actionID == actionID }
-    return matches.count == 1 && matches[0].namespace == namespace
+    return matches.count == 1
+      && matches[0].ownerNamespace == ownerNamespace
+      && matches[0].compositeNamespace == compositeNamespace
   }
 
   private static func namespacesMaySemanticallyOverlap(

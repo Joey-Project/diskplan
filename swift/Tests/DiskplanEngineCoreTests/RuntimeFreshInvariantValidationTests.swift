@@ -279,7 +279,8 @@ import Testing
           ownerBindings: [
             RuntimeFreshReleaseOwnerMutationBinding(
               actionID: ownerID,
-              namespace: namespace
+              ownerNamespace: namespace,
+              compositeNamespace: namespace
             )
           ]
         )
@@ -300,7 +301,8 @@ import Testing
           ownerBindings: [
             RuntimeFreshReleaseOwnerMutationBinding(
               actionID: invariantActionID(9),
-              namespace: namespace
+              ownerNamespace: namespace,
+              compositeNamespace: namespace
             )
           ]
         )
@@ -345,7 +347,69 @@ import Testing
             ownerBindings: [
               RuntimeFreshReleaseOwnerMutationBinding(
                 actionID: ownerID,
-                namespace: exactOwner
+                ownerNamespace: exactOwner,
+                compositeNamespace: exactOwner
+              )
+            ]
+          )
+        ),
+      ]
+    )
+
+    #expect(
+      result.terminalNamespacesExclusive.findings.contains {
+        $0.rejection == .mismatch(.overlappingTerminalMutation)
+      }
+    )
+  }
+}
+
+@Test func releaseReplacementRejectsReverseCompositeNamespaceDrift() throws {
+  let exactNamespace = try invariantNamespace(
+    root: "/fixture",
+    target: ["parent", "release-owner"],
+    targetIdentity: invariantIdentity(70, type: .directory),
+    parentIdentities: [invariantIdentity(71, type: .directory)]
+  )
+  let driftingComposites = [
+    try invariantNamespace(
+      root: "/fixture",
+      target: ["parent"],
+      targetIdentity: invariantIdentity(71, type: .directory)
+    ),
+    try invariantNamespace(
+      root: "/fixture",
+      target: ["parent", "release-owner", "child"],
+      targetIdentity: invariantIdentity(72, type: .regularFile),
+      parentIdentities: [
+        invariantIdentity(71, type: .directory),
+        invariantIdentity(70, type: .directory),
+      ]
+    ),
+    try invariantNamespace(
+      root: "/alias",
+      target: ["identity-alias"],
+      targetIdentity: invariantIdentity(70, type: .directory),
+      rootIdentity: invariantIdentity(80, type: .directory)
+    ),
+  ]
+  let ownerID = invariantActionID(1)
+
+  for currentComposite in driftingComposites {
+    let result = RuntimeFreshInvariantValidator.validate(
+      immutableDuplicateGroups: [],
+      duplicateSurvivors: [],
+      terminalMutations: [
+        RuntimeFreshTerminalMutation(actionID: ownerID, namespace: .known(exactNamespace)),
+        RuntimeFreshTerminalMutation(
+          actionID: invariantActionID(2),
+          namespace: .known(currentComposite),
+          kind: .releaseComposite(
+            ownerBindings: [
+              RuntimeFreshReleaseOwnerMutationBinding(
+                actionID: ownerID,
+                ownerNamespace: exactNamespace,
+                compositeNamespace: exactNamespace
               )
             ]
           )
