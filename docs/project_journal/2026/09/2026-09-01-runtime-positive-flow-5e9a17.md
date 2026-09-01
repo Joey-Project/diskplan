@@ -74,6 +74,11 @@ superseded_by:
   quiescence passed; the quota was not reached. Log:
   `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-rereview-5.log`;
   bounded output SHA-256: `9245d5cecd640525372162ede362ce418967e953946bca8600278ea5235f0944`.
+- India final test-stability gate: the same 106 tests passed after adding the exact authority-commit
+  barrier in 15.009 seconds. Process-group verification and post-run quiescence passed; the quota
+  was not reached. Log:
+  `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-rereview-6.log`;
+  bounded output SHA-256: `19d06a76de2614f48276de1b2e1a0e8fa49e5a7b72cd401e0050bea656532491`.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races.

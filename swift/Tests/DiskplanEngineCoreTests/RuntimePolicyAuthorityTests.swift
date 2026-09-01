@@ -3146,7 +3146,12 @@ private func prepareRuntimePositiveReview(
     guard case .applyReviewProjection(let projection)? = event.body else { return nil }
     return projection
   }
-  return try #require(reviews.last)
+  let review = try #require(reviews.last)
+  let authorityCommitted = await runtimeEventually {
+    fixture.authority.liveApplyReviewIDForTesting() == review.applyReviewID.value
+  }
+  try #require(authorityCommitted)
+  return review
 }
 
 private func runtimePositiveConfirmation(

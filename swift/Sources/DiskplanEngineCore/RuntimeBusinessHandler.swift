@@ -729,6 +729,10 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
     withLock { plan != nil }
   }
 
+  func liveApplyReviewIDForTesting() -> Data? {
+    withLock { review?.applyReviewID.value }
+  }
+
   private func beginEmission(
     _ prepared: PreparedRuntimeEmission,
     request: RuntimeBusinessRequest
