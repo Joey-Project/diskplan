@@ -1682,6 +1682,36 @@ import Testing
   }
 }
 
+@Test func controllerCancelsAwaitsClearsAndRejectsInvalidAuthoritativeTail() async throws {
+  let backend = RuntimePositiveBackend(
+    waitForCancellation: false,
+    producesInvalidTail: true
+  )
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+
+  #expect(
+    await runtimeEventually {
+      backend.cancelCount == 1 && backend.tailAwaitCount == 1
+        && fixture.controller.activeExecutionIDForTesting() == nil
+        && fixture.output.runtimeEvents().contains { event in
+          guard case .runtimeRejected(let rejection)? = event.body else { return false }
+          return rejection.code == .confirmationMismatch
+            && rejection.summary == "runtime business handler failed"
+        }
+    })
+}
+
 @Test func equalCloneIDsOnDifferentDevicesRemainSeparateAllocationGroups() throws {
   let accumulator = BoundedAuthorityEvidenceAccumulator()
   for (rootID, directoryObject, fileObject, device) in [
@@ -3181,6 +3211,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   private let lock = NSLock()
   private let waitForCancellation: Bool
   private let startGate: RuntimePositiveGate?
+  private let producesInvalidTail: Bool
   private let reviewIDs: [Data]
   private var starts = 0
   private var cancellations = 0
@@ -3216,12 +3247,14 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     waitForCancellation: Bool,
     executionID: Data = Data("positive-execution".utf8),
     startGate: RuntimePositiveGate? = nil,
+    producesInvalidTail: Bool = false,
     reviewIDs: [Data] = [Data("positive-review".utf8)]
   ) {
     precondition(!reviewIDs.isEmpty)
     self.waitForCancellation = waitForCancellation
     self.executionID = executionID
     self.startGate = startGate
+    self.producesInvalidTail = producesInvalidTail
     self.reviewIDs = reviewIDs
   }
 
@@ -3294,7 +3327,8 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
       executionID: sourceExecutionID,
       review: confirmation.review,
       context: context,
-      waitForCancellation: waitForCancellation
+      waitForCancellation: waitForCancellation,
+      producesInvalidTail: producesInvalidTail
     )
     return try await RuntimeExecutionRunHandle.start(
       executionID: executionID,
@@ -3358,7 +3392,8 @@ private final class RuntimePositiveTailSource: @unchecked Sendable {
     executionID: Data,
     review: Diskplan_V1_ApplyReviewProjection,
     context: RuntimeExecutionPlanContext,
-    waitForCancellation: Bool
+    waitForCancellation: Bool,
+    producesInvalidTail: Bool
   ) throws {
     released = !waitForCancellation
     var started = Diskplan_V1_ApplyStartedProjection()
@@ -3390,12 +3425,22 @@ private final class RuntimePositiveTailSource: @unchecked Sendable {
     var terminalEvent = Diskplan_V1_ExecutionStreamEvent()
     terminalEvent.executionID.value = executionID
     terminalEvent.body = .applyFinished(finished)
-    tail = try RuntimeExecutionTail(
-      applyStarted: startEvent,
-      remainingEvents: [terminalEvent],
-      requiredForceWarningActionIDs: review.forceWarningActionIds,
-      negotiatedProtocolMinor: context.negotiatedProtocolMinor
-    )
+    if producesInvalidTail {
+      tail = RuntimeExecutionTail(
+        authoritativeProjection: RuntimeAuthoritativeExecutionProjection.validating(
+          applyStarted: startEvent,
+          remainingEvents: [],
+          requiredForceWarningActionIDs: review.forceWarningActionIds,
+          negotiatedProtocolMinor: context.negotiatedProtocolMinor
+        ))
+    } else {
+      tail = try RuntimeExecutionTail(
+        applyStarted: startEvent,
+        remainingEvents: [terminalEvent],
+        requiredForceWarningActionIDs: review.forceWarningActionIds,
+        negotiatedProtocolMinor: context.negotiatedProtocolMinor
+      )
+    }
   }
 
   func awaitTail() async -> RuntimeExecutionTail {

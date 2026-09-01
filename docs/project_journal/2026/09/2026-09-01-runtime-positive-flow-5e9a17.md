@@ -44,12 +44,21 @@ superseded_by:
 - EngineServer no longer pre-rejects cancellation and calls the handler lifecycle before closing
   the broker at EOF. Controller teardown atomically prevents new run installation, then cancels and
   waits even when a backend start returns only after teardown has begun.
+- The executable target now contains an injectable `DiskplanRuntimeExecutionBackend` bridge. It
+  consumes Phase 4 preparation, opaque capability, review, and authorization objects, and projects
+  the exact Phase 5 coordinator event/report stream into EngineCore's sealed runtime wire. Dynamic
+  detail text and generated identifiers are bounded before publication; an invalid authoritative
+  tail is supervised as cancel-and-await plus a typed failure instead of crashing.
+- Production `DiskplanEngineMain` intentionally does not inject the bridge yet. The repository does
+  not expose a production revalidation collector factory, so production apply remains fail-closed
+  rather than substituting a fixture collector or bypassing Phase 4 authority.
 
 ## Next Steps
 
 - Complete fresh frozen-range review and address any P0-P2 findings.
-- After the concrete revalidation collector lands, add the executable composition-root conformer
-  that imports EngineCore and DiskplanExecution and injects the real backend into production main.
+- After the concrete revalidation collector factory lands, construct an
+  `EngineExecutionComposition` from the live collector and inject the existing backend bridge into
+  production main.
 
 ## Evidence
 
@@ -79,6 +88,16 @@ superseded_by:
   was not reached. Log:
   `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-rereview-6.log`;
   bounded output SHA-256: `19d06a76de2614f48276de1b2e1a0e8fa49e5a7b72cd401e0050bea656532491`.
+- India composition bridge gate ran `swift test --filter DiskplanExecutionTests` followed by
+  `swift test --filter DiskplanEngineCoreTests` under one 900-second process-group deadline and a
+  2 MiB retained-log quota. All 158 execution tests and 107 EngineCore tests passed in 13.725
+  seconds; process-group verification and post-run quiescence passed, and the quota was not
+  reached. Log:
+  `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-composition-8.log`;
+  bounded output SHA-256: `0b606131347138f4b1315bcd725216133b40d388de18e67694f5445fd62136d1`.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
-  retained-run teardown, including gated backend start and review-publication races.
+  retained-run teardown, including gated backend start and review-publication races. Bridge
+  fixtures also cover dry-run/review/apply projection, cancellation, non-current revalidation,
+  empty and oversized detail normalization, invalid generated identifiers, protocol budget
+  metadata, and supervised authoritative-tail validation failure.

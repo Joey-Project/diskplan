@@ -156,7 +156,10 @@ let package = Package(
     ),
     .testTarget(
       name: "DiskplanExecutionTests",
-      dependencies: ["DiskplanExecution", "DiskplanMacOS", "DiskplanPolicy"],
+      dependencies: [
+        "DiskplanCore", "DiskplanEngine", "DiskplanEngineCore", "DiskplanExecution",
+        "DiskplanMacOS", "DiskplanPolicy", "DiskplanProto",
+      ],
       path: "swift/Tests/DiskplanExecutionTests"
     ),
     .testTarget(

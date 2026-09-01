@@ -388,6 +388,12 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
             manifest: prepared.manifest,
             negotiatedProtocolMinor: responder.negotiatedProtocolMinor
           ))
+      } catch RuntimeExecutionBackendFailure.revalidationFailed {
+        try? responder.send(
+          try .rejected(
+            code: .revalidationFailed,
+            summary: "current evidence no longer matches the prepared plan"
+          ))
       } catch {
         try? responder.rejectHandlerFailure()
       }
@@ -462,6 +468,12 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
           return
         }
         publication.previous?.authority.invalidate()
+      } catch RuntimeExecutionBackendFailure.revalidationFailed {
+        try? responder.send(
+          try .rejected(
+            code: .revalidationFailed,
+            summary: "current evidence no longer matches the prepared plan"
+          ))
       } catch {
         try? responder.rejectHandlerFailure()
       }
@@ -576,6 +588,13 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     }
 
     let tail = await run.awaitTail()
+    guard !tail.validationFailed else {
+      run.cancel()
+      _ = await run.awaitTail()
+      clearActiveExecution(run)
+      try? fallbackResponder.rejectHandlerFailure()
+      return
+    }
     while !Task.isCancelled {
       do {
         try finishExecution(run: run, tail: tail)

@@ -31,14 +31,67 @@ package struct RuntimePreparedDryRun: Sendable {
 package struct RuntimeApplyConfirmation: Sendable {
   package let review: Diskplan_V1_ApplyReviewProjection
   package let confirmedForceActionIDs: [Diskplan_V1_OpaqueIdentifier]
+
+  package init(
+    review: Diskplan_V1_ApplyReviewProjection,
+    confirmedForceActionIDs: [Diskplan_V1_OpaqueIdentifier]
+  ) {
+    self.review = review
+    self.confirmedForceActionIDs = confirmedForceActionIDs
+  }
+}
+
+/// A package-owned projection result that cannot be constructed from unchecked protobuf bytes.
+package struct RuntimeAuthoritativeExecutionProjection: Sendable {
+  fileprivate let sealedEvents: [Diskplan_V1_ExecutionStreamEvent]
+  fileprivate let validationFailed: Bool
+
+  private init(
+    sealedEvents: [Diskplan_V1_ExecutionStreamEvent],
+    validationFailed: Bool
+  ) {
+    self.sealedEvents = sealedEvents
+    self.validationFailed = validationFailed
+  }
+
+  package static func validating(
+    applyStarted: Diskplan_V1_ExecutionStreamEvent,
+    remainingEvents: [Diskplan_V1_ExecutionStreamEvent],
+    requiredForceWarningActionIDs: [Diskplan_V1_OpaqueIdentifier],
+    negotiatedProtocolMinor: UInt32
+  ) -> Self {
+    do {
+      guard !remainingEvents.isEmpty,
+        remainingEvents.dropLast().allSatisfy({ event in
+          guard event.body != nil else { return false }
+          if case .applyStarted? = event.body { return false }
+          if case .cancellationAcknowledged? = event.body { return false }
+          if case .applyFinished? = event.body { return false }
+          return true
+        }),
+        case .applyFinished? = remainingEvents.last?.body
+      else { throw SealedRuntimeWireError.invalid(field: "runtime execution tail") }
+      let sealed = try SealedRuntimeWire.sealExecutionStream(
+        [applyStarted] + remainingEvents,
+        requiredForceWarningActionIDs: requiredForceWarningActionIDs,
+        negotiatedProtocolMinor: negotiatedProtocolMinor
+      )
+      return Self(sealedEvents: Array(sealed.dropFirst()), validationFailed: false)
+    } catch {
+      return Self(sealedEvents: [], validationFailed: true)
+    }
+  }
 }
 
 /// A package-owned, semantically sealed tail for one already-started run.
-///
-/// Backends cannot return raw or throwing protobuf tails. The package factory
-/// accepts only a tail that seals with its exact `apply_started` predecessor.
 package struct RuntimeExecutionTail: Sendable {
   let events: [Diskplan_V1_ExecutionStreamEvent]
+  let validationFailed: Bool
+
+  package init(authoritativeProjection: RuntimeAuthoritativeExecutionProjection) {
+    events = authoritativeProjection.sealedEvents
+    validationFailed = authoritativeProjection.validationFailed
+  }
 
   package init(
     applyStarted: Diskplan_V1_ExecutionStreamEvent,
@@ -46,24 +99,17 @@ package struct RuntimeExecutionTail: Sendable {
     requiredForceWarningActionIDs: [Diskplan_V1_OpaqueIdentifier],
     negotiatedProtocolMinor: UInt32
   ) throws {
-    guard !remainingEvents.isEmpty,
-      remainingEvents.dropLast().allSatisfy({ event in
-        guard event.body != nil else { return false }
-        if case .applyStarted? = event.body { return false }
-        if case .cancellationAcknowledged? = event.body { return false }
-        if case .applyFinished? = event.body { return false }
-        return true
-      }),
-      case .applyFinished? = remainingEvents.last?.body
-    else {
-      throw SealedRuntimeWireError.invalid(field: "runtime execution tail")
-    }
-    let sealed = try SealedRuntimeWire.sealExecutionStream(
-      [applyStarted] + remainingEvents,
+    let projection = RuntimeAuthoritativeExecutionProjection.validating(
+      applyStarted: applyStarted,
+      remainingEvents: remainingEvents,
       requiredForceWarningActionIDs: requiredForceWarningActionIDs,
       negotiatedProtocolMinor: negotiatedProtocolMinor
     )
-    events = Array(sealed.dropFirst())
+    guard !projection.validationFailed else {
+      throw SealedRuntimeWireError.invalid(field: "runtime execution tail")
+    }
+    events = projection.sealedEvents
+    validationFailed = false
   }
 }
 
@@ -180,4 +226,8 @@ package protocol RuntimeExecutionBackend: AnyObject, Sendable {
     context: RuntimeExecutionPlanContext,
     lifetimeSeconds: Int64
   ) async throws -> RuntimePreparedApplyReview
+}
+
+package enum RuntimeExecutionBackendFailure: Error, Equatable {
+  case revalidationFailed
 }
