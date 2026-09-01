@@ -1063,6 +1063,36 @@ class StagedFileTests(unittest.TestCase):
             finally:
                 staged.close()
 
+    def test_staged_bytes_rebinds_and_reads_the_same_verified_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.write_bytes(b"stable\n")
+            staged = packager.stage_source(source, root / "staged", 1024, 0o644)
+            real_bind = packager.bind_relative_source
+            bind_count = 0
+
+            def bind_then_replace(*args, **kwargs):
+                nonlocal bind_count
+                rebound = real_bind(*args, **kwargs)
+                bind_count += 1
+                staged.path.rename(root / "held-staged")
+                staged.path.write_bytes(b"stable\n")
+                staged.path.chmod(0o644)
+                return rebound
+
+            try:
+                with mock.patch.object(
+                    packager,
+                    "bind_relative_source",
+                    side_effect=bind_then_replace,
+                ):
+                    with self.assertRaisesRegex(ValueError, "source path was replaced"):
+                        staged.bytes()
+                self.assertEqual(bind_count, 1)
+            finally:
+                staged.close()
+
     def test_hash_regular_rejects_content_drift_after_lstat(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "source.txt"
@@ -1568,6 +1598,90 @@ class PackagingAssetsTests(unittest.TestCase):
             )
             self.assertFalse(any("history.json" in name for name in names))
             self.assertFalse(any("execution-record.json" in name for name in names))
+
+    def test_main_packages_with_real_low_process_descriptor_limit(self) -> None:
+        repository_root = SCRIPT_DIR.parent.parent
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            components = root / "components"
+            components.mkdir()
+            for name in ("diskplan", "diskplan-engine", "diskplan-fs-helper"):
+                identity = {
+                    "component": name,
+                    "product_version": "0.1.0",
+                    "protocol_major": 1,
+                    "protocol_minor": 6,
+                }
+                if name == "diskplan-fs-helper":
+                    identity["helper_abi"] = 1
+                component = components / name
+                component.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import json\n"
+                    f"print(json.dumps({identity!r}, sort_keys=True))\n",
+                    encoding="ascii",
+                )
+                component.chmod(0o755)
+
+            child = "\n".join(
+                [
+                    "import importlib.util",
+                    "import resource",
+                    "import sys",
+                    "from pathlib import Path",
+                    "from types import SimpleNamespace",
+                    "from unittest import mock",
+                    "root = Path(sys.argv[1])",
+                    "repository = Path(sys.argv[2])",
+                    "script_dir = repository / 'scripts' / 'release'",
+                    "spec = importlib.util.spec_from_file_location('package_bundle', script_dir / 'package_bundle.py')",
+                    "packager = importlib.util.module_from_spec(spec)",
+                    "sys.modules[spec.name] = packager",
+                    "spec.loader.exec_module(packager)",
+                    "_, hard = resource.getrlimit(resource.RLIMIT_NOFILE)",
+                    "if hard != resource.RLIM_INFINITY and hard < 64: raise RuntimeError('RLIMIT_NOFILE hard limit below fixture requirement')",
+                    "resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard))",
+                    "components = root / 'components'",
+                    "arguments = SimpleNamespace(",
+                    "    frontend=components / 'diskplan',",
+                    "    engine=components / 'diskplan-engine',",
+                    "    fs_helper=components / 'diskplan-fs-helper',",
+                    "    installer=script_dir / 'install.sh',",
+                    "    activator=script_dir / 'activate.sh',",
+                    "    uninstaller=script_dir / 'uninstall.sh',",
+                    "    common_library=script_dir / 'release-common.sh',",
+                    "    version_file=repository / 'release' / 'VERSION',",
+                    "    protocol_metadata=repository / 'release' / 'protocol.json',",
+                    "    asset_root=repository,",
+                    "    bundle_contract=repository / 'release' / 'bundle-contract.json',",
+                    "    source_revision='1' * 40,",
+                    "    output_dir=root / 'output',",
+                    "    require_macho_arm64=False,",
+                    ")",
+                    "with mock.patch.object(packager, 'parse_args', return_value=arguments), mock.patch.object(packager, 'validate_macho_components'):",
+                    "    raise SystemExit(packager.main())",
+                ]
+            )
+            environment = os.environ.copy()
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(root), str(repository_root)],
+                cwd=repository_root,
+                env=environment,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr.decode("utf-8", errors="replace")[-4000:],
+            )
+            self.assertTrue(
+                (root / "output" / "diskplan-0.1.0-macos-arm64.tar.gz").is_file()
+            )
 
     def test_repository_asset_symlink_is_rejected_without_following(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

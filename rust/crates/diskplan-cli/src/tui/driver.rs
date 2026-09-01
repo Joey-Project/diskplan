@@ -569,11 +569,11 @@ mod tests {
     #[test]
     fn apply_review_transport_requires_exact_minor_and_execution_capability() {
         assert_eq!(
-            validate_apply_review_transport(4, true),
+            validate_apply_review_transport(PROTOCOL16_MINOR - 1, true),
             Err("exact protocol minor 1.6 is required for mutation review")
         );
         assert_eq!(
-            validate_apply_review_transport(6, true),
+            validate_apply_review_transport(PROTOCOL16_MINOR + 1, true),
             Err("exact protocol minor 1.6 is required for mutation review")
         );
         assert_eq!(

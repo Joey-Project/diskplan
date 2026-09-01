@@ -290,6 +290,9 @@ class StagedFile:
             rebound.close()
 
     def assert_staged_stable(self) -> None:
+        self._read_verified_staged_bytes(include_bytes=False)
+
+    def _read_verified_staged_bytes(self, include_bytes: bool) -> bytes | None:
         self.staged_root.assert_stable()
         if stat.S_IMODE(os.fstat(self.staged_root.fd).st_mode) != self.staged_root_mode:
             raise ValueError(f"staged root access policy changed: {self.path}")
@@ -308,35 +311,31 @@ class StagedFile:
                 raise ValueError(f"staged object identity changed: {self.path}")
             if stat.S_IMODE(metadata.st_mode) != self.staged_mode:
                 raise ValueError(f"staged access policy changed: {self.path}")
-            if self.staged_state.size != current.size or digest_fd(
-                rebound.file_fd, self.maximum
-            ) != self.sha256:
+            data = read_fd(rebound.file_fd, self.maximum) if include_bytes else None
+            current_digest = (
+                digest(data)
+                if data is not None
+                else digest_fd(rebound.file_fd, self.maximum)
+            )
+            if self.staged_state.size != current.size or current_digest != self.sha256:
                 raise ValueError(f"staged content changed: {self.path}")
             rebound.assert_stable()
-            if not self.staged_state.same_object(
-                FileState.from_stat(os.fstat(rebound.file_fd))
-            ):
+            after = os.fstat(rebound.file_fd)
+            if not self.staged_state.same_object(FileState.from_stat(after)):
                 raise ValueError(f"staged object identity changed: {self.path}")
+            if stat.S_IMODE(after.st_mode) != self.staged_mode:
+                raise ValueError(f"staged access policy changed: {self.path}")
+            if stat.S_IMODE(os.fstat(self.staged_root.fd).st_mode) != self.staged_root_mode:
+                raise ValueError(f"staged root access policy changed: {self.path}")
+            return data
         finally:
             rebound.close()
 
     def bytes(self) -> bytes:
-        self.assert_staged_stable()
-        rebound = bind_relative_source(
-            self.staged_root,
-            self.staged_relative,
-            self.maximum,
-            {},
-            {},
-            failure_subject="staged",
-        )
-        try:
-            data = read_fd(rebound.file_fd, self.maximum)
-            if digest(data) != self.sha256:
-                raise ValueError(f"staged content changed: {self.path}")
-            return data
-        finally:
-            rebound.close()
+        data = self._read_verified_staged_bytes(include_bytes=True)
+        if data is None:
+            raise AssertionError("verified staged read did not return bytes")
+        return data
 
     def close(self) -> None:
         if self.owns_source_root:

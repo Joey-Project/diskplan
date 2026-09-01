@@ -46,6 +46,10 @@ superseded_by:
 - [x] Keep release packaging descriptor-bounded as the Protocol 1.6 fixture set
   grows while preserving source/staged identity, content, access-policy, and
   no-follow namespace authority.
+- [x] Close the first frozen review findings: enforce the Swift Protocol 1.6
+  mutation boundary before handler dispatch, accept a bound failure terminal as
+  the authoritative execution result, cover below/current/future UI minors, bind
+  archive reads to one verified descriptor, and exercise a real low-RLIMIT package.
 - [ ] Complete frozen-head review, signed commits, PR readiness, and integration
   branch handoff.
 
@@ -69,12 +73,24 @@ superseded_by:
   SHA-256 digest, and exact mode. Timestamp-only churn remains benign; missing,
   unreadable, replaced, content-changed, and access-policy-changed states remain
   distinct failures.
+- `EngineServer` rejects apply-review preparation and apply confirmation below
+  Protocol 1.6 before handler dispatch or authority claim. Read-only and dry-run
+  flows retain Protocol 1.4/1.5 compatibility.
+- Runtime execution authority now validates either positive `apply_finished` or
+  typed `execution_stream_failure` as the sole live terminal. Failure binds the
+  outer execution ID plus the live review ID and review digest, so a valid
+  post-start failure remains an execution terminal instead of being rewritten as
+  an ordinary runtime rejection.
+- Archive bytes are read from the same no-follow rebound descriptor on which
+  staged object identity, exact access mode, SHA-256 content, namespace stability,
+  and post-read identity/mode are revalidated.
 
 ## Handoff
 
-- Phase: implementation, focused India validation, and the signed landing commit
-  are ready for the frozen-range review gate.
-- Next step: complete frozen-head review and the integration PR handoff.
+- Phase: the first frozen review's five findings are fixed and focused India
+  validation is complete.
+- Next step: create the signed append commit and run the targeted frozen-head
+  closure review before the integration PR handoff.
 - Blocker: none.
 
 ## Evidence
@@ -105,3 +121,23 @@ superseded_by:
   Swift format lint, shell syntax and ShellCheck, JSON parsing, `git diff --check`,
   and project-journal validation all passed. Frozen-head review, PR, and CI evidence
   remain in the delivery gate.
+- The review-fix India package suite passed 67 tests in 6.709 seconds, including a
+  real subprocess `RLIMIT_NOFILE=64` whole-package run whose ordinary executable
+  components exercised the production component/helper bounded probes. The
+  supervisor output SHA-256 was
+  `636ce6becad22e5eb9198993a9c78b5f2ad9f92cc2ff88c366a3769b5b4e106e`.
+- Focused Swift mutation-boundary, failure-authority, and existing failure-sealer
+  tests each passed 1/1. Their supervisor output SHA-256 values were respectively
+  `18a5cb05df516d2a88c13886560fa17b8085ef397a58a43efb4847e94728f0cb`,
+  `9781564486e58befeee67f7b0e4970a6f4d212c559823c4c32064c86dca50d35`, and
+  `199db4c890ab3161718505b50157a367dfd3d7ac1223b6a95ae5ad324e17328b`.
+- The focused Rust apply-review transport test passed below/current/future minor
+  and capability cases; supervisor output SHA-256 was
+  `1af55e2acb530e83e1b694477efebef38925d09cebcb9d01f9d2068ed1f929bc`.
+- Protocol 1.4, 1.5, and 1.6 exact fixture checks passed with supervisor output
+  SHA-256 values
+  `fbe01a448e89ed36927ed28e2e6f85125a08db8b72bb6b8164d42c10d623ff4e`,
+  `7c6e2b139a002411ea7346289a16430c515f28418bcff30b2920dc4d2b54630a`, and
+  `e0ca0d6157400506048f623452ba180e04595f0b829543b3829cbd3db5d030f5`.
+  Every final India supervisor verified its process group and ended quiescent;
+  the remote task worktree, `.build`, and raw logs were then removed.

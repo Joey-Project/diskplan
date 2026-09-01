@@ -57,6 +57,48 @@ import Testing
   #expect(handler.negotiatedProtocolMinors == [protocol14Minor])
 }
 
+@Test func engineRequiresProtocol16BeforeMutationDispatchButKeepsDryRunCompatible() throws {
+  var review = Diskplan_V1_PrepareApplyReviewRequest()
+  review.requestID = 2
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = 2
+  for body in [
+    Diskplan_V1_Envelope.OneOf_Body.prepareApplyReviewRequest(review),
+    .confirmApplyRequest(confirmation),
+  ] {
+    let envelopes = try runRuntimeExchange(
+      handler: ExecutionRecordingRuntimeHandler(),
+      requestBody: body,
+      peerProtocolMinor: protocol15Minor
+    )
+    guard case .runtimeEvent(let event) = envelopes.last?.body,
+      case .runtimeRejected(let rejected) = event.body
+    else {
+      Issue.record("expected protocol-1.6 mutation rejection")
+      continue
+    }
+    #expect(rejected.code == .capabilityNotNegotiated)
+    #expect(rejected.summary.contains("protocol 1.6"))
+  }
+
+  var dryRun = Diskplan_V1_PrepareDryRunRequest()
+  dryRun.requestID = 2
+  let handler = DryRunRecordingRuntimeHandler()
+  let envelopes = try runRuntimeExchange(
+    handler: handler,
+    requestBody: .prepareDryRunRequest(dryRun),
+    peerProtocolMinor: protocol15Minor
+  )
+  #expect(handler.requestIDs == [2])
+  guard case .runtimeEvent(let event) = envelopes.last?.body,
+    case .runtimeRejected(let rejected) = event.body
+  else {
+    Issue.record("expected dry-run fixture response")
+    return
+  }
+  #expect(rejected.code == .invalidState)
+}
+
 @Test func externalHandlerCannotSelfReportPlanOrForceAuthority() throws {
   let envelopes = try runRuntimeExchange(handler: MaliciousAuthorityHandler())
   guard case .runtimeEvent(let event) = envelopes.last?.body,
@@ -434,6 +476,65 @@ import Testing
       return false
     })
   )
+}
+
+@Test func executionAuthorityAcceptsBoundFailureTerminalWithoutRuntimeRejection() throws {
+  let fixture = executionFailureFixture()
+  let events = try SealedRuntimeWire.sealExecutionStream(
+    fixture.events,
+    requiredForceWarningActionIDs: fixture.requiredForceActionIDs,
+    negotiatedProtocolMinor: protocol16Minor
+  )
+  guard case .applyStarted(let started)? = events.first?.body,
+    case .executionStreamFailure(let failure)? = events.last?.body
+  else {
+    Issue.record("expected a started execution with a typed failure terminal")
+    return
+  }
+  var manifest = Diskplan_V1_PlanProjectionManifest()
+  manifest.projectionID = started.projectionID
+  manifest.planID = started.planID
+  manifest.planSha256 = started.planSha256
+  manifest.evidenceID = started.evidenceID
+  manifest.evidenceSha256 = started.evidenceSha256
+  manifest.scanSessionID = started.scanSessionID
+  manifest.scanCheckpointID = started.scanCheckpointID
+  manifest.scanCheckpointEvidenceSha256 = started.scanCheckpointEvidenceSha256
+  var overlay = Diskplan_V1_DecisionOverlayAcknowledged()
+  overlay.overlayID = started.overlayID
+  overlay.overlaySha256 = started.overlaySha256
+  overlay.revision = started.overlayRevision
+  overlay.selectedActionCount = started.selectedActionCount
+  var review = Diskplan_V1_ApplyReviewProjection()
+  review.applyReviewID = failure.applyReviewID
+  review.reviewBindingSha256 = failure.reviewBindingSha256
+  review.currentBindingSha256 = started.currentBindingSha256
+  review.revalidationSha256 = started.revalidationSha256
+  review.epoch = started.epoch
+
+  try RuntimeExecutionAuthorityValidator.validateLiveBindings(
+    events: events,
+    planManifest: manifest,
+    overlay: overlay,
+    review: review
+  )
+  #expect(
+    events.allSatisfy {
+      if case .executionStreamFailure? = $0.body { return true }
+      if case .applyStarted? = $0.body { return true }
+      return false
+    }
+  )
+
+  review.reviewBindingSha256.value = Data(repeating: 0xee, count: 32)
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionAuthorityValidator.validateLiveBindings(
+      events: events,
+      planManifest: manifest,
+      overlay: overlay,
+      review: review
+    )
+  }
 }
 
 @Test func executionFailureTerminalIsStrictlyProtocol16AndFailClosed() throws {
@@ -821,6 +922,21 @@ private final class ExecutionRecordingRuntimeHandler: RuntimeBusinessHandler {
     responder: RuntimeBusinessResponder
   ) throws {
     Issue.record("pre-claim rejection must not dispatch to the handler")
+  }
+}
+
+private final class DryRunRecordingRuntimeHandler: RuntimeBusinessHandler {
+  let supportedCapabilities: Set<String> = ["dry-run-projection-v1"]
+  private(set) var requestIDs: [UInt64] = []
+
+  func handle(
+    _ request: RuntimeBusinessRequest,
+    responder: RuntimeBusinessResponder
+  ) throws {
+    requestIDs.append(request.requestID)
+    try responder.send(
+      try .rejected(code: .invalidState, summary: "fixture response")
+    )
   }
 }
 

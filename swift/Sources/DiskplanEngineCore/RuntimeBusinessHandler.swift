@@ -34,6 +34,15 @@ public enum RuntimeBusinessRequest {
     case .prepareApplyReview, .confirmApply, .cancelExecution: "execution-stream-v1"
     }
   }
+
+  var requiresProtocol16MutationTransport: Bool {
+    switch self {
+    case .prepareApplyReview, .confirmApply:
+      true
+    case .buildPlan, .editDecisionOverlay, .prepareDryRun, .cancelExecution:
+      false
+    }
+  }
 }
 
 public protocol RuntimeBusinessHandler: AnyObject {
@@ -394,6 +403,73 @@ package enum RuntimeExecutionAuthorityValidator {
         }
       default:
         break
+      }
+    }
+  }
+
+  package static func validateLiveBindings(
+    events: [Diskplan_V1_ExecutionStreamEvent],
+    planManifest: Diskplan_V1_PlanProjectionManifest,
+    overlay: Diskplan_V1_DecisionOverlayAcknowledged,
+    review: Diskplan_V1_ApplyReviewProjection
+  ) throws {
+    guard let first = events.first, let last = events.last else {
+      throw SealedRuntimeWireError.invalid(field: "execution terminal")
+    }
+    let requiresStarted: Bool
+    switch last.body {
+    case .applyFinished(let terminal):
+      guard terminal.applyReviewID == review.applyReviewID,
+        terminal.reviewBindingSha256 == review.reviewBindingSha256
+      else {
+        throw SealedRuntimeWireError.invalid(field: "execution terminal live review")
+      }
+      requiresStarted = terminal.startFailure == .unspecified
+    case .executionStreamFailure(let failure):
+      guard failure.executionID == last.executionID,
+        failure.executionID == first.executionID,
+        failure.applyReviewID == review.applyReviewID,
+        failure.reviewBindingSha256 == review.reviewBindingSha256,
+        failure.mutationMayHaveOccurred
+      else {
+        throw SealedRuntimeWireError.invalid(field: "execution failure live review")
+      }
+      requiresStarted = true
+    default:
+      throw SealedRuntimeWireError.invalid(field: "execution terminal")
+    }
+    if requiresStarted {
+      guard case .applyStarted(let started)? = first.body,
+        started.applyReviewID == review.applyReviewID,
+        started.projectionID == planManifest.projectionID,
+        started.planID == planManifest.planID,
+        started.planSha256 == planManifest.planSha256,
+        started.evidenceID == planManifest.evidenceID,
+        started.evidenceSha256 == planManifest.evidenceSha256,
+        started.scanSessionID == planManifest.scanSessionID,
+        started.scanCheckpointID == planManifest.scanCheckpointID,
+        started.scanCheckpointEvidenceSha256 == planManifest.scanCheckpointEvidenceSha256,
+        started.overlayID == overlay.overlayID,
+        started.overlaySha256 == overlay.overlaySha256,
+        started.overlayRevision == overlay.revision,
+        started.selectedActionCount == overlay.selectedActionCount,
+        started.reviewBindingSha256 == review.reviewBindingSha256,
+        started.currentBindingSha256 == review.currentBindingSha256,
+        started.revalidationSha256 == review.revalidationSha256,
+        started.epoch == review.epoch
+      else {
+        throw SealedRuntimeWireError.invalid(field: "execution start live review")
+      }
+    }
+    let reviewActions = Dictionary(
+      uniqueKeysWithValues: review.actions.map {
+        ($0.actionID.value, $0.executionPreview)
+      })
+    for event in events {
+      if case .forceRequiredWarning(let warning)? = event.body,
+        reviewActions[warning.actionID.value] != warning.preview
+      {
+        throw SealedRuntimeWireError.invalid(field: "execution force preview live review")
       }
     }
   }
@@ -946,41 +1022,15 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       planRecords: plan.records,
       selectedActionIDs: overlay.selectedActionIds
     )
-    guard let terminal = events.last?.applyFinished,
-      terminal.applyReviewID == review.applyReviewID,
-      terminal.reviewBindingSha256 == review.reviewBindingSha256
-    else { throw invalidState("execution terminal differs from live apply review") }
-    if terminal.startFailure == .unspecified {
-      guard case .applyStarted(let started)? = events.first?.body,
-        started.applyReviewID == review.applyReviewID,
-        started.projectionID == plan.manifest.projectionID,
-        started.planID == plan.manifest.planID,
-        started.planSha256 == plan.manifest.planSha256,
-        started.evidenceID == plan.manifest.evidenceID,
-        started.evidenceSha256 == plan.manifest.evidenceSha256,
-        started.scanSessionID == plan.manifest.scanSessionID,
-        started.scanCheckpointID == plan.manifest.scanCheckpointID,
-        started.scanCheckpointEvidenceSha256 == plan.manifest.scanCheckpointEvidenceSha256,
-        started.overlayID == overlay.overlayID,
-        started.overlaySha256 == overlay.overlaySha256,
-        started.overlayRevision == overlay.revision,
-        started.selectedActionCount == overlay.selectedActionCount,
-        started.reviewBindingSha256 == review.reviewBindingSha256,
-        started.currentBindingSha256 == review.currentBindingSha256,
-        started.revalidationSha256 == review.revalidationSha256,
-        started.epoch == review.epoch
-      else { throw invalidState("execution start differs from live apply review") }
-    }
-    let reviewActions = Dictionary(
-      uniqueKeysWithValues: review.actions.map {
-        ($0.actionID.value, $0.executionPreview)
-      })
-    for event in events {
-      if case .forceRequiredWarning(let warning)? = event.body,
-        reviewActions[warning.actionID.value] != warning.preview
-      {
-        throw invalidState("execution force preview differs from live apply review")
-      }
+    do {
+      try RuntimeExecutionAuthorityValidator.validateLiveBindings(
+        events: events,
+        planManifest: plan.manifest,
+        overlay: overlay,
+        review: review
+      )
+    } catch {
+      throw invalidState("execution stream differs from live apply review")
     }
   }
 
