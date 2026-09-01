@@ -48,6 +48,14 @@ superseded_by:
 - Production owner-chain construction verifies that every selected raw descendant ancestor is the
   exact expected prefix of the observed owner path. A missing intermediate directory cannot be
   compacted away and relabeled as a complete plan-bound namespace.
+- Every root and parent descriptor is now re-sealed around namespace metadata and `openat`
+  traversal. The runtime compares the exact plan-bound owner, group, mode, protected flags, ACL
+  digest, mount identity, and local-provider state while revalidating the no-materialization policy
+  before each probe. Directory child-entry churn does not alter this selected access-policy seal,
+  while same-inode permission, ACL, ownership, flag, or mount drift fails closed.
+- Topology aggregation preserves typed failed, unreadable, unknown, and missing observations ahead
+  of a known mismatch. Identity and access-policy mismatches are also retained as explicit issues,
+  so a concurrent replacement cannot hide a simultaneous collector or accessibility outcome.
 
 ## Task List
 
@@ -69,6 +77,10 @@ superseded_by:
   ancestor chains with an intermediate gap.
 - [x] Revalidate live materialization policy immediately before each path open and retain typed
   failure propagation.
+- [x] Revalidate descriptor-bound access-policy seals before and after every relevant root or
+  parent namespace access without treating benign child-entry churn as a policy change.
+- [x] Preserve typed missing, unreadable, and failed evidence when it co-occurs with an explicit
+  identity or access-policy mismatch at file, group, and report levels.
 - [x] Run targeted build, tests, and stress validation on the macOS 26 Apple Silicon release host.
 
 ## Evidence
@@ -97,3 +109,16 @@ superseded_by:
   findings.
 - Every final supervisor verified the child process group and reported it quiescent. Tests used
   only task-created temporary filesystem fixtures and did not mutate existing user data.
+- The final access-policy-seal regressions passed on `India-mac-mini-m4-hoteng`: live same-inode
+  mode drift versus benign child churn, exact access/ACL/mount comparison, plan-bound descendant
+  traversal, typed bind failures, and mixed mismatch plus missing/unreadable/failed collection.
+  The complete `DiskplanEngineCoreTests` gate passed all 155 tests (retained output SHA-256
+  `7e8fc2454e7bf36be78e3d0ab762abf1c689af701f2cffe7236e5a9bf3331c46`) and the complete
+  `DiskplanPolicyTests` gate passed all 66 tests (retained output SHA-256
+  `2c93512b90a3e517a2932a97479cf8d8e7caae5e449ed032d98fd8f688e7144b`). Eight
+  access-policy, materialization-race, descendant, and typed-evidence tests also passed 20
+  consecutive stress iterations (160 executions; retained output SHA-256
+  `5f9fb82b2e516ae1f31ba36074f239f22973f76dbbe8437f327154581d487783`). The final build
+  passed with retained output SHA-256
+  `7ae5c4e40ede74d47b52ef4bf37ce6bf7ccb0bca911b16265295867ce8190bb3`, and strict
+  `swift-format` lint produced no diagnostics.

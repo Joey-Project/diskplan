@@ -159,12 +159,18 @@ private struct RuntimeReleaseNamespaceAliasKey: Equatable, Hashable, Sendable {
   let rawBasename: Data
 }
 
+private let runtimeFixturePolicyDigest = try! PolicyDigest(
+  bytes: Data(repeating: 0xF0, count: 32))
+private let runtimeFixtureDescriptorAccessPolicy = RuntimeReleaseDescriptorAccessPolicy(
+  accessPolicy: "fixture-access-policy",
+  aclDigest: runtimeFixturePolicyDigest,
+  mountIdentity: "fixture-mount")
 private let runtimeFixtureNamespaceSeal = NamespaceSealEvidence(
   trustedNamespace: .unverified,
-  accessPolicy: .unknown(.unavailableViaPublicAPI),
-  aclDigest: .unknown(.unavailableViaPublicAPI),
+  accessPolicy: .known(runtimeFixtureDescriptorAccessPolicy.accessPolicy),
+  aclDigest: .known(runtimeFixtureDescriptorAccessPolicy.aclDigest),
   providerBoundary: .known(.local),
-  mountIdentity: .unknown(.unavailableViaPublicAPI))
+  mountIdentity: .known(runtimeFixtureDescriptorAccessPolicy.mountIdentity))
 
 public struct RuntimeReleaseCandidateActionBinding: Equatable, Sendable {
   public let candidateID: String
@@ -833,6 +839,7 @@ public struct RuntimeReleaseFileObjectTopology: Equatable, Sendable {
   public let owners: [FileOwnerLink]
   public let actionIDs: [ActionID]
   public let namespaceSlotsMatch: RuntimeReleaseTopologyObservation<Bool>
+  public let namespaceAccessPolicyMatches: RuntimeReleaseTopologyObservation<Bool>
   public let providerLocal: RuntimeReleaseTopologyObservation<Bool>
   public let linkCount: RuntimeReleaseTopologyObservation<UInt32>
   public let ownerClosure: RuntimeReleaseTopologyObservation<Bool>
@@ -864,6 +871,7 @@ public struct RuntimeReleaseTopologyComponent: Equatable, Sendable {
 
 public enum RuntimeReleaseTopologyIssue: Equatable, Sendable {
   case namespaceSlotMismatch(RuntimeReleaseNamespaceSlotIdentity)
+  case namespaceAccessPolicyMismatch(RuntimeReleaseNamespaceSlotIdentity)
   case hardlinkOwnerCountMismatch(
     RuntimeReleaseFileObjectIdentity, observed: UInt32, linkCount: UInt32)
   case cloneOwnerCountMismatch(
@@ -972,6 +980,12 @@ struct RuntimeReleaseKernelItem: Equatable, Sendable {
   let providerLocal: RuntimeReleaseTopologyObservation<Bool>
 }
 
+struct RuntimeReleaseDescriptorAccessPolicy: Equatable, Sendable {
+  let accessPolicy: String
+  let aclDigest: PolicyDigest
+  let mountIdentity: String
+}
+
 struct RuntimeReleaseTopologyKernel: Sendable {
   let descriptorIdentity:
     @Sendable (Int32, NoMaterializationPolicy) -> RuntimeReleaseTopologyObservation<
@@ -982,6 +996,10 @@ struct RuntimeReleaseTopologyKernel: Sendable {
     @Sendable (Int32, NoMaterializationPolicy) -> RuntimeReleaseTopologyObservation<Bool>
   let pathAccessPolicy:
     @Sendable (NoMaterializationPolicy) -> RuntimeReleaseTopologyObservation<Bool>
+  let descriptorAccessPolicy:
+    @Sendable (Int32, NoMaterializationPolicy) -> RuntimeReleaseTopologyObservation<
+      RuntimeReleaseDescriptorAccessPolicy
+    >
 
   init(
     descriptorIdentity:
@@ -999,12 +1017,19 @@ struct RuntimeReleaseTopologyKernel: Sendable {
     pathAccessPolicy:
       @escaping @Sendable (
         NoMaterializationPolicy
-      ) -> RuntimeReleaseTopologyObservation<Bool> = materializationPolicyObservation
+      ) -> RuntimeReleaseTopologyObservation<Bool> = materializationPolicyObservation,
+    descriptorAccessPolicy:
+      @escaping @Sendable (
+        Int32, NoMaterializationPolicy
+      ) -> RuntimeReleaseTopologyObservation<RuntimeReleaseDescriptorAccessPolicy> = { _, _ in
+        .known(runtimeFixtureDescriptorAccessPolicy)
+      }
   ) {
     self.descriptorIdentity = descriptorIdentity
     self.item = item
     self.snapshotBlocker = snapshotBlocker
     self.pathAccessPolicy = pathAccessPolicy
+    self.descriptorAccessPolicy = descriptorAccessPolicy
   }
 
   static let live = RuntimeReleaseTopologyKernel(
@@ -1106,7 +1131,8 @@ struct RuntimeReleaseTopologyKernel: Sendable {
       return capabilityObservation(
         SnapshotListProbe().list(fileDescriptor: isolated, buffer: &buffer)
       ).map { $0 > 0 }
-    }
+    },
+    descriptorAccessPolicy: runtimeReleaseDescriptorAccessPolicy
   )
 }
 
@@ -1213,8 +1239,16 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     for owner in lease.owners {
       let current = probe(owner, policy: lease.policy)
       currentByFile[owner.expected.slot.objectIdentity, default: []].append(current)
-      if current.slotMatches != .known(true) {
+      if current.identityMismatchObserved {
         issues.append(.namespaceSlotMismatch(owner.expected.slot))
+      }
+      if current.accessPolicyMismatchObserved {
+        issues.append(.namespaceAccessPolicyMismatch(owner.expected.slot))
+      }
+      if current.slotMatches != .known(true), !current.identityMismatchObserved,
+        !current.accessPolicyMismatchObserved
+      {
+        issues.append(.topologyEvidenceIncomplete)
       }
     }
     var files: [RuntimeReleaseFileObjectTopology] = []
@@ -1386,7 +1420,8 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       root: root,
       suppliedParent: suppliedParent,
       namespace: namespace,
-      policy: policy)
+      policy: policy
+    ).observation
     {
     case .known(true): return
     case .known(false):
@@ -1407,24 +1442,44 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     suppliedParent: Int32,
     namespace: RuntimeReleaseOwnerNamespaceBinding,
     policy: NoMaterializationPolicy
-  ) -> RuntimeReleaseTopologyObservation<Bool> {
+  ) -> RuntimeReleaseNamespaceChainObservation {
     var currentDescriptor = root
     var heldDescriptor: OwnedReleaseDescriptor?
+    var accessPolicyEvidence: [RuntimeReleaseTopologyObservation<Bool>] = []
+    var namespaceEvidence: [RuntimeReleaseTopologyObservation<Bool>] = []
     for (index, component) in namespace.targetPath.components.dropLast().enumerated() {
+      let currentExpectedSeal = index == 0 ? namespace.rootSeal : namespace.parentSeals[index - 1]
+      let currentAccessBeforeItem = descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(currentDescriptor, policy),
+        expected: currentExpectedSeal)
       let item = kernel.item(
         currentDescriptor,
         component,
         policy,
         namespace.inheritedProviderBoundaryByComponent[index])
       let expectedIdentity = namespace.parentChain[index]
-      let beforeOpen = allTrue([
+      let currentAccessAfterItem = descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(currentDescriptor, policy),
+        expected: currentExpectedSeal)
+      accessPolicyEvidence.append(contentsOf: [
+        currentAccessBeforeItem,
+        currentAccessAfterItem,
+      ])
+      namespaceEvidence.append(contentsOf: [
         item.providerLocal,
         identityMatches(item.identity, expected: expectedIdentity),
       ])
-      guard beforeOpen == .known(true) else { return beforeOpen }
+      var result = namespaceChainResult(
+        accessPolicyEvidence: accessPolicyEvidence,
+        namespaceEvidence: namespaceEvidence)
+      guard result.observation == .known(true) else { return result }
       var nullTerminatedComponent = Array(component) + [0]
       let accessPolicy = kernel.pathAccessPolicy(policy)
-      guard accessPolicy == .known(true) else { return accessPolicy }
+      accessPolicyEvidence.append(accessPolicy)
+      result = namespaceChainResult(
+        accessPolicyEvidence: accessPolicyEvidence,
+        namespaceEvidence: namespaceEvidence)
+      guard result.observation == .known(true) else { return result }
       let opened = nullTerminatedComponent.withUnsafeMutableBytes { bytes in
         openat(
           currentDescriptor,
@@ -1432,17 +1487,36 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
       }
       guard opened >= 0 else {
-        return posixObservation(errno, collector: "release-parent-chain-open")
+        namespaceEvidence.append(
+          posixObservation(errno, collector: "release-parent-chain-open"))
+        return namespaceChainResult(
+          accessPolicyEvidence: accessPolicyEvidence,
+          namespaceEvidence: namespaceEvidence)
       }
       let next = OwnedReleaseDescriptor(opened)
+      let currentAccessAfterOpen = descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(currentDescriptor, policy),
+        expected: currentExpectedSeal)
       let openedIdentity = kernel.descriptorIdentity(opened, policy)
-      let openedMatches = identityMatches(openedIdentity, expected: expectedIdentity)
-      guard openedMatches == .known(true) else { return openedMatches }
+      let openedAccess = descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(opened, policy),
+        expected: namespace.parentSeals[index])
+      let openedIdentityMatches = identityMatches(openedIdentity, expected: expectedIdentity)
+      accessPolicyEvidence.append(contentsOf: [
+        currentAccessAfterOpen,
+        openedAccess,
+      ])
+      namespaceEvidence.append(openedIdentityMatches)
+      result = namespaceChainResult(
+        accessPolicyEvidence: accessPolicyEvidence,
+        namespaceEvidence: namespaceEvidence)
+      guard result.observation == .known(true) else { return result }
       heldDescriptor = next
       currentDescriptor = next.rawValue
     }
     let expectedParent = namespace.parentChain.last ?? namespace.rootIdentity
-    return allTrue([
+    let expectedParentSeal = namespace.parentSeals.last ?? namespace.rootSeal
+    let finalIdentities = [
       identityMatches(
         kernel.descriptorIdentity(currentDescriptor, policy), expected: expectedParent),
       identityMatches(
@@ -1452,7 +1526,20 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
         kernel.descriptorIdentity(suppliedParent, policy),
       ]),
       .known(heldDescriptor != nil || namespace.parentChain.isEmpty),
-    ])
+    ]
+    let finalAccessPolicies = [
+      descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(currentDescriptor, policy),
+        expected: expectedParentSeal),
+      descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(suppliedParent, policy),
+        expected: expectedParentSeal),
+    ]
+    accessPolicyEvidence.append(contentsOf: finalAccessPolicies)
+    namespaceEvidence.append(contentsOf: finalIdentities)
+    return namespaceChainResult(
+      accessPolicyEvidence: accessPolicyEvidence,
+      namespaceEvidence: namespaceEvidence)
   }
 
   private func probe(
@@ -1460,9 +1547,18 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
     policy: NoMaterializationPolicy
   ) -> OwnerCurrent {
     let expected = owner.expected.slot
+    let expectedParentSeal = owner.namespace.parentSeals.last ?? owner.namespace.rootSeal
     let root = kernel.descriptorIdentity(owner.root.rawValue, policy)
     let parent = kernel.descriptorIdentity(owner.parent.rawValue, policy)
     let file = kernel.descriptorIdentity(owner.file.rawValue, policy)
+    let accessPolicyBefore = allTrue([
+      descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(owner.root.rawValue, policy),
+        expected: owner.namespace.rootSeal),
+      descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(owner.parent.rawValue, policy),
+        expected: expectedParentSeal),
+    ])
     let chainBefore = namespaceChainObservation(
       root: owner.root.rawValue,
       suppliedParent: owner.parent.rawValue,
@@ -1478,19 +1574,45 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
       suppliedParent: owner.parent.rawValue,
       namespace: owner.namespace,
       policy: policy)
-    let slotMatches = allTrue([
-      chainBefore,
-      chainAfter,
+    let accessPolicyAfter = allTrue([
+      descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(owner.root.rawValue, policy),
+        expected: owner.namespace.rootSeal),
+      descriptorAccessPolicyMatches(
+        kernel.descriptorAccessPolicy(owner.parent.rawValue, policy),
+        expected: expectedParentSeal),
+    ])
+    let identityEvidence = [
       identityMatches(root, expected: expected.rootIdentity),
       identityMatches(parent, expected: expected.parentIdentity),
       identityMatches(file, expected: expected.objectIdentity),
       identityMatches(item.identity, expected: expected.objectIdentity),
       allEqual([file, item.identity]),
+    ]
+    let accessPolicyMatches = allTrue([
+      accessPolicyBefore,
+      chainBefore.accessPolicyObservation,
+      chainAfter.accessPolicyObservation,
+      accessPolicyAfter,
     ])
+    let namespaceMatches = allTrue(
+      [
+        chainBefore.namespaceObservation,
+        chainAfter.namespaceObservation,
+      ] + identityEvidence)
+    let slotMatches = allTrue([accessPolicyMatches, namespaceMatches])
     let clone = cloneAssociation(item: item, expectedDevice: expected.objectIdentity.device)
     return OwnerCurrent(
       expected: owner.expected,
       slotMatches: slotMatches,
+      accessPolicyMatches: accessPolicyMatches,
+      identityMismatchObserved:
+        identityEvidence.contains(.known(false)) || chainBefore.namespaceMismatchObserved
+        || chainAfter.namespaceMismatchObserved,
+      accessPolicyMismatchObserved:
+        accessPolicyBefore == .known(false) || accessPolicyAfter == .known(false)
+        || chainBefore.accessPolicyMismatchObserved
+        || chainAfter.accessPolicyMismatchObserved,
       linkCount: item.linkCount,
       providerLocal: item.providerLocal,
       cloneAssociation: clone.association,
@@ -1500,9 +1622,34 @@ public final class RuntimeReleaseTopologyAuthority: @unchecked Sendable {
   }
 }
 
+private struct RuntimeReleaseNamespaceChainObservation {
+  let observation: RuntimeReleaseTopologyObservation<Bool>
+  let accessPolicyObservation: RuntimeReleaseTopologyObservation<Bool>
+  let namespaceObservation: RuntimeReleaseTopologyObservation<Bool>
+  let accessPolicyMismatchObserved: Bool
+  let namespaceMismatchObserved: Bool
+}
+
+private func namespaceChainResult(
+  accessPolicyEvidence: [RuntimeReleaseTopologyObservation<Bool>],
+  namespaceEvidence: [RuntimeReleaseTopologyObservation<Bool>]
+) -> RuntimeReleaseNamespaceChainObservation {
+  let accessPolicy = allTrue(accessPolicyEvidence)
+  let namespace = allTrue(namespaceEvidence)
+  return RuntimeReleaseNamespaceChainObservation(
+    observation: allTrue([accessPolicy, namespace]),
+    accessPolicyObservation: accessPolicy,
+    namespaceObservation: namespace,
+    accessPolicyMismatchObserved: accessPolicyEvidence.contains(.known(false)),
+    namespaceMismatchObserved: namespaceEvidence.contains(.known(false)))
+}
+
 private struct OwnerCurrent {
   let expected: RuntimeReleaseExpectedOwner
   let slotMatches: RuntimeReleaseTopologyObservation<Bool>
+  let accessPolicyMatches: RuntimeReleaseTopologyObservation<Bool>
+  let identityMismatchObserved: Bool
+  let accessPolicyMismatchObserved: Bool
   let linkCount: RuntimeReleaseTopologyObservation<UInt32>
   let providerLocal: RuntimeReleaseTopologyObservation<Bool>
   let cloneAssociation: RuntimeReleaseTopologyObservation<RuntimeReleaseCloneAssociation>
@@ -1523,6 +1670,7 @@ extension RuntimeReleaseTopologyAuthority {
     issues: inout [RuntimeReleaseTopologyIssue]
   ) -> RuntimeReleaseFileObjectTopology {
     let slots = allTrue(currents.map(\.slotMatches))
+    let accessPolicies = allTrue(currents.map(\.accessPolicyMatches))
     let providerLocal = allTrue(currents.map(\.providerLocal))
     let linkCount = consensus(currents.map(\.linkCount), collector: "release-link-count")
     let ownerClosure: RuntimeReleaseTopologyObservation<Bool>
@@ -1564,6 +1712,7 @@ extension RuntimeReleaseTopologyAuthority {
       owners: expected.owners.map(\.link),
       actionIDs: Array(Set(expected.owners.map(\.actionID))).sorted(),
       namespaceSlotsMatch: slots,
+      namespaceAccessPolicyMatches: accessPolicies,
       providerLocal: providerLocal,
       linkCount: linkCount,
       ownerClosure: ownerClosure,
@@ -1843,6 +1992,65 @@ private func runtimeObjectType(_ objectType: FileSystemObjectType) -> RuntimeRel
   }
 }
 
+private func runtimeReleaseDescriptorAccessPolicy(
+  _ descriptor: Int32,
+  _ policy: NoMaterializationPolicy
+) -> RuntimeReleaseTopologyObservation<RuntimeReleaseDescriptorAccessPolicy> {
+  let accessPolicy = materializationPolicyObservation(policy)
+  guard accessPolicy == .known(true) else { return accessPolicy.erased() }
+  let identity = capabilityObservation(
+    FileDescriptorIdentityProbe().probe(fileDescriptor: descriptor, policy: policy))
+  guard case .known(let identity) = identity else { return identity.erased() }
+  var status = stat()
+  guard fstat(descriptor, &status) == 0 else {
+    return posixObservation(errno, collector: "release-descriptor-access-policy")
+  }
+  let aclDigest = runtimeReleaseDescriptorACLDigest(descriptor)
+  guard case .known(let aclDigest) = aclDigest else { return aclDigest.erased() }
+  return .known(
+    RuntimeReleaseDescriptorAccessPolicy(
+      accessPolicy:
+        "uid=\(status.st_uid);gid=\(status.st_gid);mode=\(UInt32(status.st_mode));flags=\(runtimeReleaseAccessControlFlags(status.st_flags))",
+      aclDigest: aclDigest,
+      mountIdentity: "real-device:\(identity.device)"))
+}
+
+private func runtimeReleaseDescriptorACLDigest(
+  _ descriptor: Int32
+) -> RuntimeReleaseTopologyObservation<PolicyDigest> {
+  errno = 0
+  guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+    let code = errno
+    if code == ENOENT {
+      return .known(
+        try! PolicyDigest(bytes: Data(SHA256.hash(data: Data()))))
+    }
+    return posixObservation(code, collector: "release-descriptor-acl")
+  }
+  defer { acl_free(UnsafeMutableRawPointer(acl)) }
+  let byteCount = acl_size(acl)
+  guard byteCount >= 0 else {
+    return posixObservation(errno, collector: "release-descriptor-acl-size")
+  }
+  var bytes = Data(count: Int(byteCount))
+  let copied = bytes.withUnsafeMutableBytes { raw in
+    acl_copy_ext(raw.baseAddress, acl, byteCount)
+  }
+  guard copied == byteCount else {
+    return posixObservation(errno, collector: "release-descriptor-acl-serialization")
+  }
+  return .known(
+    try! PolicyDigest(bytes: Data(SHA256.hash(data: bytes))))
+}
+
+private func runtimeReleaseAccessControlFlags(_ rawFlags: UInt32) -> UInt32 {
+  let mask =
+    UInt32(UF_IMMUTABLE) | UInt32(UF_APPEND) | UInt32(UF_DATAVAULT)
+    | UInt32(SF_IMMUTABLE) | UInt32(SF_APPEND) | UInt32(SF_RESTRICTED)
+    | UInt32(SF_NOUNLINK)
+  return rawFlags & mask
+}
+
 private func combineIdentity(
   _ item: ItemStorageEvidence
 ) -> RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity> {
@@ -1996,11 +2204,11 @@ private func consensus<Value: Equatable & Sendable>(
 private func allTrue(
   _ observations: [RuntimeReleaseTopologyObservation<Bool>]
 ) -> RuntimeReleaseTopologyObservation<Bool> {
-  if observations.contains(.known(false)) { return .known(false) }
   if let failed = observations.first(where: { $0.isFailed }) { return failed }
   if let unreadable = observations.first(where: { $0.isUnreadable }) { return unreadable }
   if let unknown = observations.first(where: { $0.isUnknown }) { return unknown }
   if observations.contains(.absent) { return .absent }
+  if observations.contains(.known(false)) { return .known(false) }
   return .known(true)
 }
 
@@ -2017,8 +2225,66 @@ private func allEqual<Value: Equatable & Sendable>(
     return unknown.erased()
   }
   if observations.contains(.absent) { return .absent }
-  return consensus(observations, collector: "release-identity-consensus").map { _ in true }
-    .asBooleanFailure()
+  guard let first = observations.first else { return .unknown(.notObserved) }
+  guard case .known(let expected) = first else { return first.map { _ in true } }
+  return .known(
+    observations.dropFirst().allSatisfy {
+      guard case .known(let value) = $0 else { return false }
+      return value == expected
+    })
+}
+
+private func descriptorAccessPolicyMatches(
+  _ observed: RuntimeReleaseTopologyObservation<RuntimeReleaseDescriptorAccessPolicy>,
+  expected: NamespaceSealEvidence
+) -> RuntimeReleaseTopologyObservation<Bool> {
+  let expectedAccess = runtimeExpectedObservation(expected.accessPolicy)
+  guard case .known(let expectedAccess) = expectedAccess else {
+    return expectedAccess.erased()
+  }
+  let expectedACL = runtimeExpectedObservation(expected.aclDigest)
+  guard case .known(let expectedACL) = expectedACL else { return expectedACL.erased() }
+  let expectedMount = runtimeExpectedObservation(expected.mountIdentity)
+  guard case .known(let expectedMount) = expectedMount else { return expectedMount.erased() }
+  let expectedProvider = runtimeExpectedObservation(expected.providerBoundary)
+  guard case .known(let expectedProvider) = expectedProvider else {
+    return expectedProvider.erased()
+  }
+  guard expectedProvider == .local else { return .known(false) }
+  return observed.map {
+    $0.accessPolicy == expectedAccess && $0.aclDigest == expectedACL
+      && $0.mountIdentity == expectedMount
+  }
+}
+
+private func runtimeExpectedObservation<Value: Equatable & Sendable>(
+  _ observation: Observation<Value>
+) -> RuntimeReleaseTopologyObservation<Value> {
+  switch observation {
+  case .absent:
+    return .absent
+  case .known(let value):
+    return .known(value)
+  case .unknown(let reason):
+    switch reason {
+    case .unsupported:
+      return .unknown(.unsupported)
+    case .unavailableViaPublicAPI:
+      return .unknown(.unavailableViaPublicAPI)
+    case .notRequested, .budgetExhausted, .timedOut, .incompleteCoverage:
+      return .unknown(.incompleteCoverage)
+    }
+  case .unreadable(let failure):
+    return .unreadable(
+      RuntimeReleaseTopologyFailure(
+        kind: .probeFailed,
+        collector: "plan:\(failure.collector):\(failure.code)"))
+  case .failed(let failure):
+    return .failed(
+      RuntimeReleaseTopologyFailure(
+        kind: .probeFailed,
+        collector: "plan:\(failure.collector):\(failure.code)"))
+  }
 }
 
 private func identityMatches(

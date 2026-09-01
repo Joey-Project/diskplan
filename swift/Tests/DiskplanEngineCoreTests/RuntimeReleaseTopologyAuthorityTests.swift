@@ -391,6 +391,215 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
   #expect(report.seal.fileObjects[0].ownerClosure == .absent)
 }
 
+@Test func liveDescriptorAccessPolicyDetectsPolicyDriftButIgnoresChildChurn() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let live = RuntimeReleaseTopologyKernel.live
+  let initial = try #require(
+    live.descriptorAccessPolicy(fixture.rootDescriptor, policy).knownValue)
+  let initialIdentity = try #require(
+    live.descriptorIdentity(fixture.rootDescriptor, policy).knownValue)
+  let child = fixture.rootURL.appendingPathComponent("benign-child")
+  try Data("child".utf8).write(to: child, options: .withoutOverwriting)
+  try FileManager.default.removeItem(at: child)
+
+  #expect(live.descriptorAccessPolicy(fixture.rootDescriptor, policy) == .known(initial))
+
+  var status = stat()
+  guard fstat(fixture.rootDescriptor, &status) == 0 else {
+    throw ReleaseTopologyTestError.filesystem(errno)
+  }
+  let originalMode = status.st_mode & 0o7777
+  let changedMode = originalMode ^ mode_t(S_IWGRP)
+  guard fchmod(fixture.rootDescriptor, changedMode) == 0 else {
+    throw ReleaseTopologyTestError.filesystem(errno)
+  }
+  defer { _ = fchmod(fixture.rootDescriptor, originalMode) }
+
+  let changed = try #require(
+    live.descriptorAccessPolicy(fixture.rootDescriptor, policy).knownValue)
+  #expect(changed != initial)
+  #expect(live.descriptorIdentity(fixture.rootDescriptor, policy) == .known(initialIdentity))
+}
+
+@Test func sameInodeAccessPolicyDriftIsAnExplicitNamespaceIssue() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let setup = try hardlinkSetup(fixture: fixture)
+  let initial = try testingDescriptorAccessPolicy()
+  let state = DescriptorAccessPolicyState(.known(initial))
+  let authority = testAuthority(kernel: accessPolicyKernel(state: state))
+  let lease = try authority.bind(
+    plan: setup.plan,
+    executionEpochNonce: UUID(),
+    validForNanoseconds: 100,
+    policy: policy,
+    owners: setup.descriptors,
+    volumes: [
+      BoundRuntimeReleaseVolumeDescriptor(
+        expectedDevice: fixture.rootIdentity.device,
+        rootFileDescriptor: fixture.rootDescriptor)
+    ])
+  state.value = .known(
+    RuntimeReleaseDescriptorAccessPolicy(
+      accessPolicy: initial.accessPolicy + "-changed",
+      aclDigest: initial.aclDigest,
+      mountIdentity: initial.mountIdentity))
+
+  let report = try authority.collect(lease)
+
+  #expect(report.topologyMatchesExpected == .known(false))
+  #expect(report.seal.fileObjects[0].namespaceAccessPolicyMatches == .known(false))
+  #expect(
+    report.issues.contains(
+      .namespaceAccessPolicyMismatch(setup.descriptors[0].slot)))
+}
+
+@Test func descriptorAccessPolicySealRejectsEveryProtectedDimension() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let setup = try hardlinkSetup(fixture: fixture)
+  let initial = try testingDescriptorAccessPolicy()
+  let changedPolicies = [
+    RuntimeReleaseDescriptorAccessPolicy(
+      accessPolicy: initial.accessPolicy + "-changed",
+      aclDigest: initial.aclDigest,
+      mountIdentity: initial.mountIdentity),
+    RuntimeReleaseDescriptorAccessPolicy(
+      accessPolicy: initial.accessPolicy,
+      aclDigest: try digest(0xEF),
+      mountIdentity: initial.mountIdentity),
+    RuntimeReleaseDescriptorAccessPolicy(
+      accessPolicy: initial.accessPolicy,
+      aclDigest: initial.aclDigest,
+      mountIdentity: initial.mountIdentity + "-changed"),
+  ]
+  for changed in changedPolicies {
+    let state = DescriptorAccessPolicyState(.known(initial))
+    let authority = testAuthority(kernel: accessPolicyKernel(state: state))
+    let lease = try authority.bind(
+      plan: setup.plan,
+      executionEpochNonce: UUID(),
+      validForNanoseconds: 100,
+      policy: policy,
+      owners: setup.descriptors,
+      volumes: [
+        BoundRuntimeReleaseVolumeDescriptor(
+          expectedDevice: fixture.rootIdentity.device,
+          rootFileDescriptor: fixture.rootDescriptor)
+      ])
+    state.value = .known(changed)
+
+    let report = try authority.collect(lease)
+
+    #expect(report.topologyMatchesExpected == .known(false))
+    #expect(report.seal.fileObjects[0].namespaceAccessPolicyMatches == .known(false))
+    #expect(
+      report.issues.contains(
+        .namespaceAccessPolicyMismatch(setup.descriptors[0].slot)))
+  }
+}
+
+@Test func mixedMismatchAndTypedAccessEvidenceRemainDistinguishable() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let setup = try hardlinkSetup(fixture: fixture)
+  let initial = try testingDescriptorAccessPolicy()
+  let unreadableFailure = RuntimeReleaseTopologyFailure(
+    kind: .probeFailed, collector: "descriptor-policy-unreadable", errorCode: EACCES)
+  let failedFailure = RuntimeReleaseTopologyFailure(
+    kind: .probeFailed, collector: "descriptor-policy-failed", errorCode: EIO)
+  let outcomes: [RuntimeReleaseTopologyObservation<RuntimeReleaseDescriptorAccessPolicy>] = [
+    .absent,
+    .unreadable(unreadableFailure),
+    .failed(failedFailure),
+  ]
+  for outcome in outcomes {
+    let state = DescriptorAccessPolicyState(.known(initial))
+    let authority = testAuthority(
+      kernel: accessPolicyKernel(
+        state: state,
+        itemIdentity: .known(fixture.secondIdentity)))
+    let lease = try authority.bind(
+      plan: setup.plan,
+      executionEpochNonce: UUID(),
+      validForNanoseconds: 100,
+      policy: policy,
+      owners: setup.descriptors,
+      volumes: [
+        BoundRuntimeReleaseVolumeDescriptor(
+          expectedDevice: fixture.rootIdentity.device,
+          rootFileDescriptor: fixture.rootDescriptor)
+      ])
+    state.value = outcome
+
+    let report = try authority.collect(lease)
+    let expected = booleanFailure(outcome)
+
+    #expect(report.collection == expected)
+    #expect(report.topologyMatchesExpected == expected)
+    #expect(report.seal.fileObjects[0].namespaceSlotsMatch == expected)
+    #expect(report.seal.fileObjects[0].namespaceAccessPolicyMatches == expected)
+    #expect(report.seal.fileObjects[0].topologyMatchesExpected == expected)
+    #expect(report.seal.groups[0].topologyMatchesExpected == expected)
+    #expect(report.issues.contains(.namespaceSlotMismatch(setup.descriptors[0].slot)))
+  }
+}
+
+@Test func bindPreservesTypedDescriptorAccessPolicyFailures() throws {
+  let policy = try materializationPolicy()
+  let fixture = try RealReleaseTopologyFixture(policy: policy)
+  let setup = try hardlinkSetup(fixture: fixture)
+  let missing = DescriptorAccessPolicyState(.absent)
+  #expect(throws: RuntimeReleaseTopologyAuthorityError.namespaceChainMissing) {
+    try testAuthority(kernel: accessPolicyKernel(state: missing)).bind(
+      plan: setup.plan,
+      executionEpochNonce: UUID(),
+      validForNanoseconds: 100,
+      policy: policy,
+      owners: setup.descriptors,
+      volumes: [
+        BoundRuntimeReleaseVolumeDescriptor(
+          expectedDevice: fixture.rootIdentity.device,
+          rootFileDescriptor: fixture.rootDescriptor)
+      ])
+  }
+  let unreadableFailure = RuntimeReleaseTopologyFailure(
+    kind: .probeFailed, collector: "descriptor-policy-unreadable", errorCode: EACCES)
+  let unreadable = DescriptorAccessPolicyState(.unreadable(unreadableFailure))
+  #expect(
+    throws: RuntimeReleaseTopologyAuthorityError.namespaceChainUnreadable(unreadableFailure)
+  ) {
+    try testAuthority(kernel: accessPolicyKernel(state: unreadable)).bind(
+      plan: setup.plan,
+      executionEpochNonce: UUID(),
+      validForNanoseconds: 100,
+      policy: policy,
+      owners: setup.descriptors,
+      volumes: [
+        BoundRuntimeReleaseVolumeDescriptor(
+          expectedDevice: fixture.rootIdentity.device,
+          rootFileDescriptor: fixture.rootDescriptor)
+      ])
+  }
+  let failedFailure = RuntimeReleaseTopologyFailure(
+    kind: .probeFailed, collector: "descriptor-policy-failed", errorCode: EIO)
+  let failed = DescriptorAccessPolicyState(.failed(failedFailure))
+  #expect(throws: RuntimeReleaseTopologyAuthorityError.namespaceChainProbeFailed(failedFailure)) {
+    try testAuthority(kernel: accessPolicyKernel(state: failed)).bind(
+      plan: setup.plan,
+      executionEpochNonce: UUID(),
+      validForNanoseconds: 100,
+      policy: policy,
+      owners: setup.descriptors,
+      volumes: [
+        BoundRuntimeReleaseVolumeDescriptor(
+          expectedDevice: fixture.rootIdentity.device,
+          rootFileDescriptor: fixture.rootDescriptor)
+      ])
+  }
+}
+
 @Test func livePolicyRaceStopsAfterMetadataAndBeforeParentOpen() throws {
   let policy = try materializationPolicy()
   let fixture = try RealReleaseTopologyFixture(policy: policy)
@@ -625,7 +834,24 @@ private final class NestedReleaseTopologyFixture: @unchecked Sendable {
         snapshotDevice: fixture.rootIdentity.device)
     ],
     volumeDevices: [fixture.rootIdentity.device])
-  let authority = testAuthority(kernel: nonCloneKernel(snapshot: .known(false)))
+  let baseKernel = nonCloneKernel(snapshot: .known(false))
+  let rootIdentity = fixture.rootIdentity
+  let authority = testAuthority(
+    kernel: RuntimeReleaseTopologyKernel(
+      descriptorIdentity: baseKernel.descriptorIdentity,
+      item: baseKernel.item,
+      snapshotBlocker: baseKernel.snapshotBlocker,
+      pathAccessPolicy: baseKernel.pathAccessPolicy,
+      descriptorAccessPolicy: { descriptor, livePolicy in
+        let identity = baseKernel.descriptorIdentity(descriptor, livePolicy)
+        guard case .known(let identity) = identity else {
+          return identity.map { _ in try! testingDescriptorAccessPolicy() }
+        }
+        let seal =
+          identity == rootIdentity
+          ? try! topologyRootSeal() : try! topologyCandidateSeal()
+        return .known(try! descriptorAccessPolicy(seal))
+      }))
   let lease = try authority.bind(
     plan: plan,
     executionEpochNonce: UUID(),
@@ -1958,6 +2184,28 @@ private final class TestMonotonicClock: @unchecked Sendable {
   }
 }
 
+private final class DescriptorAccessPolicyState: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: RuntimeReleaseTopologyObservation<RuntimeReleaseDescriptorAccessPolicy>
+
+  init(_ value: RuntimeReleaseTopologyObservation<RuntimeReleaseDescriptorAccessPolicy>) {
+    storage = value
+  }
+
+  var value: RuntimeReleaseTopologyObservation<RuntimeReleaseDescriptorAccessPolicy> {
+    get {
+      lock.lock()
+      defer { lock.unlock() }
+      return storage
+    }
+    set {
+      lock.lock()
+      storage = newValue
+      lock.unlock()
+    }
+  }
+}
+
 private final class PathAccessOrderRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private var storage: [String] = []
@@ -2031,6 +2279,29 @@ private func cloneKernel(
     },
     snapshotBlocker: { _, _ in snapshot }
   )
+}
+
+private func accessPolicyKernel(
+  state: DescriptorAccessPolicyState,
+  itemIdentity: RuntimeReleaseTopologyObservation<RuntimeReleaseFileObjectIdentity>? = nil
+) -> RuntimeReleaseTopologyKernel {
+  let base = nonCloneKernel(snapshot: .known(false))
+  return RuntimeReleaseTopologyKernel(
+    descriptorIdentity: base.descriptorIdentity,
+    item: { parent, name, policy, inheritedProviderBoundary in
+      let item = base.item(parent, name, policy, inheritedProviderBoundary)
+      return RuntimeReleaseKernelItem(
+        identity: itemIdentity ?? item.identity,
+        linkCount: item.linkCount,
+        mayShareBlocks: item.mayShareBlocks,
+        sharesAllBlocks: item.sharesAllBlocks,
+        cloneID: item.cloneID,
+        cloneRefCount: item.cloneRefCount,
+        providerLocal: item.providerLocal)
+    },
+    snapshotBlocker: base.snapshotBlocker,
+    pathAccessPolicy: base.pathAccessPolicy,
+    descriptorAccessPolicy: { _, _ in state.value })
 }
 
 private func inconsistentCloneKernel(
@@ -2356,6 +2627,38 @@ private func topologyDescendantSeal(
     aclDigest: .unknown(.unavailableViaPublicAPI),
     providerBoundary: providerBoundary,
     mountIdentity: mountIdentity)
+}
+
+private func testingDescriptorAccessPolicy() throws -> RuntimeReleaseDescriptorAccessPolicy {
+  RuntimeReleaseDescriptorAccessPolicy(
+    accessPolicy: "fixture-access-policy",
+    aclDigest: try digest(0xF0),
+    mountIdentity: "fixture-mount")
+}
+
+private func descriptorAccessPolicy(
+  _ seal: NamespaceSealEvidence
+) throws -> RuntimeReleaseDescriptorAccessPolicy {
+  guard case .known(let accessPolicy) = seal.accessPolicy,
+    case .known(let aclDigest) = seal.aclDigest,
+    case .known(let mountIdentity) = seal.mountIdentity
+  else { throw ReleaseTopologyTestError.identity }
+  return RuntimeReleaseDescriptorAccessPolicy(
+    accessPolicy: accessPolicy,
+    aclDigest: aclDigest,
+    mountIdentity: mountIdentity)
+}
+
+private func booleanFailure<Value: Equatable & Sendable>(
+  _ observation: RuntimeReleaseTopologyObservation<Value>
+) -> RuntimeReleaseTopologyObservation<Bool> {
+  switch observation {
+  case .absent: return .absent
+  case .known: return .known(true)
+  case .unknown(let reason): return .unknown(reason)
+  case .unreadable(let failure): return .unreadable(failure)
+  case .failed(let failure): return .failed(failure)
+  }
 }
 
 private func digest(_ byte: UInt8) throws -> PolicyDigest {

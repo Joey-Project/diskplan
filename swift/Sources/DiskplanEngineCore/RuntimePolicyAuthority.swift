@@ -1772,8 +1772,13 @@ public struct RuntimePolicyAuthority: Sendable {
     if identity.knownValue == nil { reasons.append(.identityUnavailable) }
     let access = mapAccessPolicy(candidate.node.accessPolicy)
     if access.knownValue == nil { reasons.append(.accessPolicyUnavailable) }
-    reasons.append(.aclEvidenceUnavailable)
-    reasons.append(.rootNamespaceSealUnavailable)
+    let aclDigest = mapACLDigest(candidate.node.accessPolicy)
+    if aclDigest.knownValue == nil { reasons.append(.aclEvidenceUnavailable) }
+    if mapAccessPolicy(rootResult.rootAccessPolicy).knownValue == nil
+      || mapACLDigest(rootResult.rootAccessPolicy).knownValue == nil
+    {
+      reasons.append(.rootNamespaceSealUnavailable)
+    }
     let dependencyComplete = ownerIndex.dependencyCompleteByCandidate[candidate.id] == true
     if !dependencyComplete {
       reasons.append(.dependencyCoverageIncomplete)
@@ -1802,7 +1807,7 @@ public struct RuntimePolicyAuthority: Sendable {
         ? .known(.complete) : .unknown(.incompleteCoverage),
       accessPolicy: access,
       contentProtection: mapContentProtection(candidate.node),
-      aclDigest: .unknown(.unavailableViaPublicAPI),
+      aclDigest: aclDigest,
       targetMountIdentity: mapMountIdentity(candidate.node.identity),
       removalForceRequirement: mapForceRequirement(candidate.node.accessPolicy),
       authorityReasons: Array(Set(reasons)).sorted { $0.rawValue < $1.rawValue }
@@ -1830,8 +1835,8 @@ public struct RuntimePolicyAuthority: Sendable {
     }
     let rootSeal = NamespaceSealEvidence(
       trustedNamespace: .unverified,
-      accessPolicy: .unknown(.unavailableViaPublicAPI),
-      aclDigest: .unknown(.unavailableViaPublicAPI),
+      accessPolicy: mapAccessPolicy(root.rootAccessPolicy),
+      aclDigest: mapACLDigest(root.rootAccessPolicy),
       providerBoundary: mapProviderBoundary(root.providerBoundary),
       mountIdentity: .known("real-device:\(root.binding.identity.device)")
     )
@@ -1847,7 +1852,7 @@ public struct RuntimePolicyAuthority: Sendable {
           seal: NamespaceSealEvidence(
             trustedNamespace: .unverified,
             accessPolicy: mapAccessPolicy(ancestor.accessPolicy),
-            aclDigest: .unknown(.unavailableViaPublicAPI),
+            aclDigest: mapACLDigest(ancestor.accessPolicy),
             providerBoundary: mapProviderBoundary(ancestor.providerBoundary),
             mountIdentity: mapMountIdentity(ancestor.identity)
           )
@@ -1878,7 +1883,7 @@ public struct RuntimePolicyAuthority: Sendable {
     let candidateSeal = NamespaceSealEvidence(
       trustedNamespace: candidateNamespace.trustedNamespace,
       accessPolicy: mapAccessPolicy(candidate.node.accessPolicy),
-      aclDigest: .unknown(.unavailableViaPublicAPI),
+      aclDigest: mapACLDigest(candidate.node.accessPolicy),
       providerBoundary: mapProviderBoundary(candidate.node.providerBoundary),
       mountIdentity: mapMountIdentity(candidate.node.identity))
     parents.append(
@@ -1911,7 +1916,7 @@ public struct RuntimePolicyAuthority: Sendable {
           seal: NamespaceSealEvidence(
             trustedNamespace: candidateNamespace.trustedNamespace,
             accessPolicy: mapAccessPolicy(ancestor.accessPolicy),
-            aclDigest: .unknown(.unavailableViaPublicAPI),
+            aclDigest: mapACLDigest(ancestor.accessPolicy),
             providerBoundary: mapProviderBoundary(ancestor.providerBoundary),
             mountIdentity: mapMountIdentity(ancestor.identity))))
     }
@@ -2440,6 +2445,27 @@ private func mapAccessPolicy(
   case .failed(_, let code):
     return .failed(
       ObservationFailure(code: errorCode(code), collector: "scanner.access-policy"))
+  }
+}
+
+private func mapACLDigest(
+  _ observation: DiskplanScan.Observation<AccessPolicyEvidence>
+) -> DiskplanPolicy.Observation<PolicyDigest> {
+  switch observation {
+  case .known(let accessPolicy):
+    return observationToPolicy(accessPolicy.aclDigest) {
+      try! PolicyDigest(bytes: $0.bytes)
+    }
+  case .absent:
+    return .absent
+  case .unknown:
+    return .unknown(.incompleteCoverage)
+  case .unreadable(_, let code):
+    return .unreadable(
+      ObservationFailure(code: errorCode(code), collector: "scanner.access-policy-acl"))
+  case .failed(_, let code):
+    return .failed(
+      ObservationFailure(code: errorCode(code), collector: "scanner.access-policy-acl"))
   }
 }
 
