@@ -437,6 +437,24 @@ func anonymousReadinessDecoderCoversBothSchedulingPermutations() {
 }
 
 @Test
+func anonymousReadinessChildDescriptorsAvoidSourceCollisions() throws {
+  let sourceFileDescriptors: Set<Int32> = [40, 41, 44]
+
+  let childFileDescriptors =
+    try AnonymousDescendantReadinessFixture
+    .chooseChildFileDescriptors(
+      excludingSourceFileDescriptors: sourceFileDescriptors
+    )
+
+  #expect(childFileDescriptors == .init(ready: 42, acknowledgement: 43))
+  #expect(
+    sourceFileDescriptors.isDisjoint(with: [
+      childFileDescriptors.ready,
+      childFileDescriptors.acknowledgement,
+    ]))
+}
+
+@Test
 func anonymousReadinessPipeReportsEOFWhenUntransferredChildEndCloses() throws {
   let fixture = try AnonymousDescendantReadinessFixture()
   defer { fixture.cleanup() }
@@ -1667,7 +1685,10 @@ private enum RedirectedDescendantFixtureMode {
   case stableDescendant
   case earlyDescendantExit
 
-  fileprivate var shellScript: String {
+  fileprivate func shellScript(
+    childReadyFileDescriptor: Int32,
+    childAcknowledgementFileDescriptor: Int32
+  ) -> String {
     switch self {
     case .stableDescendant:
       return """
@@ -1676,18 +1697,18 @@ private enum RedirectedDescendantFixtureMode {
           exec /bin/sh -c '
             leader=$1
             exec </dev/null >/dev/null 2>/dev/null
-            printf "ready %s %s\\n" "$leader" "$$" >&40 || exit 91
-            exec 40>&-
-            IFS= read -r token <&41 || exit 92
+            printf "ready %s %s\\n" "$leader" "$$" >&\(childReadyFileDescriptor) || exit 91
+            exec \(childReadyFileDescriptor)>&-
+            IFS= read -r token <&\(childAcknowledgementFileDescriptor) || exit 92
             [ "$token" = go ] || exit 93
             kill -KILL "$leader" || exit 94
-            IFS= read -r unexpected <&41
+            IFS= read -r unexpected <&\(childAcknowledgementFileDescriptor)
             exit 95
           ' diskplan-descendant "$leader"
         ) &
         child=$!
-        exec 40>&-
-        exec 41<&-
+        exec \(childReadyFileDescriptor)>&-
+        exec \(childAcknowledgementFileDescriptor)<&-
         wait "$child"
         exit $?
         """
@@ -1696,14 +1717,14 @@ private enum RedirectedDescendantFixtureMode {
         (
           exec /bin/sh -c '
             exec </dev/null >/dev/null 2>/dev/null
-            exec 40>&-
-            exec 41<&-
+            exec \(childReadyFileDescriptor)>&-
+            exec \(childAcknowledgementFileDescriptor)<&-
             exit 42
           ' diskplan-descendant
         ) &
         child=$!
-        exec 40>&-
-        exec 41<&-
+        exec \(childReadyFileDescriptor)>&-
+        exec \(childAcknowledgementFileDescriptor)<&-
         wait "$child"
         status=$?
         exit "$status"
@@ -1833,22 +1854,35 @@ private struct ReadinessRecordAccumulator {
 }
 
 private final class AnonymousDescendantReadinessFixture {
-  private static let childReadyFileDescriptor: Int32 = 40
-  private static let childAcknowledgementFileDescriptor: Int32 = 41
+  struct ChildFileDescriptors: Equatable {
+    let ready: Int32
+    let acknowledgement: Int32
+  }
 
   private var readyReadFileDescriptor: Int32
   private var readyWriteFileDescriptor: Int32
   private var acknowledgementReadFileDescriptor: Int32
   private var acknowledgementWriteFileDescriptor: Int32
+  private let childFileDescriptors: ChildFileDescriptors
 
   init() throws {
     let ready = try Self.makePipe(parentEnd: 0)
     do {
       let acknowledgement = try Self.makePipe(parentEnd: 1)
-      readyReadFileDescriptor = ready[0]
-      readyWriteFileDescriptor = ready[1]
-      acknowledgementReadFileDescriptor = acknowledgement[0]
-      acknowledgementWriteFileDescriptor = acknowledgement[1]
+      do {
+        let selectedChildFileDescriptors = try Self.chooseChildFileDescriptors(
+          excludingSourceFileDescriptors: Set(ready + acknowledgement)
+        )
+        readyReadFileDescriptor = ready[0]
+        readyWriteFileDescriptor = ready[1]
+        acknowledgementReadFileDescriptor = acknowledgement[0]
+        acknowledgementWriteFileDescriptor = acknowledgement[1]
+        childFileDescriptors = selectedChildFileDescriptors
+      } catch {
+        Darwin.close(acknowledgement[0])
+        Darwin.close(acknowledgement[1])
+        throw error
+      }
     } catch {
       Darwin.close(ready[0])
       Darwin.close(ready[1])
@@ -1863,18 +1897,25 @@ private final class AnonymousDescendantReadinessFixture {
     let inherited = [
       POSIXSpawnInheritedFileDescriptor(
         sourceFileDescriptor: readyWriteFileDescriptor,
-        childFileDescriptor: Self.childReadyFileDescriptor
+        childFileDescriptor: childFileDescriptors.ready
       ),
       POSIXSpawnInheritedFileDescriptor(
         sourceFileDescriptor: acknowledgementReadFileDescriptor,
-        childFileDescriptor: Self.childAcknowledgementFileDescriptor
+        childFileDescriptor: childFileDescriptors.acknowledgement
       ),
     ]
     readyWriteFileDescriptor = -1
     acknowledgementReadFileDescriptor = -1
     return try POSIXProcessGroupSpawner().spawn(
       executableURL: URL(fileURLWithPath: "/bin/sh"),
-      arguments: ["-c", mode.shellScript, "diskplan-readiness-fixture"],
+      arguments: [
+        "-c",
+        mode.shellScript(
+          childReadyFileDescriptor: childFileDescriptors.ready,
+          childAcknowledgementFileDescriptor: childFileDescriptors.acknowledgement
+        ),
+        "diskplan-readiness-fixture",
+      ],
       environment: BoundedLsofProcessActivityCollector.sanitizedEnvironment,
       consumingInheritedFileDescriptors: inherited
     )
@@ -2114,6 +2155,26 @@ private final class AnonymousDescendantReadinessFixture {
       Darwin.close(descriptors[1])
       throw error
     }
+  }
+
+  static func chooseChildFileDescriptors(
+    excludingSourceFileDescriptors sourceFileDescriptors: Set<Int32>
+  ) throws -> ChildFileDescriptors {
+    var excluded = sourceFileDescriptors
+    excluded.formUnion([STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO])
+    var selected: [Int32] = []
+    var candidate: Int32 = 40
+    while selected.count < 2 {
+      if !excluded.contains(candidate) {
+        selected.append(candidate)
+        excluded.insert(candidate)
+      }
+      guard candidate < Int32.max else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(EMFILE))
+      }
+      candidate += 1
+    }
+    return ChildFileDescriptors(ready: selected[0], acknowledgement: selected[1])
   }
 }
 

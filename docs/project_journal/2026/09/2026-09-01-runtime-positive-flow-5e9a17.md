@@ -121,6 +121,19 @@ superseded_by:
   The subsequent Protocol 1.6 fixture gate passed in 5.070 seconds with the same supervisor
   guarantees and retained output SHA-256
   `83653f0a9a3c2efdafd7a8afb9d96929f9ed7016667255bf065ebbdf10932ae4`.
+- PR #24's full Swift foundation command reproduced one full-suite-only test failure on India:
+  635 of 636 tests passed before `redirectedDescendantReadinessReportsEarlyExit()` threw `EINVAL`.
+  Concurrent anonymous-pipe allocation could assign source descriptor 40 or 41 while the fixture
+  hard-coded those same values as child targets, violating the production spawner's required
+  source/target disjointness. The test fixture now selects child targets dynamically from 40 while
+  excluding stdio, every source descriptor, and prior selections; the production validator remains
+  unchanged. After the fix, the focused `RuntimeCollectorsTests` gate passed all 40 tests under the
+  bounded supervisor in 25.048 seconds, with output SHA-256
+  `cf14727d13366cc514dcf521436aa511659e59a0b1640947651108e5758388ac`. The exact full command
+  `scripts/ci/package-resolved-guard.sh run Package.resolved -- swift test
+  --disable-automatic-resolution` then passed all 637 tests in 10.340 supervisor seconds (5.859
+  test seconds), with process-group verification, post-run quiescence, and output SHA-256
+  `dc3646f6243a06e388e02db58a93ea5a500b3e9118f6dbb07193761f5068c134`.
 - India focused gate: `swift test --filter DiskplanEngineCoreTests` passed all 96 tests under the
   bounded supervisor in 13.793 seconds; process-group verification and quiescence both passed.
   Log: `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-enginecore-retry6.log`;
