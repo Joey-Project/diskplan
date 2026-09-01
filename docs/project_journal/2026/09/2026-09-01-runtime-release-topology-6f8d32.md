@@ -141,3 +141,17 @@ superseded_by:
   passed with retained output SHA-256
   `370a3de17cbc23915bbd607b48ae3e38db460e34553526382b8af33f2b2d85fd`, and strict
   `swift-format` lint produced no diagnostics.
+- Production runtime base `cd016f66a1233683abbc535e0544d2bff2090d58` was absorbed through
+  signed no-fast-forward merge `0ec92567e4674cadba3581172822ebd602251a41`; both signatures
+  verified as Good EDDSA. The merge preserved the production strict runtime fixture semantics and
+  the complete topology authority. On the final formatted merge tree, six focused topology tests
+  passed with bounded-supervisor SHA-256
+  `9e9a9127c694bca08c87816de7433049a1c8a49d2ccc662f8ec21b885002b9f0`, all 166
+  `DiskplanEngineCoreTests` passed with SHA-256
+  `472dd0d23eed377bfd652f34ac7fb5a52275efd7921444fbf13dea6111950d7d`, and all 66
+  `DiskplanPolicyTests` passed with SHA-256
+  `c2630f701d8477c32fa99125f2c73986098a7327b6655afa719471b36e1a0f93`. The final build passed
+  with SHA-256 `85f6e895c7ee0fee14e617e821ce001b7fe2ac074e0151285adab2cbcec12da4`.
+  Every command ran under the bounded process-group supervisor, which verified the target group
+  and reported a quiescent successful exit. The merge did not change topology production source,
+  so the earlier topology stress evidence remained applicable and was not rerun.
