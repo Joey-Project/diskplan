@@ -1,7 +1,10 @@
 use crossterm::event::KeyEvent;
 use diskplan_proto::diskplan::v1::{
-    EngineEvent, ProvisionalPlanReady, ScanControlKind, ScanProgress, ScanState,
+    EngineEvent, ProvisionalPlanReady, ScanCheckpointEvidence, ScanControlKind, ScanProgress,
+    ScanState,
 };
+
+use super::plan::{OverlayStageEdit, PlanIntentKind, PlanRuntime, PlanRuntimeEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -42,12 +45,15 @@ pub enum TerminalState {
     Failed(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct AppState {
     pub screen: Screen,
     pub scan_state: ScanState,
     pub progress: Option<ScanProgress>,
     pub provisional_plan: Option<ProvisionalPlanReady>,
+    pub plan: PlanRuntime,
+    pub latest_checkpoint: Option<ScanCheckpointEvidence>,
+    pub scan_finalized: bool,
     pub pending_controls: Vec<PendingControl>,
     pub(super) active_request: Option<ActiveRequest>,
     pub help_visible: bool,
@@ -66,6 +72,9 @@ impl Default for AppState {
             scan_state: ScanState::Idle,
             progress: None,
             provisional_plan: None,
+            plan: PlanRuntime::default(),
+            latest_checkpoint: None,
+            scan_finalized: false,
             pending_controls: vec![PendingControl {
                 request_id: 1,
                 kind: ScanControlKind::StartScan,
@@ -111,6 +120,10 @@ impl AppState {
     pub fn should_exit(&self) -> bool {
         self.terminal.is_some() && self.driver_exited
     }
+
+    pub fn resize_plan_layout(&mut self, width: u16, height: u16) {
+        self.plan.resize_layout(width, height);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,11 +135,15 @@ pub struct ControlCommand {
     pub kind: ScanControlKind,
 }
 
+// The bounded ingress queue keeps this inline union below a fixed memory
+// budget; boxing every high-rate scan event would add an allocation per event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum UiEvent {
     Key(KeyEvent),
     Resize,
     Engine(EngineDelivery),
+    Plan(PlanRuntimeEvent),
     DriverExited(Result<(), String>),
 }
 
@@ -145,8 +162,15 @@ impl EngineDelivery {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     SendControl(ControlCommand),
+    SendPlan(PlanCommand),
     StopDriver,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanCommand {
+    EditStage(OverlayStageEdit),
+    Prepare(PlanIntentKind),
 }

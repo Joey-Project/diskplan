@@ -24,7 +24,7 @@ superseded_by:
 - APFS evidence distinguishes logical bytes, nominal allocated bytes, immediate private reclaim, sharing flags, clone ID, and clone refcount. Conditional shared reclaim, snapshot attribution, and provider hidden backing remain unavailable/no-credit.
 - File Provider evidence uses public filesystem flags and provider identity. In-process metadata coordination is disabled and promised metadata is typed unavailable because a running accessor cannot be killed and reaped safely.
 - Provider identity is fail-closed: `NSFileNoSuchFileError` means identifier-absent, not local. Absent, permission, timeout, failure, and inconsistent results do not descend without positive sync-root or inherited provider-bound evidence.
-- File Provider Foundation identity operations are derived from the held parent FD/raw slot, seal both held/derived parent and child identity before and after, separately reject same-object `isDataless` transitions, and use one identity deadline without spawning metadata background work.
+- File Provider Foundation identity operations are derived from the held parent FD/raw slot, seal both held/derived parent and child identity before and after, separately reject same-object `isDataless` transitions, and use one identity deadline. Non-cancellable identity callbacks share one process-wide capacity-one request slot: timeout retains the slot until the authoritative original callback arrives, so a permanent hold cannot accumulate Diskplan-owned workers or requests and a late callback cannot revive the timed-out scan.
 - Descent requires a typed directory result and uses stable postflight evidence; provider-bound regular files remain non-descending.
 - The controlled CLI accepts only `--self-test`, creates its own temporary root, and has no arbitrary-path mode.
 
@@ -43,6 +43,7 @@ superseded_by:
 - [x] Parse type-dependent Darwin packed layouts, keep invalid defaults unavailable, and reject truncated physical slots.
 - [x] Disable unkillable in-process coordination and bind the derived parent path to the held parent FD identity.
 - [x] Make the identity timeout path close-and-discard so post-deadline callbacks cannot succeed.
+- [x] Bound repeated non-cancellable identity timeouts to one outstanding request until its original callback is reaped.
 - [ ] Run independent review and real-host File Provider callback-zero acceptance.
 - [ ] Run real APFS volume-group device-identity acceptance on the India host when its fixture exists.
 
@@ -57,10 +58,13 @@ superseded_by:
 - Accepted design: `docs/design/accepted-plan.md`.
 - Implementation contract: `docs/design/macos-capability-probes.md`.
 - Local `swift build` passed on macOS 26.6.1 with Swift 6.3.3.
-- Local `swift test --filter DiskplanMacOSTests` passed 32 focused tests, including APFS clone, live-policy mutation, child and parent replacement, child-hardlink parent mismatch, renamed-parent missing and unreadable classification, both same-object materialization directions, stable postflight traversal, real-device option, directory/non-directory packed buffers, unavailable invalid slots, truncated/impossible layouts, live directory/regular/symlink item probes, metadata-unavailable behavior, typed directory guards, the subsecond identity deadline, and the deterministic deadline-after-callback lock-order race.
-- Local full `swift test` passed all 43 tests after the packed-layout fix.
+- The scanner-integrated probe branch passed 32 focused `DiskplanMacOSTests` and all 43 tests in its then-current Swift package after the packed-layout fix.
+- The fixture-hardening branch passed 30 focused `DiskplanMacOSTests` and all 133 tests in its then-current Swift package with serial execution.
+- The combined Phase 0 integration merge passed 33 focused `DiskplanMacOSTests` and the
+  controlled `diskplan-macos-probe --self-test`; both India-only hooks remained explicitly
+  `not-available` without their opt-in environment variables.
 - `swift-format lint` passed for the new Swift source, test, and probe-tool paths.
 - The C shim passed `clang -std=c11 -Wall -Wextra -Werror -fsyntax-only` against the active macOS SDK.
 - `bash -n` and ShellCheck 0.11.0 passed for `scripts/test-macos-capabilities.sh`.
 - Local `swift run diskplan-macos-probe --self-test` reports APFS logical/private evidence and `provider_identity_status: unavailable`, keeping absent provider identity non-authoritative.
-- The complete local `scripts/test-macos-capabilities.sh` gate passed its 32 focused tests and controlled CLI probe; it leaves both the extension-backed and real APFS volume-group India-host oracles as explicit `not-available` hooks and does not claim either gate passed.
+- Both source branches passed their then-current complete local `scripts/test-macos-capabilities.sh` gate and controlled CLI probe; each left the extension-backed and real APFS volume-group India-host oracles as explicit `not-available` hooks without claiming either live gate passed.

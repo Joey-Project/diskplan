@@ -50,8 +50,13 @@ enum ScanControlKind {
   SCAN_CONTROL_KIND_START_SCAN = 1;
   SCAN_CONTROL_KIND_PAUSE_SCAN = 2;
   SCAN_CONTROL_KIND_RESUME_SCAN = 3;
+  // Retained for protocol-minor compatibility with the Phase 0 shell. The
+  // Phase 1 evidence producer rejects this control and never emits plan data.
   SCAN_CONTROL_KIND_PAUSE_AND_BUILD_PROVISIONAL_PLAN = 4;
   SCAN_CONTROL_KIND_CANCEL_SCAN = 5;
+  SCAN_CONTROL_KIND_CHECKPOINT_SCAN = 6;
+  SCAN_CONTROL_KIND_FINALIZE_PARTIAL_SCAN = 7;
+  SCAN_CONTROL_KIND_CHECKPOINT_PROVISIONAL_EVIDENCE = 8;
 }
 
 enum ScanState {
@@ -65,6 +70,17 @@ enum ScanState {
   SCAN_STATE_CANCELLED = 7;
   SCAN_STATE_FINISHED = 8;
   SCAN_STATE_FAILED = 9;
+  SCAN_STATE_FINALIZING_PARTIAL = 10;
+  SCAN_STATE_FINALIZED_PARTIAL = 11;
+}
+
+enum ScanMachineState {
+  SCAN_MACHINE_STATE_UNSPECIFIED = 0;
+  SCAN_MACHINE_STATE_READY = 1;
+  SCAN_MACHINE_STATE_SCANNING = 2;
+  SCAN_MACHINE_STATE_COMPLETE = 3;
+  SCAN_MACHINE_STATE_PARTIAL = 4;
+  SCAN_MACHINE_STATE_CANCELLED = 5;
 }
 
 enum ControlRejectCode {
@@ -72,11 +88,39 @@ enum ControlRejectCode {
   CONTROL_REJECT_CODE_INVALID_STATE = 1;
   CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID = 2;
   CONTROL_REJECT_CODE_MALFORMED_REQUEST = 3;
+  CONTROL_REJECT_CODE_UNAVAILABLE = 4;
+  // The finite producer command queue was full at the admission boundary.
+  CONTROL_REJECT_CODE_CAPACITY_EXCEEDED = 5;
+}
+
+// A stable machine-readable reason for a rejected StartScanRequest. This is
+// deliberately separate from ControlRejectCode: the latter describes the
+// control-plane class, while this enum identifies the setup boundary that
+// could not be established. Non-start controls leave this unspecified.
+enum ScanSetupRejectCode {
+  SCAN_SETUP_REJECT_CODE_UNSPECIFIED = 0;
+  SCAN_SETUP_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED = 1;
+  SCAN_SETUP_REJECT_CODE_INVALID_PROFILE = 2;
+  SCAN_SETUP_REJECT_CODE_INVALID_ROOT = 3;
+  SCAN_SETUP_REJECT_CODE_INVALID_BUDGET = 4;
+  SCAN_SETUP_REJECT_CODE_DUPLICATE_ROOT_ID = 5;
+  SCAN_SETUP_REJECT_CODE_MATERIALIZATION_POLICY_UNAVAILABLE = 6;
+  SCAN_SETUP_REJECT_CODE_ROOT_DISCOVERY_UNAVAILABLE = 7;
+  SCAN_SETUP_REJECT_CODE_SCANNER_INITIALIZATION_FAILED = 8;
 }
 
 message StartScanRequest {
   uint64 request_id = 1;
   string profile = 2;
+  repeated ScanRootRequest roots = 3;
+  uint64 maximum_duration_millis = 4;
+  uint32 batch_size = 5;
+}
+
+message ScanRootRequest {
+  string root_id = 1;
+  bytes raw_absolute_path = 2;
+  string display_path = 3;
 }
 
 message ScanControlRequest {
@@ -94,6 +138,7 @@ message ControlRejected {
   ControlRejectCode code = 2;
   string detail = 3;
   ScanState current_state = 4;
+  ScanSetupRejectCode setup_code = 5;
 }
 
 message ScanStateChanged {
@@ -114,6 +159,285 @@ message ScanProgress {
   uint64 entries_per_second = 10;
   string current_root = 11;
   uint64 structural_budget = 12;
+  uint64 retained_nodes = 13;
+}
+
+enum EvidenceStatus {
+  EVIDENCE_STATUS_UNSPECIFIED = 0;
+  EVIDENCE_STATUS_KNOWN = 1;
+  EVIDENCE_STATUS_ABSENT = 2;
+  EVIDENCE_STATUS_UNKNOWN = 3;
+  EVIDENCE_STATUS_UNREADABLE = 4;
+  EVIDENCE_STATUS_FAILED = 5;
+}
+
+enum ByteMeasureKind {
+  BYTE_MEASURE_KIND_UNSPECIFIED = 0;
+  BYTE_MEASURE_KIND_EXACT = 1;
+  BYTE_MEASURE_KIND_LOWER_BOUND = 2;
+  BYTE_MEASURE_KIND_UNKNOWN = 3;
+}
+
+message EvidenceFailure {
+  EvidenceStatus status = 1;
+  string reason = 2;
+  int32 error_code = 3;
+  bool has_error_code = 4;
+}
+
+message RawPath {
+  string root_id = 1;
+  repeated bytes components = 2;
+  string display_path = 3;
+}
+
+message CoverageEvidence {
+  bool complete = 1;
+  repeated string reasons = 2;
+}
+
+message ByteMeasureEvidence {
+  ByteMeasureKind kind = 1;
+  uint64 bytes = 2;
+  string reason = 3;
+}
+
+message ObjectIdentityEvidence {
+  EvidenceFailure observation = 1;
+  int64 device = 2;
+  uint64 file_id = 3;
+  string object_type = 4;
+}
+
+message TimeValue {
+  int64 seconds_since_epoch = 1;
+  int32 nanoseconds = 2;
+}
+
+message TimeEvidence {
+  EvidenceFailure observation = 1;
+  TimeValue value = 2;
+}
+
+message FilesystemTimeEvidence {
+  TimeEvidence access_time = 1;
+  TimeEvidence modification_time = 2;
+  TimeEvidence status_change_time = 3;
+  TimeEvidence birth_time = 4;
+  string trust = 5;
+}
+
+message AccessPolicyEvidence {
+  EvidenceFailure observation = 1;
+  uint32 owner_user_id = 2;
+  uint32 owner_group_id = 3;
+  uint32 mode = 4;
+  uint32 flags = 5;
+}
+
+message BoolEvidence {
+  EvidenceFailure observation = 1;
+  bool value = 2;
+}
+
+message UInt64Evidence {
+  EvidenceFailure observation = 1;
+  uint64 value = 2;
+}
+
+message UInt32Evidence {
+  EvidenceFailure observation = 1;
+  uint32 value = 2;
+}
+
+message ItemByteEvidence {
+  ByteMeasureEvidence logical = 1;
+  ByteMeasureEvidence nominal_allocated = 2;
+  ByteMeasureEvidence immediate_private_reclaim = 3;
+}
+
+message StorageTopologyEvidence {
+  UInt32Evidence link_count = 1;
+  BoolEvidence may_share_blocks = 2;
+  BoolEvidence shares_all_blocks = 3;
+  UInt64Evidence clone_id = 4;
+  UInt32Evidence clone_refcount = 5;
+  ByteMeasureEvidence conditional_group_reclaim = 6;
+}
+
+message ProviderObjectIdentityEvidence {
+  string item_identifier = 1;
+  string domain_identifier = 2;
+}
+
+message StringPair {
+  string key = 1;
+  string value = 2;
+}
+
+message ProviderScanEvidence {
+  EvidenceFailure observation = 1;
+  EvidenceFailure identity_observation = 2;
+  ProviderObjectIdentityEvidence identity = 3;
+  EvidenceFailure promised_metadata_observation = 4;
+  repeated StringPair promised_metadata = 5;
+  ByteMeasureEvidence hidden_backing_bytes = 6;
+  BoolEvidence controlled_non_materialization_acceptance = 7;
+}
+
+message ScannedNodeEvidence {
+  RawPath path = 1;
+  ObjectIdentityEvidence identity = 2;
+  ItemByteEvidence bytes = 3;
+  StorageTopologyEvidence storage_topology = 4;
+  FilesystemTimeEvidence filesystem_times = 5;
+  AccessPolicyEvidence access_policy = 6;
+  CoverageEvidence coverage = 7;
+  string provider_boundary = 8;
+  string provider_boundary_reason = 9;
+  ProviderScanEvidence provider_evidence = 10;
+}
+
+message ScanNodeObserved {
+  ScannedNodeEvidence node = 1;
+  bool directory_closed = 2;
+}
+
+message RootScanEvidence {
+  ScanRootRequest root = 1;
+  ObjectIdentityEvidence identity = 2;
+  string provider_boundary = 3;
+  string provider_boundary_reason = 4;
+  ItemByteEvidence aggregate_bytes = 5;
+  CoverageEvidence coverage = 6;
+  uint64 entries_observed = 7;
+  uint64 directories_closed = 8;
+}
+
+message RootFailureEvidence {
+  string root_id = 1;
+  EvidenceFailure observation = 2;
+}
+
+message ProcessActivityEvidence {
+  int32 process_id = 1;
+  string command = 2;
+  string file_descriptor = 3;
+  bytes raw_path = 4;
+  string display_path = 5;
+}
+
+message StringUInt64Pair {
+  string key = 1;
+  uint64 value = 2;
+}
+
+message GlobalFactEvidence {
+  bool known = 1;
+  string unavailable_reason = 2;
+  repeated StringUInt64Pair uint64_values = 3;
+  repeated string string_values = 4;
+}
+
+message ScanCollectorConfigurationEvidence {
+  string process_activity_collector_id = 1;
+  uint64 process_activity_deadline_nanoseconds = 2;
+  bool has_process_activity_deadline = 3;
+  repeated string global_fact_collector_ids = 4;
+}
+
+message ScanCheckpointEvidence {
+  string profile = 1;
+  uint32 resolver_version = 2;
+  uint64 wall_clock_unix_millis = 3;
+  uint64 monotonic_nanoseconds = 4;
+  uint64 maximum_entries_per_root = 5;
+  uint32 maximum_depth = 6;
+  uint64 maximum_entries_per_directory = 7;
+  uint64 maximum_pending_name_bytes = 8;
+  uint32 retained_node_count = 9;
+  uint64 maximum_duration_millis = 10;
+  repeated ScanRootRequest resolved_roots = 11;
+  ScanProgress progress = 12;
+  CoverageEvidence coverage = 13;
+  repeated ScannedNodeEvidence retained_nodes = 14;
+  repeated RootScanEvidence completed_roots = 15;
+  repeated RootFailureEvidence root_failures = 16;
+  EvidenceFailure process_activity_observation = 17;
+  repeated ProcessActivityEvidence process_activity = 18;
+  ScanMachineState machine_state = 19;
+  bool resumable_in_process = 20;
+  bool provisional = 21;
+  ScanCollectorConfigurationEvidence collector_configuration = 22;
+  GlobalFactEvidence vm = 23;
+  GlobalFactEvidence swap = 24;
+  GlobalFactEvidence apfs_snapshots = 25;
+}
+
+// A chunk payload is a concatenation of records. Each record is a four-byte
+// big-endian length followed by the canonical protobuf encoding of one
+// ScannedNodeEvidence. The digest covers canonical_node_payload exactly.
+message ScanCheckpointChunk {
+  string checkpoint_id = 1;
+  uint32 chunk_index = 2;
+  string chunk_id = 3;
+  uint32 node_count = 4;
+  bytes canonical_node_payload = 5;
+  bytes payload_sha256 = 6;
+}
+
+message ScanCheckpointChunkDescriptor {
+  uint32 chunk_index = 1;
+  string chunk_id = 2;
+  uint32 node_count = 3;
+  uint64 payload_bytes = 4;
+  bytes payload_sha256 = 5;
+}
+
+// This manifest binds the checkpoint's coverage/frontier metadata and every
+// retained-node chunk. checkpoint_evidence_sha256 covers the exact
+// canonical_checkpoint_payload bytes carried by ScanCheckpointReady or
+// ScanFinalized. final_evidence_sha256 is the protocol-defined canonical hash
+// over that evidence digest, all budgets, and the ordered descriptors. The
+// coverage/frontier mirrors must exactly match the digested checkpoint.
+message ScanCheckpointManifest {
+  uint32 manifest_version = 1;
+  string checkpoint_id = 2;
+  uint32 chunk_count = 3;
+  uint64 retained_node_count = 4;
+  uint32 retained_node_entry_budget = 5;
+  uint64 retained_node_payload_bytes = 6;
+  uint32 maximum_checkpoint_payload_bytes = 7;
+  uint32 maximum_chunk_payload_bytes = 8;
+  uint32 maximum_manifest_encoded_bytes = 9;
+  repeated ScanCheckpointChunkDescriptor chunks = 10;
+  bytes checkpoint_evidence_sha256 = 11;
+  bytes final_evidence_sha256 = 12;
+  ScanProgress frontier = 13;
+  CoverageEvidence coverage = 14;
+  repeated string completed_root_ids = 15;
+  repeated string failed_root_ids = 16;
+  ScanMachineState machine_state = 17;
+  bool resumable_in_process = 18;
+  bool provisional = 19;
+  uint64 maximum_retained_node_payload_bytes = 20;
+}
+
+message ScanCheckpointReady {
+  // Deprecated Phase 0 field. Protocol 1.3 producers leave this unset and use
+  // canonical_checkpoint_payload plus manifest so receivers can verify the
+  // exact bytes before exposing checkpoint evidence.
+  ScanCheckpointEvidence checkpoint = 1;
+  bytes canonical_checkpoint_payload = 2;
+  ScanCheckpointManifest manifest = 3;
+}
+
+message ScanFinalized {
+  // Deprecated Phase 0 field; see ScanCheckpointReady.checkpoint.
+  ScanCheckpointEvidence checkpoint = 1;
+  string reason = 2;
+  bytes canonical_checkpoint_payload = 3;
+  ScanCheckpointManifest manifest = 4;
 }
 
 message ProvisionalPlanGroupSummary {
@@ -137,6 +461,1194 @@ message ProvisionalPlanInvalidated {
   string previous_plan_id = 1;
 }
 
+// Protocol 1.4 runtime projections use byte-preserving opaque identifiers.
+// Receivers may compare and retain these values but must never parse them into
+// paths, action kinds, command arguments, or mutation authority. Version 1.4
+// requires 1...256 bytes.
+message OpaqueIdentifier {
+  bytes value = 1;
+}
+
+// Every Digest256 value is exactly 32 bytes. The producing message defines the
+// domain-separated SHA-256 binding; protobuf serialization is only transport.
+message Digest256 {
+  bytes value = 1;
+}
+
+message UnknownProjectionValue {
+  string code = 1;
+  string summary = 2;
+}
+
+message ByteEstimateProjection {
+  oneof value {
+    uint64 known_bytes = 1;
+    UnknownProjectionValue unknown = 2;
+  }
+}
+
+enum PlanDisposition {
+  PLAN_DISPOSITION_UNSPECIFIED = 0;
+  PLAN_DISPOSITION_READY = 1;
+  PLAN_DISPOSITION_CONDITIONAL = 2;
+  PLAN_DISPOSITION_NEEDS_REVIEW = 3;
+  PLAN_DISPOSITION_BLOCKED = 4;
+  PLAN_DISPOSITION_KEEP_INFORMATIONAL = 5;
+}
+
+enum PlanActionKind {
+  PLAN_ACTION_KIND_UNSPECIFIED = 0;
+  PLAN_ACTION_KIND_GENERIC_REMOVE = 1;
+  PLAN_ACTION_KIND_GIT_WORKTREE_REMOVE = 2;
+  PLAN_ACTION_KIND_GIT_WORKTREE_DISCARD_LOCAL_CHANGES = 3;
+  PLAN_ACTION_KIND_CODEX_CLEAN_TEMPORARY = 4;
+  PLAN_ACTION_KIND_VERSIONED_ARTIFACT_REMOVE = 5;
+  PLAN_ACTION_KIND_COMPLETE_RELEASE_SET_REMOVE = 6;
+  PLAN_ACTION_KIND_REPORT_ONLY = 7;
+}
+
+enum PlanRecommendation {
+  PLAN_RECOMMENDATION_UNSPECIFIED = 0;
+  PLAN_RECOMMENDATION_SAFE_TO_CLEAN = 1;
+  PLAN_RECOMMENDATION_SAFE_AFTER_EXIT = 2;
+  PLAN_RECOMMENDATION_LIKELY_REBUILDABLE = 3;
+  PLAN_RECOMMENDATION_NEEDS_SEMANTIC_REVIEW = 4;
+  PLAN_RECOMMENDATION_MANAGED_BY_PROVIDER = 5;
+  PLAN_RECOMMENDATION_KEEP = 6;
+  PLAN_RECOMMENDATION_SCAN_INCOMPLETE = 7;
+  PLAN_RECOMMENDATION_CLASSIFICATION_CONFLICT = 8;
+}
+
+enum PlanStageability {
+  PLAN_STAGEABILITY_UNSPECIFIED = 0;
+  PLAN_STAGEABILITY_STAGEABLE = 1;
+  PLAN_STAGEABILITY_REQUIRES_WAIVERS = 2;
+  PLAN_STAGEABILITY_NOT_STAGEABLE = 3;
+}
+
+enum PlanActivity {
+  PLAN_ACTIVITY_UNSPECIFIED = 0;
+  PLAN_ACTIVITY_INACTIVE = 1;
+  PLAN_ACTIVITY_ACTIVE = 2;
+  PLAN_ACTIVITY_MIXED = 3;
+  PLAN_ACTIVITY_UNKNOWN = 4;
+}
+
+enum PlanRecoverability {
+  PLAN_RECOVERABILITY_UNSPECIFIED = 0;
+  PLAN_RECOVERABILITY_REBUILDABLE = 1;
+  PLAN_RECOVERABILITY_RESTORABLE = 2;
+  PLAN_RECOVERABILITY_IRRECOVERABLE = 3;
+  PLAN_RECOVERABILITY_REVIEW_REQUIRED = 4;
+  PLAN_RECOVERABILITY_UNKNOWN = 5;
+}
+
+enum PlanTargetKind {
+  PLAN_TARGET_KIND_UNSPECIFIED = 0;
+  PLAN_TARGET_KIND_FILE = 1;
+  PLAN_TARGET_KIND_DIRECTORY = 2;
+  PLAN_TARGET_KIND_SYMBOLIC_LINK = 3;
+  PLAN_TARGET_KIND_OTHER = 4;
+  PLAN_TARGET_KIND_UNKNOWN = 5;
+}
+
+enum PlanBlockerKind {
+  PLAN_BLOCKER_KIND_UNSPECIFIED = 0;
+  PLAN_BLOCKER_KIND_PROVIDER_MANAGED = 1;
+  PLAN_BLOCKER_KIND_INCOMPLETE_EVIDENCE = 2;
+  PLAN_BLOCKER_KIND_CURRENT_ACTIVITY = 3;
+  PLAN_BLOCKER_KIND_IDENTITY_OR_ACCESS = 4;
+  PLAN_BLOCKER_KIND_SEMANTIC_UNIQUENESS = 5;
+  PLAN_BLOCKER_KIND_RECOVERABILITY = 6;
+  PLAN_BLOCKER_KIND_DEPENDENCY = 7;
+  PLAN_BLOCKER_KIND_PATH_RACE = 8;
+  PLAN_BLOCKER_KIND_SNAPSHOT = 9;
+  PLAN_BLOCKER_KIND_FORCE_REQUIRED = 10;
+  PLAN_BLOCKER_KIND_UNSUPPORTED_ADAPTER = 11;
+  PLAN_BLOCKER_KIND_PROTOCOL = 12;
+}
+
+enum PlanBlockerDisposition {
+  PLAN_BLOCKER_DISPOSITION_UNSPECIFIED = 0;
+  PLAN_BLOCKER_DISPOSITION_HARD = 1;
+  PLAN_BLOCKER_DISPOSITION_REVIEW = 2;
+  PLAN_BLOCKER_DISPOSITION_WARNING = 3;
+  PLAN_BLOCKER_DISPOSITION_INFORMATIONAL = 4;
+}
+
+enum WaiverKind {
+  WAIVER_KIND_UNSPECIFIED = 0;
+  WAIVER_KIND_RECENCY_AGE_POLICY = 1;
+  WAIVER_KIND_STATIC_ONLY_REBUILD_EVIDENCE = 2;
+  WAIVER_KIND_UNKNOWN_REBUILD_COST = 3;
+  WAIVER_KIND_AGENT_ASSISTED_CLASSIFICATION = 4;
+  WAIVER_KIND_TASK_SEMANTIC_COMPLETION = 5;
+  WAIVER_KIND_DUPLICATE_SURVIVOR_CHOICE = 6;
+  WAIVER_KIND_FULLY_OBSERVED_LOCAL_GIT_WORK_DISCARD = 7;
+  WAIVER_KIND_NORMAL_KEEP_POLICY = 8;
+}
+
+enum PathRaceProjection {
+  PATH_RACE_PROJECTION_UNSPECIFIED = 0;
+  PATH_RACE_PROJECTION_NONE_OBSERVED = 1;
+  PATH_RACE_PROJECTION_RESIDUAL = 2;
+  PATH_RACE_PROJECTION_UNKNOWN = 3;
+}
+
+message PlanRawPathProjection {
+  OpaqueIdentifier root_id = 1;
+  repeated bytes components = 2;
+  string display_path = 3;
+}
+
+message PlanBlockerProjection {
+  OpaqueIdentifier blocker_id = 1;
+  PlanBlockerKind kind = 2;
+  PlanBlockerDisposition disposition = 3;
+  string code = 4;
+  string summary = 5;
+}
+
+message PlanWaiverProjection {
+  OpaqueIdentifier waiver_id = 1;
+  WaiverKind kind = 2;
+  string predicate = 3;
+  string value_bucket = 4;
+  Digest256 semantic_evidence_sha256 = 5;
+  string summary = 6;
+}
+
+message PlanPrerequisiteProjection {
+  OpaqueIdentifier action_id = 1;
+  string summary = 2;
+}
+
+message EvidenceSummaryProjection {
+  EvidenceStatus status = 1;
+  string code = 2;
+  string summary = 3;
+}
+
+enum EvidenceUnknownReasonProjection {
+  EVIDENCE_UNKNOWN_REASON_PROJECTION_UNSPECIFIED = 0;
+  EVIDENCE_UNKNOWN_REASON_PROJECTION_NOT_REQUESTED = 1;
+  EVIDENCE_UNKNOWN_REASON_PROJECTION_UNSUPPORTED = 2;
+  EVIDENCE_UNKNOWN_REASON_PROJECTION_BUDGET_EXHAUSTED = 3;
+  EVIDENCE_UNKNOWN_REASON_PROJECTION_TIMED_OUT = 4;
+  EVIDENCE_UNKNOWN_REASON_PROJECTION_INCOMPLETE_COVERAGE = 5;
+  EVIDENCE_UNKNOWN_REASON_PROJECTION_UNAVAILABLE_VIA_PUBLIC_API = 6;
+}
+
+// value_sha256 binds the engine-internal canonical evidence bytes. It is not a
+// frontend input and the frontend must not recreate safety policy from it.
+message EvidenceObservationProjection {
+  EvidenceStatus status = 1;
+  string code = 2;
+  string summary = 3;
+  EvidenceUnknownReasonProjection unknown_reason = 4;
+  ObservationFailureProjection failure = 5;
+  Digest256 value_sha256 = 6;
+}
+
+enum EvidenceCoverageCompletenessProjection {
+  EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_UNSPECIFIED = 0;
+  EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_COMPLETE = 1;
+  EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_PARTIAL = 2;
+}
+
+enum EvidenceCoverageReasonProjection {
+  EVIDENCE_COVERAGE_REASON_PROJECTION_UNSPECIFIED = 0;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_BUDGET_EXHAUSTED = 1;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_ACCESS_POLICY_CHANGED = 2;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_CANCELLED = 3;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_COLLECTOR_FAILED = 4;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_IDENTITY_MISMATCH = 5;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_MISSING = 6;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_MOUNT_BOUNDARY = 7;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_NOT_REQUESTED_BY_PROFILE = 8;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_PERMISSION_DENIED = 9;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_PROVIDER_METADATA_ONLY = 10;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_PROVIDER_STATE_UNVERIFIED = 11;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_SUBTREE_INCOMPLETE = 12;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_TIMED_OUT = 13;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_UNREADABLE = 14;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_UNSTABLE_DURING_SCAN = 15;
+  EVIDENCE_COVERAGE_REASON_PROJECTION_USER_FINALIZED_PARTIAL = 16;
+}
+
+message EvidenceCoverageProjection {
+  EvidenceCoverageCompletenessProjection completeness = 1;
+  // Canonical enum order, unique, and capped at the complete closed reason set.
+  repeated EvidenceCoverageReasonProjection reasons = 2;
+  Digest256 binding_sha256 = 3;
+}
+
+enum EvidenceObjectKindProjection {
+  EVIDENCE_OBJECT_KIND_PROJECTION_UNSPECIFIED = 0;
+  EVIDENCE_OBJECT_KIND_PROJECTION_REGULAR = 1;
+  EVIDENCE_OBJECT_KIND_PROJECTION_DIRECTORY = 2;
+  EVIDENCE_OBJECT_KIND_PROJECTION_SYMBOLIC_LINK = 3;
+  EVIDENCE_OBJECT_KIND_PROJECTION_OTHER = 4;
+}
+
+message EvidenceObjectIdentityProjection {
+  uint64 device = 1;
+  uint64 file_id = 2;
+  EvidenceObjectKindProjection kind = 3;
+  Digest256 binding_sha256 = 4;
+}
+
+message NamespaceAccessEvidenceProjection {
+  EvidenceObservationProjection root_access_policy = 1;
+  EvidenceObservationProjection root_acl_digest = 2;
+  // The known value digest covers the ordered raw relative path, identity, and
+  // access-policy seal of every ancestor. Individual path records stay inside
+  // the engine; PlanTargetProjection remains the bounded raw-byte display path.
+  EvidenceObservationProjection ancestor_access_policy_chain = 3;
+  uint32 ancestor_count = 4;
+  uint32 maximum_ancestor_count = 5;
+  Digest256 namespace_binding_sha256 = 6;
+  EvidenceObservationProjection target_access_policy = 7;
+  EvidenceObservationProjection target_acl_digest = 8;
+  // Exact root and terminal ancestor seal observations emitted by the scanner.
+  EvidenceObservationProjection root_access_policy_seal = 9;
+  EvidenceObservationProjection ancestor_access_policy_seal = 10;
+}
+
+enum ContentBaselineKindProjection {
+  CONTENT_BASELINE_KIND_PROJECTION_UNSPECIFIED = 0;
+  CONTENT_BASELINE_KIND_PROJECTION_REQUIRED_DIGEST = 1;
+  CONTENT_BASELINE_KIND_PROJECTION_EXPLICITLY_NOT_APPLICABLE = 2;
+}
+
+enum ContentNotApplicableReasonProjection {
+  CONTENT_NOT_APPLICABLE_REASON_PROJECTION_UNSPECIFIED = 0;
+  CONTENT_NOT_APPLICABLE_REASON_PROJECTION_NOT_REGULAR_FILE = 1;
+  CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PLAN_CONTRACT_DOES_NOT_REQUIRE_CONTENT = 2;
+  CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PROVIDER_MANAGED = 3;
+  CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PROVIDER_STATE_UNVERIFIED = 4;
+  CONTENT_NOT_APPLICABLE_REASON_PROJECTION_METADATA_ONLY_OBJECT = 5;
+}
+
+message ContentBaselineEvidenceProjection {
+  EvidenceObservationProjection observation = 1;
+  ContentBaselineKindProjection known_kind = 2;
+  uint64 logical_bytes = 3;
+  ContentNotApplicableReasonProjection not_applicable_reason = 4;
+}
+
+enum GitWorktreeMarkerKindProjection {
+  GIT_WORKTREE_MARKER_KIND_PROJECTION_UNSPECIFIED = 0;
+  GIT_WORKTREE_MARKER_KIND_PROJECTION_ORDINARY_DIRECTORY = 1;
+  GIT_WORKTREE_MARKER_KIND_PROJECTION_LINKED_GITDIR_FILE = 2;
+  GIT_WORKTREE_MARKER_KIND_PROJECTION_ABSENT = 3;
+}
+
+enum GitFeatureStateProjection {
+  GIT_FEATURE_STATE_PROJECTION_UNSPECIFIED = 0;
+  GIT_FEATURE_STATE_PROJECTION_ABSENT = 1;
+  GIT_FEATURE_STATE_PROJECTION_PRESENT = 2;
+}
+
+enum GitLinkageKindProjection {
+  GIT_LINKAGE_KIND_PROJECTION_UNSPECIFIED = 0;
+  GIT_LINKAGE_KIND_PROJECTION_ORDINARY = 1;
+  GIT_LINKAGE_KIND_PROJECTION_LINKED = 2;
+}
+
+message GitChangeSummaryProjection {
+  uint64 staged = 1;
+  uint64 unstaged = 2;
+  uint64 unmerged = 3;
+  uint64 untracked = 4;
+  uint64 ignored = 5;
+  Digest256 streamed_change_set_sha256 = 6;
+  uint64 maximum_status_records = 7;
+}
+
+message GitRegistrationSummaryProjection {
+  EvidenceObjectIdentityProjection worktree_identity = 1;
+  EvidenceObjectIdentityProjection administrative_directory_identity = 2;
+  EvidenceObjectIdentityProjection common_directory_identity = 3;
+  Digest256 registration_sha256 = 4;
+  Digest256 metadata_sha256 = 5;
+}
+
+message GitWorktreeScanSummaryProjection {
+  // SHA-256 of domain "diskplan/git-worktree-scan-evidence/v1\0" plus the
+  // engine's canonical bounded scan evidence and collection-budget binding.
+  Digest256 bundle_sha256 = 1;
+  EvidenceObservationProjection marker = 2;
+  GitWorktreeMarkerKindProjection known_marker_kind = 3;
+  GitRegistrationSummaryProjection registration = 4;
+  GitChangeSummaryProjection changes = 5;
+  GitLinkageKindProjection known_linkage_kind = 6;
+  Digest256 linked_registration_id = 7;
+  GitFeatureStateProjection known_nested_repositories = 8;
+  GitFeatureStateProjection known_submodules = 9;
+  GitFeatureStateProjection known_sparse_checkout = 10;
+  EvidenceCoverageProjection command_coverage = 11;
+}
+
+// Git evidence contains fixed observations and digests only. It never carries
+// an unbounded status/path record list or lets the frontend infer stageability.
+message GitWorktreeEvidenceProjection {
+  // Exact digest of the canonical policy GitWorktreeEvidence.bindingBytes.
+  Digest256 bundle_sha256 = 1;
+  EvidenceObservationProjection no_follow_traversal_complete = 2;
+  EvidenceObservationProjection head_identity = 3;
+  EvidenceObservationProjection index_digest = 4;
+  EvidenceObservationProjection local_changes = 5;
+  EvidenceObservationProjection registration = 6;
+  EvidenceObservationProjection linkage = 7;
+  EvidenceObservationProjection sparse_checkout = 8;
+  EvidenceObservationProjection nested_repositories = 9;
+  EvidenceObservationProjection submodules = 10;
+  EvidenceObservationProjection trusted_exclusive_namespace = 11;
+  EvidenceObservationProjection post_quarantine_coverage = 12;
+  EvidenceObservationProjection post_discard_successor = 13;
+  GitWorktreeScanSummaryProjection scan_summary = 14;
+}
+
+enum AdapterScopeProvenanceKindProjection {
+  ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_UNSPECIFIED = 0;
+  ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_CONFIGURED_BOUND_SCOPE = 1;
+  ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_TYPE_HINT_ONLY = 2;
+}
+
+enum CodexHelperCapabilityKindProjection {
+  CODEX_HELPER_CAPABILITY_KIND_PROJECTION_UNSPECIFIED = 0;
+  CODEX_HELPER_CAPABILITY_KIND_PROJECTION_AVAILABLE = 1;
+  CODEX_HELPER_CAPABILITY_KIND_PROJECTION_UNAVAILABLE = 2;
+}
+
+message CodexCleanupScopeEvidenceProjection {
+  AdapterScopeProvenanceKindProjection provenance_kind = 1;
+  // Present only for a configured bound scope. Canonical identifier bytes;
+  // never a filesystem path String.
+  OpaqueIdentifier cleanup_scope_id = 2;
+  EvidenceObservationProjection provenance = 3;
+  EvidenceObservationProjection bound_root_identity = 4;
+  EvidenceObjectIdentityProjection known_bound_root_identity = 5;
+  EvidenceObservationProjection helper_capability = 6;
+  CodexHelperCapabilityKindProjection known_helper_capability = 7;
+  EvidenceCoverageProjection coverage = 8;
+  // SHA-256 of domain "diskplan/codex-cleanup-scope-evidence/v1\0" plus the
+  // canonical evidence, collector identity, and budget binding.
+  Digest256 scope_binding_sha256 = 9;
+}
+
+enum VersionedArtifactActiveStateProjection {
+  VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_UNSPECIFIED = 0;
+  VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CANDIDATE_ACTIVE = 1;
+  VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CANDIDATE_INACTIVE = 2;
+  VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_NONE_ACTIVE = 3;
+  VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CONFLICT = 4;
+}
+
+enum VersionedArtifactSurvivorStateProjection {
+  VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_UNSPECIFIED = 0;
+  VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_CANDIDATE_IS_SURVIVOR = 1;
+  VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_OTHER_SURVIVOR = 2;
+  VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_NOT_REQUIRED = 3;
+  VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_UNRESOLVED = 4;
+  VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_CONFLICT = 5;
+}
+
+message VersionedArtifactEvidenceProjection {
+  // Raw authoritative identifier/component bytes. Producers must not derive
+  // either field through lossy UTF-8 decoding or path normalization.
+  OpaqueIdentifier artifact_kind_id = 1;
+  OpaqueIdentifier version_id = 2;
+  EvidenceObservationProjection inventory_coverage = 3;
+  VersionedArtifactActiveStateProjection active_state = 4;
+  VersionedArtifactSurvivorStateProjection survivor_state = 5;
+  OpaqueIdentifier survivor_evidence_id = 6;
+  uint64 observed_version_count = 7;
+  uint64 active_version_count = 8;
+  uint64 survivor_count = 9;
+  uint64 maximum_version_count = 10;
+  // SHA-256 of domain "diskplan/versioned-artifact-scan-evidence/v1\0" plus
+  // exact per-version raw names/identities/metadata, selector/survivors,
+  // collector identity, and budget binding retained by the Swift engine.
+  Digest256 bundle_sha256 = 11;
+  AdapterScopeProvenanceKindProjection provenance_kind = 12;
+  OpaqueIdentifier configured_scope_id = 13;
+  EvidenceObservationProjection provenance = 14;
+  EvidenceObservationProjection install_root_identity = 15;
+  EvidenceObjectIdentityProjection known_install_root_identity = 16;
+  EvidenceObservationProjection active_selector = 17;
+  EvidenceObjectIdentityProjection known_active_selector_identity = 18;
+  // Exact single leaf bytes, at most 4 KiB, never decoded or normalized.
+  bytes raw_active_selector_target = 19;
+  EvidenceObservationProjection survivor_set = 20;
+  // Digest of the canonical ordered raw survivor-name set; names are not sent.
+  Digest256 survivor_set_sha256 = 21;
+  uint64 metadata_complete_count = 22;
+  EvidenceObservationProjection current_update_marker = 23;
+  EvidenceCoverageProjection coverage = 24;
+  bool current_update_in_progress = 25;
+}
+
+message PlanSafetyEvidenceProjection {
+  // Exact FrozenEvidenceSnapshot.evidenceID bytes from the Swift policy model.
+  Digest256 policy_evidence_sha256 = 1;
+  NamespaceAccessEvidenceProjection namespace_access = 2;
+  ContentBaselineEvidenceProjection content_baseline = 3;
+  GitWorktreeEvidenceProjection git_worktree = 4;
+  CodexCleanupScopeEvidenceProjection codex_cleanup_scope = 5;
+  VersionedArtifactEvidenceProjection versioned_artifact = 6;
+}
+
+// The preview is produced only by the Swift engine. raw_argv is display-only
+// evidence of the exact adapter shape and is never accepted in a request.
+message ActionExecutionPreviewProjection {
+  PlanActionKind adapter = 1;
+  bytes raw_executable = 2;
+  repeated bytes raw_argv = 3;
+  repeated string display_argv = 4;
+  string postcondition = 5;
+  bool mutation_supported = 6;
+  // Protocol 1.5: exact execve working-directory bytes. Presence is required
+  // at 1.5, including an explicitly empty value for a non-mutating preview.
+  // Protocol 1.4 senders must omit this field.
+  optional bytes raw_working_directory = 7;
+  // Protocol 1.5: engine-authored residual race classification. Protocol 1.4
+  // senders must retain the zero value and omit the field from the wire.
+  PathRaceProjection path_race = 8;
+}
+
+message PlanActionProjection {
+  OpaqueIdentifier action_id = 1;
+  OpaqueIdentifier action_lineage_id = 2;
+  PlanDisposition disposition = 3;
+  PlanActionKind kind = 4;
+  string kind_label = 5;
+  uint32 kind_order = 6;
+  string label = 7;
+  uint64 order = 8;
+  PlanStageability stageability = 9;
+  repeated PlanWaiverProjection required_waivers = 10;
+  ByteEstimateProjection immediate_reclaim = 11;
+  ByteEstimateProjection shared_unlock = 12;
+  PlanActivity activity = 13;
+  PlanRecoverability recoverability = 14;
+  repeated PlanBlockerProjection blockers = 15;
+  repeated PlanPrerequisiteProjection prerequisites = 16;
+  repeated OpaqueIdentifier release_set_ids = 17;
+  bool requires_force = 18;
+  string force_reason = 19;
+  PathRaceProjection path_race = 20;
+  repeated OpaqueIdentifier target_ids = 21;
+  repeated EvidenceSummaryProjection evidence = 22;
+  ActionExecutionPreviewProjection execution_preview = 23;
+  PlanRecommendation recommendation = 24;
+  PlanSafetyEvidenceProjection safety_evidence = 25;
+}
+
+// Target trees are flat records so one large directory cannot create an
+// unbounded recursive protobuf object. parent_target_id is absent at a root.
+message PlanTargetProjection {
+  OpaqueIdentifier target_id = 1;
+  OpaqueIdentifier action_id = 2;
+  OpaqueIdentifier parent_target_id = 3;
+  uint32 depth = 4;
+  uint64 order = 5;
+  PlanRawPathProjection path = 6;
+  PlanTargetKind kind = 7;
+}
+
+message PlanReleaseSetProjection {
+  OpaqueIdentifier release_set_id = 1;
+  repeated OpaqueIdentifier action_ids = 2;
+  ByteEstimateProjection shared_unlock = 3;
+  repeated PlanBlockerProjection blockers = 4;
+}
+
+// Records are ordered by record_index and encoded in chunks as four-byte
+// big-endian length followed by the exact protobuf bytes of each record.
+message PlanProjectionRecord {
+  uint64 record_index = 1;
+  oneof body {
+    PlanActionProjection action = 10;
+    PlanTargetProjection target = 11;
+    PlanReleaseSetProjection release_set = 12;
+  }
+}
+
+message PlanProjectionChunk {
+  OpaqueIdentifier projection_id = 1;
+  uint32 chunk_index = 2;
+  OpaqueIdentifier chunk_id = 3;
+  uint32 record_count = 4;
+  bytes canonical_record_payload = 5;
+  Digest256 payload_sha256 = 6;
+}
+
+message PlanProjectionChunkDescriptor {
+  uint32 chunk_index = 1;
+  OpaqueIdentifier chunk_id = 2;
+  uint32 record_count = 3;
+  uint64 payload_bytes = 4;
+  Digest256 payload_sha256 = 5;
+}
+
+message PlanDispositionCount {
+  PlanDisposition disposition = 1;
+  uint64 action_count = 2;
+}
+
+message PlanRecommendationCount {
+  PlanRecommendation recommendation = 1;
+  uint64 action_count = 2;
+}
+
+message PlanProjectionManifest {
+  uint32 manifest_version = 1;
+  OpaqueIdentifier projection_id = 2;
+  Digest256 plan_sha256 = 3;
+  Digest256 evidence_sha256 = 4;
+  string policy_version = 5;
+  string schema_version = 6;
+  uint32 chunk_count = 7;
+  uint64 record_count = 8;
+  uint64 action_count = 9;
+  uint64 target_count = 10;
+  uint64 release_set_count = 11;
+  uint64 blocker_count = 12;
+  uint64 waiver_count = 13;
+  uint64 record_payload_bytes = 14;
+  uint64 maximum_record_count = 15;
+  uint64 maximum_record_payload_bytes = 16;
+  uint32 maximum_chunk_payload_bytes = 17;
+  uint32 maximum_manifest_encoded_bytes = 18;
+  repeated PlanProjectionChunkDescriptor chunks = 19;
+  Digest256 projection_sha256 = 20;
+  repeated PlanDispositionCount disposition_counts = 21;
+  repeated PlanRecommendationCount recommendation_counts = 22;
+  uint64 cleanup_candidate_count = 23;
+  OpaqueIdentifier scan_session_id = 24;
+  OpaqueIdentifier scan_checkpoint_id = 25;
+  OpaqueIdentifier plan_id = 26;
+  OpaqueIdentifier evidence_id = 27;
+  Digest256 scan_checkpoint_evidence_sha256 = 28;
+}
+
+message BuildPlanRequest {
+  uint64 request_id = 1;
+  OpaqueIdentifier scan_session_id = 2;
+  OpaqueIdentifier scan_checkpoint_id = 3;
+  Digest256 scan_evidence_sha256 = 4;
+  bool allow_partial_evidence = 5;
+  AgentMode agent_mode = 6;
+}
+
+enum AgentMode {
+  AGENT_MODE_UNSPECIFIED = 0;
+  AGENT_MODE_OFF = 1;
+  AGENT_MODE_ASK = 2;
+  AGENT_MODE_AUTO = 3;
+}
+
+message BuildPlanAccepted {
+  OpaqueIdentifier plan_build_id = 1;
+}
+
+message PlanProjection {
+  PlanProjectionManifest manifest = 1;
+}
+
+message PlanProjectionInvalidated {
+  OpaqueIdentifier projection_id = 1;
+  string reason_code = 2;
+  string summary = 3;
+}
+
+enum DecisionEditKind {
+  DECISION_EDIT_KIND_UNSPECIFIED = 0;
+  DECISION_EDIT_KIND_STAGE_ACTION = 1;
+  DECISION_EDIT_KIND_UNSTAGE_ACTION = 2;
+  DECISION_EDIT_KIND_ALLOW_WAIVER = 3;
+  DECISION_EDIT_KIND_REVOKE_WAIVER = 4;
+  DECISION_EDIT_KIND_REPLACE_NOTES = 5;
+  DECISION_EDIT_KIND_APPLY_BATCH_SELECTION_PRESET = 6;
+}
+
+enum BatchSelectionPreset {
+  BATCH_SELECTION_PRESET_UNSPECIFIED = 0;
+  // The engine selects only actions whose authoritative policy result is
+  // stageable without a waiver. An empty result is valid and stays explicit.
+  BATCH_SELECTION_PRESET_SAFE_STAGEABLE_WITHOUT_WAIVER = 1;
+  reserved 2 to 8;
+}
+
+message StageActionEdit {
+  OpaqueIdentifier action_id = 1;
+}
+
+message AllowWaiverEdit {
+  OpaqueIdentifier action_id = 1;
+  OpaqueIdentifier waiver_id = 2;
+  string reason = 3;
+  OpaqueIdentifier consent_event_id = 4;
+}
+
+message RevokeWaiverEdit {
+  OpaqueIdentifier action_id = 1;
+  OpaqueIdentifier waiver_id = 2;
+}
+
+message ReplaceNotesEdit {
+  repeated string user_notes = 1;
+}
+
+message ApplyBatchSelectionPresetEdit {
+  BatchSelectionPreset preset = 1;
+}
+
+message DecisionOverlayEdit {
+  DecisionEditKind kind = 1;
+  oneof edit {
+    StageActionEdit stage_action = 10;
+    StageActionEdit unstage_action = 11;
+    AllowWaiverEdit allow_waiver = 12;
+    RevokeWaiverEdit revoke_waiver = 13;
+    ReplaceNotesEdit replace_notes = 14;
+    ApplyBatchSelectionPresetEdit apply_batch_selection_preset = 15;
+  }
+}
+
+message DecisionOverlayEditRequest {
+  uint64 request_id = 1;
+  OpaqueIdentifier projection_id = 2;
+  uint64 base_revision = 3;
+  repeated DecisionOverlayEdit edits = 4;
+  reserved 5;
+}
+
+message AcknowledgedWaiver {
+  OpaqueIdentifier action_id = 1;
+  OpaqueIdentifier waiver_id = 2;
+  Digest256 consent_sha256 = 3;
+}
+
+message DecisionOverlayAcknowledged {
+  OpaqueIdentifier projection_id = 1;
+  uint64 revision = 2;
+  Digest256 overlay_sha256 = 3;
+  repeated OpaqueIdentifier selected_action_ids = 4;
+  repeated AcknowledgedWaiver acknowledged_waivers = 5;
+  repeated string user_notes = 6;
+  repeated OpaqueIdentifier force_warning_action_ids = 7;
+  uint32 maximum_selected_actions = 8;
+  uint32 maximum_waiver_consents = 9;
+  uint32 maximum_user_notes = 10;
+  uint64 selected_action_count = 11;
+  OpaqueIdentifier overlay_id = 12;
+  OpaqueIdentifier plan_id = 13;
+  Digest256 plan_sha256 = 14;
+  OpaqueIdentifier evidence_id = 15;
+  Digest256 evidence_sha256 = 16;
+  uint32 maximum_encoded_bytes = 17;
+  uint32 maximum_note_bytes = 18;
+  OpaqueIdentifier scan_session_id = 19;
+  OpaqueIdentifier scan_checkpoint_id = 20;
+  Digest256 scan_checkpoint_evidence_sha256 = 21;
+  Digest256 projection_sha256 = 22;
+}
+
+enum DecisionOverlayRejectCode {
+  DECISION_OVERLAY_REJECT_CODE_UNSPECIFIED = 0;
+  DECISION_OVERLAY_REJECT_CODE_UNKNOWN_PROJECTION = 1;
+  DECISION_OVERLAY_REJECT_CODE_STALE_REVISION = 2;
+  DECISION_OVERLAY_REJECT_CODE_UNKNOWN_ACTION = 3;
+  DECISION_OVERLAY_REJECT_CODE_ACTION_NOT_STAGEABLE = 4;
+  DECISION_OVERLAY_REJECT_CODE_UNKNOWN_WAIVER = 5;
+  DECISION_OVERLAY_REJECT_CODE_WAIVER_NOT_ALLOWED = 6;
+  DECISION_OVERLAY_REJECT_CODE_INVALID_REASON = 7;
+  DECISION_OVERLAY_REJECT_CODE_LIMIT_EXCEEDED = 8;
+  DECISION_OVERLAY_REJECT_CODE_INVALID_EDIT = 9;
+  DECISION_OVERLAY_REJECT_CODE_INTERNAL_ERROR = 10;
+}
+
+message DecisionOverlayRejected {
+  DecisionOverlayRejectCode code = 1;
+  string summary = 2;
+  OpaqueIdentifier action_id = 3;
+  OpaqueIdentifier waiver_id = 4;
+  uint64 current_revision = 5;
+}
+
+message PrepareDryRunRequest {
+  uint64 request_id = 1;
+  OpaqueIdentifier projection_id = 2;
+  uint64 overlay_revision = 3;
+  Digest256 overlay_sha256 = 4;
+  OpaqueIdentifier overlay_id = 5;
+}
+
+enum RevalidationFailureKind {
+  REVALIDATION_FAILURE_KIND_UNSPECIFIED = 0;
+  REVALIDATION_FAILURE_KIND_MISSING = 1;
+  REVALIDATION_FAILURE_KIND_UNKNOWN = 2;
+  REVALIDATION_FAILURE_KIND_UNREADABLE = 3;
+  REVALIDATION_FAILURE_KIND_COLLECTION_FAILED = 4;
+  REVALIDATION_FAILURE_KIND_CANCELLED = 5;
+  REVALIDATION_FAILURE_KIND_IDENTITY_MISMATCH = 6;
+  REVALIDATION_FAILURE_KIND_CONTENT_MISMATCH = 7;
+  REVALIDATION_FAILURE_KIND_ACCESS_POLICY_MISMATCH = 8;
+  REVALIDATION_FAILURE_KIND_NAMESPACE_IDENTITY_MISMATCH = 9;
+  REVALIDATION_FAILURE_KIND_NAMESPACE_ACCESS_POLICY_MISMATCH = 10;
+  REVALIDATION_FAILURE_KIND_COVERAGE_MISMATCH = 11;
+  REVALIDATION_FAILURE_KIND_ACTIVITY_MISMATCH = 12;
+  REVALIDATION_FAILURE_KIND_PROTECTION_MISMATCH = 13;
+  REVALIDATION_FAILURE_KIND_PROVIDER_MISMATCH = 14;
+  REVALIDATION_FAILURE_KIND_RECOVERABILITY_MISMATCH = 15;
+  REVALIDATION_FAILURE_KIND_DEPENDENCY_MISMATCH = 16;
+  REVALIDATION_FAILURE_KIND_GIT_PREREQUISITE_MISMATCH = 17;
+  REVALIDATION_FAILURE_KIND_RELEASE_TOPOLOGY_MISMATCH = 18;
+  REVALIDATION_FAILURE_KIND_SURVIVOR_INVARIANT_VIOLATED = 19;
+  REVALIDATION_FAILURE_KIND_TERMINAL_NAMESPACE_INVARIANT_VIOLATED = 20;
+  REVALIDATION_FAILURE_KIND_INCOMPLETE_COMPOUND_RELEASE_UNIT = 21;
+  REVALIDATION_FAILURE_KIND_DUPLICATE_OBSERVATION = 22;
+  REVALIDATION_FAILURE_KIND_UNEXPECTED_OBSERVATION = 23;
+  REVALIDATION_FAILURE_KIND_POLICY_EVIDENCE_MISMATCH = 24;
+  REVALIDATION_FAILURE_KIND_POLICY_THRESHOLD_CROSSED = 25;
+  REVALIDATION_FAILURE_KIND_STALE_CONSENT = 26;
+}
+
+enum RevalidationSubject {
+  REVALIDATION_SUBJECT_UNSPECIFIED = 0;
+  REVALIDATION_SUBJECT_TARGET_IDENTITY = 1;
+  REVALIDATION_SUBJECT_TARGET_CONTENT = 2;
+  REVALIDATION_SUBJECT_TARGET_ACCESS_POLICY = 3;
+  REVALIDATION_SUBJECT_COVERAGE = 4;
+  REVALIDATION_SUBJECT_COLLECTOR_STATUS = 5;
+  REVALIDATION_SUBJECT_ACTIVITY = 6;
+  REVALIDATION_SUBJECT_EXPLICIT_PROTECTION = 7;
+  REVALIDATION_SUBJECT_PROVIDER_STATE = 8;
+  REVALIDATION_SUBJECT_RECOVERABILITY = 9;
+  REVALIDATION_SUBJECT_DEPENDENCY = 10;
+  REVALIDATION_SUBJECT_ROOT_IDENTITY = 11;
+  REVALIDATION_SUBJECT_ROOT_ACCESS_POLICY = 12;
+  REVALIDATION_SUBJECT_PARENT_IDENTITY = 13;
+  REVALIDATION_SUBJECT_PARENT_ACCESS_POLICY = 14;
+  REVALIDATION_SUBJECT_GIT_PREREQUISITES = 15;
+  REVALIDATION_SUBJECT_RELEASE_TOPOLOGY = 16;
+  REVALIDATION_SUBJECT_DUPLICATE_SURVIVORS = 17;
+  REVALIDATION_SUBJECT_TERMINAL_NAMESPACES = 18;
+  REVALIDATION_SUBJECT_COMPOUND_RELEASE_UNIT = 19;
+  REVALIDATION_SUBJECT_COLLECTOR = 20;
+  REVALIDATION_SUBJECT_POLICY_EVIDENCE = 21;
+  REVALIDATION_SUBJECT_WAIVER_CONSENT = 22;
+}
+
+message ObservationFailureProjection {
+  string code = 1;
+  string collector = 2;
+  int32 error_code = 3;
+  bool has_error_code = 4;
+}
+
+message RevalidationFindingProjection {
+  OpaqueIdentifier finding_id = 1;
+  OpaqueIdentifier action_id = 2;
+  RevalidationSubject subject = 3;
+  RevalidationFailureKind kind = 4;
+  bytes subject_parameter = 5;
+  oneof detail {
+    ObservationFailureProjection observation_failure = 6;
+    UnknownProjectionValue unknown = 7;
+  }
+  string summary = 8;
+}
+
+message ActionRevalidationProjection {
+  OpaqueIdentifier action_id = 1;
+  bool current = 2;
+  repeated RevalidationFindingProjection findings = 3;
+}
+
+message ExecutionEpochProjection {
+  OpaqueIdentifier epoch_id = 1;
+  int64 semantic_reference_time_seconds = 2;
+  int64 issued_at_seconds = 3;
+  int64 deadline_seconds = 4;
+}
+
+message DryRunActionProjection {
+  OpaqueIdentifier action_id = 1;
+  ActionExecutionPreviewProjection execution_preview = 2;
+  reserved 3;
+}
+
+message RevalidationProjectionPayload {
+  repeated ActionRevalidationProjection action_outcomes = 1;
+  repeated RevalidationFindingProjection global_findings = 2;
+}
+
+message DryRunProjectionPayload {
+  RevalidationProjectionPayload revalidation = 1;
+  repeated DryRunActionProjection actions = 2;
+  reserved 3;
+}
+
+message DryRunProjectionManifest {
+  uint32 manifest_version = 1;
+  OpaqueIdentifier projection_id = 2;
+  Digest256 plan_sha256 = 3;
+  Digest256 overlay_sha256 = 4;
+  ExecutionEpochProjection epoch = 5;
+  bool current = 6;
+  uint64 action_count = 7;
+  uint64 finding_count = 8;
+  uint32 maximum_action_count = 9;
+  uint32 maximum_finding_count = 10;
+  uint32 maximum_projection_payload_bytes = 11;
+  Digest256 payload_sha256 = 12;
+  Digest256 projection_sha256 = 13;
+  OpaqueIdentifier dry_run_id = 14;
+  uint64 selected_action_count = 15;
+  OpaqueIdentifier overlay_id = 16;
+  OpaqueIdentifier plan_id = 17;
+  OpaqueIdentifier evidence_id = 18;
+  Digest256 evidence_sha256 = 19;
+  Digest256 current_binding_sha256 = 20;
+  Digest256 revalidation_sha256 = 21;
+  uint64 overlay_revision = 22;
+  OpaqueIdentifier scan_session_id = 23;
+  OpaqueIdentifier scan_checkpoint_id = 24;
+  Digest256 scan_checkpoint_evidence_sha256 = 25;
+}
+
+// Dry-run is deliberately capability-free. The payload is an engine-authored
+// projection and cannot be submitted as apply authority.
+message DryRunProjection {
+  bytes canonical_projection_payload = 1;
+  DryRunProjectionManifest manifest = 2;
+}
+
+message PrepareApplyReviewRequest {
+  uint64 request_id = 1;
+  OpaqueIdentifier projection_id = 2;
+  uint64 overlay_revision = 3;
+  Digest256 overlay_sha256 = 4;
+  OpaqueIdentifier overlay_id = 5;
+}
+
+message ApplyReviewActionProjection {
+  OpaqueIdentifier action_id = 1;
+  bool requires_force = 2;
+  ActionExecutionPreviewProjection execution_preview = 3;
+}
+
+message ApplyReviewProjection {
+  OpaqueIdentifier apply_review_id = 1;
+  OpaqueIdentifier projection_id = 2;
+  Digest256 plan_sha256 = 3;
+  Digest256 overlay_sha256 = 4;
+  ExecutionEpochProjection epoch = 5;
+  RevalidationProjectionPayload revalidation = 6;
+  reserved 7;
+  repeated OpaqueIdentifier force_warning_action_ids = 8;
+  repeated ApplyReviewActionProjection actions = 9;
+  Digest256 review_binding_sha256 = 10;
+  uint32 maximum_action_count = 11;
+  uint32 maximum_finding_count = 12;
+  uint32 maximum_encoded_bytes = 13;
+  Digest256 projection_sha256 = 14;
+  OpaqueIdentifier overlay_id = 15;
+  uint64 selected_action_count = 16;
+  OpaqueIdentifier plan_id = 17;
+  OpaqueIdentifier evidence_id = 18;
+  Digest256 evidence_sha256 = 19;
+  Digest256 current_binding_sha256 = 20;
+  Digest256 revalidation_sha256 = 21;
+  uint64 overlay_revision = 22;
+  OpaqueIdentifier scan_session_id = 23;
+  OpaqueIdentifier scan_checkpoint_id = 24;
+  Digest256 scan_checkpoint_evidence_sha256 = 25;
+}
+
+// apply_review_id is only a same-session registry lookup. It is not an apply
+// capability and is insufficient without the exact engine-authored binding
+// and force-warning list.
+message ConfirmApplyRequest {
+  uint64 request_id = 1;
+  OpaqueIdentifier apply_review_id = 2;
+  Digest256 review_binding_sha256 = 3;
+  repeated OpaqueIdentifier confirmed_force_action_ids = 4;
+}
+
+message CancelExecutionRequest {
+  uint64 request_id = 1;
+  OpaqueIdentifier execution_id = 2;
+}
+
+message ExecutionUnitProjection {
+  oneof unit {
+    OpaqueIdentifier action_id = 1;
+    CompoundReleaseUnitProjection compound_release = 2;
+  }
+}
+
+message CompoundReleaseUnitProjection {
+  repeated OpaqueIdentifier release_set_ids = 1;
+}
+
+enum ExecutionStepStatus {
+  EXECUTION_STEP_STATUS_UNSPECIFIED = 0;
+  EXECUTION_STEP_STATUS_SUCCEEDED = 1;
+  EXECUTION_STEP_STATUS_PARTIALLY_SUCCEEDED = 2;
+  EXECUTION_STEP_STATUS_FAILED = 3;
+  EXECUTION_STEP_STATUS_CANCELLED = 4;
+  EXECUTION_STEP_STATUS_EXPIRED = 5;
+  EXECUTION_STEP_STATUS_SUPERSEDED = 6;
+  EXECUTION_STEP_STATUS_SKIPPED_PREREQUISITE = 7;
+}
+
+enum ExecutionUnitStatus {
+  EXECUTION_UNIT_STATUS_UNSPECIFIED = 0;
+  EXECUTION_UNIT_STATUS_SUCCEEDED = 1;
+  EXECUTION_UNIT_STATUS_PARTIALLY_FAILED = 2;
+  EXECUTION_UNIT_STATUS_FAILED = 3;
+  EXECUTION_UNIT_STATUS_CANCELLED = 4;
+  EXECUTION_UNIT_STATUS_SKIPPED_PREREQUISITE = 5;
+  EXECUTION_UNIT_STATUS_JIT_REJECTED = 6;
+  EXECUTION_UNIT_STATUS_EXPIRED = 7;
+  EXECUTION_UNIT_STATUS_SUPERSEDED = 8;
+}
+
+message ExecutionAdapterFailureProjection {
+  string code = 1;
+  int32 error_code = 2;
+  bool has_error_code = 3;
+  int32 exit_status = 4;
+  bool has_exit_status = 5;
+  int32 terminating_signal = 6;
+  bool has_terminating_signal = 7;
+}
+
+enum AdapterOutcomeKind {
+  ADAPTER_OUTCOME_KIND_UNSPECIFIED = 0;
+  ADAPTER_OUTCOME_KIND_SUCCEEDED = 1;
+  ADAPTER_OUTCOME_KIND_FAILED = 2;
+  ADAPTER_OUTCOME_KIND_CANCELLED = 3;
+  ADAPTER_OUTCOME_KIND_TIMED_OUT = 4;
+  ADAPTER_OUTCOME_KIND_NOT_STARTED = 5;
+}
+
+message AdapterOutcomeProjection {
+  AdapterOutcomeKind kind = 1;
+  string detail_code = 2;
+  oneof detail {
+    ExecutionAdapterFailureProjection failure = 3;
+    string not_started_reason = 4;
+  }
+}
+
+enum PostVerificationKind {
+  POST_VERIFICATION_KIND_UNSPECIFIED = 0;
+  POST_VERIFICATION_KIND_SATISFIED = 1;
+  POST_VERIFICATION_KIND_EXPECTED_RESIDUAL = 2;
+  POST_VERIFICATION_KIND_MISSING = 3;
+  POST_VERIFICATION_KIND_NOT_SATISFIED = 4;
+  POST_VERIFICATION_KIND_UNKNOWN = 5;
+  POST_VERIFICATION_KIND_UNREADABLE = 6;
+  POST_VERIFICATION_KIND_FAILED = 7;
+}
+
+message PostVerificationProjection {
+  PostVerificationKind kind = 1;
+  string code = 2;
+  oneof detail {
+    ExecutionAdapterFailureProjection residual = 3;
+    UnknownProjectionValue unknown = 4;
+    ObservationFailureProjection observation_failure = 5;
+  }
+}
+
+message ExecutionStepFinishedProjection {
+  OpaqueIdentifier action_id = 1;
+  ExecutionStepStatus status = 2;
+  AdapterOutcomeProjection adapter_outcome = 3;
+  PostVerificationProjection post_verification = 4;
+}
+
+message ReleasePostVerificationProjection {
+  OpaqueIdentifier release_set_id = 1;
+  PostVerificationProjection outcome = 2;
+}
+
+message AuditWriteFailureProjection {
+  uint64 event_index = 1;
+  string code = 2;
+  int32 error_code = 3;
+  bool has_error_code = 4;
+}
+
+message ApplyStartedProjection {
+  ExecutionEpochProjection epoch = 1;
+  OpaqueIdentifier apply_review_id = 2;
+  OpaqueIdentifier projection_id = 3;
+  Digest256 plan_sha256 = 4;
+  OpaqueIdentifier overlay_id = 5;
+  Digest256 overlay_sha256 = 6;
+  Digest256 review_binding_sha256 = 7;
+  uint64 selected_action_count = 8;
+  OpaqueIdentifier plan_id = 9;
+  OpaqueIdentifier evidence_id = 10;
+  Digest256 evidence_sha256 = 11;
+  Digest256 current_binding_sha256 = 12;
+  Digest256 revalidation_sha256 = 13;
+  uint64 overlay_revision = 14;
+  OpaqueIdentifier scan_session_id = 15;
+  OpaqueIdentifier scan_checkpoint_id = 16;
+  Digest256 scan_checkpoint_evidence_sha256 = 17;
+}
+
+message UnitStartedProjection {
+  ExecutionUnitProjection unit = 1;
+}
+
+message ForceRequiredWarningProjection {
+  OpaqueIdentifier action_id = 1;
+  ActionExecutionPreviewProjection preview = 2;
+}
+
+message UnitFinishedProjection {
+  ExecutionUnitProjection unit = 1;
+  ExecutionUnitStatus status = 2;
+}
+
+message UnitJITRejectedProjection {
+  ExecutionUnitProjection unit = 1;
+  RevalidationProjectionPayload revalidation = 2;
+  reserved 3;
+}
+
+message UnitSkippedPrerequisiteProjection {
+  ExecutionUnitProjection unit = 1;
+  repeated ExecutionUnitProjection blocking_prerequisites = 2;
+}
+
+message ExecutionCancellationAcknowledgedProjection {
+  string reason = 1;
+}
+
+enum ApplyStartFailureKind {
+  APPLY_START_FAILURE_KIND_UNSPECIFIED = 0;
+  APPLY_START_FAILURE_KIND_AUTHORIZATION_ALREADY_CLAIMED = 1;
+  APPLY_START_FAILURE_KIND_INVALID_OVERLAY = 2;
+  APPLY_START_FAILURE_KIND_MANIFEST_BINDING_MISMATCH = 3;
+  APPLY_START_FAILURE_KIND_EXPIRED = 4;
+  APPLY_START_FAILURE_KIND_INVALID_EXECUTION_GRAPH = 5;
+  APPLY_START_FAILURE_KIND_PREPARATION_SUPERSEDED = 6;
+  APPLY_START_FAILURE_KIND_FORCE_CONFIRMATION_BINDING_MISMATCH = 7;
+}
+
+message ApplyFinishedProjection {
+  ApplyStartFailureKind start_failure = 1;
+  uint64 unit_count = 2;
+  uint64 succeeded_unit_count = 3;
+  uint64 partial_unit_count = 4;
+  uint64 failed_unit_count = 5;
+  uint64 cancelled_unit_count = 6;
+  uint64 skipped_unit_count = 7;
+  uint64 audit_failure_count = 8;
+  Digest256 execution_record_sha256 = 9;
+  uint64 event_count = 10;
+  uint64 encoded_event_bytes = 11;
+  uint64 maximum_event_count = 12;
+  uint64 maximum_encoded_event_bytes = 13;
+  uint64 jit_rejected_unit_count = 14;
+  uint64 expired_unit_count = 15;
+  uint64 superseded_unit_count = 16;
+  OpaqueIdentifier apply_review_id = 17;
+  Digest256 review_binding_sha256 = 18;
+}
+
+// Protocol 1.6: a fail-closed terminal emitted when the engine can no longer
+// produce a trustworthy positive ApplyFinishedProjection after mutation may
+// have begun. These reasons classify only the projection boundary; they do not
+// reinterpret backend or policy outcomes.
+enum ExecutionStreamFailureKind {
+  EXECUTION_STREAM_FAILURE_KIND_UNSPECIFIED = 0;
+  EXECUTION_STREAM_FAILURE_KIND_PROJECTION_LIMIT_EXCEEDED = 1;
+  EXECUTION_STREAM_FAILURE_KIND_VALIDATION_FAILED = 2;
+  EXECUTION_STREAM_FAILURE_KIND_BACKEND_CONTRACT_VIOLATION = 3;
+}
+
+message ExecutionStreamFailureProjection {
+  ExecutionStreamFailureKind kind = 1;
+  OpaqueIdentifier execution_id = 2;
+  OpaqueIdentifier apply_review_id = 3;
+  Digest256 review_binding_sha256 = 4;
+  bool mutation_may_have_occurred = 5;
+  Digest256 execution_record_sha256 = 6;
+  uint64 event_count = 7;
+  uint64 encoded_event_bytes = 8;
+  uint64 maximum_event_count = 9;
+  uint64 maximum_encoded_event_bytes = 10;
+}
+
+message ExecutionStreamEvent {
+  uint64 execution_event_index = 1;
+  OpaqueIdentifier execution_id = 2;
+  oneof body {
+    ApplyStartedProjection apply_started = 10;
+    UnitStartedProjection unit_started = 11;
+    ForceRequiredWarningProjection force_required_warning = 12;
+    ExecutionStepFinishedProjection step_finished = 13;
+    ReleasePostVerificationProjection release_post_verification_finished = 14;
+    UnitFinishedProjection unit_finished = 15;
+    AuditWriteFailureProjection audit_write_failed = 16;
+    ApplyFinishedProjection apply_finished = 17;
+    UnitJITRejectedProjection unit_jit_rejected = 18;
+    UnitSkippedPrerequisiteProjection unit_skipped_prerequisite = 19;
+    ExecutionCancellationAcknowledgedProjection cancellation_acknowledged = 20;
+    ExecutionStreamFailureProjection execution_stream_failure = 21;
+  }
+}
+
+enum RuntimeRejectCode {
+  RUNTIME_REJECT_CODE_UNSPECIFIED = 0;
+  RUNTIME_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED = 1;
+  RUNTIME_REJECT_CODE_INVALID_STATE = 2;
+  RUNTIME_REJECT_CODE_UNKNOWN_PROJECTION = 3;
+  RUNTIME_REJECT_CODE_STALE_BINDING = 4;
+  RUNTIME_REJECT_CODE_LIMIT_EXCEEDED = 5;
+  RUNTIME_REJECT_CODE_REVALIDATION_FAILED = 6;
+  RUNTIME_REJECT_CODE_CONFIRMATION_MISMATCH = 7;
+  RUNTIME_REJECT_CODE_INTERNAL_ERROR = 8;
+  RUNTIME_REJECT_CODE_BUSINESS_UNSUPPORTED = 9;
+  RUNTIME_REJECT_CODE_MALFORMED_REQUEST = 10;
+  RUNTIME_REJECT_CODE_DUPLICATE_REQUEST_ID = 11;
+}
+
+message RuntimeRejected {
+  RuntimeRejectCode code = 1;
+  string summary = 2;
+}
+
+message RuntimeEvent {
+  uint64 event_sequence = 1;
+  uint64 request_id = 2;
+  OpaqueIdentifier runtime_session_id = 3;
+  oneof body {
+    BuildPlanAccepted build_plan_accepted = 10;
+    PlanProjectionChunk plan_projection_chunk = 11;
+    PlanProjection plan_projection = 12;
+    PlanProjectionInvalidated plan_projection_invalidated = 13;
+    DecisionOverlayAcknowledged decision_overlay_acknowledged = 14;
+    DecisionOverlayRejected decision_overlay_rejected = 15;
+    DryRunProjection dry_run_projection = 16;
+    ApplyReviewProjection apply_review_projection = 17;
+    ExecutionStreamEvent execution_stream_event = 18;
+    RuntimeRejected runtime_rejected = 19;
+  }
+}
+
 message ScanCancelled {
   string reason = 1;
 }
@@ -153,6 +1665,7 @@ message EngineFailed {
 message EngineEvent {
   uint64 event_sequence = 1;
   uint64 request_id = 2;
+  string scan_session_id = 3;
   oneof body {
     ControlAccepted control_accepted = 10;
     ControlRejected control_rejected = 11;
@@ -163,6 +1676,10 @@ message EngineEvent {
     ScanCancelled scan_cancelled = 16;
     ScanFinished scan_finished = 17;
     EngineFailed engine_failed = 18;
+    ScanNodeObserved scan_node_observed = 19;
+    ScanCheckpointReady scan_checkpoint_ready = 20;
+    ScanFinalized scan_finalized = 21;
+    ScanCheckpointChunk scan_checkpoint_chunk = 22;
   }
 }
 
@@ -176,5 +1693,12 @@ message Envelope {
     StartScanRequest start_scan_request = 21;
     ScanControlRequest scan_control_request = 22;
     EngineEvent engine_event = 23;
+    BuildPlanRequest build_plan_request = 24;
+    DecisionOverlayEditRequest decision_overlay_edit_request = 25;
+    PrepareDryRunRequest prepare_dry_run_request = 26;
+    PrepareApplyReviewRequest prepare_apply_review_request = 27;
+    ConfirmApplyRequest confirm_apply_request = 28;
+    CancelExecutionRequest cancel_execution_request = 29;
+    RuntimeEvent runtime_event = 30;
   }
 }

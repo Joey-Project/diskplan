@@ -100,6 +100,8 @@ jobs:
           python3 scripts/ci/validate_journals.py
 
       - name: Build and test Swift foundation
+        env:
+          LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
         run: |
           scripts/ci/package-resolved-guard.sh run Package.resolved -- swift build --disable-automatic-resolution
           scripts/ci/package-resolved-guard.sh run Package.resolved -- swift test --disable-automatic-resolution

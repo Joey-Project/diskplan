@@ -27,6 +27,15 @@ func noMaterializationPolicyIsSetThenReadBack() throws {
 }
 
 @Test
+func snapshotListShimPreservesTypedPOSIXFailureWithoutPathAccess() {
+  var buffer = Data(count: 64)
+  let result = SnapshotListProbe().list(fileDescriptor: -1, buffer: &buffer)
+  #expect(result.status == .failed)
+  #expect(result.detail == "fs_snapshot_list")
+  #expect(result.errorCode == EINVAL)
+}
+
+@Test
 func noMaterializationPolicyRejectsInconsistentReadback() {
   let installer = MaterializationPolicyInstaller(
     setOff: { (0, 0) },
@@ -367,15 +376,19 @@ func unavailableObjectTypeNeverReceivesDescentDecision() throws {
 
 @Test
 func boundProviderProbePreservesSubsecondDeadlineAndRereadsPolicy() throws {
+  let deadline = OperationDeadline(
+    timeout: .milliseconds(100),
+    nowUptimeNanoseconds: 1_000
+  )
+  #expect(deadline.dispatchTime.uptimeNanoseconds == 100_001_000)
+
   let fixture = try BoundProbeFixture()
   defer { fixture.close() }
   let reads = LockedCounter()
   let policy = try injectedPolicy(counter: reads)
   let operations = FileProviderProbeOperations(
     startIdentity: { _, completion in
-      DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(5)) {
-        completion(.identifierAbsent)
-      }
+      completion(.identifierAbsent)
     }
   )
   let outcome = FileProviderBoundaryProbe(operations: operations).probe(
@@ -408,6 +421,41 @@ func boundProviderProbeTypesIdentityTimeoutWithoutMetadataWork() throws {
   )
   #expect(outcome == .rejected(.timedOut(stage: .identityLookup)))
   #expect(outcome.traversal == .doNotDescendUnverifiedProviderOwnership)
+}
+
+@Test
+func repeatedIdentityTimeoutsRetainOneBoundedOutstandingRequestUntilLateCompletion() throws {
+  let fixture = try BoundProbeFixture()
+  defer { fixture.close() }
+  let starter = HeldIdentityStarter()
+  let probe = FileProviderBoundaryProbe(
+    operations: FileProviderProbeOperations(startIdentity: starter.start)
+  )
+
+  for _ in 0..<8 {
+    let outcome = probe.probe(
+      parentFileDescriptor: fixture.parentFD,
+      rawName: fixture.rawName,
+      policy: try injectedPolicy(),
+      timeout: .milliseconds(2)
+    )
+    #expect(outcome == .rejected(.timedOut(stage: .identityLookup)))
+  }
+  #expect(starter.startCount == 1)
+
+  starter.releaseHeldAndCompleteFuture(with: .identifierAbsent)
+  let recovered = probe.probe(
+    parentFileDescriptor: fixture.parentFD,
+    rawName: fixture.rawName,
+    policy: try injectedPolicy(),
+    timeout: .milliseconds(100)
+  )
+  guard case .evidence(let evidence) = recovered else {
+    Issue.record("expected a new request after the original late callback, got \(recovered)")
+    return
+  }
+  #expect(evidence.identityDisposition == .identifierAbsent)
+  #expect(starter.startCount == 2)
 }
 
 @Test
@@ -929,6 +977,39 @@ private final class LockedEvidenceSequence: @unchecked Sendable {
       }
       return .known(values.removeFirst())
     }
+  }
+}
+
+private final class HeldIdentityStarter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var held: (@Sendable (ProviderIdentityOperationResult) -> Void)?
+  private var immediate: ProviderIdentityOperationResult?
+  private var starts = 0
+
+  var startCount: Int { lock.withLock { starts } }
+
+  func start(
+    _ url: URL,
+    _ completion: @escaping @Sendable (ProviderIdentityOperationResult) -> Void
+  ) {
+    _ = url
+    let result = lock.withLock { () -> ProviderIdentityOperationResult? in
+      starts += 1
+      if let immediate { return immediate }
+      held = completion
+      return nil
+    }
+    if let result { completion(result) }
+  }
+
+  func releaseHeldAndCompleteFuture(with result: ProviderIdentityOperationResult) {
+    let completion = lock.withLock {
+      immediate = result
+      let value = held
+      held = nil
+      return value
+    }
+    completion?(result)
   }
 }
 

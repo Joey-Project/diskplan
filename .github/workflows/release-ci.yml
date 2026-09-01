@@ -1,0 +1,146 @@
+name: Release CI
+
+on:
+  push:
+    branches:
+      - main
+      - "wip/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  required-macos-26-arm64-release:
+    name: Required release / macOS 26 Apple Silicon
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      # actions/checkout v7. Update the SHA and version comment together.
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert release runner
+        run: scripts/ci/assert-macos-runner.sh exact 26 arm64
+
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="$(< release/VERSION)"
+          core='(0|[1-9][0-9]*)'
+          identifier='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          prerelease="${identifier}(\\.${identifier})*"
+          build='[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*'
+          if [[ ! "${VERSION}" =~ ^${core}\.${core}\.${core}(-${prerelease})?(\+${build})?$ ]]; then
+            echo "release/VERSION is not canonical SemVer: ${VERSION}" >&2
+            exit 1
+          fi
+          if [[ "${RELEASE_TAG}" != "v${VERSION}" ]]; then
+            echo "release tag ${RELEASE_TAG} does not exactly match release/VERSION ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Configure task-scoped release paths
+        run: |
+          echo "DISKPLAN_RELEASE_WORK_ROOT=$RUNNER_TEMP/diskplan-release-build" >> "$GITHUB_ENV"
+          echo "DISKPLAN_RELEASE_OUTPUT=$RUNNER_TEMP/diskplan-release-output" >> "$GITHUB_ENV"
+
+      - name: Verify dependency lock inputs
+        run: scripts/ci/package-resolved-guard.sh check Package.resolved
+
+      - name: Select pinned Xcode
+        run: scripts/ci/select-xcode.sh
+
+      - name: Bootstrap pinned release tools
+        run: scripts/ci/bootstrap-macos-tools.sh foundation
+
+      - name: Validate release sources
+        run: |
+          actionlint -shellcheck shellcheck
+          for script in scripts/release/*.sh; do
+            bash -n "$script"
+          done
+          shellcheck scripts/release/*.sh
+          python3 -m py_compile \
+            scripts/release/package_bundle.py \
+            scripts/release/generate_bundle_contract.py \
+            scripts/release/run_bounded.py \
+            scripts/release/source_manifest.py \
+            scripts/release/test_package_bundle.py \
+            scripts/release/test_run_bounded.py
+          python3 -c 'import zlib; expected="1.2.12"; assert zlib.ZLIB_VERSION == expected and zlib.ZLIB_RUNTIME_VERSION == expected, (zlib.ZLIB_VERSION, zlib.ZLIB_RUNTIME_VERSION)'
+
+      - name: Build deterministic release bundle
+        run: |
+          scripts/ci/package-resolved-guard.sh run Package.resolved -- \
+            scripts/release/build-release.sh "$DISKPLAN_RELEASE_OUTPUT"
+
+      - name: Test bounded release helpers
+        run: |
+          python3 -m unittest \
+            scripts/release/test_package_bundle.py \
+            scripts/release/test_run_bounded.py
+
+      - name: Test package and versioned install lifecycle
+        run: |
+          VERSION="$(< release/VERSION)"
+          scripts/release/test-release.sh \
+            "$DISKPLAN_RELEASE_OUTPUT/diskplan-${VERSION}-macos-arm64.tar.gz"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: diskplan-macos-arm64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/diskplan-release-output/*.tar.gz
+            ${{ runner.temp }}/diskplan-release-output/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  best-effort-macos-14-arm64-release-compatibility:
+    name: Best effort release compatibility / macOS 14
+    needs: required-macos-26-arm64-release
+    runs-on: macos-14
+    continue-on-error: true
+    timeout-minutes: 25
+    steps:
+      # actions/checkout v7. Update the SHA and version comment together.
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Assert compatibility runner
+        run: scripts/ci/assert-macos-runner.sh exact 14 arm64
+
+      # actions/download-artifact v8. Update the SHA and version comment together.
+      - name: Download macOS 26 release archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: diskplan-macos-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/diskplan-release-output
+
+      - name: Verify and exercise the same release archive
+        run: |
+          VERSION="$(< release/VERSION)"
+          ARCHIVE="$RUNNER_TEMP/diskplan-release-output/diskplan-${VERSION}-macos-arm64.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          (cd "$(dirname "${ARCHIVE}")" && /usr/bin/shasum -a 256 -c "$(basename "${CHECKSUM}")")
+          scripts/release/test-release.sh "${ARCHIVE}"

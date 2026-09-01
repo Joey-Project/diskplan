@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use tokio::sync::Notify;
 
 use super::model::{EngineDelivery, UiEvent};
+use super::plan::PlanRuntimeEvent;
 
 pub trait EventSource {
     fn next_event(&mut self) -> impl Future<Output = io::Result<UiEvent>>;
@@ -111,6 +112,10 @@ impl EngineEventIngress {
 
     pub fn send_driver_exited(&self, result: Result<(), String>) -> io::Result<()> {
         self.send(UiEvent::DriverExited(result))
+    }
+
+    pub fn send_plan_event(&self, event: PlanRuntimeEvent) -> io::Result<()> {
+        self.send(UiEvent::Plan(event))
     }
 
     fn send(&self, mut event: UiEvent) -> io::Result<()> {
@@ -340,6 +345,7 @@ mod tests {
                 control: 1,
                 resulting_state: ScanState::Running as i32,
             })),
+            ..Default::default()
         }
     }
 

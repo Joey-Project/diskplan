@@ -3,68 +3,169 @@
 import PackageDescription
 
 let package = Package(
-    name: "diskplan",
-    platforms: [.macOS(.v14)],
-    products: [
-        .library(name: "DiskplanCore", targets: ["DiskplanCore"]),
-        .library(name: "DiskplanMacOS", targets: ["DiskplanMacOS"]),
-        .executable(name: "diskplan-engine", targets: ["DiskplanEngine"]),
-        .executable(name: "diskplan-macos-probe", targets: ["DiskplanMacOSProbe"]),
-    ],
-    dependencies: [
-        .package(
-            url: "https://github.com/apple/swift-protobuf.git",
-            exact: "1.38.0"
-        ),
-    ],
-    targets: [
-        .target(
-            name: "CDiskplanMacOS",
-            path: "swift/Sources/CDiskplanMacOS",
-            publicHeadersPath: "include"
-        ),
-        .target(
-            name: "DiskplanProto",
-            dependencies: [
-                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
-            ],
-            path: "swift/Sources/DiskplanProto"
-        ),
-        .target(
-            name: "DiskplanCore",
-            dependencies: ["DiskplanProto"],
-            path: "swift/Sources/DiskplanCore"
-        ),
-        .target(
-            name: "DiskplanMacOS",
-            dependencies: ["CDiskplanMacOS"],
-            path: "swift/Sources/DiskplanMacOS",
-            linkerSettings: [.linkedFramework("FileProvider")]
-        ),
-        .executableTarget(
-            name: "DiskplanEngine",
-            dependencies: ["DiskplanCore", "DiskplanProto"],
-            path: "swift/Sources/DiskplanEngine"
-        ),
-        .executableTarget(
-            name: "DiskplanFixtureGenerator",
-            dependencies: ["DiskplanCore"],
-            path: "swift/Tools/DiskplanFixtureGenerator"
-        ),
-        .executableTarget(
-            name: "DiskplanMacOSProbe",
-            dependencies: ["DiskplanMacOS"],
-            path: "swift/Tools/DiskplanMacOSProbe"
-        ),
-        .testTarget(
-            name: "DiskplanCoreTests",
-            dependencies: ["DiskplanCore", "DiskplanProto"],
-            path: "swift/Tests/DiskplanCoreTests"
-        ),
-        .testTarget(
-            name: "DiskplanMacOSTests",
-            dependencies: ["DiskplanMacOS"],
-            path: "swift/Tests/DiskplanMacOSTests"
-        ),
-    ]
+  name: "diskplan",
+  platforms: [.macOS(.v14)],
+  products: [
+    .library(name: "DiskplanCore", targets: ["DiskplanCore"]),
+    .library(name: "DiskplanMacOS", targets: ["DiskplanMacOS"]),
+    .library(name: "DiskplanScan", targets: ["DiskplanScan"]),
+    .library(name: "DiskplanEngineCore", targets: ["DiskplanEngineCore"]),
+    .library(name: "DiskplanPolicy", targets: ["DiskplanPolicy"]),
+    .library(name: "DiskplanRules", targets: ["DiskplanRules"]),
+    .library(name: "DiskplanDoctor", targets: ["DiskplanDoctor"]),
+    .library(name: "DiskplanExecution", targets: ["DiskplanExecution"]),
+    .library(
+      name: "DiskplanFileProviderFixtureSupport",
+      targets: ["DiskplanFileProviderFixtureSupport"]
+    ),
+    .executable(name: "diskplan-engine", targets: ["DiskplanEngine"]),
+    .executable(name: "diskplan-macos-probe", targets: ["DiskplanMacOSProbe"]),
+  ],
+  dependencies: [
+    .package(
+      url: "https://github.com/apple/swift-protobuf.git",
+      exact: "1.38.0"
+    )
+  ],
+  targets: [
+    .target(
+      name: "CDiskplanTestSupport",
+      path: "swift/Tests/CDiskplanTestSupport",
+      publicHeadersPath: "include"
+    ),
+    .target(
+      name: "CDiskplanMacOS",
+      path: "swift/Sources/CDiskplanMacOS",
+      publicHeadersPath: "include"
+    ),
+    .target(
+      name: "DiskplanProto",
+      dependencies: [
+        .product(name: "SwiftProtobuf", package: "swift-protobuf")
+      ],
+      path: "swift/Sources/DiskplanProto"
+    ),
+    .target(
+      name: "DiskplanCore",
+      dependencies: ["DiskplanProto"],
+      path: "swift/Sources/DiskplanCore"
+    ),
+    .target(
+      name: "DiskplanMacOS",
+      dependencies: ["CDiskplanMacOS"],
+      path: "swift/Sources/DiskplanMacOS",
+      linkerSettings: [.linkedFramework("FileProvider")]
+    ),
+    .target(
+      name: "DiskplanScan",
+      dependencies: ["DiskplanMacOS"],
+      path: "swift/Sources/DiskplanScan"
+    ),
+    .target(
+      name: "DiskplanEngineCore",
+      dependencies: [
+        "DiskplanCore", "DiskplanMacOS", "DiskplanPolicy", "DiskplanProto", "DiskplanScan",
+      ],
+      path: "swift/Sources/DiskplanEngineCore"
+    ),
+    .target(
+      name: "DiskplanPolicy",
+      path: "swift/Sources/DiskplanPolicy"
+    ),
+    .target(
+      name: "DiskplanRules",
+      dependencies: ["DiskplanPolicy"],
+      path: "swift/Sources/DiskplanRules"
+    ),
+    .target(
+      name: "DiskplanDoctor",
+      dependencies: ["DiskplanMacOS"],
+      path: "swift/Sources/DiskplanDoctor"
+    ),
+    .target(
+      name: "DiskplanExecution",
+      dependencies: ["DiskplanMacOS", "DiskplanPolicy"],
+      path: "swift/Sources/DiskplanExecution"
+    ),
+    .target(
+      name: "DiskplanFileProviderFixtureSupport",
+      path: "fixtures/FileProviderAcceptance/Shared"
+    ),
+    .executableTarget(
+      name: "DiskplanEngine",
+      dependencies: ["DiskplanCore", "DiskplanEngineCore", "DiskplanExecution"],
+      path: "swift/Sources/DiskplanEngine"
+    ),
+    .executableTarget(
+      name: "DiskplanFixtureGenerator",
+      dependencies: ["DiskplanCore"],
+      path: "swift/Tools/DiskplanFixtureGenerator"
+    ),
+    .executableTarget(
+      name: "DiskplanProtocolFixtureGenerator",
+      dependencies: ["DiskplanEngineCore", "DiskplanProto"],
+      path: "swift/Tools/DiskplanProtocolFixtureGenerator"
+    ),
+    .executableTarget(
+      name: "DiskplanMacOSProbe",
+      dependencies: ["DiskplanMacOS"],
+      path: "swift/Tools/DiskplanMacOSProbe"
+    ),
+    .testTarget(
+      name: "DiskplanCoreTests",
+      dependencies: ["DiskplanCore", "DiskplanProto"],
+      path: "swift/Tests/DiskplanCoreTests"
+    ),
+    .testTarget(
+      name: "DiskplanMacOSTests",
+      dependencies: ["DiskplanMacOS"],
+      path: "swift/Tests/DiskplanMacOSTests"
+    ),
+    .testTarget(
+      name: "DiskplanScanTests",
+      dependencies: ["DiskplanScan", "DiskplanMacOS"],
+      path: "swift/Tests/DiskplanScanTests"
+    ),
+    .testTarget(
+      name: "DiskplanEngineCoreTests",
+      dependencies: [
+        "CDiskplanTestSupport",
+        "DiskplanCore",
+        "DiskplanEngineCore",
+        "DiskplanPolicy",
+        "DiskplanProto",
+        "DiskplanScan",
+        .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+      ],
+      path: "swift/Tests/DiskplanEngineCoreTests"
+    ),
+    .testTarget(
+      name: "DiskplanPolicyTests",
+      dependencies: ["DiskplanPolicy"],
+      path: "swift/Tests/DiskplanPolicyTests"
+    ),
+    .testTarget(
+      name: "DiskplanRulesTests",
+      dependencies: ["DiskplanRules"],
+      path: "swift/Tests/DiskplanRulesTests"
+    ),
+    .testTarget(
+      name: "DiskplanDoctorTests",
+      dependencies: ["DiskplanDoctor", "DiskplanMacOS"],
+      path: "swift/Tests/DiskplanDoctorTests"
+    ),
+    .testTarget(
+      name: "DiskplanExecutionTests",
+      dependencies: [
+        "DiskplanCore", "DiskplanEngine", "DiskplanEngineCore", "DiskplanExecution",
+        "DiskplanMacOS", "DiskplanPolicy", "DiskplanProto",
+      ],
+      path: "swift/Tests/DiskplanExecutionTests"
+    ),
+    .testTarget(
+      name: "DiskplanFileProviderFixtureSupportTests",
+      dependencies: ["DiskplanFileProviderFixtureSupport"],
+      path: "swift/Tests/DiskplanFileProviderFixtureSupportTests"
+    ),
+  ]
 )

@@ -278,12 +278,18 @@ dependencies = [
  "diskplan-core",
  "diskplan-proto",
  "futures-util",
+ "getrandom",
+ "hex",
  "insta",
+ "libc",
  "prost",
  "ratatui",
+ "rustix",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]
@@ -303,7 +309,9 @@ dependencies = [
 name = "diskplan-proto"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "prost",
+ "sha2",
 ]
 
 [[package]]
