@@ -589,7 +589,9 @@ func gitWorktreeRestoreRejectsReplacedQuarantinePayloadWithoutPublishingLocator(
   #expect(
     result.mutationDisposition
       == .gitWorktree(
-        .quarantineBindingUnverified(failureCode: "destination-identity-mismatch")
+        .quarantineBindingUnverified(
+          failureCode: "quarantine-destination-identity-mismatch"
+        )
       )
   )
   guard
@@ -602,7 +604,8 @@ func gitWorktreeRestoreRejectsReplacedQuarantinePayloadWithoutPublishingLocator(
     return
   }
   #expect(
-    postFailure.code == "quarantine-binding-unverified-destination-identity-mismatch"
+    postFailure.code
+      == "quarantine-binding-unverified-quarantine-destination-identity-mismatch"
   )
 }
 
@@ -643,7 +646,9 @@ func gitWorktreeRestoreRejectsMovedRawRootWithoutPublishingLocator() async throw
   #expect(
     result.mutationDisposition
       == .gitWorktree(
-        .quarantineBindingUnverified(failureCode: "destination-identity-mismatch")
+        .quarantineBindingUnverified(
+          failureCode: "quarantine-destination-identity-mismatch"
+        )
       )
   )
 }

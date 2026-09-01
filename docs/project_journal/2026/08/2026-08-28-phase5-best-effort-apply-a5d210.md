@@ -247,4 +247,6 @@ superseded_by:
   administrative fixture had no index file. The successor adds a captured index to that fixture,
   checks that both race-hook writes succeed, keeps the commit-point checks unchanged, and updates
   the affected tests to assert the exact attempt result and typed post-verification outcome. The
-  serial full gate was not started.
+  serial full gate was not started. Focused static review then caught three replacement-binding
+  assertions missing the production helper's `quarantine-` failure-code prefix; the successor
+  uses the exact typed code without changing production behavior.
