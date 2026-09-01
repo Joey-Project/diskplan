@@ -121,8 +121,12 @@ struct ReleasePostverificationGroupExpectation: Equatable, Sendable {
 
 struct ReleasePostverificationExecutionBinding: Equatable, Sendable {
   let executionBindingHash: PolicyDigest
+  let applyClaimIDHash: PolicyDigest
+  let preparationGeneration: UInt64
   let epoch: ExecutionEpochContext
+  let jitOneShotNonce: Data
   let planCaptureID: PolicyDigest
+  let wholePlanCaptureID: PolicyDigest
   let jitCaptureID: PolicyDigest
   let freshnessLimitSeconds: Int64
 }
@@ -156,6 +160,8 @@ enum ReleasePostverificationManifestClaimError: Error, Equatable, Sendable {
   case invalidExecutionBinding
   case unitNotInClaimedManifest
   case unitAlreadyAuthorized
+  case jitClaimUnknownOrReplayed
+  case jitClaimBindingMismatch
   case invalidConnectedClosure
   case descriptorLocatorMembershipMismatch
   case descriptorLocatorBindingMismatch(ActionID)
@@ -169,10 +175,15 @@ struct ReleasePostverificationComponentBindingV1: Equatable, Sendable {
   let planHash: PolicyDigest
   let overlayHash: PolicyDigest
   let epoch: ExecutionEpochContext
+  let applyClaimIDHash: PolicyDigest
+  let preparationGeneration: UInt64
+  let jitOneShotNonce: Data
   let planCaptureID: PolicyDigest
+  let wholePlanCaptureID: PolicyDigest
   let jitCaptureID: PolicyDigest
   let allocationGroupIDs: [String]
   let ownerActionIDs: [ActionID]
+  let jitActionIDs: [ActionID]
 
   func canonicalBytes(
     execution: ReleasePostverificationExecutionBinding,
@@ -187,10 +198,15 @@ struct ReleasePostverificationComponentBindingV1: Equatable, Sendable {
     encoder.int64(epoch.semanticReferenceTimeSeconds)
     encoder.int64(epoch.issuedAtSeconds)
     encoder.int64(epoch.deadlineSeconds)
+    encoder.data(applyClaimIDHash.bytes)
+    encoder.uint64(preparationGeneration)
+    encoder.data(jitOneShotNonce)
     encoder.data(planCaptureID.bytes)
+    encoder.data(wholePlanCaptureID.bytes)
     encoder.data(jitCaptureID.bytes)
     encoder.array(allocationGroupIDs) { Data($0.utf8) }
     encoder.array(ownerActionIDs) { $0.digest.bytes }
+    encoder.array(jitActionIDs) { $0.digest.bytes }
     encoder.data(execution.executionBindingHash.bytes)
     encoder.int64(execution.freshnessLimitSeconds)
     encoder.array(owners.sorted { $0.actionID < $1.actionID }) { owner in
@@ -330,6 +346,8 @@ struct ReleasePostverificationComponentBindingV1: Equatable, Sendable {
 final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable {
   private let manifest: ExecutionManifest
   private let plan: ImmutablePlan
+  private let registryClaimIDHash: PolicyDigest
+  private let registryGeneration: UInt64
   private let lock = NSLock()
   private var authorizedUnits = Set<ExecutionUnitID>()
 
@@ -340,6 +358,8 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
     try self.init(
       claimedManifest: claimedAuthorization.manifest,
       registryCurrentBindingHash: claimedAuthorization.registryCurrentBindingHash,
+      registryClaimIDHash: claimedAuthorization.registryClaimIDHash,
+      registryGeneration: claimedAuthorization.generation,
       plan: plan
     )
   }
@@ -348,12 +368,18 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
     convenience init(
       testingClaimedManifest: ExecutionManifest,
       registryCurrentBindingHash: PolicyDigest? = nil,
+      registryClaimIDHash: PolicyDigest = try! PolicyDigest(
+        bytes: Data(repeating: 0x71, count: 32)
+      ),
+      registryGeneration: UInt64 = 1,
       plan: ImmutablePlan
     ) throws {
       try self.init(
         claimedManifest: testingClaimedManifest,
         registryCurrentBindingHash: registryCurrentBindingHash
           ?? testingClaimedManifest.currentBindingHash,
+        registryClaimIDHash: registryClaimIDHash,
+        registryGeneration: registryGeneration,
         plan: plan
       )
     }
@@ -362,6 +388,8 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
   private init(
     claimedManifest manifest: ExecutionManifest,
     registryCurrentBindingHash: PolicyDigest,
+    registryClaimIDHash: PolicyDigest,
+    registryGeneration: UInt64,
     plan: ImmutablePlan
   ) throws {
     guard manifest.planHash == plan.planHash else {
@@ -379,12 +407,47 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
     }
     self.manifest = manifest
     self.plan = plan
+    self.registryClaimIDHash = registryClaimIDHash
+    self.registryGeneration = registryGeneration
   }
 
   func authorize(
-    unitID: ExecutionUnitID,
+    jitClaim: EngineJITExecutionClaim,
     descriptorLocators: [ReleasePostverificationOwnerLocator]
   ) throws -> EngineReleasePostverificationComponentHandle {
+    let jit: EngineJITExecutionClaimRecord
+    do {
+      jit = try jitClaim.claim()
+    } catch EngineJITExecutionClaimError.claimUnknownOrReplayed {
+      throw ReleasePostverificationManifestClaimError.jitClaimUnknownOrReplayed
+    } catch {
+      throw ReleasePostverificationManifestClaimError.jitClaimBindingMismatch
+    }
+    let unitID = jit.unit.unitID
+    let derivedJITBinding: EngineJITExecutionUnitBinding
+    do {
+      derivedJITBinding = try EngineJITExecutionUnitBinding.derive(
+        unitID: unitID,
+        plan: plan,
+        manifest: manifest
+      )
+    } catch {
+      throw ReleasePostverificationManifestClaimError.jitClaimBindingMismatch
+    }
+    guard jit.applyClaimIDHash == registryClaimIDHash,
+      jit.currentBindingHash == manifest.currentBindingHash,
+      jit.preparationGeneration == registryGeneration,
+      jit.epoch == manifest.epoch,
+      jit.oneShotNonce.count == 32,
+      jit.planCaptureID == plan.globalFacts.captureID,
+      jit.wholePlanCaptureID == manifest.currentCaptureID,
+      jit.jitCaptureID != jit.planCaptureID,
+      jit.jitCaptureID != jit.wholePlanCaptureID,
+      jit.planCaptureID != jit.wholePlanCaptureID,
+      jit.unit == derivedJITBinding
+    else {
+      throw ReleasePostverificationManifestClaimError.jitClaimBindingMismatch
+    }
     guard case .compoundRelease = unitID else {
       throw ReleasePostverificationManifestClaimError.unitNotInClaimedManifest
     }
@@ -443,9 +506,13 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
     }
     let execution = ReleasePostverificationExecutionBinding(
       executionBindingHash: manifest.currentBindingHash,
+      applyClaimIDHash: jit.applyClaimIDHash,
+      preparationGeneration: jit.preparationGeneration,
       epoch: manifest.epoch,
+      jitOneShotNonce: jit.oneShotNonce,
       planCaptureID: plan.globalFacts.captureID,
-      jitCaptureID: manifest.currentCaptureID,
+      wholePlanCaptureID: manifest.currentCaptureID,
+      jitCaptureID: jit.jitCaptureID,
       freshnessLimitSeconds: manifest.epoch.deadlineSeconds - manifest.epoch.issuedAtSeconds
     )
     let schema = ReleasePostverificationComponentBindingV1(
@@ -453,10 +520,15 @@ final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable 
       planHash: manifest.planHash,
       overlayHash: manifest.overlayHash,
       epoch: manifest.epoch,
+      applyClaimIDHash: jit.applyClaimIDHash,
+      preparationGeneration: jit.preparationGeneration,
+      jitOneShotNonce: jit.oneShotNonce,
       planCaptureID: plan.globalFacts.captureID,
-      jitCaptureID: manifest.currentCaptureID,
+      wholePlanCaptureID: manifest.currentCaptureID,
+      jitCaptureID: jit.jitCaptureID,
       allocationGroupIDs: unit.allocationGroupIDs,
-      ownerActionIDs: unit.ownerActionIDs
+      ownerActionIDs: unit.ownerActionIDs,
+      jitActionIDs: jit.unit.actionIDs
     )
     let componentID = schema.digest(
       execution: execution,
@@ -1167,7 +1239,10 @@ struct DescriptorBoundReleasePostverificationCore: Sendable {
     guard !request.owners.isEmpty, !trusted.groups.isEmpty else {
       throw ReleasePostverificationFreezeError.emptyComponent
     }
-    guard trusted.execution.planCaptureID != trusted.execution.jitCaptureID,
+    guard trusted.execution.planCaptureID != trusted.execution.wholePlanCaptureID,
+      trusted.execution.planCaptureID != trusted.execution.jitCaptureID,
+      trusted.execution.wholePlanCaptureID != trusted.execution.jitCaptureID,
+      trusted.execution.jitOneShotNonce.count == 32,
       trusted.execution.freshnessLimitSeconds > 0,
       frozenAtSeconds >= trusted.execution.epoch.issuedAtSeconds,
       frozenAtSeconds < trusted.execution.epoch.deadlineSeconds
@@ -1624,6 +1699,7 @@ struct DescriptorBoundReleasePostverificationCore: Sendable {
       return .failure(.topologyReceiptBindingMismatch)
     }
     guard capture.captureID != execution.planCaptureID,
+      capture.captureID != execution.wholePlanCaptureID,
       capture.captureID != execution.jitCaptureID
     else {
       return .failure(.topologyCaptureReused)

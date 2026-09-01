@@ -645,6 +645,8 @@ struct ClaimedApplyAuthorization: Sendable {
   /// Copied from the one-shot registry record independently of later consumers of `manifest`.
   /// Engine-internal authorities compare both values before deriving mutation-adjacent state.
   let registryCurrentBindingHash: PolicyDigest
+  /// Opaque digest of the exact one-shot authorization registry key consumed by this claim.
+  let registryClaimIDHash: PolicyDigest
   let collector: EngineRevalidationCollector
   let generation: UInt64
   let confirmedForceActionIDs: [ActionID]

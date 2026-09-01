@@ -189,19 +189,45 @@ public actor BestEffortApplyCoordinator {
       }
 
       let oneShotNonce = nonceGenerator()
-      let jitRequest = JITRevalidationRequest(
-        plan: plan,
-        validatedOverlay: validated,
-        manifest: manifest,
-        actionIDs: unit.jitActionIDs,
-        releaseGroupIDs: unit.releaseGroupIDs,
-        preparationGeneration: claimed.generation,
-        oneShotNonce: oneShotNonce
-      )
+      let jitRequest: JITRevalidationRequest
+      do {
+        jitRequest = try JITRevalidationRequest.authoritative(
+          plan: plan,
+          validatedOverlay: validated,
+          claimedAuthorization: claimed,
+          unitID: unit.id,
+          oneShotNonce: oneShotNonce
+        )
+        guard jitRequest.actionIDs == unit.jitActionIDs,
+          jitRequest.releaseGroupIDs.map(RawUTF8Key.init)
+            == unit.releaseGroupIDs.map(RawUTF8Key.init)
+        else { throw EngineJITExecutionClaimError.unitBindingMismatch }
+      } catch {
+        let report = invalidJITReport(
+          oneShotNonce: oneShotNonce,
+          code: "invalid-authoritative-jit-unit-binding"
+        )
+        let outcome = ExecutionUnitOutcome(
+          id: unit.id,
+          logicalActionIDs: unit.logicalActionIDs,
+          prerequisiteActionIDs: unit.prerequisiteActionIDs,
+          status: .jitRejected,
+          jitReport: report,
+          steps: []
+        )
+        outcomes.append(outcome)
+        record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
+        await emit(
+          .unitFinished(outcome),
+          index: &eventIndex,
+          auditFailures: &auditFailures
+        )
+        continue
+      }
       var jitReport: JITRevalidationReport
       if oneShotNonce.count != 32 || !usedJITNonces.insert(oneShotNonce).inserted {
         jitReport = invalidJITReport(
-          request: jitRequest,
+          oneShotNonce: oneShotNonce,
           code: "invalid-or-reused-jit-nonce"
         )
       } else {
@@ -252,6 +278,34 @@ public actor BestEffortApplyCoordinator {
         continue
       }
       guard jitReport.isCurrent else {
+        let outcome = ExecutionUnitOutcome(
+          id: unit.id,
+          logicalActionIDs: unit.logicalActionIDs,
+          prerequisiteActionIDs: unit.prerequisiteActionIDs,
+          status: .jitRejected,
+          jitReport: jitReport,
+          steps: []
+        )
+        outcomes.append(outcome)
+        record(outcome.status, for: unit.logicalActionIDs, in: &statusByLogicalActionID)
+        await emit(
+          .unitFinished(outcome),
+          index: &eventIndex,
+          auditFailures: &auditFailures
+        )
+        continue
+      }
+      let jitExecutionClaim: EngineJITExecutionClaim
+      do {
+        jitExecutionClaim = try EngineJITExecutionClaim.issue(
+          after: jitRequest,
+          report: jitReport
+        )
+      } catch {
+        jitReport = appendingJITFinding(
+          jitReport,
+          code: "jit-execution-claim-rejected"
+        )
         let outcome = ExecutionUnitOutcome(
           id: unit.id,
           logicalActionIDs: unit.logicalActionIDs,
@@ -386,6 +440,9 @@ public actor BestEffortApplyCoordinator {
         manifest: manifest,
         collector: claimed.collector
       )
+      // Keep the unit-bound single-consume claim alive through mutation and legacy
+      // postverification. Descriptor-bound composition consumes it when that adapter is wired.
+      _ = jitExecutionClaim
       for releaseOutcome in releasePostVerification {
         await emit(
           .releasePostVerificationFinished(releaseOutcome),
@@ -461,12 +518,12 @@ public actor BestEffortApplyCoordinator {
   }
 
   private func invalidJITReport(
-    request: JITRevalidationRequest,
+    oneShotNonce: Data,
     code: String
   ) -> JITRevalidationReport {
     JITRevalidationReport(
       captureID: nil,
-      oneShotNonce: request.oneShotNonce,
+      oneShotNonce: oneShotNonce,
       actionOutcomes: [],
       globalFindings: [
         RevalidationFinding(
@@ -693,7 +750,7 @@ public actor BestEffortApplyCoordinator {
             id: .action(step.action.id),
             logicalActionIDs: [step.action.id],
             prerequisiteActionIDs: step.prerequisiteStepActionIDs,
-            jitActionIDs: step.jitRevalidationActions.map(\.id),
+            jitActionIDs: Set(step.jitRevalidationActions.map(\.id)).sorted(),
             releaseGroupIDs: [],
             mutationSteps: [
               try mutationStep(for: step.action, internalPrerequisiteIDs: [])

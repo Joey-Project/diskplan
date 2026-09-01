@@ -34,6 +34,7 @@ struct VersionedExecutionBindingEncoderV1 {
 }
 
 struct JITRevalidationRequest: Equatable, Sendable {
+  let unitID: ExecutionUnitID
   let plan: ImmutablePlan
   let validatedOverlay: ValidatedDecisionOverlay
   let manifest: ExecutionManifest
@@ -42,27 +43,101 @@ struct JITRevalidationRequest: Equatable, Sendable {
   let authorizationCurrentBindingHash: PolicyDigest
   let preparationGeneration: UInt64
   let oneShotNonce: Data
+  fileprivate let applyClaimIDHash: PolicyDigest
+  fileprivate let authority: JITRevalidationRequestAuthority
 
   var epoch: ExecutionEpochContext { manifest.epoch }
 
-  init(
+  static func authoritative(
+    plan: ImmutablePlan,
+    validatedOverlay: ValidatedDecisionOverlay,
+    claimedAuthorization: ClaimedApplyAuthorization,
+    unitID: ExecutionUnitID,
+    oneShotNonce: Data
+  ) throws -> Self {
+    let manifest = claimedAuthorization.manifest
+    guard manifest.planHash == plan.planHash,
+      manifest.overlayHash == validatedOverlay.overlayHash,
+      claimedAuthorization.registryCurrentBindingHash == manifest.currentBindingHash
+    else { throw EngineJITExecutionClaimError.claimBindingMismatch }
+    let binding = try EngineJITExecutionUnitBinding.derive(
+      unitID: unitID,
+      plan: plan,
+      manifest: manifest
+    )
+    return Self(
+      unitID: binding.unitID,
+      plan: plan,
+      validatedOverlay: validatedOverlay,
+      manifest: manifest,
+      actionIDs: binding.actionIDs,
+      releaseGroupIDs: binding.releaseGroupIDs,
+      authorizationCurrentBindingHash: manifest.currentBindingHash,
+      preparationGeneration: claimedAuthorization.generation,
+      oneShotNonce: oneShotNonce,
+      applyClaimIDHash: claimedAuthorization.registryClaimIDHash,
+      authority: .registryClaim
+    )
+  }
+
+  #if DEBUG
+    init(
+      testingPlan plan: ImmutablePlan,
+      validatedOverlay: ValidatedDecisionOverlay,
+      manifest: ExecutionManifest,
+      unitID: ExecutionUnitID,
+      actionIDs: [ActionID],
+      releaseGroupIDs: [String],
+      preparationGeneration: UInt64,
+      oneShotNonce: Data,
+      applyClaimIDHash: PolicyDigest
+    ) {
+      self.init(
+        unitID: unitID,
+        plan: plan,
+        validatedOverlay: validatedOverlay,
+        manifest: manifest,
+        actionIDs: actionIDs,
+        releaseGroupIDs: releaseGroupIDs,
+        authorizationCurrentBindingHash: manifest.currentBindingHash,
+        preparationGeneration: preparationGeneration,
+        oneShotNonce: oneShotNonce,
+        applyClaimIDHash: applyClaimIDHash,
+        authority: .testing
+      )
+    }
+  #endif
+
+  private init(
+    unitID: ExecutionUnitID,
     plan: ImmutablePlan,
     validatedOverlay: ValidatedDecisionOverlay,
     manifest: ExecutionManifest,
     actionIDs: [ActionID],
     releaseGroupIDs: [String],
+    authorizationCurrentBindingHash: PolicyDigest,
     preparationGeneration: UInt64,
-    oneShotNonce: Data
+    oneShotNonce: Data,
+    applyClaimIDHash: PolicyDigest,
+    authority: JITRevalidationRequestAuthority
   ) {
+    self.unitID = unitID
     self.plan = plan
     self.validatedOverlay = validatedOverlay
     self.manifest = manifest
     self.actionIDs = actionIDs
     self.releaseGroupIDs = releaseGroupIDs
-    self.authorizationCurrentBindingHash = manifest.currentBindingHash
+    self.authorizationCurrentBindingHash = authorizationCurrentBindingHash
     self.preparationGeneration = preparationGeneration
     self.oneShotNonce = oneShotNonce
+    self.applyClaimIDHash = applyClaimIDHash
+    self.authority = authority
   }
+}
+
+private enum JITRevalidationRequestAuthority: Equatable, Sendable {
+  case registryClaim
+  case testing
 }
 
 struct JITRevalidationSnapshot: Equatable, Sendable {
@@ -160,6 +235,180 @@ public enum ExecutionUnitID: Equatable, Hashable, Sendable {
       hasher.combine(groupIDs.count)
       for groupID in groupIDs { hasher.combine(RawUTF8Key(groupID)) }
     }
+  }
+}
+
+struct EngineJITExecutionUnitBinding: Equatable, Sendable {
+  let unitID: ExecutionUnitID
+  let actionIDs: [ActionID]
+  let releaseGroupIDs: [String]
+
+  static func derive(
+    unitID: ExecutionUnitID,
+    plan: ImmutablePlan,
+    manifest: ExecutionManifest
+  ) throws -> Self {
+    guard manifest.executionActionIDs.count == manifest.jitRevalidationActionIDs.count,
+      Set(manifest.executionActionIDs).count == manifest.executionActionIDs.count
+    else {
+      throw EngineJITExecutionClaimError.unitBindingMismatch
+    }
+    let jitByExecutionAction = Dictionary(
+      uniqueKeysWithValues: zip(
+        manifest.executionActionIDs,
+        manifest.jitRevalidationActionIDs
+      ).map { ($0.0, $0.1) }
+    )
+    switch unitID {
+    case .action(let actionID):
+      guard let action = plan.actions.first(where: { $0.id == actionID }),
+        !Self.isReleaseAction(action),
+        let manifestActionIDs = jitByExecutionAction[actionID],
+        Set(manifestActionIDs).count == manifestActionIDs.count
+      else { throw EngineJITExecutionClaimError.unitBindingMismatch }
+      return Self(
+        unitID: unitID,
+        actionIDs: manifestActionIDs.sorted(),
+        releaseGroupIDs: []
+      )
+    case .compoundRelease:
+      let matches = manifest.compoundReleaseUnits.filter {
+        ExecutionUnitID.compoundRelease($0.allocationGroupIDs) == unitID
+      }
+      guard matches.count == 1, let compound = matches.first,
+        !compound.allocationGroupIDs.isEmpty
+      else { throw EngineJITExecutionClaimError.unitBindingMismatch }
+      let groupKeys = Set(compound.allocationGroupIDs.map(RawUTF8Key.init))
+      let releaseActions = plan.actions.filter { action in
+        guard case .allocationGroupReleased(let groupID) = action.prototype.postcondition else {
+          return false
+        }
+        return groupKeys.contains(RawUTF8Key(groupID))
+      }
+      guard releaseActions.count == compound.allocationGroupIDs.count,
+        Set(
+          releaseActions.compactMap { action -> RawUTF8Key? in
+            guard case .allocationGroupReleased(let groupID) = action.prototype.postcondition else {
+              return nil
+            }
+            return RawUTF8Key(groupID)
+          }) == groupKeys,
+        releaseActions.allSatisfy({ action in
+          guard let actionIDs = jitByExecutionAction[action.id] else { return false }
+          return Set(actionIDs).count == actionIDs.count
+        })
+      else { throw EngineJITExecutionClaimError.unitBindingMismatch }
+      let actionIDs = Set(
+        releaseActions.flatMap { jitByExecutionAction[$0.id] ?? [] }
+      ).sorted()
+      return Self(
+        unitID: unitID,
+        actionIDs: actionIDs,
+        releaseGroupIDs: compound.allocationGroupIDs
+      )
+    }
+  }
+
+  private static func isReleaseAction(_ action: ActionDefinition) -> Bool {
+    if case .allocationGroupReleased = action.prototype.postcondition { return true }
+    return false
+  }
+}
+
+enum EngineJITExecutionClaimError: Error, Equatable, Sendable {
+  case unitBindingMismatch
+  case claimBindingMismatch
+  case jitNotCurrent
+  case invalidCaptureBinding
+  case claimUnknownOrReplayed
+}
+
+struct EngineJITExecutionClaimRecord: Equatable, Sendable {
+  let applyClaimIDHash: PolicyDigest
+  let unit: EngineJITExecutionUnitBinding
+  let currentBindingHash: PolicyDigest
+  let preparationGeneration: UInt64
+  let epoch: ExecutionEpochContext
+  let oneShotNonce: Data
+  let planCaptureID: PolicyDigest
+  let wholePlanCaptureID: PolicyDigest
+  let jitCaptureID: PolicyDigest
+}
+
+final class EngineJITExecutionClaim: @unchecked Sendable {
+  private let lock = NSLock()
+  private var record: EngineJITExecutionClaimRecord?
+
+  private init(record: EngineJITExecutionClaimRecord) { self.record = record }
+
+  static func issue(
+    after request: JITRevalidationRequest,
+    report: JITRevalidationReport
+  ) throws -> Self {
+    guard request.authority == .registryClaim else {
+      throw EngineJITExecutionClaimError.claimBindingMismatch
+    }
+    return try issueTrusted(after: request, report: report)
+  }
+
+  #if DEBUG
+    static func issueForTesting(
+      after request: JITRevalidationRequest,
+      report: JITRevalidationReport
+    ) throws -> Self {
+      try issueTrusted(after: request, report: report)
+    }
+
+    static func issueForTesting(record: EngineJITExecutionClaimRecord) -> Self {
+      Self(record: record)
+    }
+  #endif
+
+  private static func issueTrusted(
+    after request: JITRevalidationRequest,
+    report: JITRevalidationReport
+  ) throws -> Self {
+    guard report.isCurrent, report.oneShotNonce == request.oneShotNonce,
+      report.actionOutcomes.map(\.actionID) == request.actionIDs.sorted(),
+      let captureID = report.captureID
+    else { throw EngineJITExecutionClaimError.jitNotCurrent }
+    let derived = try EngineJITExecutionUnitBinding.derive(
+      unitID: request.unitID,
+      plan: request.plan,
+      manifest: request.manifest
+    )
+    guard derived.actionIDs == request.actionIDs,
+      derived.releaseGroupIDs.map(RawUTF8Key.init)
+        == request.releaseGroupIDs.map(RawUTF8Key.init)
+    else { throw EngineJITExecutionClaimError.unitBindingMismatch }
+    guard request.authorizationCurrentBindingHash == request.manifest.currentBindingHash else {
+      throw EngineJITExecutionClaimError.claimBindingMismatch
+    }
+    guard request.oneShotNonce.count == 32,
+      captureID != request.plan.globalFacts.captureID,
+      captureID != request.manifest.currentCaptureID,
+      request.plan.globalFacts.captureID != request.manifest.currentCaptureID
+    else { throw EngineJITExecutionClaimError.invalidCaptureBinding }
+    return Self(
+      record: EngineJITExecutionClaimRecord(
+        applyClaimIDHash: request.applyClaimIDHash,
+        unit: derived,
+        currentBindingHash: request.authorizationCurrentBindingHash,
+        preparationGeneration: request.preparationGeneration,
+        epoch: request.epoch,
+        oneShotNonce: request.oneShotNonce,
+        planCaptureID: request.plan.globalFacts.captureID,
+        wholePlanCaptureID: request.manifest.currentCaptureID,
+        jitCaptureID: captureID
+      ))
+  }
+
+  func claim() throws -> EngineJITExecutionClaimRecord {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let record else { throw EngineJITExecutionClaimError.claimUnknownOrReplayed }
+    self.record = nil
+    return record
   }
 }
 

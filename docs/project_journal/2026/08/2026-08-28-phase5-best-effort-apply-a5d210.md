@@ -350,3 +350,23 @@ superseded_by:
   18 tests with output SHA-256
   `7bc83929f79c8678737a5724da0d7fb69194a01ca52394499c61abcb93823e0b` under the same
   supervisor guarantees. Strict Swift formatting passed on the macOS 26 release host.
+- A final release-postverification audit found that the claimed manifest's whole-plan capture was
+  incorrectly occupying the per-unit JIT capture slot. The successor keeps plan capture P,
+  whole-plan capture A, actual JIT capture B, and postverification capture C distinct. A successful
+  JIT report now mints an engine-internal, single-consume claim that binds the exact execution unit,
+  canonical JIT action and release-group membership, apply-authorization claim hash, current
+  binding, preparation generation, epoch, nonce, and B. Manifest authority consumes that opaque
+  claim before deriving the connected owner/group closure; caller input remains limited to exact
+  descriptor locators. The v1 component binding and shared golden now include the apply claim,
+  generation, nonce, A, B, and JIT action membership without changing IPC.
+- India validation of the JIT-claim successor passed all 187 `DiskplanExecutionTests` in
+  0.424 seconds. Its bounded supervisor completed in 6.680 seconds, emitted 43,153 bytes with
+  SHA-256 `96e32e36675844c46cb44aa6ca55a15cbf551207943053a6826566a2f9033451`,
+  verified the process group, and reached terminal quiescence. The descriptor-bound targeted gate
+  passed 21 tests, including actual-B issuance, cross-unit rejection, every bound claim dimension,
+  replay, and the exact v1 golden; its supervisor completed in 2.790 seconds, emitted 5,835 bytes
+  with SHA-256 `83f84574bd9a911336cc0e798b40d89f87d70ed1d8877641d0cf55522421fd08`,
+  and provided the same process-group guarantees. The release acceptance validator passed all 18
+  tests with output SHA-256
+  `7bc83929f79c8678737a5724da0d7fb69194a01ca52394499c61abcb93823e0b`, and strict Swift
+  formatting passed on the macOS 26 release host.

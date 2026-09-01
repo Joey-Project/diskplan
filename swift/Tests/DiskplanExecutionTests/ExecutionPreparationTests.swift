@@ -1,7 +1,8 @@
-@_spi(DiskplanEngine) @testable import DiskplanExecution
 import DiskplanPolicy
 import Foundation
 import Testing
+
+@_spi(DiskplanEngine) @testable import DiskplanExecution
 
 @Test
 func dryRunHasNoApplyCapabilityAndDoesNotInvokeMutation() async throws {
@@ -1220,13 +1221,15 @@ func jitRejectsMixedGlobalFactsWithinOneFreshCapture() async throws {
   let validated = try DecisionOverlayValidator.validate(release.overlay, against: release.plan)
   let nonce = Data(repeating: 0xa6, count: 32)
   let request = JITRevalidationRequest(
-    plan: release.plan,
+    testingPlan: release.plan,
     validatedOverlay: validated,
     manifest: manifest,
+    unitID: .action(release.ownerActions[0].id),
     actionIDs: release.ownerActions.map(\.id),
     releaseGroupIDs: [],
     preparationGeneration: 1,
-    oneShotNonce: nonce
+    oneShotNonce: nonce,
+    applyClaimIDHash: digest(92)
   )
   let report = Revalidator.evaluateJIT(
     request: request,

@@ -307,6 +307,9 @@ public actor ExecutionPreparationEngine {
       ClaimedApplyAuthorization(
         manifest: record.manifest,
         registryCurrentBindingHash: record.manifest.currentBindingHash,
+        registryClaimIDHash: try! PolicyDigest(
+          bytes: Data(SHA256.hash(data: key))
+        ),
         collector: record.collector,
         generation: record.generation,
         confirmedForceActionIDs: record.confirmedForceActionIDs,

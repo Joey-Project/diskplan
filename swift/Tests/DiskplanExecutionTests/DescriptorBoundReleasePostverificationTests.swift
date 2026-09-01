@@ -164,7 +164,7 @@ func manifestHandleRejectsCallerReplacementAndComponentShrink() throws {
   #expect(
     throws: ReleasePostverificationManifestClaimError.descriptorLocatorMembershipMismatch
   ) {
-    try authority.authorize(unitID: fixture.unitID, descriptorLocators: [])
+    try authority.authorize(jitClaim: fixture.jitClaim(), descriptorLocators: [])
   }
   let secondAuthority = try EngineReleasePostverificationManifestAuthority(
     testingClaimedManifest: fixture.manifest,
@@ -174,7 +174,7 @@ func manifestHandleRejectsCallerReplacementAndComponentShrink() throws {
     throws: ReleasePostverificationManifestClaimError.descriptorLocatorMembershipMismatch
   ) {
     try secondAuthority.authorize(
-      unitID: fixture.unitID,
+      jitClaim: fixture.jitClaim(),
       descriptorLocators: [authorizedOwner, authorizedOwner]
     )
   }
@@ -196,7 +196,7 @@ func manifestHandleRejectsCallerReplacementAndComponentShrink() throws {
     )
   ) {
     try bindingAuthority.authorize(
-      unitID: fixture.unitID,
+      jitClaim: fixture.jitClaim(),
       descriptorLocators: [invalidLocator]
     )
   }
@@ -205,13 +205,20 @@ func manifestHandleRejectsCallerReplacementAndComponentShrink() throws {
     testingClaimedManifest: fixture.manifest,
     plan: fixture.plan
   )
+  let consumedClaim = try fixture.jitClaim()
   _ = try oneShotAuthority.authorize(
-    unitID: fixture.unitID,
+    jitClaim: consumedClaim,
     descriptorLocators: [authorizedOwner]
   )
+  #expect(throws: ReleasePostverificationManifestClaimError.jitClaimUnknownOrReplayed) {
+    try oneShotAuthority.authorize(
+      jitClaim: consumedClaim,
+      descriptorLocators: [authorizedOwner]
+    )
+  }
   #expect(throws: ReleasePostverificationManifestClaimError.unitAlreadyAuthorized) {
     try oneShotAuthority.authorize(
-      unitID: fixture.unitID,
+      jitClaim: fixture.jitClaim(),
       descriptorLocators: [authorizedOwner]
     )
   }
@@ -239,7 +246,7 @@ func manifestAuthorityRejectsPlanSubstitutionAndUnclaimedUnits() throws {
   )
   #expect(throws: ReleasePostverificationManifestClaimError.unitNotInClaimedManifest) {
     try authority.authorize(
-      unitID: .action(fixture.actionID),
+      jitClaim: fixture.jitClaim(unitID: .action(fixture.actionID)),
       descriptorLocators: [fixture.ownerLocator()]
     )
   }
@@ -259,6 +266,98 @@ func manifestAuthorityRejectsPlanSubstitutionAndUnclaimedUnits() throws {
       plan: fixture.plan
     )
   }
+}
+
+@Test
+func jitExecutionClaimBindsActualCaptureAndRejectsCrossUnitSplices() throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+
+  let request = try fixture.jitRequest()
+  let report = fixture.currentJITReport(for: request)
+  let claim = try EngineJITExecutionClaim.issueForTesting(after: request, report: report)
+  let authority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: fixture.manifest,
+    plan: fixture.plan
+  )
+  _ = try authority.authorize(
+    jitClaim: claim,
+    descriptorLocators: [fixture.ownerLocator()]
+  )
+
+  let missingOutcome = JITRevalidationReport(
+    captureID: testDigest(4),
+    oneShotNonce: request.oneShotNonce,
+    actionOutcomes: [],
+    globalFindings: []
+  )
+  #expect(throws: EngineJITExecutionClaimError.jitNotCurrent) {
+    try EngineJITExecutionClaim.issueForTesting(after: request, report: missingOutcome)
+  }
+  let wrongNonceReport = JITRevalidationReport(
+    captureID: testDigest(4),
+    oneShotNonce: Data(repeating: 0x73, count: 32),
+    actionOutcomes: request.actionIDs.sorted().map {
+      ActionRevalidationOutcome(actionID: $0, findings: [])
+    },
+    globalFindings: []
+  )
+  #expect(throws: EngineJITExecutionClaimError.jitNotCurrent) {
+    try EngineJITExecutionClaim.issueForTesting(after: request, report: wrongNonceReport)
+  }
+
+  let actionRequest = try fixture.jitRequest(unitID: .action(fixture.actionID))
+  let actionClaim = try EngineJITExecutionClaim.issueForTesting(
+    after: actionRequest,
+    report: fixture.currentJITReport(for: actionRequest, captureID: testDigest(5))
+  )
+  let crossUnitAuthority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: fixture.manifest,
+    plan: fixture.plan
+  )
+  #expect(throws: ReleasePostverificationManifestClaimError.unitNotInClaimedManifest) {
+    try crossUnitAuthority.authorize(
+      jitClaim: actionClaim,
+      descriptorLocators: [fixture.ownerLocator()]
+    )
+  }
+}
+
+@Test
+func manifestAuthorityRejectsEveryJITClaimBindingDimension() throws {
+  let fixture = try ReleasePostverificationFixture()
+  defer { fixture.cleanUp() }
+  let wrongEpoch = try ExecutionEpochContext(
+    epochID: "wrong-epoch",
+    semanticReferenceTimeSeconds: fixture.manifest.epoch.semanticReferenceTimeSeconds,
+    issuedAtSeconds: fixture.manifest.epoch.issuedAtSeconds,
+    deadlineSeconds: fixture.manifest.epoch.deadlineSeconds
+  )
+
+  func rejects(_ claim: EngineJITExecutionClaim) throws {
+    let authority = try EngineReleasePostverificationManifestAuthority(
+      testingClaimedManifest: fixture.manifest,
+      plan: fixture.plan
+    )
+    #expect(throws: ReleasePostverificationManifestClaimError.jitClaimBindingMismatch) {
+      try authority.authorize(
+        jitClaim: claim,
+        descriptorLocators: [fixture.ownerLocator()]
+      )
+    }
+  }
+
+  try rejects(fixture.jitClaim(applyClaimIDHash: testDigest(0x80)))
+  try rejects(fixture.jitClaim(actionIDs: []))
+  try rejects(fixture.jitClaim(releaseGroupIDs: []))
+  try rejects(fixture.jitClaim(currentBindingHash: testDigest(0x81)))
+  try rejects(fixture.jitClaim(preparationGeneration: 2))
+  try rejects(fixture.jitClaim(epoch: wrongEpoch))
+  try rejects(fixture.jitClaim(oneShotNonce: Data(repeating: 0x82, count: 31)))
+  try rejects(fixture.jitClaim(planCaptureID: testDigest(0x83)))
+  try rejects(fixture.jitClaim(wholePlanCaptureID: testDigest(0x84)))
+  try rejects(fixture.jitClaim(jitCaptureID: fixture.plan.globalFacts.captureID))
+  try rejects(fixture.jitClaim(jitCaptureID: fixture.manifest.currentCaptureID))
 }
 
 @Test
@@ -689,9 +788,13 @@ private func releasePostverificationBindingVector() throws -> (
   )
   let execution = ReleasePostverificationExecutionBinding(
     executionBindingHash: testDigest(9),
+    applyClaimIDHash: testDigest(8),
+    preparationGeneration: 42,
     epoch: epoch,
+    jitOneShotNonce: Data(repeating: 0x44, count: 32),
     planCaptureID: testDigest(5),
-    jitCaptureID: testDigest(6),
+    wholePlanCaptureID: testDigest(6),
+    jitCaptureID: testDigest(7),
     freshnessLimitSeconds: 300
   )
   return (
@@ -700,10 +803,15 @@ private func releasePostverificationBindingVector() throws -> (
       planHash: testDigest(1),
       overlayHash: testDigest(2),
       epoch: epoch,
+      applyClaimIDHash: testDigest(8),
+      preparationGeneration: 42,
+      jitOneShotNonce: Data(repeating: 0x44, count: 32),
       planCaptureID: testDigest(5),
-      jitCaptureID: testDigest(6),
+      wholePlanCaptureID: testDigest(6),
+      jitCaptureID: testDigest(7),
       allocationGroupIDs: [group.allocationGroupID],
-      ownerActionIDs: [actionID]
+      ownerActionIDs: [actionID],
+      jitActionIDs: [actionID]
     ),
     execution,
     [owner],
@@ -1239,7 +1347,7 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       epoch: epoch,
       currentCaptureID: testDigest(2),
       executionActionIDs: [ownerAction.id] + releaseActions.map(\.id),
-      jitRevalidationActionIDs: Array(repeating: [], count: releaseActions.count + 1),
+      jitRevalidationActionIDs: [[]] + releaseActions.map { _ in compoundOwners },
       compoundReleaseUnits: [
         CompoundReleaseUnit(
           allocationGroupIDs: compound.allocationGroupIDs,
@@ -1268,9 +1376,13 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
     unitID = .compoundRelease(compound.allocationGroupIDs)
     execution = ReleasePostverificationExecutionBinding(
       executionBindingHash: self.manifest.currentBindingHash,
+      applyClaimIDHash: testDigest(0x71),
+      preparationGeneration: 1,
       epoch: self.manifest.epoch,
+      jitOneShotNonce: Data(repeating: 0x72, count: 32),
       planCaptureID: builtPlan.globalFacts.captureID,
-      jitCaptureID: self.manifest.currentCaptureID,
+      wholePlanCaptureID: self.manifest.currentCaptureID,
+      jitCaptureID: testDigest(4),
       freshnessLimitSeconds: self.manifest.epoch.deadlineSeconds
         - self.manifest.epoch.issuedAtSeconds
     )
@@ -1347,12 +1459,101 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       plan: plan
     )
     let handle = try authority.authorize(
-      unitID: unitID,
+      jitClaim: try jitClaim(),
       descriptorLocators: authorizedOwner.map { [$0] } ?? resolvedOwners
     )
     return ReleasePostverificationComponentRequest(
       componentHandle: handle,
       owners: resolvedOwners
+    )
+  }
+
+  func jitClaim(
+    applyClaimIDHash: PolicyDigest = testDigest(0x71),
+    unitID overrideUnitID: ExecutionUnitID? = nil,
+    actionIDs: [ActionID]? = nil,
+    releaseGroupIDs: [String]? = nil,
+    currentBindingHash: PolicyDigest? = nil,
+    preparationGeneration: UInt64 = 1,
+    epoch: ExecutionEpochContext? = nil,
+    oneShotNonce: Data = Data(repeating: 0x72, count: 32),
+    planCaptureID: PolicyDigest? = nil,
+    wholePlanCaptureID: PolicyDigest? = nil,
+    jitCaptureID: PolicyDigest = testDigest(4)
+  ) throws -> EngineJITExecutionClaim {
+    let resolvedUnitID = overrideUnitID ?? unitID
+    let derived = try EngineJITExecutionUnitBinding.derive(
+      unitID: resolvedUnitID,
+      plan: plan,
+      manifest: manifest
+    )
+    let overridden = EngineJITExecutionUnitBinding(
+      unitID: resolvedUnitID,
+      actionIDs: actionIDs ?? derived.actionIDs,
+      releaseGroupIDs: releaseGroupIDs ?? derived.releaseGroupIDs
+    )
+    return EngineJITExecutionClaim.issueForTesting(
+      record: EngineJITExecutionClaimRecord(
+        applyClaimIDHash: applyClaimIDHash,
+        unit: overridden,
+        currentBindingHash: currentBindingHash ?? manifest.currentBindingHash,
+        preparationGeneration: preparationGeneration,
+        epoch: epoch ?? manifest.epoch,
+        oneShotNonce: oneShotNonce,
+        planCaptureID: planCaptureID ?? plan.globalFacts.captureID,
+        wholePlanCaptureID: wholePlanCaptureID ?? manifest.currentCaptureID,
+        jitCaptureID: jitCaptureID
+      ))
+  }
+
+  func jitRequest(
+    unitID overrideUnitID: ExecutionUnitID? = nil,
+    actionIDs: [ActionID]? = nil,
+    releaseGroupIDs: [String]? = nil,
+    preparationGeneration: UInt64 = 1,
+    oneShotNonce: Data = Data(repeating: 0x72, count: 32),
+    applyClaimIDHash: PolicyDigest = testDigest(0x71)
+  ) throws -> JITRevalidationRequest {
+    let resolvedUnitID = overrideUnitID ?? unitID
+    let derived = try EngineJITExecutionUnitBinding.derive(
+      unitID: resolvedUnitID,
+      plan: plan,
+      manifest: manifest
+    )
+    let decisionOverlay = DecisionOverlay.create(
+      plan: plan,
+      selectedActionIDs: plan.actions.map(\.id),
+      waiverConsents: [],
+      userNotes: []
+    )
+    let validatedOverlay = try DecisionOverlayValidator.validate(
+      decisionOverlay,
+      against: plan
+    )
+    return JITRevalidationRequest(
+      testingPlan: plan,
+      validatedOverlay: validatedOverlay,
+      manifest: manifest,
+      unitID: resolvedUnitID,
+      actionIDs: actionIDs ?? derived.actionIDs,
+      releaseGroupIDs: releaseGroupIDs ?? derived.releaseGroupIDs,
+      preparationGeneration: preparationGeneration,
+      oneShotNonce: oneShotNonce,
+      applyClaimIDHash: applyClaimIDHash
+    )
+  }
+
+  func currentJITReport(
+    for request: JITRevalidationRequest,
+    captureID: PolicyDigest = testDigest(4)
+  ) -> JITRevalidationReport {
+    JITRevalidationReport(
+      captureID: captureID,
+      oneShotNonce: request.oneShotNonce,
+      actionOutcomes: request.actionIDs.sorted().map {
+        ActionRevalidationOutcome(actionID: $0, findings: [])
+      },
+      globalFindings: []
     )
   }
 
