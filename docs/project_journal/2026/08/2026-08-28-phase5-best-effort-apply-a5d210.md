@@ -1,7 +1,7 @@
 ---
 id: 20260828-a5d210
 title: Phase 5 Best-Effort Apply
-status: active
+status: completed
 created: 2026-08-28
 updated: 2026-09-01
 branch: wip/phase5-best-effort-apply
@@ -110,18 +110,18 @@ superseded_by:
   best-effort continuation, optional audit output, provider evidence, and APFS allocation-owner
   closure requirements.
 - [x] Complete static review follow-up implementation and documentation updates.
-- [ ] Run the focused/full Swift follow-up gates on India-mac-mini-m4-hoteng for the corrected
+- [x] Run the focused/full Swift follow-up gates on India-mac-mini-m4-hoteng for the corrected
   successor to `69542257`.
-- [ ] Run release integration, journal validation, and formatting for the follow-up head.
-- [ ] Complete frozen-range review and the signed landing commit.
+- [x] Run the final India targeted/full validation plus local journal, formatting, parse, and diff
+  gates.
+- [x] Complete frozen-range review and the signed landing commits.
 
 ## Handoff
 
 - Phase: Phase 5 best-effort apply and the accepted dirty-Git report-only boundary are complete at
-  the static gate.
-- Next step: run the focused and serial full Swift gates on India-mac-mini-m4-hoteng, resolve any
-  compiler/runtime findings, reconcile the branch with the current integration head, then freeze
-  the range for review and a signed landing commit.
+  the frozen review, static, focused, and serial full Swift gates.
+- Next step: integrate the signed final branch head, then remove the India validation worktree,
+  `.build` directory, and retained Phase 5 logs.
 - Dependency: the final live production route must consume the separately owned concrete
   revalidation collector and typed survivor/terminal-namespace invariant proofs. This slice does
   not fabricate or weaken those inputs and does not depend on their two pending hookup decisions.
@@ -257,3 +257,11 @@ superseded_by:
   rejects that internally invalid chain immediately. The successor asserts that earlier rejection
   and retains the valid evidence-rich discard/remove chain to prove both actions remain report-only
   and cannot be staged or waived. No production validation is weakened.
+- India targeted validation of `8376664fdc556479ab2bae0ce28d11a1e5daffce` passed the corrected
+  dirty-Git policy test (1/1) in 0.008 seconds; the bounded supervisor completed in 5.771 seconds,
+  emitted 1,131 bytes with SHA-256 prefix `98f4ab68`, and verified a quiescent process group.
+- India serial full validation of the same exact code head passed all 191 tests in 0.706 seconds;
+  the bounded supervisor completed in 4.837 seconds, emitted 39,795 bytes with SHA-256
+  `781158a72c126f6b3714c3567f131942629cd74163b377c4530519f93ca8d573`, and verified the process
+  group quiescent. Because the final successor is journal-only, this is the final dynamic code
+  evidence; the docs-only head receives a separate accuracy review before integration.
