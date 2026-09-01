@@ -36,9 +36,14 @@ superseded_by:
   to commit or roll back. It then sees the committed review or a typed stale-binding rejection,
   never the transient active prepare request.
 - Controller-owned async tasks never perform a condition-backed responder flush on the Swift
-  cooperative executor. Blocking responder transactions run on named, joined Foundation threads
-  and resume their owning tasks through checked continuations; synchronous server request paths
-  retain their existing authority and ordering boundaries.
+  cooperative executor. One broker-owned, serial Foundation worker executes every blocking
+  responder transaction, rejects work beyond its finite pending bound, and resumes owning tasks
+  through checked continuations; synchronous server request paths retain their existing authority
+  and ordering boundaries.
+- Runtime lifecycle stop closes that worker to new submissions, cancels queued operations, and
+  fails closed plus interrupts the transport when an operation is already executing. In-flight
+  batch acknowledgements are resolved exactly once, the writer and worker are joined before EOF
+  teardown returns, and broker finish remains idempotent.
 - The registered execution ID becomes visible through an early `apply_started` prefix. One exact
   cancellation mirrors the same prefix, appends one typed acknowledgement, cancels the retained
   run, and gives both pending requests the same sealed terminal stream.
@@ -233,6 +238,19 @@ superseded_by:
   again verified process-group quiescence; output SHA-256 values were
   `1abaa6c717eeb815a036c070412a938166842e192b3147e536d50ef2380c6d3b` and
   `872e9d5abc64245eb0779d01d89252e912249c889d9d60b55ae3b5ec61ffcd9a`.
+- Frozen review found that the first bridge created one uncancellable native thread per send and
+  could deadlock lifecycle stop behind an unread stdout writer. The replacement uses one serial
+  worker with a 128-operation pending bound and cancellation-aware queue removal. Eight exact
+  strict-pool regressions, including 128 concurrent submissions, deterministic overflow rejection,
+  and a blocked-writer stop without manual gate release, passed on the final source; supervisor
+  output SHA-256 was `e9a6dbbdad27bd0e58514a8c5b5ed377d8a24f2c5c69631c128fd3d098ae89f4`.
+- The exact CI build passed with output SHA-256
+  `2c8b0760877ab457f3d0534f56bc7c331d962fca5ed98f7bbd2a495b2e7cd5d9`. Two subsequent exact
+  Foundation runs passed all 641 tests with verified process-group quiescence; supervisor output
+  SHA-256 values were `80956aa201c8a004d0571370a87584a5959305360cbbb2eeae396be7b6ff1f66`
+  and `7f6025d469e80d362f5461f1cd7814a95f0ea31b07e7e9d6a9d9333eee52e47a`. After the final
+  capacity and completed-operation cancellation-race assertions, all 641 tests passed once more
+  with output SHA-256 `6aad600df636890d29818dfc3e4674573b399327e58217f0aa3c992bf1a3b2a9`.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races. Bridge

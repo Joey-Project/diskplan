@@ -1702,6 +1702,8 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   /// runtime session. Handlers use it to author the closed preview shape.
   public let negotiatedProtocolMinor: UInt32
 
+  var eventBroker: SerialEventBroker { broker }
+
   init(
     broker: SerialEventBroker,
     request: RuntimeBusinessRequest,
@@ -1745,7 +1747,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   }
 
   func sendAsync(_ emission: RuntimeBusinessEmission) async throws {
-    try await runtimeResponderBlockingOperation {
+    try await runtimeResponderBlockingOperation(broker: broker) {
       try self.send(emission)
     }
   }
@@ -1759,7 +1761,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     rollback: @escaping @Sendable () -> Void
   ) async throws -> Bool {
     guard
-      let transaction = try await runtimeResponderBlockingOperation({
+      let transaction = try await runtimeResponderBlockingOperation(broker: broker, {
         try self.beginApplyReview(
           emission,
           install: install,
@@ -1867,7 +1869,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   func sendExecutionPrefixAsync(
     _ candidate: [Diskplan_V1_ExecutionStreamEvent]
   ) async throws {
-    try await runtimeResponderBlockingOperation {
+    try await runtimeResponderBlockingOperation(broker: broker) {
       try self.sendExecutionPrefix(candidate)
     }
   }
@@ -2023,7 +2025,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
   ) async throws(RuntimeExecutionTerminalError) {
     do {
-      try await runtimeResponderBlockingOperation {
+      try await runtimeResponderBlockingOperation(broker: broker) {
         try self.finishExecution(events, mirroredTo: cancellationResponder)
       }
     } catch let error as RuntimeExecutionTerminalError {
@@ -2134,7 +2136,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
     mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
   ) async throws(RuntimeExecutionTerminalError) {
     do {
-      try await runtimeResponderBlockingOperation {
+      try await runtimeResponderBlockingOperation(broker: broker) {
         try self.finishExecutionFailure(failure, mirroredTo: cancellationResponder)
       }
     } catch let error as RuntimeExecutionTerminalError {
@@ -2162,7 +2164,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   }
 
   func finishApplyStartFailureAsync(_ terminal: RuntimeApplyStartFailureTerminal) async throws {
-    try await runtimeResponderBlockingOperation {
+    try await runtimeResponderBlockingOperation(broker: broker) {
       try self.finishApplyStartFailure(terminal)
     }
   }
@@ -2198,7 +2200,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   func abortExecutionStreamWithoutEmissionAsync(
     mirroredTo cancellationResponder: RuntimeBusinessResponder? = nil
   ) async throws {
-    try await runtimeResponderBlockingOperation {
+    try await runtimeResponderBlockingOperation(broker: broker) {
       try self.abortExecutionStreamWithoutEmission(mirroredTo: cancellationResponder)
     }
   }
@@ -2220,7 +2222,7 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
   }
 
   func rejectHandlerFailureAsync() async throws {
-    try await runtimeResponderBlockingOperation {
+    try await runtimeResponderBlockingOperation(broker: broker) {
       try self.rejectHandlerFailure()
     }
   }
@@ -2385,17 +2387,8 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
 }
 
 private func runtimeResponderBlockingOperation<Value: Sendable>(
+  broker: SerialEventBroker,
   _ operation: @escaping @Sendable () throws -> Value
 ) async throws -> Value {
-  try await withCheckedThrowingContinuation { continuation in
-    let thread = Thread {
-      do {
-        continuation.resume(returning: try operation())
-      } catch {
-        continuation.resume(throwing: error)
-      }
-    }
-    thread.name = "diskplan-runtime-responder-blocking-operation"
-    thread.start()
-  }
+  try await broker.performRuntimeResponderOperation(operation)
 }

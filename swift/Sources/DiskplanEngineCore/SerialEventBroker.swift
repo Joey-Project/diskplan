@@ -83,6 +83,238 @@ private final class BrokerWriteAcknowledgement: @unchecked Sendable {
   }
 }
 
+enum RuntimeResponderWorkerError: Error, Equatable {
+  case closed
+  case capacityExceeded(maximumPending: Int)
+}
+
+private protocol RuntimeResponderQueuedOperation: AnyObject, Sendable {
+  var isCompleted: Bool { get }
+  func execute()
+  func cancelBeforeExecution(_ error: any Error)
+}
+
+private final class RuntimeResponderOperation<Value: Sendable>: RuntimeResponderQueuedOperation,
+  @unchecked Sendable
+{
+  private let lock = NSLock()
+  private var operation: (@Sendable () throws -> Value)?
+  private var continuation: CheckedContinuation<Value, any Error>?
+
+  init(
+    operation: @escaping @Sendable () throws -> Value,
+    continuation: CheckedContinuation<Value, any Error>
+  ) {
+    self.operation = operation
+    self.continuation = continuation
+  }
+
+  var isCompleted: Bool {
+    lock.withLock { continuation == nil }
+  }
+
+  func execute() {
+    let operation: (@Sendable () throws -> Value)? = lock.withLock {
+      defer { self.operation = nil }
+      return self.operation
+    }
+    guard let operation else { return }
+    do {
+      complete(.success(try operation()))
+    } catch {
+      complete(.failure(error))
+    }
+  }
+
+  func cancelBeforeExecution(_ error: any Error) {
+    lock.withLock { operation = nil }
+    complete(.failure(error))
+  }
+
+  private func complete(_ result: Result<Value, any Error>) {
+    let continuation = lock.withLock {
+      defer { self.continuation = nil }
+      return self.continuation
+    }
+    continuation?.resume(with: result)
+  }
+}
+
+private final class RuntimeResponderCancellationRegistration: @unchecked Sendable {
+  private let lock = NSLock()
+  private var action: (@Sendable () -> Void)?
+  private var cancellationRequested = false
+
+  func install(_ action: @escaping @Sendable () -> Void) {
+    let cancelImmediately = lock.withLock {
+      if cancellationRequested { return true }
+      self.action = action
+      return false
+    }
+    if cancelImmediately { action() }
+  }
+
+  func cancel() {
+    let action = lock.withLock {
+      cancellationRequested = true
+      defer { self.action = nil }
+      return self.action
+    }
+    action?()
+  }
+}
+
+private enum RuntimeResponderCancellationOutcome {
+  case cancelledBeforeExecution
+  case executing
+  case completed
+}
+
+private final class RuntimeResponderWorker: @unchecked Sendable {
+  private let condition = NSCondition()
+  private let maximumPending: Int
+  private var pending: [any RuntimeResponderQueuedOperation] = []
+  private var active: (any RuntimeResponderQueuedOperation)?
+  private var accepting = true
+  private var finished = false
+  private var threadStartCount = 0
+  private var maximumObservedActiveCount = 0
+
+  init(maximumPending: Int) {
+    precondition(maximumPending > 0)
+    self.maximumPending = maximumPending
+    let thread = Thread { [self] in drain() }
+    thread.name = "diskplan-runtime-responder-worker"
+    condition.lock()
+    threadStartCount = 1
+    condition.unlock()
+    thread.start()
+  }
+
+  func perform<Value: Sendable>(
+    _ operation: @escaping @Sendable () throws -> Value,
+    onExecutingCancellation: @escaping @Sendable () -> Void
+  ) async throws -> Value {
+    let registration = RuntimeResponderCancellationRegistration()
+    return try await withTaskCancellationHandler {
+      try Task.checkCancellation()
+      return try await withCheckedThrowingContinuation { continuation in
+        let item = RuntimeResponderOperation(
+          operation: operation,
+          continuation: continuation
+        )
+        enqueue(item)
+        registration.install { [weak self, weak item] in
+          guard let self, let item else { return }
+          if self.cancel(item) == .executing {
+            onExecutingCancellation()
+          }
+        }
+      }
+    } onCancel: {
+      registration.cancel()
+    }
+  }
+
+  func beginStop() -> Bool {
+    condition.lock()
+    guard accepting else {
+      let hasActive = active != nil
+      condition.unlock()
+      return hasActive
+    }
+    accepting = false
+    let cancelled = pending
+    pending.removeAll(keepingCapacity: false)
+    let hasActive = active != nil
+    condition.broadcast()
+    condition.unlock()
+    for item in cancelled {
+      item.cancelBeforeExecution(CancellationError())
+    }
+    return hasActive
+  }
+
+  func waitUntilStopped() {
+    condition.lock()
+    while !finished { condition.wait() }
+    condition.unlock()
+  }
+
+  var threadStartCountForTesting: Int {
+    condition.withLock { threadStartCount }
+  }
+
+  var maximumObservedActiveCountForTesting: Int {
+    condition.withLock { maximumObservedActiveCount }
+  }
+
+  var pendingCountForTesting: Int {
+    condition.withLock { pending.count }
+  }
+
+  private func enqueue(_ item: any RuntimeResponderQueuedOperation) {
+    condition.lock()
+    if !accepting {
+      condition.unlock()
+      item.cancelBeforeExecution(RuntimeResponderWorkerError.closed)
+      return
+    }
+    guard pending.count < maximumPending else {
+      condition.unlock()
+      item.cancelBeforeExecution(
+        RuntimeResponderWorkerError.capacityExceeded(maximumPending: maximumPending)
+      )
+      return
+    }
+    pending.append(item)
+    condition.signal()
+    condition.unlock()
+  }
+
+  private func cancel(
+    _ item: any RuntimeResponderQueuedOperation
+  ) -> RuntimeResponderCancellationOutcome {
+    condition.lock()
+    if let index = pending.firstIndex(where: { $0 === item }) {
+      let cancelled = pending.remove(at: index)
+      condition.unlock()
+      cancelled.cancelBeforeExecution(CancellationError())
+      return .cancelledBeforeExecution
+    }
+    if active === item, !item.isCompleted {
+      condition.unlock()
+      return .executing
+    }
+    condition.unlock()
+    return .completed
+  }
+
+  private func drain() {
+    while true {
+      condition.lock()
+      while pending.isEmpty && accepting { condition.wait() }
+      guard !pending.isEmpty else {
+        finished = true
+        condition.broadcast()
+        condition.unlock()
+        return
+      }
+      let item = pending.removeFirst()
+      active = item
+      maximumObservedActiveCount = max(maximumObservedActiveCount, 1)
+      condition.unlock()
+
+      item.execute()
+
+      condition.lock()
+      if active === item { active = nil }
+      condition.broadcast()
+      condition.unlock()
+    }
+  }
+}
+
 /// The sole post-handshake stdout writer. Semantic events block at a finite
 /// queue boundary; only a contiguous pending telemetry run may be replaced.
 final class SerialEventBroker: @unchecked Sendable {
@@ -91,11 +323,15 @@ final class SerialEventBroker: @unchecked Sendable {
   private let condition = NSCondition()
   private let semanticCapacity: Int
   private let writer: Writer
+  private let interruptWriter: @Sendable () -> Void
+  private let runtimeResponderWorker = RuntimeResponderWorker(maximumPending: 128)
   private var pending: [PendingOutput] = []
   private var semanticCount = 0
   private var inFlightCount = 0
+  private var inFlightWriteAcknowledgement: BrokerWriteAcknowledgement?
   private var closing = false
   private var finished = false
+  private var writerInterrupted = false
   private var failure: EventBrokerError?
   private var nextEventSequence: UInt64 = 1
   private var nextRuntimeBatchReservation: UInt64 = 1
@@ -103,11 +339,13 @@ final class SerialEventBroker: @unchecked Sendable {
 
   init(
     semanticCapacity: Int = 128,
-    writer: @escaping Writer
+    writer: @escaping Writer,
+    interruptWriter: @escaping @Sendable () -> Void = {}
   ) {
     precondition(semanticCapacity > 0)
     self.semanticCapacity = semanticCapacity
     self.writer = writer
+    self.interruptWriter = interruptWriter
     Thread { [self] in drain() }.start()
   }
 
@@ -115,9 +353,53 @@ final class SerialEventBroker: @unchecked Sendable {
     output: FileHandle,
     semanticCapacity: Int = 128
   ) {
-    self.init(semanticCapacity: semanticCapacity) { data in
-      try FrameCodec.write(data, to: output)
+    self.init(
+      semanticCapacity: semanticCapacity,
+      writer: { data in
+        try FrameCodec.write(data, to: output)
+      },
+      interruptWriter: {
+        try? output.close()
+      }
+    )
+  }
+
+  func performRuntimeResponderOperation<Value: Sendable>(
+    _ operation: @escaping @Sendable () throws -> Value
+  ) async throws -> Value {
+    try await runtimeResponderWorker.perform(
+      operation,
+      onExecutingCancellation: { [weak self] in
+        self?.failAndInterrupt(
+          "runtime responder operation was cancelled during transport"
+        )
+      }
+    )
+  }
+
+  /// Stops the fixed-size runtime responder executor. If one transaction is
+  /// already executing, the transport is failed closed and its writer is
+  /// interrupted before joining the worker so lifecycle shutdown cannot wait
+  /// behind an unread stdout pipe.
+  func stopRuntimeResponderOperationsAndWait() {
+    let hadActiveOperation = runtimeResponderWorker.beginStop()
+    if hadActiveOperation {
+      failAndInterrupt("runtime responder lifecycle stopped during transport")
     }
+    runtimeResponderWorker.waitUntilStopped()
+    if hadActiveOperation { waitUntilFinished() }
+  }
+
+  func runtimeResponderWorkerThreadStartCountForTesting() -> Int {
+    runtimeResponderWorker.threadStartCountForTesting
+  }
+
+  func runtimeResponderMaximumActiveCountForTesting() -> Int {
+    runtimeResponderWorker.maximumObservedActiveCountForTesting
+  }
+
+  func runtimeResponderPendingCountForTesting() -> Int {
+    runtimeResponderWorker.pendingCountForTesting
   }
 
   func sendEnvelope(
@@ -269,6 +551,7 @@ final class SerialEventBroker: @unchecked Sendable {
   }
 
   func finish() throws {
+    stopRuntimeResponderOperationsAndWait()
     condition.lock()
     closing = true
     condition.broadcast()
@@ -288,10 +571,12 @@ final class SerialEventBroker: @unchecked Sendable {
     failure = outputFailure
     closing = true
     let pendingAcknowledgements = pending.compactMap(\.writeAcknowledgement)
+    let inFlightAcknowledgement = inFlightWriteAcknowledgement
     pending.removeAll()
     semanticCount = 0
     condition.broadcast()
     condition.unlock()
+    inFlightAcknowledgement?.resolve(.failure(outputFailure))
     for acknowledgement in pendingAcknowledgements {
       acknowledgement.resolve(.failure(outputFailure))
     }
@@ -314,6 +599,21 @@ final class SerialEventBroker: @unchecked Sendable {
     condition.lock()
     defer { condition.unlock() }
     return runtimeBatchReservations.count
+  }
+
+  private func failAndInterrupt(_ summary: String) {
+    failClosed(summary)
+    condition.lock()
+    let shouldInterrupt = !writerInterrupted
+    writerInterrupted = true
+    condition.unlock()
+    if shouldInterrupt { interruptWriter() }
+  }
+
+  private func waitUntilFinished() {
+    condition.lock()
+    while !finished { condition.wait() }
+    condition.unlock()
   }
 
   private func enqueue(_ output: PendingOutput, semantic: Bool) throws {
@@ -365,6 +665,7 @@ final class SerialEventBroker: @unchecked Sendable {
       }
       let output = pending.removeFirst()
       inFlightCount += 1
+      inFlightWriteAcknowledgement = output.writeAcknowledgement
       if !output.isTelemetry { semanticCount -= output.semanticWeight }
       condition.broadcast()
       condition.unlock()
@@ -375,6 +676,7 @@ final class SerialEventBroker: @unchecked Sendable {
         }
         condition.lock()
         inFlightCount -= 1
+        inFlightWriteAcknowledgement = nil
         condition.broadcast()
         condition.unlock()
         output.writeAcknowledgement?.resolve(.success(()))
@@ -382,6 +684,7 @@ final class SerialEventBroker: @unchecked Sendable {
         let outputFailure = EventBrokerError.outputFailed(String(describing: error))
         condition.lock()
         inFlightCount -= 1
+        inFlightWriteAcknowledgement = nil
         failure = outputFailure
         let pendingAcknowledgements = pending.compactMap(\.writeAcknowledgement)
         pending.removeAll()

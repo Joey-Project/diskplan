@@ -656,6 +656,42 @@ import Testing
   #expect(await signal.wait(timeout: .zero))
 }
 
+@Test func runtimeResponderWorkerStaysSerialAcrossManyConcurrentSubmissions() async throws {
+  let broker = SerialEventBroker { _ in }
+  let gate = AuthorityTestGate()
+  let started = RuntimePositiveOneShotSignal()
+  let first = Task {
+    try await broker.performRuntimeResponderOperation {
+      started.signal()
+      gate.wait()
+      return 0
+    }
+  }
+  try #require(await started.wait())
+  let followers = (1...128).map { value in
+    Task {
+      try await broker.performRuntimeResponderOperation { value }
+    }
+  }
+  try #require(
+    await runtimeEventually {
+      broker.runtimeResponderPendingCountForTesting() == followers.count
+    })
+
+  #expect(broker.runtimeResponderWorkerThreadStartCountForTesting() == 1)
+  #expect(broker.runtimeResponderMaximumActiveCountForTesting() == 1)
+  await #expect(throws: RuntimeResponderWorkerError.capacityExceeded(maximumPending: 128)) {
+    try await broker.performRuntimeResponderOperation { 129 }
+  }
+
+  gate.open()
+  #expect(try await first.value == 0)
+  for (index, follower) in followers.enumerated() {
+    #expect(try await follower.value == index + 1)
+  }
+  try broker.finish()
+}
+
 @Test func runtimeBatchReservationPreventsLaterSemanticProducerOvertaking() async throws {
   let writer = RuntimePositiveWriter()
   writer.block(at: .applyStarted)
@@ -1787,6 +1823,36 @@ func controllerRequiresProtocol16BeforeBackendMutationPreparation(
     #expect(backend.startCount == 0)
     #expect(throws: (any Error).self) { try fixture.broker.finish() }
   }
+}
+
+@Test func controllerStopInterruptsABlockedRuntimeResponderAndJoinsItsWorker() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: false)
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  writer.block(at: .applyReview)
+
+  var request = Diskplan_V1_PrepareApplyReviewRequest()
+  request.requestID = 3
+  request.projectionID = fixture.plan.projectionID
+  request.overlayID = fixture.overlay.overlayID
+  request.overlayRevision = fixture.overlay.revision
+  request.overlaySha256 = fixture.overlay.overlaySha256
+  try #require(fixture.authority.claim(.prepareApplyReview(request)) == nil)
+  try fixture.controller.handle(
+    .prepareApplyReview(request),
+    responder: fixture.responder(.prepareApplyReview(request))
+  )
+  try #require(await writer.waitUntilBlocked())
+  #expect(fixture.broker.runtimeResponderWorkerThreadStartCountForTesting() == 1)
+  #expect(fixture.broker.runtimeResponderMaximumActiveCountForTesting() == 1)
+
+  try await runtimePositiveBlockingTask {
+    fixture.controller.stopAndWait()
+  }.value
+
+  #expect(writer.interruptCount == 1)
+  #expect(fixture.broker.runtimeResponderPendingCountForTesting() == 0)
+  #expect(throws: (any Error).self) { try fixture.broker.finish() }
 }
 
 @Test func controllerCancelsAndAwaitsInvalidStartedRun() async throws {
@@ -3760,6 +3826,7 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
   private var injectedFailure = false
   private var observeReviewInstallation = false
   private var observedInstalledReview = false
+  private var interruptions = 0
 
   func observeInstalledReview() {
     condition.lock()
@@ -3790,6 +3857,18 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
     released = true
     condition.broadcast()
     condition.unlock()
+  }
+
+  func interrupt() {
+    condition.lock()
+    interruptions += 1
+    released = true
+    condition.broadcast()
+    condition.unlock()
+  }
+
+  var interruptCount: Int {
+    condition.withLock { interruptions }
   }
 
   var sawInstalledReview: Bool {
@@ -3864,13 +3943,18 @@ private func runtimePositiveFixture(
     ))
   let output = writer?.output ?? AuthorityTestOutput()
   writer?.controller = controller
-  let broker = SerialEventBroker { data in
-    if let writer {
-      try writer.write(data)
-    } else {
-      output.append(data)
+  let broker = SerialEventBroker(
+    writer: { data in
+      if let writer {
+        try writer.write(data)
+      } else {
+        output.append(data)
+      }
+    },
+    interruptWriter: {
+      writer?.interrupt()
     }
-  }
+  )
   let gateHook: (@Sendable () async throws -> Void)? = reviewCommitGate.map { gate in
     { @Sendable in await gate.wait() }
   }

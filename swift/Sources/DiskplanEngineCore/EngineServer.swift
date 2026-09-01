@@ -125,6 +125,7 @@ public enum EngineServer {
     defer {
       coordinator.stopAndWait()
       runtimeLifecycle?.stopAndWait()
+      try? broker.finish()
     }
 
     while let payload = try FrameCodec.read(from: input) {

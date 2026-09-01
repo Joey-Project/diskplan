@@ -124,6 +124,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
   private var livePlan: LivePlan?
   private var preparedApply: PreparedApply?
   private var activeExecution: ActiveExecution?
+  private var responderBrokers: [ObjectIdentifier: SerialEventBroker] = [:]
   private var ownedTasks: [UUID: RuntimeOwnedTask] = [:]
   private var stopping = false
 
@@ -152,6 +153,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     _ request: RuntimeBusinessRequest,
     responder: RuntimeBusinessResponder
   ) throws {
+    registerResponderBroker(responder.eventBroker)
     switch request {
     case .buildPlan(let build):
       try handleBuildPlan(build, responder: responder)
@@ -857,6 +859,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     lock.lock()
     stopping = true
     let run = activeExecution?.run
+    let brokers = Array(responderBrokers.values)
     taskCondition.lock()
     let tasks = Array(ownedTasks.values)
     taskCondition.unlock()
@@ -864,6 +867,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
 
     run?.cancel()
     for task in tasks { task.cancel() }
+    for broker in brokers { broker.stopRuntimeResponderOperationsAndWait() }
 
     taskCondition.lock()
     while !ownedTasks.isEmpty { taskCondition.wait() }
@@ -872,6 +876,14 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     lock.lock()
     activeExecution = nil
     lock.unlock()
+  }
+
+  private func registerResponderBroker(_ broker: SerialEventBroker) {
+    lock.lock()
+    responderBrokers[ObjectIdentifier(broker)] = broker
+    let shouldStop = stopping
+    lock.unlock()
+    if shouldStop { broker.stopRuntimeResponderOperationsAndWait() }
   }
 
   @discardableResult
