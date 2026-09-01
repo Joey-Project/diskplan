@@ -44,7 +44,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
   public let semanticUniqueness: PolicyGateInput
   public let recoverability: PolicyGateInput
   public let dependencyCompleteness: PolicyGateInput
-  public let defaultReviewRecommendation: Recommendation
   fileprivate let providerBound: Bool
   fileprivate let classificationConflict: Bool
   fileprivate let sourceBinding: PolicyEvaluationSourceBinding
@@ -59,7 +58,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
     dependencyCompleteness: GateResult,
     providerBound: Bool,
     classificationConflict: Bool,
-    defaultReviewRecommendation: Recommendation,
     sourceBinding: PolicyEvaluationSourceBinding
   ) {
     self.protectionAndProvider = PolicyGateInput(result: protectionAndProvider)
@@ -71,7 +69,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
     self.dependencyCompleteness = PolicyGateInput(result: dependencyCompleteness)
     self.providerBound = providerBound
     self.classificationConflict = classificationConflict
-    self.defaultReviewRecommendation = defaultReviewRecommendation
     self.sourceBinding = sourceBinding
   }
 
@@ -151,7 +148,8 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
 
     let boundIdentityAndAccess: GateResult
     let namespaceAccessComplete = namespaceSeals.allSatisfy { seal in
-      if case .known = seal.accessPolicy, case .known = seal.aclDigest,
+      if seal.trustedNamespace != .unverified,
+        case .known = seal.accessPolicy, case .known = seal.aclDigest,
         case .known = seal.mountIdentity
       {
         return true
@@ -263,11 +261,10 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
       dependencyCompleteness: boundDependency,
       providerBound: providerBound,
       classificationConflict: classification.isConflict,
-      defaultReviewRecommendation: .needsSemanticReview,
-      sourceBinding: Self.sourceBinding(
+      sourceBinding: try PolicyEvaluationSourceBinding.verified(
         evidence: evidence,
         globalFacts: globalFacts,
-        classificationHash: classificationHash
+        classificationResolutionHash: classificationHash
       )
     )
   }
@@ -326,21 +323,6 @@ public struct OneVotePolicyInputs: Equatable, Sendable {
       : .requiresWaiver(predicates: predicates, reasons: reasons)
   }
 
-  private static func sourceBinding(
-    evidence: FrozenEvidenceSnapshot,
-    globalFacts: FrozenGlobalFacts,
-    classificationHash: PolicyDigest
-  ) -> PolicyEvaluationSourceBinding {
-    PolicyEvaluationSourceBinding(
-      captureID: evidence.captureID,
-      evidenceID: evidence.evidenceID,
-      globalFactsHash: globalFacts.globalFactsHash,
-      classificationResolutionHash: classificationHash,
-      policyVersion: evidence.policyVersion,
-      schemaVersion: evidence.schemaVersion,
-      semanticReferenceTimeSeconds: evidence.semanticReferenceTimeSeconds
-    )
-  }
 }
 
 public enum OneVotePolicy {
@@ -357,7 +339,6 @@ public enum OneVotePolicy {
       ],
       providerBound: inputs.providerBound,
       classificationConflict: inputs.classificationConflict,
-      defaultReviewRecommendation: inputs.defaultReviewRecommendation,
       sourceBinding: inputs.sourceBinding
     )
   }
@@ -453,7 +434,9 @@ extension GitWorktreeEvidence {
       case .known = indexDigest,
       case .known(let registration) = registration,
       registration.registeredWorktreeIdentity == targetIdentity,
-      linkage == .known(.ordinary),
+      registration.administrativeDirectoryIdentity
+        != registration.commonDirectoryIdentity,
+      linkage == .known(.linked(registrationID: registration.registrationID)),
       sparseCheckout == .known(.disabled),
       nestedRepositories == .known(.none),
       submodules == .known(.none),
@@ -507,7 +490,7 @@ extension GitWorktreeEvidence {
 }
 
 extension ClassificationResolution {
-  fileprivate var bindingHash: PolicyDigest {
+  var bindingHash: PolicyDigest {
     PolicyBindings.digest(kind: "classification-resolution") { encoder in
       encoder.array(facets) { facet in
         var nested = PolicyBindingEncoder()
@@ -556,7 +539,7 @@ extension ClassificationClaim {
 }
 
 extension String {
-  fileprivate func rawUTF8Equal(_ other: String) -> Bool {
+  func rawUTF8Equal(_ other: String) -> Bool {
     Data(utf8) == Data(other.utf8)
   }
 }

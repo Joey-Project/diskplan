@@ -2,6 +2,12 @@ import DiskplanPolicy
 import Foundation
 
 public actor BestEffortApplyCoordinator {
+  private struct AuditFailureAccumulator {
+    let epochID: String
+    var values: [AuditWriteFailure] = []
+    var persistenceEnabled = true
+  }
+
   private struct MutationStep: Sendable {
     let action: ActionDefinition
     let operation: ExecutionAdapterOperation
@@ -107,7 +113,7 @@ public actor BestEffortApplyCoordinator {
       return startFailure(.forceConfirmationBindingMismatch, manifest: manifest)
     }
 
-    var auditFailures: [AuditWriteFailure] = []
+    var auditFailures = AuditFailureAccumulator(epochID: manifest.epoch.epochID)
     var eventIndex = 0
     await emit(
       .applyStarted(epochID: manifest.epoch.epochID),
@@ -414,7 +420,7 @@ public actor BestEffortApplyCoordinator {
       manifest: manifest,
       startFailure: nil,
       unitOutcomes: outcomes,
-      auditFailures: auditFailures
+      auditFailures: auditFailures.values
     )
   }
 
@@ -579,26 +585,31 @@ public actor BestEffortApplyCoordinator {
   private func emit(
     _ event: ExecutionEvent,
     index: inout Int,
-    auditFailures: inout [AuditWriteFailure]
+    auditFailures: inout AuditFailureAccumulator
   ) async {
     let currentIndex = index
     index += 1
     await eventSink.emit(event)
-    guard let auditSink else { return }
+    guard let auditSink, auditFailures.persistenceEnabled else { return }
     do {
-      try await auditSink.record(event)
+      try await auditSink.record(event, epochID: auditFailures.epochID)
     } catch {
+      // Optional persistence is latched off after the first failure for this apply epoch. Shell/TUI
+      // delivery remains independent above, while a failing sink cannot amplify one storage fault
+      // into an event-sized failure transcript.
+      auditFailures.persistenceEnabled = false
+      let artifactWarning = (error as? SafeArtifactWriteError)?.warning
       let errorValue = error as NSError
       let posixErrno =
-        errorValue.domain == NSPOSIXErrorDomain
-        ? Int32(exactly: errorValue.code)
-        : nil
+        artifactWarning?.errno
+        ?? (errorValue.domain == NSPOSIXErrorDomain ? Int32(exactly: errorValue.code) : nil)
       let failure = AuditWriteFailure(
         eventIndex: currentIndex,
-        code: String(reflecting: type(of: error)),
-        errno: posixErrno
+        code: artifactWarning?.code ?? String(reflecting: type(of: error)),
+        errno: posixErrno,
+        retainedLocator: artifactWarning?.retainedLocator
       )
-      auditFailures.append(failure)
+      auditFailures.values.append(failure)
       await eventSink.emit(.auditWriteFailed(failure))
     }
   }

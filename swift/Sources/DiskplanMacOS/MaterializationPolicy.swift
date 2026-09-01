@@ -9,7 +9,8 @@ public struct NoMaterializationPolicy: Equatable, Sendable {
     lhs.installedValue == rhs.installedValue
   }
 
-  func revalidateLive() -> Capability<NoMaterializationPolicy> {
+  /// Re-reads the process policy immediately before a filesystem path access.
+  public func revalidateLive() -> Capability<NoMaterializationPolicy> {
     let result = readBack()
     guard result.result >= 0 else {
       return POSIXFailure.capability(
@@ -81,5 +82,22 @@ public struct MaterializationPolicyInstaller: Sendable {
     return .known(
       NoMaterializationPolicy(installedValue: readResult.result, readBack: readBack)
     )
+  }
+}
+
+/// Reads the current process policy without installing or changing it.
+public struct MaterializationPolicyReader: Sendable {
+  public init() {}
+
+  public func read() -> Capability<Bool> {
+    let result = dp_get_materialization_policy()
+    guard result >= 0 else {
+      return POSIXFailure.capability(
+        errno,
+        operation: "read process dataless materialization policy"
+      )
+    }
+    let off = Int32(IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+    return .known(result & Int32(IOPOL_MATERIALIZE_DATALESS_FILES_BASIC_MASK) == off)
   }
 }

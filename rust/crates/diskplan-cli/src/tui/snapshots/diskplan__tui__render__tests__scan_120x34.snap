@@ -1,0 +1,38 @@
+---
+source: rust/crates/diskplan-cli/src/tui/render.rs
+expression: "snapshot(&state, 120, 34)"
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ diskplan Read-only scan  •  Running                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Engine facts ────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│Profile standard       Elapsed 1:23         Rate 9945 entries/s                                                       │
+│Entries 825431         Directories 37602      Retained evidence 148                                                   │
+│Allocated observed 23.0 GiB     Classification deferred to plan phase                                                 │
+│Complete roots 4         Partial roots 1         Structural budget 2000000                                            │
+│Current root /Users/example/Library/Caches/com.example                                                                │
+│                                                                                                                      │
+│Completion percentage is intentionally unavailable: the engine has not proved a denominator.                          │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+q cancel  Space pause/resume  p finalize partial + plan  ? or / help
+scan is running

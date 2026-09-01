@@ -660,7 +660,7 @@ func selectedGitPrerequisitesAreRevalidatedAsTypedEvidence() async throws {
     globalFacts: facts,
     evidenceSnapshots: [evidence],
     actions: [action],
-    releaseSets: []
+    releaseGraphBundle: nil
   )
   let overlay = DecisionOverlay.create(
     plan: plan, selectedActionIDs: [action.id], waiverConsents: [], userNotes: [])
@@ -1464,7 +1464,7 @@ struct Fixture {
       globalFacts: facts,
       evidenceSnapshots: [evidence],
       actions: [action],
-      releaseSets: []
+      releaseGraphBundle: nil
     )
     overlay = DecisionOverlay.create(
       plan: plan, selectedActionIDs: [action.id], waiverConsents: [], userNotes: [])
@@ -1531,10 +1531,10 @@ struct ReleaseFixture {
       CandidateActionBinding(candidateID: "b", action: b),
     ]
     let evaluation = try graph.evaluate(selectedCandidateActions: bindings)
-    releaseSet = try #require(
-      PlanReleaseSet.buildAll(
-        from: evaluation, candidateActions: bindings
-      ).first)
+    let releaseGraphBundle = try PlanReleaseSet.buildAll(
+      from: evaluation, candidateActions: bindings
+    )
+    releaseSet = try #require(releaseGraphBundle.releaseSets.first)
     releaseAction = try makeAction(
       evidence: aEvidence,
       facts: facts,
@@ -1548,7 +1548,7 @@ struct ReleaseFixture {
       globalFacts: facts,
       evidenceSnapshots: [aEvidence, bEvidence],
       actions: [a, b, releaseAction],
-      releaseSets: [releaseSet]
+      releaseGraphBundle: releaseGraphBundle
     )
     overlay = DecisionOverlay.create(
       plan: plan,
@@ -1596,7 +1596,7 @@ private struct ConsentFixture {
       globalFacts: facts,
       evidenceSnapshots: [evidence],
       actions: [builtAction],
-      releaseSets: []
+      releaseGraphBundle: nil
     )
     action = builtAction
     predicates = sortedPredicates
@@ -1842,7 +1842,7 @@ func gitEvidence(
     indexDigest: indexDigest,
     localChanges: .known(localChanges),
     registration: .known(registration),
-    linkage: .known(.ordinary),
+    linkage: .known(.linked(registrationID: registration.registrationID)),
     sparseCheckout: .known(.disabled),
     nestedRepositories: .known(.none),
     submodules: .known(.none),
@@ -1899,7 +1899,6 @@ func makeAction(
     prerequisites: prerequisites,
     evaluation: evaluation,
     displayMetrics: ActionDisplayMetrics(
-      tier: .safe,
       immediateReclaimBytes: .known(1),
       inactiveDurationSeconds: .known(10),
       rebuildCost: .known(1),

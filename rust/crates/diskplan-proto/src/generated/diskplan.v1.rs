@@ -42,16 +42,1961 @@ pub struct BusinessEnvelope {
     #[prost(bytes = "vec", tag = "2")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StartScanRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(string, tag = "2")]
+    pub profile: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub roots: ::prost::alloc::vec::Vec<ScanRootRequest>,
+    #[prost(uint64, tag = "4")]
+    pub maximum_duration_millis: u64,
+    #[prost(uint32, tag = "5")]
+    pub batch_size: u32,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanRootRequest {
+    #[prost(string, tag = "1")]
+    pub root_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub raw_absolute_path: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub display_path: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanControlRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(enumeration = "ScanControlKind", tag = "2")]
+    pub control: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ControlAccepted {
+    #[prost(enumeration = "ScanControlKind", tag = "1")]
+    pub control: i32,
+    #[prost(enumeration = "ScanState", tag = "2")]
+    pub resulting_state: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ControlRejected {
+    #[prost(enumeration = "ScanControlKind", tag = "1")]
+    pub control: i32,
+    #[prost(enumeration = "ControlRejectCode", tag = "2")]
+    pub code: i32,
+    #[prost(string, tag = "3")]
+    pub detail: ::prost::alloc::string::String,
+    #[prost(enumeration = "ScanState", tag = "4")]
+    pub current_state: i32,
+    #[prost(enumeration = "ScanSetupRejectCode", tag = "5")]
+    pub setup_code: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanStateChanged {
+    #[prost(enumeration = "ScanState", tag = "1")]
+    pub state: i32,
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanProgress {
+    #[prost(string, tag = "1")]
+    pub profile: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub elapsed_millis: u64,
+    #[prost(uint64, tag = "3")]
+    pub entries: u64,
+    #[prost(uint64, tag = "4")]
+    pub directories: u64,
+    #[prost(uint64, tag = "5")]
+    pub candidates: u64,
+    #[prost(uint64, tag = "6")]
+    pub allocated_bytes_observed: u64,
+    #[prost(uint64, tag = "7")]
+    pub reclaim_estimate_bytes: u64,
+    #[prost(uint64, tag = "8")]
+    pub complete_roots: u64,
+    #[prost(uint64, tag = "9")]
+    pub partial_roots: u64,
+    #[prost(uint64, tag = "10")]
+    pub entries_per_second: u64,
+    #[prost(string, tag = "11")]
+    pub current_root: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "12")]
+    pub structural_budget: u64,
+    #[prost(uint64, tag = "13")]
+    pub retained_nodes: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EvidenceFailure {
+    #[prost(enumeration = "EvidenceStatus", tag = "1")]
+    pub status: i32,
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub error_code: i32,
+    #[prost(bool, tag = "4")]
+    pub has_error_code: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RawPath {
+    #[prost(string, tag = "1")]
+    pub root_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", repeated, tag = "2")]
+    pub components: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    #[prost(string, tag = "3")]
+    pub display_path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CoverageEvidence {
+    #[prost(bool, tag = "1")]
+    pub complete: bool,
+    #[prost(string, repeated, tag = "2")]
+    pub reasons: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ByteMeasureEvidence {
+    #[prost(enumeration = "ByteMeasureKind", tag = "1")]
+    pub kind: i32,
+    #[prost(uint64, tag = "2")]
+    pub bytes: u64,
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ObjectIdentityEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(int64, tag = "2")]
+    pub device: i64,
+    #[prost(uint64, tag = "3")]
+    pub file_id: u64,
+    #[prost(string, tag = "4")]
+    pub object_type: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TimeValue {
+    #[prost(int64, tag = "1")]
+    pub seconds_since_epoch: i64,
+    #[prost(int32, tag = "2")]
+    pub nanoseconds: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TimeEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, optional, tag = "2")]
+    pub value: ::core::option::Option<TimeValue>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FilesystemTimeEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub access_time: ::core::option::Option<TimeEvidence>,
+    #[prost(message, optional, tag = "2")]
+    pub modification_time: ::core::option::Option<TimeEvidence>,
+    #[prost(message, optional, tag = "3")]
+    pub status_change_time: ::core::option::Option<TimeEvidence>,
+    #[prost(message, optional, tag = "4")]
+    pub birth_time: ::core::option::Option<TimeEvidence>,
+    #[prost(string, tag = "5")]
+    pub trust: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AccessPolicyEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(uint32, tag = "2")]
+    pub owner_user_id: u32,
+    #[prost(uint32, tag = "3")]
+    pub owner_group_id: u32,
+    #[prost(uint32, tag = "4")]
+    pub mode: u32,
+    #[prost(uint32, tag = "5")]
+    pub flags: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BoolEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(bool, tag = "2")]
+    pub value: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UInt64Evidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(uint64, tag = "2")]
+    pub value: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UInt32Evidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(uint32, tag = "2")]
+    pub value: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ItemByteEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub logical: ::core::option::Option<ByteMeasureEvidence>,
+    #[prost(message, optional, tag = "2")]
+    pub nominal_allocated: ::core::option::Option<ByteMeasureEvidence>,
+    #[prost(message, optional, tag = "3")]
+    pub immediate_private_reclaim: ::core::option::Option<ByteMeasureEvidence>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StorageTopologyEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub link_count: ::core::option::Option<UInt32Evidence>,
+    #[prost(message, optional, tag = "2")]
+    pub may_share_blocks: ::core::option::Option<BoolEvidence>,
+    #[prost(message, optional, tag = "3")]
+    pub shares_all_blocks: ::core::option::Option<BoolEvidence>,
+    #[prost(message, optional, tag = "4")]
+    pub clone_id: ::core::option::Option<UInt64Evidence>,
+    #[prost(message, optional, tag = "5")]
+    pub clone_refcount: ::core::option::Option<UInt32Evidence>,
+    #[prost(message, optional, tag = "6")]
+    pub conditional_group_reclaim: ::core::option::Option<ByteMeasureEvidence>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProviderObjectIdentityEvidence {
+    #[prost(string, tag = "1")]
+    pub item_identifier: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub domain_identifier: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StringPair {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub value: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProviderScanEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, optional, tag = "2")]
+    pub identity_observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, optional, tag = "3")]
+    pub identity: ::core::option::Option<ProviderObjectIdentityEvidence>,
+    #[prost(message, optional, tag = "4")]
+    pub promised_metadata_observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, repeated, tag = "5")]
+    pub promised_metadata: ::prost::alloc::vec::Vec<StringPair>,
+    #[prost(message, optional, tag = "6")]
+    pub hidden_backing_bytes: ::core::option::Option<ByteMeasureEvidence>,
+    #[prost(message, optional, tag = "7")]
+    pub controlled_non_materialization_acceptance: ::core::option::Option<BoolEvidence>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScannedNodeEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub path: ::core::option::Option<RawPath>,
+    #[prost(message, optional, tag = "2")]
+    pub identity: ::core::option::Option<ObjectIdentityEvidence>,
+    #[prost(message, optional, tag = "3")]
+    pub bytes: ::core::option::Option<ItemByteEvidence>,
+    #[prost(message, optional, tag = "4")]
+    pub storage_topology: ::core::option::Option<StorageTopologyEvidence>,
+    #[prost(message, optional, tag = "5")]
+    pub filesystem_times: ::core::option::Option<FilesystemTimeEvidence>,
+    #[prost(message, optional, tag = "6")]
+    pub access_policy: ::core::option::Option<AccessPolicyEvidence>,
+    #[prost(message, optional, tag = "7")]
+    pub coverage: ::core::option::Option<CoverageEvidence>,
+    #[prost(string, tag = "8")]
+    pub provider_boundary: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub provider_boundary_reason: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "10")]
+    pub provider_evidence: ::core::option::Option<ProviderScanEvidence>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanNodeObserved {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<ScannedNodeEvidence>,
+    #[prost(bool, tag = "2")]
+    pub directory_closed: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RootScanEvidence {
+    #[prost(message, optional, tag = "1")]
+    pub root: ::core::option::Option<ScanRootRequest>,
+    #[prost(message, optional, tag = "2")]
+    pub identity: ::core::option::Option<ObjectIdentityEvidence>,
+    #[prost(string, tag = "3")]
+    pub provider_boundary: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub provider_boundary_reason: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub aggregate_bytes: ::core::option::Option<ItemByteEvidence>,
+    #[prost(message, optional, tag = "6")]
+    pub coverage: ::core::option::Option<CoverageEvidence>,
+    #[prost(uint64, tag = "7")]
+    pub entries_observed: u64,
+    #[prost(uint64, tag = "8")]
+    pub directories_closed: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RootFailureEvidence {
+    #[prost(string, tag = "1")]
+    pub root_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub observation: ::core::option::Option<EvidenceFailure>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProcessActivityEvidence {
+    #[prost(int32, tag = "1")]
+    pub process_id: i32,
+    #[prost(string, tag = "2")]
+    pub command: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub file_descriptor: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "4")]
+    pub raw_path: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "5")]
+    pub display_path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StringUInt64Pair {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub value: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GlobalFactEvidence {
+    #[prost(bool, tag = "1")]
+    pub known: bool,
+    #[prost(string, tag = "2")]
+    pub unavailable_reason: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub uint64_values: ::prost::alloc::vec::Vec<StringUInt64Pair>,
+    #[prost(string, repeated, tag = "4")]
+    pub string_values: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanCollectorConfigurationEvidence {
+    #[prost(string, tag = "1")]
+    pub process_activity_collector_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub process_activity_deadline_nanoseconds: u64,
+    #[prost(bool, tag = "3")]
+    pub has_process_activity_deadline: bool,
+    #[prost(string, repeated, tag = "4")]
+    pub global_fact_collector_ids: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanCheckpointEvidence {
+    #[prost(string, tag = "1")]
+    pub profile: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub resolver_version: u32,
+    #[prost(uint64, tag = "3")]
+    pub wall_clock_unix_millis: u64,
+    #[prost(uint64, tag = "4")]
+    pub monotonic_nanoseconds: u64,
+    #[prost(uint64, tag = "5")]
+    pub maximum_entries_per_root: u64,
+    #[prost(uint32, tag = "6")]
+    pub maximum_depth: u32,
+    #[prost(uint64, tag = "7")]
+    pub maximum_entries_per_directory: u64,
+    #[prost(uint64, tag = "8")]
+    pub maximum_pending_name_bytes: u64,
+    #[prost(uint32, tag = "9")]
+    pub retained_node_count: u32,
+    #[prost(uint64, tag = "10")]
+    pub maximum_duration_millis: u64,
+    #[prost(message, repeated, tag = "11")]
+    pub resolved_roots: ::prost::alloc::vec::Vec<ScanRootRequest>,
+    #[prost(message, optional, tag = "12")]
+    pub progress: ::core::option::Option<ScanProgress>,
+    #[prost(message, optional, tag = "13")]
+    pub coverage: ::core::option::Option<CoverageEvidence>,
+    #[prost(message, repeated, tag = "14")]
+    pub retained_nodes: ::prost::alloc::vec::Vec<ScannedNodeEvidence>,
+    #[prost(message, repeated, tag = "15")]
+    pub completed_roots: ::prost::alloc::vec::Vec<RootScanEvidence>,
+    #[prost(message, repeated, tag = "16")]
+    pub root_failures: ::prost::alloc::vec::Vec<RootFailureEvidence>,
+    #[prost(message, optional, tag = "17")]
+    pub process_activity_observation: ::core::option::Option<EvidenceFailure>,
+    #[prost(message, repeated, tag = "18")]
+    pub process_activity: ::prost::alloc::vec::Vec<ProcessActivityEvidence>,
+    #[prost(enumeration = "ScanMachineState", tag = "19")]
+    pub machine_state: i32,
+    #[prost(bool, tag = "20")]
+    pub resumable_in_process: bool,
+    #[prost(bool, tag = "21")]
+    pub provisional: bool,
+    #[prost(message, optional, tag = "22")]
+    pub collector_configuration: ::core::option::Option<
+        ScanCollectorConfigurationEvidence,
+    >,
+    #[prost(message, optional, tag = "23")]
+    pub vm: ::core::option::Option<GlobalFactEvidence>,
+    #[prost(message, optional, tag = "24")]
+    pub swap: ::core::option::Option<GlobalFactEvidence>,
+    #[prost(message, optional, tag = "25")]
+    pub apfs_snapshots: ::core::option::Option<GlobalFactEvidence>,
+}
+/// A chunk payload is a concatenation of records. Each record is a four-byte
+/// big-endian length followed by the canonical protobuf encoding of one
+/// ScannedNodeEvidence. The digest covers canonical_node_payload exactly.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanCheckpointChunk {
+    #[prost(string, tag = "1")]
+    pub checkpoint_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub chunk_index: u32,
+    #[prost(string, tag = "3")]
+    pub chunk_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub node_count: u32,
+    #[prost(bytes = "vec", tag = "5")]
+    pub canonical_node_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub payload_sha256: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanCheckpointChunkDescriptor {
+    #[prost(uint32, tag = "1")]
+    pub chunk_index: u32,
+    #[prost(string, tag = "2")]
+    pub chunk_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub node_count: u32,
+    #[prost(uint64, tag = "4")]
+    pub payload_bytes: u64,
+    #[prost(bytes = "vec", tag = "5")]
+    pub payload_sha256: ::prost::alloc::vec::Vec<u8>,
+}
+/// This manifest binds the checkpoint's coverage/frontier metadata and every
+/// retained-node chunk. checkpoint_evidence_sha256 covers the exact
+/// canonical_checkpoint_payload bytes carried by ScanCheckpointReady or
+/// ScanFinalized. final_evidence_sha256 is the protocol-defined canonical hash
+/// over that evidence digest, all budgets, and the ordered descriptors. The
+/// coverage/frontier mirrors must exactly match the digested checkpoint.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanCheckpointManifest {
+    #[prost(uint32, tag = "1")]
+    pub manifest_version: u32,
+    #[prost(string, tag = "2")]
+    pub checkpoint_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub chunk_count: u32,
+    #[prost(uint64, tag = "4")]
+    pub retained_node_count: u64,
+    #[prost(uint32, tag = "5")]
+    pub retained_node_entry_budget: u32,
+    #[prost(uint64, tag = "6")]
+    pub retained_node_payload_bytes: u64,
+    #[prost(uint32, tag = "7")]
+    pub maximum_checkpoint_payload_bytes: u32,
+    #[prost(uint32, tag = "8")]
+    pub maximum_chunk_payload_bytes: u32,
+    #[prost(uint32, tag = "9")]
+    pub maximum_manifest_encoded_bytes: u32,
+    #[prost(message, repeated, tag = "10")]
+    pub chunks: ::prost::alloc::vec::Vec<ScanCheckpointChunkDescriptor>,
+    #[prost(bytes = "vec", tag = "11")]
+    pub checkpoint_evidence_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "12")]
+    pub final_evidence_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "13")]
+    pub frontier: ::core::option::Option<ScanProgress>,
+    #[prost(message, optional, tag = "14")]
+    pub coverage: ::core::option::Option<CoverageEvidence>,
+    #[prost(string, repeated, tag = "15")]
+    pub completed_root_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "16")]
+    pub failed_root_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(enumeration = "ScanMachineState", tag = "17")]
+    pub machine_state: i32,
+    #[prost(bool, tag = "18")]
+    pub resumable_in_process: bool,
+    #[prost(bool, tag = "19")]
+    pub provisional: bool,
+    #[prost(uint64, tag = "20")]
+    pub maximum_retained_node_payload_bytes: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanCheckpointReady {
+    /// Deprecated Phase 0 field. Protocol 1.3 producers leave this unset and use
+    /// canonical_checkpoint_payload plus manifest so receivers can verify the
+    /// exact bytes before exposing checkpoint evidence.
+    #[prost(message, optional, tag = "1")]
+    pub checkpoint: ::core::option::Option<ScanCheckpointEvidence>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub canonical_checkpoint_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    pub manifest: ::core::option::Option<ScanCheckpointManifest>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScanFinalized {
+    /// Deprecated Phase 0 field; see ScanCheckpointReady.checkpoint.
+    #[prost(message, optional, tag = "1")]
+    pub checkpoint: ::core::option::Option<ScanCheckpointEvidence>,
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "3")]
+    pub canonical_checkpoint_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    pub manifest: ::core::option::Option<ScanCheckpointManifest>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvisionalPlanGroupSummary {
+    #[prost(string, tag = "1")]
+    pub group_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub action_count: u64,
+    #[prost(uint64, tag = "4")]
+    pub immediate_reclaim_bytes: u64,
+    #[prost(uint64, tag = "5")]
+    pub conditional_reclaim_bytes: u64,
+    #[prost(string, tag = "6")]
+    pub status: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProvisionalPlanReady {
+    #[prost(string, tag = "1")]
+    pub plan_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub action_count: u64,
+    #[prost(uint64, tag = "3")]
+    pub immediate_reclaim_bytes: u64,
+    #[prost(uint64, tag = "4")]
+    pub conditional_reclaim_bytes: u64,
+    #[prost(message, repeated, tag = "5")]
+    pub groups: ::prost::alloc::vec::Vec<ProvisionalPlanGroupSummary>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvisionalPlanInvalidated {
+    #[prost(string, tag = "1")]
+    pub previous_plan_id: ::prost::alloc::string::String,
+}
+/// Protocol 1.4 runtime projections use byte-preserving opaque identifiers.
+/// Receivers may compare and retain these values but must never parse them into
+/// paths, action kinds, command arguments, or mutation authority. Version 1.4
+/// requires 1...256 bytes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpaqueIdentifier {
+    #[prost(bytes = "vec", tag = "1")]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
+/// Every Digest256 value is exactly 32 bytes. The producing message defines the
+/// domain-separated SHA-256 binding; protobuf serialization is only transport.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Digest256 {
+    #[prost(bytes = "vec", tag = "1")]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UnknownProjectionValue {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ByteEstimateProjection {
+    #[prost(oneof = "byte_estimate_projection::Value", tags = "1, 2")]
+    pub value: ::core::option::Option<byte_estimate_projection::Value>,
+}
+/// Nested message and enum types in `ByteEstimateProjection`.
+pub mod byte_estimate_projection {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Value {
+        #[prost(uint64, tag = "1")]
+        KnownBytes(u64),
+        #[prost(message, tag = "2")]
+        Unknown(super::UnknownProjectionValue),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanRawPathProjection {
+    #[prost(message, optional, tag = "1")]
+    pub root_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(bytes = "vec", repeated, tag = "2")]
+    pub components: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    #[prost(string, tag = "3")]
+    pub display_path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanBlockerProjection {
+    #[prost(message, optional, tag = "1")]
+    pub blocker_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(enumeration = "PlanBlockerKind", tag = "2")]
+    pub kind: i32,
+    #[prost(enumeration = "PlanBlockerDisposition", tag = "3")]
+    pub disposition: i32,
+    #[prost(string, tag = "4")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanWaiverProjection {
+    #[prost(message, optional, tag = "1")]
+    pub waiver_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(enumeration = "WaiverKind", tag = "2")]
+    pub kind: i32,
+    #[prost(string, tag = "3")]
+    pub predicate: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub value_bucket: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub semantic_evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(string, tag = "6")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanPrerequisiteProjection {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(string, tag = "2")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EvidenceSummaryProjection {
+    #[prost(enumeration = "EvidenceStatus", tag = "1")]
+    pub status: i32,
+    #[prost(string, tag = "2")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub summary: ::prost::alloc::string::String,
+}
+/// value_sha256 binds the engine-internal canonical evidence bytes. It is not a
+/// frontend input and the frontend must not recreate safety policy from it.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EvidenceObservationProjection {
+    #[prost(enumeration = "EvidenceStatus", tag = "1")]
+    pub status: i32,
+    #[prost(string, tag = "2")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub summary: ::prost::alloc::string::String,
+    #[prost(enumeration = "EvidenceUnknownReasonProjection", tag = "4")]
+    pub unknown_reason: i32,
+    #[prost(message, optional, tag = "5")]
+    pub failure: ::core::option::Option<ObservationFailureProjection>,
+    #[prost(message, optional, tag = "6")]
+    pub value_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EvidenceCoverageProjection {
+    #[prost(enumeration = "EvidenceCoverageCompletenessProjection", tag = "1")]
+    pub completeness: i32,
+    /// Canonical enum order, unique, and capped at the complete closed reason set.
+    #[prost(enumeration = "EvidenceCoverageReasonProjection", repeated, tag = "2")]
+    pub reasons: ::prost::alloc::vec::Vec<i32>,
+    #[prost(message, optional, tag = "3")]
+    pub binding_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EvidenceObjectIdentityProjection {
+    #[prost(uint64, tag = "1")]
+    pub device: u64,
+    #[prost(uint64, tag = "2")]
+    pub file_id: u64,
+    #[prost(enumeration = "EvidenceObjectKindProjection", tag = "3")]
+    pub kind: i32,
+    #[prost(message, optional, tag = "4")]
+    pub binding_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct NamespaceAccessEvidenceProjection {
+    #[prost(message, optional, tag = "1")]
+    pub root_access_policy: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "2")]
+    pub root_acl_digest: ::core::option::Option<EvidenceObservationProjection>,
+    /// The known value digest covers the ordered raw relative path, identity, and
+    /// access-policy seal of every ancestor. Individual path records stay inside
+    /// the engine; PlanTargetProjection remains the bounded raw-byte display path.
+    #[prost(message, optional, tag = "3")]
+    pub ancestor_access_policy_chain: ::core::option::Option<
+        EvidenceObservationProjection,
+    >,
+    #[prost(uint32, tag = "4")]
+    pub ancestor_count: u32,
+    #[prost(uint32, tag = "5")]
+    pub maximum_ancestor_count: u32,
+    #[prost(message, optional, tag = "6")]
+    pub namespace_binding_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "7")]
+    pub target_access_policy: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "8")]
+    pub target_acl_digest: ::core::option::Option<EvidenceObservationProjection>,
+    /// Exact root and terminal ancestor seal observations emitted by the scanner.
+    #[prost(message, optional, tag = "9")]
+    pub root_access_policy_seal: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "10")]
+    pub ancestor_access_policy_seal: ::core::option::Option<
+        EvidenceObservationProjection,
+    >,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ContentBaselineEvidenceProjection {
+    #[prost(message, optional, tag = "1")]
+    pub observation: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(enumeration = "ContentBaselineKindProjection", tag = "2")]
+    pub known_kind: i32,
+    #[prost(uint64, tag = "3")]
+    pub logical_bytes: u64,
+    #[prost(enumeration = "ContentNotApplicableReasonProjection", tag = "4")]
+    pub not_applicable_reason: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GitChangeSummaryProjection {
+    #[prost(uint64, tag = "1")]
+    pub staged: u64,
+    #[prost(uint64, tag = "2")]
+    pub unstaged: u64,
+    #[prost(uint64, tag = "3")]
+    pub unmerged: u64,
+    #[prost(uint64, tag = "4")]
+    pub untracked: u64,
+    #[prost(uint64, tag = "5")]
+    pub ignored: u64,
+    #[prost(message, optional, tag = "6")]
+    pub streamed_change_set_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint64, tag = "7")]
+    pub maximum_status_records: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GitRegistrationSummaryProjection {
+    #[prost(message, optional, tag = "1")]
+    pub worktree_identity: ::core::option::Option<EvidenceObjectIdentityProjection>,
+    #[prost(message, optional, tag = "2")]
+    pub administrative_directory_identity: ::core::option::Option<
+        EvidenceObjectIdentityProjection,
+    >,
+    #[prost(message, optional, tag = "3")]
+    pub common_directory_identity: ::core::option::Option<
+        EvidenceObjectIdentityProjection,
+    >,
+    #[prost(message, optional, tag = "4")]
+    pub registration_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "5")]
+    pub metadata_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GitWorktreeScanSummaryProjection {
+    /// SHA-256 of domain "diskplan/git-worktree-scan-evidence/v1\0" plus the
+    /// engine's canonical bounded scan evidence and collection-budget binding.
+    #[prost(message, optional, tag = "1")]
+    pub bundle_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "2")]
+    pub marker: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(enumeration = "GitWorktreeMarkerKindProjection", tag = "3")]
+    pub known_marker_kind: i32,
+    #[prost(message, optional, tag = "4")]
+    pub registration: ::core::option::Option<GitRegistrationSummaryProjection>,
+    #[prost(message, optional, tag = "5")]
+    pub changes: ::core::option::Option<GitChangeSummaryProjection>,
+    #[prost(enumeration = "GitLinkageKindProjection", tag = "6")]
+    pub known_linkage_kind: i32,
+    #[prost(message, optional, tag = "7")]
+    pub linked_registration_id: ::core::option::Option<Digest256>,
+    #[prost(enumeration = "GitFeatureStateProjection", tag = "8")]
+    pub known_nested_repositories: i32,
+    #[prost(enumeration = "GitFeatureStateProjection", tag = "9")]
+    pub known_submodules: i32,
+    #[prost(enumeration = "GitFeatureStateProjection", tag = "10")]
+    pub known_sparse_checkout: i32,
+    #[prost(message, optional, tag = "11")]
+    pub command_coverage: ::core::option::Option<EvidenceCoverageProjection>,
+}
+/// Git evidence contains fixed observations and digests only. It never carries
+/// an unbounded status/path record list or lets the frontend infer stageability.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GitWorktreeEvidenceProjection {
+    /// Exact digest of the canonical policy GitWorktreeEvidence.bindingBytes.
+    #[prost(message, optional, tag = "1")]
+    pub bundle_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "2")]
+    pub no_follow_traversal_complete: ::core::option::Option<
+        EvidenceObservationProjection,
+    >,
+    #[prost(message, optional, tag = "3")]
+    pub head_identity: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "4")]
+    pub index_digest: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "5")]
+    pub local_changes: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "6")]
+    pub registration: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "7")]
+    pub linkage: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "8")]
+    pub sparse_checkout: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "9")]
+    pub nested_repositories: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "10")]
+    pub submodules: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "11")]
+    pub trusted_exclusive_namespace: ::core::option::Option<
+        EvidenceObservationProjection,
+    >,
+    #[prost(message, optional, tag = "12")]
+    pub post_quarantine_coverage: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "13")]
+    pub post_discard_successor: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "14")]
+    pub scan_summary: ::core::option::Option<GitWorktreeScanSummaryProjection>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CodexCleanupScopeEvidenceProjection {
+    #[prost(enumeration = "AdapterScopeProvenanceKindProjection", tag = "1")]
+    pub provenance_kind: i32,
+    /// Present only for a configured bound scope. Canonical identifier bytes;
+    /// never a filesystem path String.
+    #[prost(message, optional, tag = "2")]
+    pub cleanup_scope_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub provenance: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "4")]
+    pub bound_root_identity: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "5")]
+    pub known_bound_root_identity: ::core::option::Option<
+        EvidenceObjectIdentityProjection,
+    >,
+    #[prost(message, optional, tag = "6")]
+    pub helper_capability: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(enumeration = "CodexHelperCapabilityKindProjection", tag = "7")]
+    pub known_helper_capability: i32,
+    #[prost(message, optional, tag = "8")]
+    pub coverage: ::core::option::Option<EvidenceCoverageProjection>,
+    /// SHA-256 of domain "diskplan/codex-cleanup-scope-evidence/v1\0" plus the
+    /// canonical evidence, collector identity, and budget binding.
+    #[prost(message, optional, tag = "9")]
+    pub scope_binding_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct VersionedArtifactEvidenceProjection {
+    /// Raw authoritative identifier/component bytes. Producers must not derive
+    /// either field through lossy UTF-8 decoding or path normalization.
+    #[prost(message, optional, tag = "1")]
+    pub artifact_kind_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub version_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub inventory_coverage: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(enumeration = "VersionedArtifactActiveStateProjection", tag = "4")]
+    pub active_state: i32,
+    #[prost(enumeration = "VersionedArtifactSurvivorStateProjection", tag = "5")]
+    pub survivor_state: i32,
+    #[prost(message, optional, tag = "6")]
+    pub survivor_evidence_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint64, tag = "7")]
+    pub observed_version_count: u64,
+    #[prost(uint64, tag = "8")]
+    pub active_version_count: u64,
+    #[prost(uint64, tag = "9")]
+    pub survivor_count: u64,
+    #[prost(uint64, tag = "10")]
+    pub maximum_version_count: u64,
+    /// SHA-256 of domain "diskplan/versioned-artifact-scan-evidence/v1\0" plus
+    /// exact per-version raw names/identities/metadata, selector/survivors,
+    /// collector identity, and budget binding retained by the Swift engine.
+    #[prost(message, optional, tag = "11")]
+    pub bundle_sha256: ::core::option::Option<Digest256>,
+    #[prost(enumeration = "AdapterScopeProvenanceKindProjection", tag = "12")]
+    pub provenance_kind: i32,
+    #[prost(message, optional, tag = "13")]
+    pub configured_scope_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "14")]
+    pub provenance: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "15")]
+    pub install_root_identity: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "16")]
+    pub known_install_root_identity: ::core::option::Option<
+        EvidenceObjectIdentityProjection,
+    >,
+    #[prost(message, optional, tag = "17")]
+    pub active_selector: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "18")]
+    pub known_active_selector_identity: ::core::option::Option<
+        EvidenceObjectIdentityProjection,
+    >,
+    /// Exact single leaf bytes, at most 4 KiB, never decoded or normalized.
+    #[prost(bytes = "vec", tag = "19")]
+    pub raw_active_selector_target: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "20")]
+    pub survivor_set: ::core::option::Option<EvidenceObservationProjection>,
+    /// Digest of the canonical ordered raw survivor-name set; names are not sent.
+    #[prost(message, optional, tag = "21")]
+    pub survivor_set_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint64, tag = "22")]
+    pub metadata_complete_count: u64,
+    #[prost(message, optional, tag = "23")]
+    pub current_update_marker: ::core::option::Option<EvidenceObservationProjection>,
+    #[prost(message, optional, tag = "24")]
+    pub coverage: ::core::option::Option<EvidenceCoverageProjection>,
+    #[prost(bool, tag = "25")]
+    pub current_update_in_progress: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanSafetyEvidenceProjection {
+    /// Exact FrozenEvidenceSnapshot.evidenceID bytes from the Swift policy model.
+    #[prost(message, optional, tag = "1")]
+    pub policy_evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "2")]
+    pub namespace_access: ::core::option::Option<NamespaceAccessEvidenceProjection>,
+    #[prost(message, optional, tag = "3")]
+    pub content_baseline: ::core::option::Option<ContentBaselineEvidenceProjection>,
+    #[prost(message, optional, tag = "4")]
+    pub git_worktree: ::core::option::Option<GitWorktreeEvidenceProjection>,
+    #[prost(message, optional, tag = "5")]
+    pub codex_cleanup_scope: ::core::option::Option<CodexCleanupScopeEvidenceProjection>,
+    #[prost(message, optional, tag = "6")]
+    pub versioned_artifact: ::core::option::Option<VersionedArtifactEvidenceProjection>,
+}
+/// The preview is produced only by the Swift engine. raw_argv is display-only
+/// evidence of the exact adapter shape and is never accepted in a request.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ActionExecutionPreviewProjection {
+    #[prost(enumeration = "PlanActionKind", tag = "1")]
+    pub adapter: i32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub raw_executable: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", repeated, tag = "3")]
+    pub raw_argv: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    #[prost(string, repeated, tag = "4")]
+    pub display_argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "5")]
+    pub postcondition: ::prost::alloc::string::String,
+    #[prost(bool, tag = "6")]
+    pub mutation_supported: bool,
+    /// Protocol 1.5: exact execve working-directory bytes. Presence is required
+    /// at 1.5, including an explicitly empty value for a non-mutating preview.
+    /// Protocol 1.4 senders must omit this field.
+    #[prost(bytes = "vec", optional, tag = "7")]
+    pub raw_working_directory: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Protocol 1.5: engine-authored residual race classification. Protocol 1.4
+    /// senders must retain the zero value and omit the field from the wire.
+    #[prost(enumeration = "PathRaceProjection", tag = "8")]
+    pub path_race: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PlanActionProjection {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub action_lineage_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(enumeration = "PlanDisposition", tag = "3")]
+    pub disposition: i32,
+    #[prost(enumeration = "PlanActionKind", tag = "4")]
+    pub kind: i32,
+    #[prost(string, tag = "5")]
+    pub kind_label: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "6")]
+    pub kind_order: u32,
+    #[prost(string, tag = "7")]
+    pub label: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "8")]
+    pub order: u64,
+    #[prost(enumeration = "PlanStageability", tag = "9")]
+    pub stageability: i32,
+    #[prost(message, repeated, tag = "10")]
+    pub required_waivers: ::prost::alloc::vec::Vec<PlanWaiverProjection>,
+    #[prost(message, optional, tag = "11")]
+    pub immediate_reclaim: ::core::option::Option<ByteEstimateProjection>,
+    #[prost(message, optional, tag = "12")]
+    pub shared_unlock: ::core::option::Option<ByteEstimateProjection>,
+    #[prost(enumeration = "PlanActivity", tag = "13")]
+    pub activity: i32,
+    #[prost(enumeration = "PlanRecoverability", tag = "14")]
+    pub recoverability: i32,
+    #[prost(message, repeated, tag = "15")]
+    pub blockers: ::prost::alloc::vec::Vec<PlanBlockerProjection>,
+    #[prost(message, repeated, tag = "16")]
+    pub prerequisites: ::prost::alloc::vec::Vec<PlanPrerequisiteProjection>,
+    #[prost(message, repeated, tag = "17")]
+    pub release_set_ids: ::prost::alloc::vec::Vec<OpaqueIdentifier>,
+    #[prost(bool, tag = "18")]
+    pub requires_force: bool,
+    #[prost(string, tag = "19")]
+    pub force_reason: ::prost::alloc::string::String,
+    #[prost(enumeration = "PathRaceProjection", tag = "20")]
+    pub path_race: i32,
+    #[prost(message, repeated, tag = "21")]
+    pub target_ids: ::prost::alloc::vec::Vec<OpaqueIdentifier>,
+    #[prost(message, repeated, tag = "22")]
+    pub evidence: ::prost::alloc::vec::Vec<EvidenceSummaryProjection>,
+    #[prost(message, optional, tag = "23")]
+    pub execution_preview: ::core::option::Option<ActionExecutionPreviewProjection>,
+    #[prost(enumeration = "PlanRecommendation", tag = "24")]
+    pub recommendation: i32,
+    #[prost(message, optional, tag = "25")]
+    pub safety_evidence: ::core::option::Option<PlanSafetyEvidenceProjection>,
+}
+/// Target trees are flat records so one large directory cannot create an
+/// unbounded recursive protobuf object. parent_target_id is absent at a root.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanTargetProjection {
+    #[prost(message, optional, tag = "1")]
+    pub target_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub parent_target_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint32, tag = "4")]
+    pub depth: u32,
+    #[prost(uint64, tag = "5")]
+    pub order: u64,
+    #[prost(message, optional, tag = "6")]
+    pub path: ::core::option::Option<PlanRawPathProjection>,
+    #[prost(enumeration = "PlanTargetKind", tag = "7")]
+    pub kind: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PlanReleaseSetProjection {
+    #[prost(message, optional, tag = "1")]
+    pub release_set_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, repeated, tag = "2")]
+    pub action_ids: ::prost::alloc::vec::Vec<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub shared_unlock: ::core::option::Option<ByteEstimateProjection>,
+    #[prost(message, repeated, tag = "4")]
+    pub blockers: ::prost::alloc::vec::Vec<PlanBlockerProjection>,
+}
+/// Records are ordered by record_index and encoded in chunks as four-byte
+/// big-endian length followed by the exact protobuf bytes of each record.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PlanProjectionRecord {
+    #[prost(uint64, tag = "1")]
+    pub record_index: u64,
+    #[prost(oneof = "plan_projection_record::Body", tags = "10, 11, 12")]
+    pub body: ::core::option::Option<plan_projection_record::Body>,
+}
+/// Nested message and enum types in `PlanProjectionRecord`.
+pub mod plan_projection_record {
+    #[allow(clippy::large_enum_variant)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "10")]
+        Action(super::PlanActionProjection),
+        #[prost(message, tag = "11")]
+        Target(super::PlanTargetProjection),
+        #[prost(message, tag = "12")]
+        ReleaseSet(super::PlanReleaseSetProjection),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanProjectionChunk {
+    #[prost(message, optional, tag = "1")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint32, tag = "2")]
+    pub chunk_index: u32,
+    #[prost(message, optional, tag = "3")]
+    pub chunk_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint32, tag = "4")]
+    pub record_count: u32,
+    #[prost(bytes = "vec", tag = "5")]
+    pub canonical_record_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "6")]
+    pub payload_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanProjectionChunkDescriptor {
+    #[prost(uint32, tag = "1")]
+    pub chunk_index: u32,
+    #[prost(message, optional, tag = "2")]
+    pub chunk_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint32, tag = "3")]
+    pub record_count: u32,
+    #[prost(uint64, tag = "4")]
+    pub payload_bytes: u64,
+    #[prost(message, optional, tag = "5")]
+    pub payload_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanDispositionCount {
+    #[prost(enumeration = "PlanDisposition", tag = "1")]
+    pub disposition: i32,
+    #[prost(uint64, tag = "2")]
+    pub action_count: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanRecommendationCount {
+    #[prost(enumeration = "PlanRecommendation", tag = "1")]
+    pub recommendation: i32,
+    #[prost(uint64, tag = "2")]
+    pub action_count: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PlanProjectionManifest {
+    #[prost(uint32, tag = "1")]
+    pub manifest_version: u32,
+    #[prost(message, optional, tag = "2")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub plan_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "4")]
+    pub evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(string, tag = "5")]
+    pub policy_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub schema_version: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "7")]
+    pub chunk_count: u32,
+    #[prost(uint64, tag = "8")]
+    pub record_count: u64,
+    #[prost(uint64, tag = "9")]
+    pub action_count: u64,
+    #[prost(uint64, tag = "10")]
+    pub target_count: u64,
+    #[prost(uint64, tag = "11")]
+    pub release_set_count: u64,
+    #[prost(uint64, tag = "12")]
+    pub blocker_count: u64,
+    #[prost(uint64, tag = "13")]
+    pub waiver_count: u64,
+    #[prost(uint64, tag = "14")]
+    pub record_payload_bytes: u64,
+    #[prost(uint64, tag = "15")]
+    pub maximum_record_count: u64,
+    #[prost(uint64, tag = "16")]
+    pub maximum_record_payload_bytes: u64,
+    #[prost(uint32, tag = "17")]
+    pub maximum_chunk_payload_bytes: u32,
+    #[prost(uint32, tag = "18")]
+    pub maximum_manifest_encoded_bytes: u32,
+    #[prost(message, repeated, tag = "19")]
+    pub chunks: ::prost::alloc::vec::Vec<PlanProjectionChunkDescriptor>,
+    #[prost(message, optional, tag = "20")]
+    pub projection_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, repeated, tag = "21")]
+    pub disposition_counts: ::prost::alloc::vec::Vec<PlanDispositionCount>,
+    #[prost(message, repeated, tag = "22")]
+    pub recommendation_counts: ::prost::alloc::vec::Vec<PlanRecommendationCount>,
+    #[prost(uint64, tag = "23")]
+    pub cleanup_candidate_count: u64,
+    #[prost(message, optional, tag = "24")]
+    pub scan_session_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "25")]
+    pub scan_checkpoint_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "26")]
+    pub plan_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "27")]
+    pub evidence_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "28")]
+    pub scan_checkpoint_evidence_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BuildPlanRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub scan_session_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub scan_checkpoint_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "4")]
+    pub scan_evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(bool, tag = "5")]
+    pub allow_partial_evidence: bool,
+    #[prost(enumeration = "AgentMode", tag = "6")]
+    pub agent_mode: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BuildPlanAccepted {
+    #[prost(message, optional, tag = "1")]
+    pub plan_build_id: ::core::option::Option<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PlanProjection {
+    #[prost(message, optional, tag = "1")]
+    pub manifest: ::core::option::Option<PlanProjectionManifest>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlanProjectionInvalidated {
+    #[prost(message, optional, tag = "1")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(string, tag = "2")]
+    pub reason_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StageActionEdit {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AllowWaiverEdit {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub waiver_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub consent_event_id: ::core::option::Option<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeWaiverEdit {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub waiver_id: ::core::option::Option<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReplaceNotesEdit {
+    #[prost(string, repeated, tag = "1")]
+    pub user_notes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ApplyBatchSelectionPresetEdit {
+    #[prost(enumeration = "BatchSelectionPreset", tag = "1")]
+    pub preset: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DecisionOverlayEdit {
+    #[prost(enumeration = "DecisionEditKind", tag = "1")]
+    pub kind: i32,
+    #[prost(oneof = "decision_overlay_edit::Edit", tags = "10, 11, 12, 13, 14, 15")]
+    pub edit: ::core::option::Option<decision_overlay_edit::Edit>,
+}
+/// Nested message and enum types in `DecisionOverlayEdit`.
+pub mod decision_overlay_edit {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Edit {
+        #[prost(message, tag = "10")]
+        StageAction(super::StageActionEdit),
+        #[prost(message, tag = "11")]
+        UnstageAction(super::StageActionEdit),
+        #[prost(message, tag = "12")]
+        AllowWaiver(super::AllowWaiverEdit),
+        #[prost(message, tag = "13")]
+        RevokeWaiver(super::RevokeWaiverEdit),
+        #[prost(message, tag = "14")]
+        ReplaceNotes(super::ReplaceNotesEdit),
+        #[prost(message, tag = "15")]
+        ApplyBatchSelectionPreset(super::ApplyBatchSelectionPresetEdit),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DecisionOverlayEditRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint64, tag = "3")]
+    pub base_revision: u64,
+    #[prost(message, repeated, tag = "4")]
+    pub edits: ::prost::alloc::vec::Vec<DecisionOverlayEdit>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AcknowledgedWaiver {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub waiver_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub consent_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DecisionOverlayAcknowledged {
+    #[prost(message, optional, tag = "1")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint64, tag = "2")]
+    pub revision: u64,
+    #[prost(message, optional, tag = "3")]
+    pub overlay_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, repeated, tag = "4")]
+    pub selected_action_ids: ::prost::alloc::vec::Vec<OpaqueIdentifier>,
+    #[prost(message, repeated, tag = "5")]
+    pub acknowledged_waivers: ::prost::alloc::vec::Vec<AcknowledgedWaiver>,
+    #[prost(string, repeated, tag = "6")]
+    pub user_notes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "7")]
+    pub force_warning_action_ids: ::prost::alloc::vec::Vec<OpaqueIdentifier>,
+    #[prost(uint32, tag = "8")]
+    pub maximum_selected_actions: u32,
+    #[prost(uint32, tag = "9")]
+    pub maximum_waiver_consents: u32,
+    #[prost(uint32, tag = "10")]
+    pub maximum_user_notes: u32,
+    #[prost(uint64, tag = "11")]
+    pub selected_action_count: u64,
+    #[prost(message, optional, tag = "12")]
+    pub overlay_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "13")]
+    pub plan_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "14")]
+    pub plan_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "15")]
+    pub evidence_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "16")]
+    pub evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint32, tag = "17")]
+    pub maximum_encoded_bytes: u32,
+    #[prost(uint32, tag = "18")]
+    pub maximum_note_bytes: u32,
+    #[prost(message, optional, tag = "19")]
+    pub scan_session_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "20")]
+    pub scan_checkpoint_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "21")]
+    pub scan_checkpoint_evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "22")]
+    pub projection_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DecisionOverlayRejected {
+    #[prost(enumeration = "DecisionOverlayRejectCode", tag = "1")]
+    pub code: i32,
+    #[prost(string, tag = "2")]
+    pub summary: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "4")]
+    pub waiver_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint64, tag = "5")]
+    pub current_revision: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PrepareDryRunRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint64, tag = "3")]
+    pub overlay_revision: u64,
+    #[prost(message, optional, tag = "4")]
+    pub overlay_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "5")]
+    pub overlay_id: ::core::option::Option<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ObservationFailureProjection {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub collector: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub error_code: i32,
+    #[prost(bool, tag = "4")]
+    pub has_error_code: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevalidationFindingProjection {
+    #[prost(message, optional, tag = "1")]
+    pub finding_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(enumeration = "RevalidationSubject", tag = "3")]
+    pub subject: i32,
+    #[prost(enumeration = "RevalidationFailureKind", tag = "4")]
+    pub kind: i32,
+    #[prost(bytes = "vec", tag = "5")]
+    pub subject_parameter: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "8")]
+    pub summary: ::prost::alloc::string::String,
+    #[prost(oneof = "revalidation_finding_projection::Detail", tags = "6, 7")]
+    pub detail: ::core::option::Option<revalidation_finding_projection::Detail>,
+}
+/// Nested message and enum types in `RevalidationFindingProjection`.
+pub mod revalidation_finding_projection {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Detail {
+        #[prost(message, tag = "6")]
+        ObservationFailure(super::ObservationFailureProjection),
+        #[prost(message, tag = "7")]
+        Unknown(super::UnknownProjectionValue),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActionRevalidationProjection {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(bool, tag = "2")]
+    pub current: bool,
+    #[prost(message, repeated, tag = "3")]
+    pub findings: ::prost::alloc::vec::Vec<RevalidationFindingProjection>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutionEpochProjection {
+    #[prost(message, optional, tag = "1")]
+    pub epoch_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(int64, tag = "2")]
+    pub semantic_reference_time_seconds: i64,
+    #[prost(int64, tag = "3")]
+    pub issued_at_seconds: i64,
+    #[prost(int64, tag = "4")]
+    pub deadline_seconds: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DryRunActionProjection {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub execution_preview: ::core::option::Option<ActionExecutionPreviewProjection>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RevalidationProjectionPayload {
+    #[prost(message, repeated, tag = "1")]
+    pub action_outcomes: ::prost::alloc::vec::Vec<ActionRevalidationProjection>,
+    #[prost(message, repeated, tag = "2")]
+    pub global_findings: ::prost::alloc::vec::Vec<RevalidationFindingProjection>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DryRunProjectionPayload {
+    #[prost(message, optional, tag = "1")]
+    pub revalidation: ::core::option::Option<RevalidationProjectionPayload>,
+    #[prost(message, repeated, tag = "2")]
+    pub actions: ::prost::alloc::vec::Vec<DryRunActionProjection>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DryRunProjectionManifest {
+    #[prost(uint32, tag = "1")]
+    pub manifest_version: u32,
+    #[prost(message, optional, tag = "2")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub plan_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "4")]
+    pub overlay_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "5")]
+    pub epoch: ::core::option::Option<ExecutionEpochProjection>,
+    #[prost(bool, tag = "6")]
+    pub current: bool,
+    #[prost(uint64, tag = "7")]
+    pub action_count: u64,
+    #[prost(uint64, tag = "8")]
+    pub finding_count: u64,
+    #[prost(uint32, tag = "9")]
+    pub maximum_action_count: u32,
+    #[prost(uint32, tag = "10")]
+    pub maximum_finding_count: u32,
+    #[prost(uint32, tag = "11")]
+    pub maximum_projection_payload_bytes: u32,
+    #[prost(message, optional, tag = "12")]
+    pub payload_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "13")]
+    pub projection_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "14")]
+    pub dry_run_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint64, tag = "15")]
+    pub selected_action_count: u64,
+    #[prost(message, optional, tag = "16")]
+    pub overlay_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "17")]
+    pub plan_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "18")]
+    pub evidence_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "19")]
+    pub evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "20")]
+    pub current_binding_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "21")]
+    pub revalidation_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint64, tag = "22")]
+    pub overlay_revision: u64,
+    #[prost(message, optional, tag = "23")]
+    pub scan_session_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "24")]
+    pub scan_checkpoint_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "25")]
+    pub scan_checkpoint_evidence_sha256: ::core::option::Option<Digest256>,
+}
+/// Dry-run is deliberately capability-free. The payload is an engine-authored
+/// projection and cannot be submitted as apply authority.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DryRunProjection {
+    #[prost(bytes = "vec", tag = "1")]
+    pub canonical_projection_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    pub manifest: ::core::option::Option<DryRunProjectionManifest>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PrepareApplyReviewRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint64, tag = "3")]
+    pub overlay_revision: u64,
+    #[prost(message, optional, tag = "4")]
+    pub overlay_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "5")]
+    pub overlay_id: ::core::option::Option<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ApplyReviewActionProjection {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(bool, tag = "2")]
+    pub requires_force: bool,
+    #[prost(message, optional, tag = "3")]
+    pub execution_preview: ::core::option::Option<ActionExecutionPreviewProjection>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ApplyReviewProjection {
+    #[prost(message, optional, tag = "1")]
+    pub apply_review_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub plan_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "4")]
+    pub overlay_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "5")]
+    pub epoch: ::core::option::Option<ExecutionEpochProjection>,
+    #[prost(message, optional, tag = "6")]
+    pub revalidation: ::core::option::Option<RevalidationProjectionPayload>,
+    #[prost(message, repeated, tag = "8")]
+    pub force_warning_action_ids: ::prost::alloc::vec::Vec<OpaqueIdentifier>,
+    #[prost(message, repeated, tag = "9")]
+    pub actions: ::prost::alloc::vec::Vec<ApplyReviewActionProjection>,
+    #[prost(message, optional, tag = "10")]
+    pub review_binding_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint32, tag = "11")]
+    pub maximum_action_count: u32,
+    #[prost(uint32, tag = "12")]
+    pub maximum_finding_count: u32,
+    #[prost(uint32, tag = "13")]
+    pub maximum_encoded_bytes: u32,
+    #[prost(message, optional, tag = "14")]
+    pub projection_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "15")]
+    pub overlay_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(uint64, tag = "16")]
+    pub selected_action_count: u64,
+    #[prost(message, optional, tag = "17")]
+    pub plan_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "18")]
+    pub evidence_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "19")]
+    pub evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "20")]
+    pub current_binding_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "21")]
+    pub revalidation_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint64, tag = "22")]
+    pub overlay_revision: u64,
+    #[prost(message, optional, tag = "23")]
+    pub scan_session_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "24")]
+    pub scan_checkpoint_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "25")]
+    pub scan_checkpoint_evidence_sha256: ::core::option::Option<Digest256>,
+}
+/// apply_review_id is only a same-session registry lookup. It is not an apply
+/// capability and is insufficient without the exact engine-authored binding
+/// and force-warning list.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfirmApplyRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub apply_review_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub review_binding_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, repeated, tag = "4")]
+    pub confirmed_force_action_ids: ::prost::alloc::vec::Vec<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CancelExecutionRequest {
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub execution_id: ::core::option::Option<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecutionUnitProjection {
+    #[prost(oneof = "execution_unit_projection::Unit", tags = "1, 2")]
+    pub unit: ::core::option::Option<execution_unit_projection::Unit>,
+}
+/// Nested message and enum types in `ExecutionUnitProjection`.
+pub mod execution_unit_projection {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Unit {
+        #[prost(message, tag = "1")]
+        ActionId(super::OpaqueIdentifier),
+        #[prost(message, tag = "2")]
+        CompoundRelease(super::CompoundReleaseUnitProjection),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CompoundReleaseUnitProjection {
+    #[prost(message, repeated, tag = "1")]
+    pub release_set_ids: ::prost::alloc::vec::Vec<OpaqueIdentifier>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutionAdapterFailureProjection {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(int32, tag = "2")]
+    pub error_code: i32,
+    #[prost(bool, tag = "3")]
+    pub has_error_code: bool,
+    #[prost(int32, tag = "4")]
+    pub exit_status: i32,
+    #[prost(bool, tag = "5")]
+    pub has_exit_status: bool,
+    #[prost(int32, tag = "6")]
+    pub terminating_signal: i32,
+    #[prost(bool, tag = "7")]
+    pub has_terminating_signal: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AdapterOutcomeProjection {
+    #[prost(enumeration = "AdapterOutcomeKind", tag = "1")]
+    pub kind: i32,
+    #[prost(string, tag = "2")]
+    pub detail_code: ::prost::alloc::string::String,
+    #[prost(oneof = "adapter_outcome_projection::Detail", tags = "3, 4")]
+    pub detail: ::core::option::Option<adapter_outcome_projection::Detail>,
+}
+/// Nested message and enum types in `AdapterOutcomeProjection`.
+pub mod adapter_outcome_projection {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Detail {
+        #[prost(message, tag = "3")]
+        Failure(super::ExecutionAdapterFailureProjection),
+        #[prost(string, tag = "4")]
+        NotStartedReason(::prost::alloc::string::String),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PostVerificationProjection {
+    #[prost(enumeration = "PostVerificationKind", tag = "1")]
+    pub kind: i32,
+    #[prost(string, tag = "2")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(oneof = "post_verification_projection::Detail", tags = "3, 4, 5")]
+    pub detail: ::core::option::Option<post_verification_projection::Detail>,
+}
+/// Nested message and enum types in `PostVerificationProjection`.
+pub mod post_verification_projection {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Detail {
+        #[prost(message, tag = "3")]
+        Residual(super::ExecutionAdapterFailureProjection),
+        #[prost(message, tag = "4")]
+        Unknown(super::UnknownProjectionValue),
+        #[prost(message, tag = "5")]
+        ObservationFailure(super::ObservationFailureProjection),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutionStepFinishedProjection {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(enumeration = "ExecutionStepStatus", tag = "2")]
+    pub status: i32,
+    #[prost(message, optional, tag = "3")]
+    pub adapter_outcome: ::core::option::Option<AdapterOutcomeProjection>,
+    #[prost(message, optional, tag = "4")]
+    pub post_verification: ::core::option::Option<PostVerificationProjection>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReleasePostVerificationProjection {
+    #[prost(message, optional, tag = "1")]
+    pub release_set_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub outcome: ::core::option::Option<PostVerificationProjection>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuditWriteFailureProjection {
+    #[prost(uint64, tag = "1")]
+    pub event_index: u64,
+    #[prost(string, tag = "2")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub error_code: i32,
+    #[prost(bool, tag = "4")]
+    pub has_error_code: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ApplyStartedProjection {
+    #[prost(message, optional, tag = "1")]
+    pub epoch: ::core::option::Option<ExecutionEpochProjection>,
+    #[prost(message, optional, tag = "2")]
+    pub apply_review_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "3")]
+    pub projection_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "4")]
+    pub plan_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "5")]
+    pub overlay_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "6")]
+    pub overlay_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "7")]
+    pub review_binding_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint64, tag = "8")]
+    pub selected_action_count: u64,
+    #[prost(message, optional, tag = "9")]
+    pub plan_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "10")]
+    pub evidence_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "11")]
+    pub evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "12")]
+    pub current_binding_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "13")]
+    pub revalidation_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint64, tag = "14")]
+    pub overlay_revision: u64,
+    #[prost(message, optional, tag = "15")]
+    pub scan_session_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "16")]
+    pub scan_checkpoint_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "17")]
+    pub scan_checkpoint_evidence_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UnitStartedProjection {
+    #[prost(message, optional, tag = "1")]
+    pub unit: ::core::option::Option<ExecutionUnitProjection>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ForceRequiredWarningProjection {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "2")]
+    pub preview: ::core::option::Option<ActionExecutionPreviewProjection>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UnitFinishedProjection {
+    #[prost(message, optional, tag = "1")]
+    pub unit: ::core::option::Option<ExecutionUnitProjection>,
+    #[prost(enumeration = "ExecutionUnitStatus", tag = "2")]
+    pub status: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UnitJitRejectedProjection {
+    #[prost(message, optional, tag = "1")]
+    pub unit: ::core::option::Option<ExecutionUnitProjection>,
+    #[prost(message, optional, tag = "2")]
+    pub revalidation: ::core::option::Option<RevalidationProjectionPayload>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UnitSkippedPrerequisiteProjection {
+    #[prost(message, optional, tag = "1")]
+    pub unit: ::core::option::Option<ExecutionUnitProjection>,
+    #[prost(message, repeated, tag = "2")]
+    pub blocking_prerequisites: ::prost::alloc::vec::Vec<ExecutionUnitProjection>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutionCancellationAcknowledgedProjection {
+    #[prost(string, tag = "1")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ApplyFinishedProjection {
+    #[prost(enumeration = "ApplyStartFailureKind", tag = "1")]
+    pub start_failure: i32,
+    #[prost(uint64, tag = "2")]
+    pub unit_count: u64,
+    #[prost(uint64, tag = "3")]
+    pub succeeded_unit_count: u64,
+    #[prost(uint64, tag = "4")]
+    pub partial_unit_count: u64,
+    #[prost(uint64, tag = "5")]
+    pub failed_unit_count: u64,
+    #[prost(uint64, tag = "6")]
+    pub cancelled_unit_count: u64,
+    #[prost(uint64, tag = "7")]
+    pub skipped_unit_count: u64,
+    #[prost(uint64, tag = "8")]
+    pub audit_failure_count: u64,
+    #[prost(message, optional, tag = "9")]
+    pub execution_record_sha256: ::core::option::Option<Digest256>,
+    #[prost(uint64, tag = "10")]
+    pub event_count: u64,
+    #[prost(uint64, tag = "11")]
+    pub encoded_event_bytes: u64,
+    #[prost(uint64, tag = "12")]
+    pub maximum_event_count: u64,
+    #[prost(uint64, tag = "13")]
+    pub maximum_encoded_event_bytes: u64,
+    #[prost(uint64, tag = "14")]
+    pub jit_rejected_unit_count: u64,
+    #[prost(uint64, tag = "15")]
+    pub expired_unit_count: u64,
+    #[prost(uint64, tag = "16")]
+    pub superseded_unit_count: u64,
+    #[prost(message, optional, tag = "17")]
+    pub apply_review_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "18")]
+    pub review_binding_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecutionStreamEvent {
+    #[prost(uint64, tag = "1")]
+    pub execution_event_index: u64,
+    #[prost(message, optional, tag = "2")]
+    pub execution_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(
+        oneof = "execution_stream_event::Body",
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20"
+    )]
+    pub body: ::core::option::Option<execution_stream_event::Body>,
+}
+/// Nested message and enum types in `ExecutionStreamEvent`.
+pub mod execution_stream_event {
+    #[allow(clippy::large_enum_variant)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "10")]
+        ApplyStarted(super::ApplyStartedProjection),
+        #[prost(message, tag = "11")]
+        UnitStarted(super::UnitStartedProjection),
+        #[prost(message, tag = "12")]
+        ForceRequiredWarning(super::ForceRequiredWarningProjection),
+        #[prost(message, tag = "13")]
+        StepFinished(super::ExecutionStepFinishedProjection),
+        #[prost(message, tag = "14")]
+        ReleasePostVerificationFinished(super::ReleasePostVerificationProjection),
+        #[prost(message, tag = "15")]
+        UnitFinished(super::UnitFinishedProjection),
+        #[prost(message, tag = "16")]
+        AuditWriteFailed(super::AuditWriteFailureProjection),
+        #[prost(message, tag = "17")]
+        ApplyFinished(super::ApplyFinishedProjection),
+        #[prost(message, tag = "18")]
+        UnitJitRejected(super::UnitJitRejectedProjection),
+        #[prost(message, tag = "19")]
+        UnitSkippedPrerequisite(super::UnitSkippedPrerequisiteProjection),
+        #[prost(message, tag = "20")]
+        CancellationAcknowledged(super::ExecutionCancellationAcknowledgedProjection),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RuntimeRejected {
+    #[prost(enumeration = "RuntimeRejectCode", tag = "1")]
+    pub code: i32,
+    #[prost(string, tag = "2")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RuntimeEvent {
+    #[prost(uint64, tag = "1")]
+    pub event_sequence: u64,
+    #[prost(uint64, tag = "2")]
+    pub request_id: u64,
+    #[prost(message, optional, tag = "3")]
+    pub runtime_session_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(
+        oneof = "runtime_event::Body",
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
+    )]
+    pub body: ::core::option::Option<runtime_event::Body>,
+}
+/// Nested message and enum types in `RuntimeEvent`.
+pub mod runtime_event {
+    #[allow(clippy::large_enum_variant)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "10")]
+        BuildPlanAccepted(super::BuildPlanAccepted),
+        #[prost(message, tag = "11")]
+        PlanProjectionChunk(super::PlanProjectionChunk),
+        #[prost(message, tag = "12")]
+        PlanProjection(super::PlanProjection),
+        #[prost(message, tag = "13")]
+        PlanProjectionInvalidated(super::PlanProjectionInvalidated),
+        #[prost(message, tag = "14")]
+        DecisionOverlayAcknowledged(super::DecisionOverlayAcknowledged),
+        #[prost(message, tag = "15")]
+        DecisionOverlayRejected(super::DecisionOverlayRejected),
+        #[prost(message, tag = "16")]
+        DryRunProjection(super::DryRunProjection),
+        #[prost(message, tag = "17")]
+        ApplyReviewProjection(super::ApplyReviewProjection),
+        #[prost(message, tag = "18")]
+        ExecutionStreamEvent(super::ExecutionStreamEvent),
+        #[prost(message, tag = "19")]
+        RuntimeRejected(super::RuntimeRejected),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanCancelled {
+    #[prost(string, tag = "1")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScanFinished {
+    #[prost(string, tag = "1")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EngineFailed {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub detail: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EngineEvent {
+    #[prost(uint64, tag = "1")]
+    pub event_sequence: u64,
+    #[prost(uint64, tag = "2")]
+    pub request_id: u64,
+    #[prost(string, tag = "3")]
+    pub scan_session_id: ::prost::alloc::string::String,
+    #[prost(
+        oneof = "engine_event::Body",
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22"
+    )]
+    pub body: ::core::option::Option<engine_event::Body>,
+}
+/// Nested message and enum types in `EngineEvent`.
+pub mod engine_event {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "10")]
+        ControlAccepted(super::ControlAccepted),
+        #[prost(message, tag = "11")]
+        ControlRejected(super::ControlRejected),
+        #[prost(message, tag = "12")]
+        ScanStateChanged(super::ScanStateChanged),
+        #[prost(message, tag = "13")]
+        ScanProgress(super::ScanProgress),
+        #[prost(message, tag = "14")]
+        ProvisionalPlanReady(super::ProvisionalPlanReady),
+        #[prost(message, tag = "15")]
+        ProvisionalPlanInvalidated(super::ProvisionalPlanInvalidated),
+        #[prost(message, tag = "16")]
+        ScanCancelled(super::ScanCancelled),
+        #[prost(message, tag = "17")]
+        ScanFinished(super::ScanFinished),
+        #[prost(message, tag = "18")]
+        EngineFailed(super::EngineFailed),
+        #[prost(message, tag = "19")]
+        ScanNodeObserved(super::ScanNodeObserved),
+        #[prost(message, tag = "20")]
+        ScanCheckpointReady(super::ScanCheckpointReady),
+        #[prost(message, tag = "21")]
+        ScanFinalized(super::ScanFinalized),
+        #[prost(message, tag = "22")]
+        ScanCheckpointChunk(super::ScanCheckpointChunk),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Envelope {
     #[prost(uint64, tag = "1")]
     pub sequence: u64,
-    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 20")]
+    #[prost(
+        oneof = "envelope::Body",
+        tags = "10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
+    )]
     pub body: ::core::option::Option<envelope::Body>,
 }
 /// Nested message and enum types in `Envelope`.
 pub mod envelope {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[allow(clippy::large_enum_variant)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Body {
         #[prost(message, tag = "10")]
         Hello(super::Hello),
@@ -61,6 +2006,26 @@ pub mod envelope {
         HelloRejected(super::HelloRejected),
         #[prost(message, tag = "20")]
         Business(super::BusinessEnvelope),
+        #[prost(message, tag = "21")]
+        StartScanRequest(super::StartScanRequest),
+        #[prost(message, tag = "22")]
+        ScanControlRequest(super::ScanControlRequest),
+        #[prost(message, tag = "23")]
+        EngineEvent(super::EngineEvent),
+        #[prost(message, tag = "24")]
+        BuildPlanRequest(super::BuildPlanRequest),
+        #[prost(message, tag = "25")]
+        DecisionOverlayEditRequest(super::DecisionOverlayEditRequest),
+        #[prost(message, tag = "26")]
+        PrepareDryRunRequest(super::PrepareDryRunRequest),
+        #[prost(message, tag = "27")]
+        PrepareApplyReviewRequest(super::PrepareApplyReviewRequest),
+        #[prost(message, tag = "28")]
+        ConfirmApplyRequest(super::ConfirmApplyRequest),
+        #[prost(message, tag = "29")]
+        CancelExecutionRequest(super::CancelExecutionRequest),
+        #[prost(message, tag = "30")]
+        RuntimeEvent(super::RuntimeEvent),
     }
 }
 /// Stable rejection codes are part of the v1 compatibility contract.
@@ -111,6 +2076,2133 @@ impl RejectCode {
             "REJECT_CODE_FRAME_TOO_LARGE" => Some(Self::FrameTooLarge),
             "REJECT_CODE_INTERNAL_ERROR" => Some(Self::InternalError),
             "REJECT_CODE_BUSINESS_UNSUPPORTED" => Some(Self::BusinessUnsupported),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScanControlKind {
+    Unspecified = 0,
+    StartScan = 1,
+    PauseScan = 2,
+    ResumeScan = 3,
+    /// Retained for protocol-minor compatibility with the Phase 0 shell. The
+    /// Phase 1 evidence producer rejects this control and never emits plan data.
+    PauseAndBuildProvisionalPlan = 4,
+    CancelScan = 5,
+    CheckpointScan = 6,
+    FinalizePartialScan = 7,
+    CheckpointProvisionalEvidence = 8,
+}
+impl ScanControlKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCAN_CONTROL_KIND_UNSPECIFIED",
+            Self::StartScan => "SCAN_CONTROL_KIND_START_SCAN",
+            Self::PauseScan => "SCAN_CONTROL_KIND_PAUSE_SCAN",
+            Self::ResumeScan => "SCAN_CONTROL_KIND_RESUME_SCAN",
+            Self::PauseAndBuildProvisionalPlan => {
+                "SCAN_CONTROL_KIND_PAUSE_AND_BUILD_PROVISIONAL_PLAN"
+            }
+            Self::CancelScan => "SCAN_CONTROL_KIND_CANCEL_SCAN",
+            Self::CheckpointScan => "SCAN_CONTROL_KIND_CHECKPOINT_SCAN",
+            Self::FinalizePartialScan => "SCAN_CONTROL_KIND_FINALIZE_PARTIAL_SCAN",
+            Self::CheckpointProvisionalEvidence => {
+                "SCAN_CONTROL_KIND_CHECKPOINT_PROVISIONAL_EVIDENCE"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCAN_CONTROL_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCAN_CONTROL_KIND_START_SCAN" => Some(Self::StartScan),
+            "SCAN_CONTROL_KIND_PAUSE_SCAN" => Some(Self::PauseScan),
+            "SCAN_CONTROL_KIND_RESUME_SCAN" => Some(Self::ResumeScan),
+            "SCAN_CONTROL_KIND_PAUSE_AND_BUILD_PROVISIONAL_PLAN" => {
+                Some(Self::PauseAndBuildProvisionalPlan)
+            }
+            "SCAN_CONTROL_KIND_CANCEL_SCAN" => Some(Self::CancelScan),
+            "SCAN_CONTROL_KIND_CHECKPOINT_SCAN" => Some(Self::CheckpointScan),
+            "SCAN_CONTROL_KIND_FINALIZE_PARTIAL_SCAN" => Some(Self::FinalizePartialScan),
+            "SCAN_CONTROL_KIND_CHECKPOINT_PROVISIONAL_EVIDENCE" => {
+                Some(Self::CheckpointProvisionalEvidence)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScanState {
+    Unspecified = 0,
+    Idle = 1,
+    Running = 2,
+    Paused = 3,
+    BuildingProvisionalPlan = 4,
+    ProvisionalPlanReady = 5,
+    Cancelling = 6,
+    Cancelled = 7,
+    Finished = 8,
+    Failed = 9,
+    FinalizingPartial = 10,
+    FinalizedPartial = 11,
+}
+impl ScanState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCAN_STATE_UNSPECIFIED",
+            Self::Idle => "SCAN_STATE_IDLE",
+            Self::Running => "SCAN_STATE_RUNNING",
+            Self::Paused => "SCAN_STATE_PAUSED",
+            Self::BuildingProvisionalPlan => "SCAN_STATE_BUILDING_PROVISIONAL_PLAN",
+            Self::ProvisionalPlanReady => "SCAN_STATE_PROVISIONAL_PLAN_READY",
+            Self::Cancelling => "SCAN_STATE_CANCELLING",
+            Self::Cancelled => "SCAN_STATE_CANCELLED",
+            Self::Finished => "SCAN_STATE_FINISHED",
+            Self::Failed => "SCAN_STATE_FAILED",
+            Self::FinalizingPartial => "SCAN_STATE_FINALIZING_PARTIAL",
+            Self::FinalizedPartial => "SCAN_STATE_FINALIZED_PARTIAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCAN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCAN_STATE_IDLE" => Some(Self::Idle),
+            "SCAN_STATE_RUNNING" => Some(Self::Running),
+            "SCAN_STATE_PAUSED" => Some(Self::Paused),
+            "SCAN_STATE_BUILDING_PROVISIONAL_PLAN" => Some(Self::BuildingProvisionalPlan),
+            "SCAN_STATE_PROVISIONAL_PLAN_READY" => Some(Self::ProvisionalPlanReady),
+            "SCAN_STATE_CANCELLING" => Some(Self::Cancelling),
+            "SCAN_STATE_CANCELLED" => Some(Self::Cancelled),
+            "SCAN_STATE_FINISHED" => Some(Self::Finished),
+            "SCAN_STATE_FAILED" => Some(Self::Failed),
+            "SCAN_STATE_FINALIZING_PARTIAL" => Some(Self::FinalizingPartial),
+            "SCAN_STATE_FINALIZED_PARTIAL" => Some(Self::FinalizedPartial),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScanMachineState {
+    Unspecified = 0,
+    Ready = 1,
+    Scanning = 2,
+    Complete = 3,
+    Partial = 4,
+    Cancelled = 5,
+}
+impl ScanMachineState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCAN_MACHINE_STATE_UNSPECIFIED",
+            Self::Ready => "SCAN_MACHINE_STATE_READY",
+            Self::Scanning => "SCAN_MACHINE_STATE_SCANNING",
+            Self::Complete => "SCAN_MACHINE_STATE_COMPLETE",
+            Self::Partial => "SCAN_MACHINE_STATE_PARTIAL",
+            Self::Cancelled => "SCAN_MACHINE_STATE_CANCELLED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCAN_MACHINE_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCAN_MACHINE_STATE_READY" => Some(Self::Ready),
+            "SCAN_MACHINE_STATE_SCANNING" => Some(Self::Scanning),
+            "SCAN_MACHINE_STATE_COMPLETE" => Some(Self::Complete),
+            "SCAN_MACHINE_STATE_PARTIAL" => Some(Self::Partial),
+            "SCAN_MACHINE_STATE_CANCELLED" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ControlRejectCode {
+    Unspecified = 0,
+    InvalidState = 1,
+    DuplicateRequestId = 2,
+    MalformedRequest = 3,
+    Unavailable = 4,
+    /// The finite producer command queue was full at the admission boundary.
+    CapacityExceeded = 5,
+}
+impl ControlRejectCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONTROL_REJECT_CODE_UNSPECIFIED",
+            Self::InvalidState => "CONTROL_REJECT_CODE_INVALID_STATE",
+            Self::DuplicateRequestId => "CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID",
+            Self::MalformedRequest => "CONTROL_REJECT_CODE_MALFORMED_REQUEST",
+            Self::Unavailable => "CONTROL_REJECT_CODE_UNAVAILABLE",
+            Self::CapacityExceeded => "CONTROL_REJECT_CODE_CAPACITY_EXCEEDED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONTROL_REJECT_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "CONTROL_REJECT_CODE_INVALID_STATE" => Some(Self::InvalidState),
+            "CONTROL_REJECT_CODE_DUPLICATE_REQUEST_ID" => Some(Self::DuplicateRequestId),
+            "CONTROL_REJECT_CODE_MALFORMED_REQUEST" => Some(Self::MalformedRequest),
+            "CONTROL_REJECT_CODE_UNAVAILABLE" => Some(Self::Unavailable),
+            "CONTROL_REJECT_CODE_CAPACITY_EXCEEDED" => Some(Self::CapacityExceeded),
+            _ => None,
+        }
+    }
+}
+/// A stable machine-readable reason for a rejected StartScanRequest. This is
+/// deliberately separate from ControlRejectCode: the latter describes the
+/// control-plane class, while this enum identifies the setup boundary that
+/// could not be established. Non-start controls leave this unspecified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScanSetupRejectCode {
+    Unspecified = 0,
+    CapabilityNotNegotiated = 1,
+    InvalidProfile = 2,
+    InvalidRoot = 3,
+    InvalidBudget = 4,
+    DuplicateRootId = 5,
+    MaterializationPolicyUnavailable = 6,
+    RootDiscoveryUnavailable = 7,
+    ScannerInitializationFailed = 8,
+}
+impl ScanSetupRejectCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCAN_SETUP_REJECT_CODE_UNSPECIFIED",
+            Self::CapabilityNotNegotiated => {
+                "SCAN_SETUP_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED"
+            }
+            Self::InvalidProfile => "SCAN_SETUP_REJECT_CODE_INVALID_PROFILE",
+            Self::InvalidRoot => "SCAN_SETUP_REJECT_CODE_INVALID_ROOT",
+            Self::InvalidBudget => "SCAN_SETUP_REJECT_CODE_INVALID_BUDGET",
+            Self::DuplicateRootId => "SCAN_SETUP_REJECT_CODE_DUPLICATE_ROOT_ID",
+            Self::MaterializationPolicyUnavailable => {
+                "SCAN_SETUP_REJECT_CODE_MATERIALIZATION_POLICY_UNAVAILABLE"
+            }
+            Self::RootDiscoveryUnavailable => {
+                "SCAN_SETUP_REJECT_CODE_ROOT_DISCOVERY_UNAVAILABLE"
+            }
+            Self::ScannerInitializationFailed => {
+                "SCAN_SETUP_REJECT_CODE_SCANNER_INITIALIZATION_FAILED"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCAN_SETUP_REJECT_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCAN_SETUP_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED" => {
+                Some(Self::CapabilityNotNegotiated)
+            }
+            "SCAN_SETUP_REJECT_CODE_INVALID_PROFILE" => Some(Self::InvalidProfile),
+            "SCAN_SETUP_REJECT_CODE_INVALID_ROOT" => Some(Self::InvalidRoot),
+            "SCAN_SETUP_REJECT_CODE_INVALID_BUDGET" => Some(Self::InvalidBudget),
+            "SCAN_SETUP_REJECT_CODE_DUPLICATE_ROOT_ID" => Some(Self::DuplicateRootId),
+            "SCAN_SETUP_REJECT_CODE_MATERIALIZATION_POLICY_UNAVAILABLE" => {
+                Some(Self::MaterializationPolicyUnavailable)
+            }
+            "SCAN_SETUP_REJECT_CODE_ROOT_DISCOVERY_UNAVAILABLE" => {
+                Some(Self::RootDiscoveryUnavailable)
+            }
+            "SCAN_SETUP_REJECT_CODE_SCANNER_INITIALIZATION_FAILED" => {
+                Some(Self::ScannerInitializationFailed)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EvidenceStatus {
+    Unspecified = 0,
+    Known = 1,
+    Absent = 2,
+    Unknown = 3,
+    Unreadable = 4,
+    Failed = 5,
+}
+impl EvidenceStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EVIDENCE_STATUS_UNSPECIFIED",
+            Self::Known => "EVIDENCE_STATUS_KNOWN",
+            Self::Absent => "EVIDENCE_STATUS_ABSENT",
+            Self::Unknown => "EVIDENCE_STATUS_UNKNOWN",
+            Self::Unreadable => "EVIDENCE_STATUS_UNREADABLE",
+            Self::Failed => "EVIDENCE_STATUS_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EVIDENCE_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "EVIDENCE_STATUS_KNOWN" => Some(Self::Known),
+            "EVIDENCE_STATUS_ABSENT" => Some(Self::Absent),
+            "EVIDENCE_STATUS_UNKNOWN" => Some(Self::Unknown),
+            "EVIDENCE_STATUS_UNREADABLE" => Some(Self::Unreadable),
+            "EVIDENCE_STATUS_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ByteMeasureKind {
+    Unspecified = 0,
+    Exact = 1,
+    LowerBound = 2,
+    Unknown = 3,
+}
+impl ByteMeasureKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "BYTE_MEASURE_KIND_UNSPECIFIED",
+            Self::Exact => "BYTE_MEASURE_KIND_EXACT",
+            Self::LowerBound => "BYTE_MEASURE_KIND_LOWER_BOUND",
+            Self::Unknown => "BYTE_MEASURE_KIND_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "BYTE_MEASURE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "BYTE_MEASURE_KIND_EXACT" => Some(Self::Exact),
+            "BYTE_MEASURE_KIND_LOWER_BOUND" => Some(Self::LowerBound),
+            "BYTE_MEASURE_KIND_UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanDisposition {
+    Unspecified = 0,
+    Ready = 1,
+    Conditional = 2,
+    NeedsReview = 3,
+    Blocked = 4,
+    KeepInformational = 5,
+}
+impl PlanDisposition {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_DISPOSITION_UNSPECIFIED",
+            Self::Ready => "PLAN_DISPOSITION_READY",
+            Self::Conditional => "PLAN_DISPOSITION_CONDITIONAL",
+            Self::NeedsReview => "PLAN_DISPOSITION_NEEDS_REVIEW",
+            Self::Blocked => "PLAN_DISPOSITION_BLOCKED",
+            Self::KeepInformational => "PLAN_DISPOSITION_KEEP_INFORMATIONAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_DISPOSITION_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_DISPOSITION_READY" => Some(Self::Ready),
+            "PLAN_DISPOSITION_CONDITIONAL" => Some(Self::Conditional),
+            "PLAN_DISPOSITION_NEEDS_REVIEW" => Some(Self::NeedsReview),
+            "PLAN_DISPOSITION_BLOCKED" => Some(Self::Blocked),
+            "PLAN_DISPOSITION_KEEP_INFORMATIONAL" => Some(Self::KeepInformational),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanActionKind {
+    Unspecified = 0,
+    GenericRemove = 1,
+    GitWorktreeRemove = 2,
+    GitWorktreeDiscardLocalChanges = 3,
+    CodexCleanTemporary = 4,
+    VersionedArtifactRemove = 5,
+    CompleteReleaseSetRemove = 6,
+    ReportOnly = 7,
+}
+impl PlanActionKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_ACTION_KIND_UNSPECIFIED",
+            Self::GenericRemove => "PLAN_ACTION_KIND_GENERIC_REMOVE",
+            Self::GitWorktreeRemove => "PLAN_ACTION_KIND_GIT_WORKTREE_REMOVE",
+            Self::GitWorktreeDiscardLocalChanges => {
+                "PLAN_ACTION_KIND_GIT_WORKTREE_DISCARD_LOCAL_CHANGES"
+            }
+            Self::CodexCleanTemporary => "PLAN_ACTION_KIND_CODEX_CLEAN_TEMPORARY",
+            Self::VersionedArtifactRemove => "PLAN_ACTION_KIND_VERSIONED_ARTIFACT_REMOVE",
+            Self::CompleteReleaseSetRemove => {
+                "PLAN_ACTION_KIND_COMPLETE_RELEASE_SET_REMOVE"
+            }
+            Self::ReportOnly => "PLAN_ACTION_KIND_REPORT_ONLY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_ACTION_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_ACTION_KIND_GENERIC_REMOVE" => Some(Self::GenericRemove),
+            "PLAN_ACTION_KIND_GIT_WORKTREE_REMOVE" => Some(Self::GitWorktreeRemove),
+            "PLAN_ACTION_KIND_GIT_WORKTREE_DISCARD_LOCAL_CHANGES" => {
+                Some(Self::GitWorktreeDiscardLocalChanges)
+            }
+            "PLAN_ACTION_KIND_CODEX_CLEAN_TEMPORARY" => Some(Self::CodexCleanTemporary),
+            "PLAN_ACTION_KIND_VERSIONED_ARTIFACT_REMOVE" => {
+                Some(Self::VersionedArtifactRemove)
+            }
+            "PLAN_ACTION_KIND_COMPLETE_RELEASE_SET_REMOVE" => {
+                Some(Self::CompleteReleaseSetRemove)
+            }
+            "PLAN_ACTION_KIND_REPORT_ONLY" => Some(Self::ReportOnly),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanRecommendation {
+    Unspecified = 0,
+    SafeToClean = 1,
+    SafeAfterExit = 2,
+    LikelyRebuildable = 3,
+    NeedsSemanticReview = 4,
+    ManagedByProvider = 5,
+    Keep = 6,
+    ScanIncomplete = 7,
+    ClassificationConflict = 8,
+}
+impl PlanRecommendation {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_RECOMMENDATION_UNSPECIFIED",
+            Self::SafeToClean => "PLAN_RECOMMENDATION_SAFE_TO_CLEAN",
+            Self::SafeAfterExit => "PLAN_RECOMMENDATION_SAFE_AFTER_EXIT",
+            Self::LikelyRebuildable => "PLAN_RECOMMENDATION_LIKELY_REBUILDABLE",
+            Self::NeedsSemanticReview => "PLAN_RECOMMENDATION_NEEDS_SEMANTIC_REVIEW",
+            Self::ManagedByProvider => "PLAN_RECOMMENDATION_MANAGED_BY_PROVIDER",
+            Self::Keep => "PLAN_RECOMMENDATION_KEEP",
+            Self::ScanIncomplete => "PLAN_RECOMMENDATION_SCAN_INCOMPLETE",
+            Self::ClassificationConflict => "PLAN_RECOMMENDATION_CLASSIFICATION_CONFLICT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_RECOMMENDATION_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_RECOMMENDATION_SAFE_TO_CLEAN" => Some(Self::SafeToClean),
+            "PLAN_RECOMMENDATION_SAFE_AFTER_EXIT" => Some(Self::SafeAfterExit),
+            "PLAN_RECOMMENDATION_LIKELY_REBUILDABLE" => Some(Self::LikelyRebuildable),
+            "PLAN_RECOMMENDATION_NEEDS_SEMANTIC_REVIEW" => {
+                Some(Self::NeedsSemanticReview)
+            }
+            "PLAN_RECOMMENDATION_MANAGED_BY_PROVIDER" => Some(Self::ManagedByProvider),
+            "PLAN_RECOMMENDATION_KEEP" => Some(Self::Keep),
+            "PLAN_RECOMMENDATION_SCAN_INCOMPLETE" => Some(Self::ScanIncomplete),
+            "PLAN_RECOMMENDATION_CLASSIFICATION_CONFLICT" => {
+                Some(Self::ClassificationConflict)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanStageability {
+    Unspecified = 0,
+    Stageable = 1,
+    RequiresWaivers = 2,
+    NotStageable = 3,
+}
+impl PlanStageability {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_STAGEABILITY_UNSPECIFIED",
+            Self::Stageable => "PLAN_STAGEABILITY_STAGEABLE",
+            Self::RequiresWaivers => "PLAN_STAGEABILITY_REQUIRES_WAIVERS",
+            Self::NotStageable => "PLAN_STAGEABILITY_NOT_STAGEABLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_STAGEABILITY_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_STAGEABILITY_STAGEABLE" => Some(Self::Stageable),
+            "PLAN_STAGEABILITY_REQUIRES_WAIVERS" => Some(Self::RequiresWaivers),
+            "PLAN_STAGEABILITY_NOT_STAGEABLE" => Some(Self::NotStageable),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanActivity {
+    Unspecified = 0,
+    Inactive = 1,
+    Active = 2,
+    Mixed = 3,
+    Unknown = 4,
+}
+impl PlanActivity {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_ACTIVITY_UNSPECIFIED",
+            Self::Inactive => "PLAN_ACTIVITY_INACTIVE",
+            Self::Active => "PLAN_ACTIVITY_ACTIVE",
+            Self::Mixed => "PLAN_ACTIVITY_MIXED",
+            Self::Unknown => "PLAN_ACTIVITY_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_ACTIVITY_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_ACTIVITY_INACTIVE" => Some(Self::Inactive),
+            "PLAN_ACTIVITY_ACTIVE" => Some(Self::Active),
+            "PLAN_ACTIVITY_MIXED" => Some(Self::Mixed),
+            "PLAN_ACTIVITY_UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanRecoverability {
+    Unspecified = 0,
+    Rebuildable = 1,
+    Restorable = 2,
+    Irrecoverable = 3,
+    ReviewRequired = 4,
+    Unknown = 5,
+}
+impl PlanRecoverability {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_RECOVERABILITY_UNSPECIFIED",
+            Self::Rebuildable => "PLAN_RECOVERABILITY_REBUILDABLE",
+            Self::Restorable => "PLAN_RECOVERABILITY_RESTORABLE",
+            Self::Irrecoverable => "PLAN_RECOVERABILITY_IRRECOVERABLE",
+            Self::ReviewRequired => "PLAN_RECOVERABILITY_REVIEW_REQUIRED",
+            Self::Unknown => "PLAN_RECOVERABILITY_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_RECOVERABILITY_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_RECOVERABILITY_REBUILDABLE" => Some(Self::Rebuildable),
+            "PLAN_RECOVERABILITY_RESTORABLE" => Some(Self::Restorable),
+            "PLAN_RECOVERABILITY_IRRECOVERABLE" => Some(Self::Irrecoverable),
+            "PLAN_RECOVERABILITY_REVIEW_REQUIRED" => Some(Self::ReviewRequired),
+            "PLAN_RECOVERABILITY_UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanTargetKind {
+    Unspecified = 0,
+    File = 1,
+    Directory = 2,
+    SymbolicLink = 3,
+    Other = 4,
+    Unknown = 5,
+}
+impl PlanTargetKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_TARGET_KIND_UNSPECIFIED",
+            Self::File => "PLAN_TARGET_KIND_FILE",
+            Self::Directory => "PLAN_TARGET_KIND_DIRECTORY",
+            Self::SymbolicLink => "PLAN_TARGET_KIND_SYMBOLIC_LINK",
+            Self::Other => "PLAN_TARGET_KIND_OTHER",
+            Self::Unknown => "PLAN_TARGET_KIND_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_TARGET_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_TARGET_KIND_FILE" => Some(Self::File),
+            "PLAN_TARGET_KIND_DIRECTORY" => Some(Self::Directory),
+            "PLAN_TARGET_KIND_SYMBOLIC_LINK" => Some(Self::SymbolicLink),
+            "PLAN_TARGET_KIND_OTHER" => Some(Self::Other),
+            "PLAN_TARGET_KIND_UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanBlockerKind {
+    Unspecified = 0,
+    ProviderManaged = 1,
+    IncompleteEvidence = 2,
+    CurrentActivity = 3,
+    IdentityOrAccess = 4,
+    SemanticUniqueness = 5,
+    Recoverability = 6,
+    Dependency = 7,
+    PathRace = 8,
+    Snapshot = 9,
+    ForceRequired = 10,
+    UnsupportedAdapter = 11,
+    Protocol = 12,
+}
+impl PlanBlockerKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_BLOCKER_KIND_UNSPECIFIED",
+            Self::ProviderManaged => "PLAN_BLOCKER_KIND_PROVIDER_MANAGED",
+            Self::IncompleteEvidence => "PLAN_BLOCKER_KIND_INCOMPLETE_EVIDENCE",
+            Self::CurrentActivity => "PLAN_BLOCKER_KIND_CURRENT_ACTIVITY",
+            Self::IdentityOrAccess => "PLAN_BLOCKER_KIND_IDENTITY_OR_ACCESS",
+            Self::SemanticUniqueness => "PLAN_BLOCKER_KIND_SEMANTIC_UNIQUENESS",
+            Self::Recoverability => "PLAN_BLOCKER_KIND_RECOVERABILITY",
+            Self::Dependency => "PLAN_BLOCKER_KIND_DEPENDENCY",
+            Self::PathRace => "PLAN_BLOCKER_KIND_PATH_RACE",
+            Self::Snapshot => "PLAN_BLOCKER_KIND_SNAPSHOT",
+            Self::ForceRequired => "PLAN_BLOCKER_KIND_FORCE_REQUIRED",
+            Self::UnsupportedAdapter => "PLAN_BLOCKER_KIND_UNSUPPORTED_ADAPTER",
+            Self::Protocol => "PLAN_BLOCKER_KIND_PROTOCOL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_BLOCKER_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_BLOCKER_KIND_PROVIDER_MANAGED" => Some(Self::ProviderManaged),
+            "PLAN_BLOCKER_KIND_INCOMPLETE_EVIDENCE" => Some(Self::IncompleteEvidence),
+            "PLAN_BLOCKER_KIND_CURRENT_ACTIVITY" => Some(Self::CurrentActivity),
+            "PLAN_BLOCKER_KIND_IDENTITY_OR_ACCESS" => Some(Self::IdentityOrAccess),
+            "PLAN_BLOCKER_KIND_SEMANTIC_UNIQUENESS" => Some(Self::SemanticUniqueness),
+            "PLAN_BLOCKER_KIND_RECOVERABILITY" => Some(Self::Recoverability),
+            "PLAN_BLOCKER_KIND_DEPENDENCY" => Some(Self::Dependency),
+            "PLAN_BLOCKER_KIND_PATH_RACE" => Some(Self::PathRace),
+            "PLAN_BLOCKER_KIND_SNAPSHOT" => Some(Self::Snapshot),
+            "PLAN_BLOCKER_KIND_FORCE_REQUIRED" => Some(Self::ForceRequired),
+            "PLAN_BLOCKER_KIND_UNSUPPORTED_ADAPTER" => Some(Self::UnsupportedAdapter),
+            "PLAN_BLOCKER_KIND_PROTOCOL" => Some(Self::Protocol),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlanBlockerDisposition {
+    Unspecified = 0,
+    Hard = 1,
+    Review = 2,
+    Warning = 3,
+    Informational = 4,
+}
+impl PlanBlockerDisposition {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAN_BLOCKER_DISPOSITION_UNSPECIFIED",
+            Self::Hard => "PLAN_BLOCKER_DISPOSITION_HARD",
+            Self::Review => "PLAN_BLOCKER_DISPOSITION_REVIEW",
+            Self::Warning => "PLAN_BLOCKER_DISPOSITION_WARNING",
+            Self::Informational => "PLAN_BLOCKER_DISPOSITION_INFORMATIONAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAN_BLOCKER_DISPOSITION_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAN_BLOCKER_DISPOSITION_HARD" => Some(Self::Hard),
+            "PLAN_BLOCKER_DISPOSITION_REVIEW" => Some(Self::Review),
+            "PLAN_BLOCKER_DISPOSITION_WARNING" => Some(Self::Warning),
+            "PLAN_BLOCKER_DISPOSITION_INFORMATIONAL" => Some(Self::Informational),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum WaiverKind {
+    Unspecified = 0,
+    RecencyAgePolicy = 1,
+    StaticOnlyRebuildEvidence = 2,
+    UnknownRebuildCost = 3,
+    AgentAssistedClassification = 4,
+    TaskSemanticCompletion = 5,
+    DuplicateSurvivorChoice = 6,
+    FullyObservedLocalGitWorkDiscard = 7,
+    NormalKeepPolicy = 8,
+}
+impl WaiverKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "WAIVER_KIND_UNSPECIFIED",
+            Self::RecencyAgePolicy => "WAIVER_KIND_RECENCY_AGE_POLICY",
+            Self::StaticOnlyRebuildEvidence => "WAIVER_KIND_STATIC_ONLY_REBUILD_EVIDENCE",
+            Self::UnknownRebuildCost => "WAIVER_KIND_UNKNOWN_REBUILD_COST",
+            Self::AgentAssistedClassification => {
+                "WAIVER_KIND_AGENT_ASSISTED_CLASSIFICATION"
+            }
+            Self::TaskSemanticCompletion => "WAIVER_KIND_TASK_SEMANTIC_COMPLETION",
+            Self::DuplicateSurvivorChoice => "WAIVER_KIND_DUPLICATE_SURVIVOR_CHOICE",
+            Self::FullyObservedLocalGitWorkDiscard => {
+                "WAIVER_KIND_FULLY_OBSERVED_LOCAL_GIT_WORK_DISCARD"
+            }
+            Self::NormalKeepPolicy => "WAIVER_KIND_NORMAL_KEEP_POLICY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "WAIVER_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "WAIVER_KIND_RECENCY_AGE_POLICY" => Some(Self::RecencyAgePolicy),
+            "WAIVER_KIND_STATIC_ONLY_REBUILD_EVIDENCE" => {
+                Some(Self::StaticOnlyRebuildEvidence)
+            }
+            "WAIVER_KIND_UNKNOWN_REBUILD_COST" => Some(Self::UnknownRebuildCost),
+            "WAIVER_KIND_AGENT_ASSISTED_CLASSIFICATION" => {
+                Some(Self::AgentAssistedClassification)
+            }
+            "WAIVER_KIND_TASK_SEMANTIC_COMPLETION" => Some(Self::TaskSemanticCompletion),
+            "WAIVER_KIND_DUPLICATE_SURVIVOR_CHOICE" => {
+                Some(Self::DuplicateSurvivorChoice)
+            }
+            "WAIVER_KIND_FULLY_OBSERVED_LOCAL_GIT_WORK_DISCARD" => {
+                Some(Self::FullyObservedLocalGitWorkDiscard)
+            }
+            "WAIVER_KIND_NORMAL_KEEP_POLICY" => Some(Self::NormalKeepPolicy),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PathRaceProjection {
+    Unspecified = 0,
+    NoneObserved = 1,
+    Residual = 2,
+    Unknown = 3,
+}
+impl PathRaceProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PATH_RACE_PROJECTION_UNSPECIFIED",
+            Self::NoneObserved => "PATH_RACE_PROJECTION_NONE_OBSERVED",
+            Self::Residual => "PATH_RACE_PROJECTION_RESIDUAL",
+            Self::Unknown => "PATH_RACE_PROJECTION_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PATH_RACE_PROJECTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "PATH_RACE_PROJECTION_NONE_OBSERVED" => Some(Self::NoneObserved),
+            "PATH_RACE_PROJECTION_RESIDUAL" => Some(Self::Residual),
+            "PATH_RACE_PROJECTION_UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EvidenceUnknownReasonProjection {
+    Unspecified = 0,
+    NotRequested = 1,
+    Unsupported = 2,
+    BudgetExhausted = 3,
+    TimedOut = 4,
+    IncompleteCoverage = 5,
+    UnavailableViaPublicApi = 6,
+}
+impl EvidenceUnknownReasonProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EVIDENCE_UNKNOWN_REASON_PROJECTION_UNSPECIFIED",
+            Self::NotRequested => "EVIDENCE_UNKNOWN_REASON_PROJECTION_NOT_REQUESTED",
+            Self::Unsupported => "EVIDENCE_UNKNOWN_REASON_PROJECTION_UNSUPPORTED",
+            Self::BudgetExhausted => {
+                "EVIDENCE_UNKNOWN_REASON_PROJECTION_BUDGET_EXHAUSTED"
+            }
+            Self::TimedOut => "EVIDENCE_UNKNOWN_REASON_PROJECTION_TIMED_OUT",
+            Self::IncompleteCoverage => {
+                "EVIDENCE_UNKNOWN_REASON_PROJECTION_INCOMPLETE_COVERAGE"
+            }
+            Self::UnavailableViaPublicApi => {
+                "EVIDENCE_UNKNOWN_REASON_PROJECTION_UNAVAILABLE_VIA_PUBLIC_API"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EVIDENCE_UNKNOWN_REASON_PROJECTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "EVIDENCE_UNKNOWN_REASON_PROJECTION_NOT_REQUESTED" => {
+                Some(Self::NotRequested)
+            }
+            "EVIDENCE_UNKNOWN_REASON_PROJECTION_UNSUPPORTED" => Some(Self::Unsupported),
+            "EVIDENCE_UNKNOWN_REASON_PROJECTION_BUDGET_EXHAUSTED" => {
+                Some(Self::BudgetExhausted)
+            }
+            "EVIDENCE_UNKNOWN_REASON_PROJECTION_TIMED_OUT" => Some(Self::TimedOut),
+            "EVIDENCE_UNKNOWN_REASON_PROJECTION_INCOMPLETE_COVERAGE" => {
+                Some(Self::IncompleteCoverage)
+            }
+            "EVIDENCE_UNKNOWN_REASON_PROJECTION_UNAVAILABLE_VIA_PUBLIC_API" => {
+                Some(Self::UnavailableViaPublicApi)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EvidenceCoverageCompletenessProjection {
+    Unspecified = 0,
+    Complete = 1,
+    Partial = 2,
+}
+impl EvidenceCoverageCompletenessProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_UNSPECIFIED",
+            Self::Complete => "EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_COMPLETE",
+            Self::Partial => "EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_PARTIAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_COMPLETE" => Some(Self::Complete),
+            "EVIDENCE_COVERAGE_COMPLETENESS_PROJECTION_PARTIAL" => Some(Self::Partial),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EvidenceCoverageReasonProjection {
+    Unspecified = 0,
+    BudgetExhausted = 1,
+    AccessPolicyChanged = 2,
+    Cancelled = 3,
+    CollectorFailed = 4,
+    IdentityMismatch = 5,
+    Missing = 6,
+    MountBoundary = 7,
+    NotRequestedByProfile = 8,
+    PermissionDenied = 9,
+    ProviderMetadataOnly = 10,
+    ProviderStateUnverified = 11,
+    SubtreeIncomplete = 12,
+    TimedOut = 13,
+    Unreadable = 14,
+    UnstableDuringScan = 15,
+    UserFinalizedPartial = 16,
+}
+impl EvidenceCoverageReasonProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EVIDENCE_COVERAGE_REASON_PROJECTION_UNSPECIFIED",
+            Self::BudgetExhausted => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_BUDGET_EXHAUSTED"
+            }
+            Self::AccessPolicyChanged => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_ACCESS_POLICY_CHANGED"
+            }
+            Self::Cancelled => "EVIDENCE_COVERAGE_REASON_PROJECTION_CANCELLED",
+            Self::CollectorFailed => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_COLLECTOR_FAILED"
+            }
+            Self::IdentityMismatch => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_IDENTITY_MISMATCH"
+            }
+            Self::Missing => "EVIDENCE_COVERAGE_REASON_PROJECTION_MISSING",
+            Self::MountBoundary => "EVIDENCE_COVERAGE_REASON_PROJECTION_MOUNT_BOUNDARY",
+            Self::NotRequestedByProfile => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_NOT_REQUESTED_BY_PROFILE"
+            }
+            Self::PermissionDenied => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_PERMISSION_DENIED"
+            }
+            Self::ProviderMetadataOnly => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_PROVIDER_METADATA_ONLY"
+            }
+            Self::ProviderStateUnverified => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_PROVIDER_STATE_UNVERIFIED"
+            }
+            Self::SubtreeIncomplete => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_SUBTREE_INCOMPLETE"
+            }
+            Self::TimedOut => "EVIDENCE_COVERAGE_REASON_PROJECTION_TIMED_OUT",
+            Self::Unreadable => "EVIDENCE_COVERAGE_REASON_PROJECTION_UNREADABLE",
+            Self::UnstableDuringScan => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_UNSTABLE_DURING_SCAN"
+            }
+            Self::UserFinalizedPartial => {
+                "EVIDENCE_COVERAGE_REASON_PROJECTION_USER_FINALIZED_PARTIAL"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_BUDGET_EXHAUSTED" => {
+                Some(Self::BudgetExhausted)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_ACCESS_POLICY_CHANGED" => {
+                Some(Self::AccessPolicyChanged)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_CANCELLED" => Some(Self::Cancelled),
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_COLLECTOR_FAILED" => {
+                Some(Self::CollectorFailed)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_IDENTITY_MISMATCH" => {
+                Some(Self::IdentityMismatch)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_MISSING" => Some(Self::Missing),
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_MOUNT_BOUNDARY" => {
+                Some(Self::MountBoundary)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_NOT_REQUESTED_BY_PROFILE" => {
+                Some(Self::NotRequestedByProfile)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_PERMISSION_DENIED" => {
+                Some(Self::PermissionDenied)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_PROVIDER_METADATA_ONLY" => {
+                Some(Self::ProviderMetadataOnly)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_PROVIDER_STATE_UNVERIFIED" => {
+                Some(Self::ProviderStateUnverified)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_SUBTREE_INCOMPLETE" => {
+                Some(Self::SubtreeIncomplete)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_TIMED_OUT" => Some(Self::TimedOut),
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_UNREADABLE" => Some(Self::Unreadable),
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_UNSTABLE_DURING_SCAN" => {
+                Some(Self::UnstableDuringScan)
+            }
+            "EVIDENCE_COVERAGE_REASON_PROJECTION_USER_FINALIZED_PARTIAL" => {
+                Some(Self::UserFinalizedPartial)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EvidenceObjectKindProjection {
+    Unspecified = 0,
+    Regular = 1,
+    Directory = 2,
+    SymbolicLink = 3,
+    Other = 4,
+}
+impl EvidenceObjectKindProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EVIDENCE_OBJECT_KIND_PROJECTION_UNSPECIFIED",
+            Self::Regular => "EVIDENCE_OBJECT_KIND_PROJECTION_REGULAR",
+            Self::Directory => "EVIDENCE_OBJECT_KIND_PROJECTION_DIRECTORY",
+            Self::SymbolicLink => "EVIDENCE_OBJECT_KIND_PROJECTION_SYMBOLIC_LINK",
+            Self::Other => "EVIDENCE_OBJECT_KIND_PROJECTION_OTHER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EVIDENCE_OBJECT_KIND_PROJECTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "EVIDENCE_OBJECT_KIND_PROJECTION_REGULAR" => Some(Self::Regular),
+            "EVIDENCE_OBJECT_KIND_PROJECTION_DIRECTORY" => Some(Self::Directory),
+            "EVIDENCE_OBJECT_KIND_PROJECTION_SYMBOLIC_LINK" => Some(Self::SymbolicLink),
+            "EVIDENCE_OBJECT_KIND_PROJECTION_OTHER" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ContentBaselineKindProjection {
+    Unspecified = 0,
+    RequiredDigest = 1,
+    ExplicitlyNotApplicable = 2,
+}
+impl ContentBaselineKindProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONTENT_BASELINE_KIND_PROJECTION_UNSPECIFIED",
+            Self::RequiredDigest => "CONTENT_BASELINE_KIND_PROJECTION_REQUIRED_DIGEST",
+            Self::ExplicitlyNotApplicable => {
+                "CONTENT_BASELINE_KIND_PROJECTION_EXPLICITLY_NOT_APPLICABLE"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONTENT_BASELINE_KIND_PROJECTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "CONTENT_BASELINE_KIND_PROJECTION_REQUIRED_DIGEST" => {
+                Some(Self::RequiredDigest)
+            }
+            "CONTENT_BASELINE_KIND_PROJECTION_EXPLICITLY_NOT_APPLICABLE" => {
+                Some(Self::ExplicitlyNotApplicable)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ContentNotApplicableReasonProjection {
+    Unspecified = 0,
+    NotRegularFile = 1,
+    PlanContractDoesNotRequireContent = 2,
+    ProviderManaged = 3,
+    ProviderStateUnverified = 4,
+    MetadataOnlyObject = 5,
+}
+impl ContentNotApplicableReasonProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_UNSPECIFIED",
+            Self::NotRegularFile => {
+                "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_NOT_REGULAR_FILE"
+            }
+            Self::PlanContractDoesNotRequireContent => {
+                "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PLAN_CONTRACT_DOES_NOT_REQUIRE_CONTENT"
+            }
+            Self::ProviderManaged => {
+                "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PROVIDER_MANAGED"
+            }
+            Self::ProviderStateUnverified => {
+                "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PROVIDER_STATE_UNVERIFIED"
+            }
+            Self::MetadataOnlyObject => {
+                "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_METADATA_ONLY_OBJECT"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_NOT_REGULAR_FILE" => {
+                Some(Self::NotRegularFile)
+            }
+            "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PLAN_CONTRACT_DOES_NOT_REQUIRE_CONTENT" => {
+                Some(Self::PlanContractDoesNotRequireContent)
+            }
+            "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PROVIDER_MANAGED" => {
+                Some(Self::ProviderManaged)
+            }
+            "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_PROVIDER_STATE_UNVERIFIED" => {
+                Some(Self::ProviderStateUnverified)
+            }
+            "CONTENT_NOT_APPLICABLE_REASON_PROJECTION_METADATA_ONLY_OBJECT" => {
+                Some(Self::MetadataOnlyObject)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum GitWorktreeMarkerKindProjection {
+    Unspecified = 0,
+    OrdinaryDirectory = 1,
+    LinkedGitdirFile = 2,
+    Absent = 3,
+}
+impl GitWorktreeMarkerKindProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "GIT_WORKTREE_MARKER_KIND_PROJECTION_UNSPECIFIED",
+            Self::OrdinaryDirectory => {
+                "GIT_WORKTREE_MARKER_KIND_PROJECTION_ORDINARY_DIRECTORY"
+            }
+            Self::LinkedGitdirFile => {
+                "GIT_WORKTREE_MARKER_KIND_PROJECTION_LINKED_GITDIR_FILE"
+            }
+            Self::Absent => "GIT_WORKTREE_MARKER_KIND_PROJECTION_ABSENT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "GIT_WORKTREE_MARKER_KIND_PROJECTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "GIT_WORKTREE_MARKER_KIND_PROJECTION_ORDINARY_DIRECTORY" => {
+                Some(Self::OrdinaryDirectory)
+            }
+            "GIT_WORKTREE_MARKER_KIND_PROJECTION_LINKED_GITDIR_FILE" => {
+                Some(Self::LinkedGitdirFile)
+            }
+            "GIT_WORKTREE_MARKER_KIND_PROJECTION_ABSENT" => Some(Self::Absent),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum GitFeatureStateProjection {
+    Unspecified = 0,
+    Absent = 1,
+    Present = 2,
+}
+impl GitFeatureStateProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "GIT_FEATURE_STATE_PROJECTION_UNSPECIFIED",
+            Self::Absent => "GIT_FEATURE_STATE_PROJECTION_ABSENT",
+            Self::Present => "GIT_FEATURE_STATE_PROJECTION_PRESENT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "GIT_FEATURE_STATE_PROJECTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "GIT_FEATURE_STATE_PROJECTION_ABSENT" => Some(Self::Absent),
+            "GIT_FEATURE_STATE_PROJECTION_PRESENT" => Some(Self::Present),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum GitLinkageKindProjection {
+    Unspecified = 0,
+    Ordinary = 1,
+    Linked = 2,
+}
+impl GitLinkageKindProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "GIT_LINKAGE_KIND_PROJECTION_UNSPECIFIED",
+            Self::Ordinary => "GIT_LINKAGE_KIND_PROJECTION_ORDINARY",
+            Self::Linked => "GIT_LINKAGE_KIND_PROJECTION_LINKED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "GIT_LINKAGE_KIND_PROJECTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "GIT_LINKAGE_KIND_PROJECTION_ORDINARY" => Some(Self::Ordinary),
+            "GIT_LINKAGE_KIND_PROJECTION_LINKED" => Some(Self::Linked),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AdapterScopeProvenanceKindProjection {
+    Unspecified = 0,
+    ConfiguredBoundScope = 1,
+    TypeHintOnly = 2,
+}
+impl AdapterScopeProvenanceKindProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_UNSPECIFIED",
+            Self::ConfiguredBoundScope => {
+                "ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_CONFIGURED_BOUND_SCOPE"
+            }
+            Self::TypeHintOnly => {
+                "ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_TYPE_HINT_ONLY"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_CONFIGURED_BOUND_SCOPE" => {
+                Some(Self::ConfiguredBoundScope)
+            }
+            "ADAPTER_SCOPE_PROVENANCE_KIND_PROJECTION_TYPE_HINT_ONLY" => {
+                Some(Self::TypeHintOnly)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CodexHelperCapabilityKindProjection {
+    Unspecified = 0,
+    Available = 1,
+    Unavailable = 2,
+}
+impl CodexHelperCapabilityKindProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CODEX_HELPER_CAPABILITY_KIND_PROJECTION_UNSPECIFIED",
+            Self::Available => "CODEX_HELPER_CAPABILITY_KIND_PROJECTION_AVAILABLE",
+            Self::Unavailable => "CODEX_HELPER_CAPABILITY_KIND_PROJECTION_UNAVAILABLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CODEX_HELPER_CAPABILITY_KIND_PROJECTION_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "CODEX_HELPER_CAPABILITY_KIND_PROJECTION_AVAILABLE" => Some(Self::Available),
+            "CODEX_HELPER_CAPABILITY_KIND_PROJECTION_UNAVAILABLE" => {
+                Some(Self::Unavailable)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum VersionedArtifactActiveStateProjection {
+    Unspecified = 0,
+    CandidateActive = 1,
+    CandidateInactive = 2,
+    NoneActive = 3,
+    Conflict = 4,
+}
+impl VersionedArtifactActiveStateProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_UNSPECIFIED",
+            Self::CandidateActive => {
+                "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CANDIDATE_ACTIVE"
+            }
+            Self::CandidateInactive => {
+                "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CANDIDATE_INACTIVE"
+            }
+            Self::NoneActive => "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_NONE_ACTIVE",
+            Self::Conflict => "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CONFLICT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CANDIDATE_ACTIVE" => {
+                Some(Self::CandidateActive)
+            }
+            "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CANDIDATE_INACTIVE" => {
+                Some(Self::CandidateInactive)
+            }
+            "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_NONE_ACTIVE" => {
+                Some(Self::NoneActive)
+            }
+            "VERSIONED_ARTIFACT_ACTIVE_STATE_PROJECTION_CONFLICT" => Some(Self::Conflict),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum VersionedArtifactSurvivorStateProjection {
+    Unspecified = 0,
+    CandidateIsSurvivor = 1,
+    OtherSurvivor = 2,
+    NotRequired = 3,
+    Unresolved = 4,
+    Conflict = 5,
+}
+impl VersionedArtifactSurvivorStateProjection {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => {
+                "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_UNSPECIFIED"
+            }
+            Self::CandidateIsSurvivor => {
+                "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_CANDIDATE_IS_SURVIVOR"
+            }
+            Self::OtherSurvivor => {
+                "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_OTHER_SURVIVOR"
+            }
+            Self::NotRequired => {
+                "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_NOT_REQUIRED"
+            }
+            Self::Unresolved => "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_UNRESOLVED",
+            Self::Conflict => "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_CONFLICT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_CANDIDATE_IS_SURVIVOR" => {
+                Some(Self::CandidateIsSurvivor)
+            }
+            "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_OTHER_SURVIVOR" => {
+                Some(Self::OtherSurvivor)
+            }
+            "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_NOT_REQUIRED" => {
+                Some(Self::NotRequired)
+            }
+            "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_UNRESOLVED" => {
+                Some(Self::Unresolved)
+            }
+            "VERSIONED_ARTIFACT_SURVIVOR_STATE_PROJECTION_CONFLICT" => {
+                Some(Self::Conflict)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AgentMode {
+    Unspecified = 0,
+    Off = 1,
+    Ask = 2,
+    Auto = 3,
+}
+impl AgentMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "AGENT_MODE_UNSPECIFIED",
+            Self::Off => "AGENT_MODE_OFF",
+            Self::Ask => "AGENT_MODE_ASK",
+            Self::Auto => "AGENT_MODE_AUTO",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "AGENT_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "AGENT_MODE_OFF" => Some(Self::Off),
+            "AGENT_MODE_ASK" => Some(Self::Ask),
+            "AGENT_MODE_AUTO" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DecisionEditKind {
+    Unspecified = 0,
+    StageAction = 1,
+    UnstageAction = 2,
+    AllowWaiver = 3,
+    RevokeWaiver = 4,
+    ReplaceNotes = 5,
+    ApplyBatchSelectionPreset = 6,
+}
+impl DecisionEditKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DECISION_EDIT_KIND_UNSPECIFIED",
+            Self::StageAction => "DECISION_EDIT_KIND_STAGE_ACTION",
+            Self::UnstageAction => "DECISION_EDIT_KIND_UNSTAGE_ACTION",
+            Self::AllowWaiver => "DECISION_EDIT_KIND_ALLOW_WAIVER",
+            Self::RevokeWaiver => "DECISION_EDIT_KIND_REVOKE_WAIVER",
+            Self::ReplaceNotes => "DECISION_EDIT_KIND_REPLACE_NOTES",
+            Self::ApplyBatchSelectionPreset => {
+                "DECISION_EDIT_KIND_APPLY_BATCH_SELECTION_PRESET"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DECISION_EDIT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "DECISION_EDIT_KIND_STAGE_ACTION" => Some(Self::StageAction),
+            "DECISION_EDIT_KIND_UNSTAGE_ACTION" => Some(Self::UnstageAction),
+            "DECISION_EDIT_KIND_ALLOW_WAIVER" => Some(Self::AllowWaiver),
+            "DECISION_EDIT_KIND_REVOKE_WAIVER" => Some(Self::RevokeWaiver),
+            "DECISION_EDIT_KIND_REPLACE_NOTES" => Some(Self::ReplaceNotes),
+            "DECISION_EDIT_KIND_APPLY_BATCH_SELECTION_PRESET" => {
+                Some(Self::ApplyBatchSelectionPreset)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum BatchSelectionPreset {
+    Unspecified = 0,
+    /// The engine selects only actions whose authoritative policy result is
+    /// stageable without a waiver. An empty result is valid and stays explicit.
+    SafeStageableWithoutWaiver = 1,
+}
+impl BatchSelectionPreset {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "BATCH_SELECTION_PRESET_UNSPECIFIED",
+            Self::SafeStageableWithoutWaiver => {
+                "BATCH_SELECTION_PRESET_SAFE_STAGEABLE_WITHOUT_WAIVER"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "BATCH_SELECTION_PRESET_UNSPECIFIED" => Some(Self::Unspecified),
+            "BATCH_SELECTION_PRESET_SAFE_STAGEABLE_WITHOUT_WAIVER" => {
+                Some(Self::SafeStageableWithoutWaiver)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DecisionOverlayRejectCode {
+    Unspecified = 0,
+    UnknownProjection = 1,
+    StaleRevision = 2,
+    UnknownAction = 3,
+    ActionNotStageable = 4,
+    UnknownWaiver = 5,
+    WaiverNotAllowed = 6,
+    InvalidReason = 7,
+    LimitExceeded = 8,
+    InvalidEdit = 9,
+    InternalError = 10,
+}
+impl DecisionOverlayRejectCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DECISION_OVERLAY_REJECT_CODE_UNSPECIFIED",
+            Self::UnknownProjection => "DECISION_OVERLAY_REJECT_CODE_UNKNOWN_PROJECTION",
+            Self::StaleRevision => "DECISION_OVERLAY_REJECT_CODE_STALE_REVISION",
+            Self::UnknownAction => "DECISION_OVERLAY_REJECT_CODE_UNKNOWN_ACTION",
+            Self::ActionNotStageable => {
+                "DECISION_OVERLAY_REJECT_CODE_ACTION_NOT_STAGEABLE"
+            }
+            Self::UnknownWaiver => "DECISION_OVERLAY_REJECT_CODE_UNKNOWN_WAIVER",
+            Self::WaiverNotAllowed => "DECISION_OVERLAY_REJECT_CODE_WAIVER_NOT_ALLOWED",
+            Self::InvalidReason => "DECISION_OVERLAY_REJECT_CODE_INVALID_REASON",
+            Self::LimitExceeded => "DECISION_OVERLAY_REJECT_CODE_LIMIT_EXCEEDED",
+            Self::InvalidEdit => "DECISION_OVERLAY_REJECT_CODE_INVALID_EDIT",
+            Self::InternalError => "DECISION_OVERLAY_REJECT_CODE_INTERNAL_ERROR",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DECISION_OVERLAY_REJECT_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "DECISION_OVERLAY_REJECT_CODE_UNKNOWN_PROJECTION" => {
+                Some(Self::UnknownProjection)
+            }
+            "DECISION_OVERLAY_REJECT_CODE_STALE_REVISION" => Some(Self::StaleRevision),
+            "DECISION_OVERLAY_REJECT_CODE_UNKNOWN_ACTION" => Some(Self::UnknownAction),
+            "DECISION_OVERLAY_REJECT_CODE_ACTION_NOT_STAGEABLE" => {
+                Some(Self::ActionNotStageable)
+            }
+            "DECISION_OVERLAY_REJECT_CODE_UNKNOWN_WAIVER" => Some(Self::UnknownWaiver),
+            "DECISION_OVERLAY_REJECT_CODE_WAIVER_NOT_ALLOWED" => {
+                Some(Self::WaiverNotAllowed)
+            }
+            "DECISION_OVERLAY_REJECT_CODE_INVALID_REASON" => Some(Self::InvalidReason),
+            "DECISION_OVERLAY_REJECT_CODE_LIMIT_EXCEEDED" => Some(Self::LimitExceeded),
+            "DECISION_OVERLAY_REJECT_CODE_INVALID_EDIT" => Some(Self::InvalidEdit),
+            "DECISION_OVERLAY_REJECT_CODE_INTERNAL_ERROR" => Some(Self::InternalError),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RevalidationFailureKind {
+    Unspecified = 0,
+    Missing = 1,
+    Unknown = 2,
+    Unreadable = 3,
+    CollectionFailed = 4,
+    Cancelled = 5,
+    IdentityMismatch = 6,
+    ContentMismatch = 7,
+    AccessPolicyMismatch = 8,
+    NamespaceIdentityMismatch = 9,
+    NamespaceAccessPolicyMismatch = 10,
+    CoverageMismatch = 11,
+    ActivityMismatch = 12,
+    ProtectionMismatch = 13,
+    ProviderMismatch = 14,
+    RecoverabilityMismatch = 15,
+    DependencyMismatch = 16,
+    GitPrerequisiteMismatch = 17,
+    ReleaseTopologyMismatch = 18,
+    SurvivorInvariantViolated = 19,
+    TerminalNamespaceInvariantViolated = 20,
+    IncompleteCompoundReleaseUnit = 21,
+    DuplicateObservation = 22,
+    UnexpectedObservation = 23,
+    PolicyEvidenceMismatch = 24,
+    PolicyThresholdCrossed = 25,
+    StaleConsent = 26,
+}
+impl RevalidationFailureKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REVALIDATION_FAILURE_KIND_UNSPECIFIED",
+            Self::Missing => "REVALIDATION_FAILURE_KIND_MISSING",
+            Self::Unknown => "REVALIDATION_FAILURE_KIND_UNKNOWN",
+            Self::Unreadable => "REVALIDATION_FAILURE_KIND_UNREADABLE",
+            Self::CollectionFailed => "REVALIDATION_FAILURE_KIND_COLLECTION_FAILED",
+            Self::Cancelled => "REVALIDATION_FAILURE_KIND_CANCELLED",
+            Self::IdentityMismatch => "REVALIDATION_FAILURE_KIND_IDENTITY_MISMATCH",
+            Self::ContentMismatch => "REVALIDATION_FAILURE_KIND_CONTENT_MISMATCH",
+            Self::AccessPolicyMismatch => {
+                "REVALIDATION_FAILURE_KIND_ACCESS_POLICY_MISMATCH"
+            }
+            Self::NamespaceIdentityMismatch => {
+                "REVALIDATION_FAILURE_KIND_NAMESPACE_IDENTITY_MISMATCH"
+            }
+            Self::NamespaceAccessPolicyMismatch => {
+                "REVALIDATION_FAILURE_KIND_NAMESPACE_ACCESS_POLICY_MISMATCH"
+            }
+            Self::CoverageMismatch => "REVALIDATION_FAILURE_KIND_COVERAGE_MISMATCH",
+            Self::ActivityMismatch => "REVALIDATION_FAILURE_KIND_ACTIVITY_MISMATCH",
+            Self::ProtectionMismatch => "REVALIDATION_FAILURE_KIND_PROTECTION_MISMATCH",
+            Self::ProviderMismatch => "REVALIDATION_FAILURE_KIND_PROVIDER_MISMATCH",
+            Self::RecoverabilityMismatch => {
+                "REVALIDATION_FAILURE_KIND_RECOVERABILITY_MISMATCH"
+            }
+            Self::DependencyMismatch => "REVALIDATION_FAILURE_KIND_DEPENDENCY_MISMATCH",
+            Self::GitPrerequisiteMismatch => {
+                "REVALIDATION_FAILURE_KIND_GIT_PREREQUISITE_MISMATCH"
+            }
+            Self::ReleaseTopologyMismatch => {
+                "REVALIDATION_FAILURE_KIND_RELEASE_TOPOLOGY_MISMATCH"
+            }
+            Self::SurvivorInvariantViolated => {
+                "REVALIDATION_FAILURE_KIND_SURVIVOR_INVARIANT_VIOLATED"
+            }
+            Self::TerminalNamespaceInvariantViolated => {
+                "REVALIDATION_FAILURE_KIND_TERMINAL_NAMESPACE_INVARIANT_VIOLATED"
+            }
+            Self::IncompleteCompoundReleaseUnit => {
+                "REVALIDATION_FAILURE_KIND_INCOMPLETE_COMPOUND_RELEASE_UNIT"
+            }
+            Self::DuplicateObservation => {
+                "REVALIDATION_FAILURE_KIND_DUPLICATE_OBSERVATION"
+            }
+            Self::UnexpectedObservation => {
+                "REVALIDATION_FAILURE_KIND_UNEXPECTED_OBSERVATION"
+            }
+            Self::PolicyEvidenceMismatch => {
+                "REVALIDATION_FAILURE_KIND_POLICY_EVIDENCE_MISMATCH"
+            }
+            Self::PolicyThresholdCrossed => {
+                "REVALIDATION_FAILURE_KIND_POLICY_THRESHOLD_CROSSED"
+            }
+            Self::StaleConsent => "REVALIDATION_FAILURE_KIND_STALE_CONSENT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REVALIDATION_FAILURE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "REVALIDATION_FAILURE_KIND_MISSING" => Some(Self::Missing),
+            "REVALIDATION_FAILURE_KIND_UNKNOWN" => Some(Self::Unknown),
+            "REVALIDATION_FAILURE_KIND_UNREADABLE" => Some(Self::Unreadable),
+            "REVALIDATION_FAILURE_KIND_COLLECTION_FAILED" => Some(Self::CollectionFailed),
+            "REVALIDATION_FAILURE_KIND_CANCELLED" => Some(Self::Cancelled),
+            "REVALIDATION_FAILURE_KIND_IDENTITY_MISMATCH" => Some(Self::IdentityMismatch),
+            "REVALIDATION_FAILURE_KIND_CONTENT_MISMATCH" => Some(Self::ContentMismatch),
+            "REVALIDATION_FAILURE_KIND_ACCESS_POLICY_MISMATCH" => {
+                Some(Self::AccessPolicyMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_NAMESPACE_IDENTITY_MISMATCH" => {
+                Some(Self::NamespaceIdentityMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_NAMESPACE_ACCESS_POLICY_MISMATCH" => {
+                Some(Self::NamespaceAccessPolicyMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_COVERAGE_MISMATCH" => Some(Self::CoverageMismatch),
+            "REVALIDATION_FAILURE_KIND_ACTIVITY_MISMATCH" => Some(Self::ActivityMismatch),
+            "REVALIDATION_FAILURE_KIND_PROTECTION_MISMATCH" => {
+                Some(Self::ProtectionMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_PROVIDER_MISMATCH" => Some(Self::ProviderMismatch),
+            "REVALIDATION_FAILURE_KIND_RECOVERABILITY_MISMATCH" => {
+                Some(Self::RecoverabilityMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_DEPENDENCY_MISMATCH" => {
+                Some(Self::DependencyMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_GIT_PREREQUISITE_MISMATCH" => {
+                Some(Self::GitPrerequisiteMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_RELEASE_TOPOLOGY_MISMATCH" => {
+                Some(Self::ReleaseTopologyMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_SURVIVOR_INVARIANT_VIOLATED" => {
+                Some(Self::SurvivorInvariantViolated)
+            }
+            "REVALIDATION_FAILURE_KIND_TERMINAL_NAMESPACE_INVARIANT_VIOLATED" => {
+                Some(Self::TerminalNamespaceInvariantViolated)
+            }
+            "REVALIDATION_FAILURE_KIND_INCOMPLETE_COMPOUND_RELEASE_UNIT" => {
+                Some(Self::IncompleteCompoundReleaseUnit)
+            }
+            "REVALIDATION_FAILURE_KIND_DUPLICATE_OBSERVATION" => {
+                Some(Self::DuplicateObservation)
+            }
+            "REVALIDATION_FAILURE_KIND_UNEXPECTED_OBSERVATION" => {
+                Some(Self::UnexpectedObservation)
+            }
+            "REVALIDATION_FAILURE_KIND_POLICY_EVIDENCE_MISMATCH" => {
+                Some(Self::PolicyEvidenceMismatch)
+            }
+            "REVALIDATION_FAILURE_KIND_POLICY_THRESHOLD_CROSSED" => {
+                Some(Self::PolicyThresholdCrossed)
+            }
+            "REVALIDATION_FAILURE_KIND_STALE_CONSENT" => Some(Self::StaleConsent),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RevalidationSubject {
+    Unspecified = 0,
+    TargetIdentity = 1,
+    TargetContent = 2,
+    TargetAccessPolicy = 3,
+    Coverage = 4,
+    CollectorStatus = 5,
+    Activity = 6,
+    ExplicitProtection = 7,
+    ProviderState = 8,
+    Recoverability = 9,
+    Dependency = 10,
+    RootIdentity = 11,
+    RootAccessPolicy = 12,
+    ParentIdentity = 13,
+    ParentAccessPolicy = 14,
+    GitPrerequisites = 15,
+    ReleaseTopology = 16,
+    DuplicateSurvivors = 17,
+    TerminalNamespaces = 18,
+    CompoundReleaseUnit = 19,
+    Collector = 20,
+    PolicyEvidence = 21,
+    WaiverConsent = 22,
+}
+impl RevalidationSubject {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REVALIDATION_SUBJECT_UNSPECIFIED",
+            Self::TargetIdentity => "REVALIDATION_SUBJECT_TARGET_IDENTITY",
+            Self::TargetContent => "REVALIDATION_SUBJECT_TARGET_CONTENT",
+            Self::TargetAccessPolicy => "REVALIDATION_SUBJECT_TARGET_ACCESS_POLICY",
+            Self::Coverage => "REVALIDATION_SUBJECT_COVERAGE",
+            Self::CollectorStatus => "REVALIDATION_SUBJECT_COLLECTOR_STATUS",
+            Self::Activity => "REVALIDATION_SUBJECT_ACTIVITY",
+            Self::ExplicitProtection => "REVALIDATION_SUBJECT_EXPLICIT_PROTECTION",
+            Self::ProviderState => "REVALIDATION_SUBJECT_PROVIDER_STATE",
+            Self::Recoverability => "REVALIDATION_SUBJECT_RECOVERABILITY",
+            Self::Dependency => "REVALIDATION_SUBJECT_DEPENDENCY",
+            Self::RootIdentity => "REVALIDATION_SUBJECT_ROOT_IDENTITY",
+            Self::RootAccessPolicy => "REVALIDATION_SUBJECT_ROOT_ACCESS_POLICY",
+            Self::ParentIdentity => "REVALIDATION_SUBJECT_PARENT_IDENTITY",
+            Self::ParentAccessPolicy => "REVALIDATION_SUBJECT_PARENT_ACCESS_POLICY",
+            Self::GitPrerequisites => "REVALIDATION_SUBJECT_GIT_PREREQUISITES",
+            Self::ReleaseTopology => "REVALIDATION_SUBJECT_RELEASE_TOPOLOGY",
+            Self::DuplicateSurvivors => "REVALIDATION_SUBJECT_DUPLICATE_SURVIVORS",
+            Self::TerminalNamespaces => "REVALIDATION_SUBJECT_TERMINAL_NAMESPACES",
+            Self::CompoundReleaseUnit => "REVALIDATION_SUBJECT_COMPOUND_RELEASE_UNIT",
+            Self::Collector => "REVALIDATION_SUBJECT_COLLECTOR",
+            Self::PolicyEvidence => "REVALIDATION_SUBJECT_POLICY_EVIDENCE",
+            Self::WaiverConsent => "REVALIDATION_SUBJECT_WAIVER_CONSENT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REVALIDATION_SUBJECT_UNSPECIFIED" => Some(Self::Unspecified),
+            "REVALIDATION_SUBJECT_TARGET_IDENTITY" => Some(Self::TargetIdentity),
+            "REVALIDATION_SUBJECT_TARGET_CONTENT" => Some(Self::TargetContent),
+            "REVALIDATION_SUBJECT_TARGET_ACCESS_POLICY" => Some(Self::TargetAccessPolicy),
+            "REVALIDATION_SUBJECT_COVERAGE" => Some(Self::Coverage),
+            "REVALIDATION_SUBJECT_COLLECTOR_STATUS" => Some(Self::CollectorStatus),
+            "REVALIDATION_SUBJECT_ACTIVITY" => Some(Self::Activity),
+            "REVALIDATION_SUBJECT_EXPLICIT_PROTECTION" => Some(Self::ExplicitProtection),
+            "REVALIDATION_SUBJECT_PROVIDER_STATE" => Some(Self::ProviderState),
+            "REVALIDATION_SUBJECT_RECOVERABILITY" => Some(Self::Recoverability),
+            "REVALIDATION_SUBJECT_DEPENDENCY" => Some(Self::Dependency),
+            "REVALIDATION_SUBJECT_ROOT_IDENTITY" => Some(Self::RootIdentity),
+            "REVALIDATION_SUBJECT_ROOT_ACCESS_POLICY" => Some(Self::RootAccessPolicy),
+            "REVALIDATION_SUBJECT_PARENT_IDENTITY" => Some(Self::ParentIdentity),
+            "REVALIDATION_SUBJECT_PARENT_ACCESS_POLICY" => Some(Self::ParentAccessPolicy),
+            "REVALIDATION_SUBJECT_GIT_PREREQUISITES" => Some(Self::GitPrerequisites),
+            "REVALIDATION_SUBJECT_RELEASE_TOPOLOGY" => Some(Self::ReleaseTopology),
+            "REVALIDATION_SUBJECT_DUPLICATE_SURVIVORS" => Some(Self::DuplicateSurvivors),
+            "REVALIDATION_SUBJECT_TERMINAL_NAMESPACES" => Some(Self::TerminalNamespaces),
+            "REVALIDATION_SUBJECT_COMPOUND_RELEASE_UNIT" => {
+                Some(Self::CompoundReleaseUnit)
+            }
+            "REVALIDATION_SUBJECT_COLLECTOR" => Some(Self::Collector),
+            "REVALIDATION_SUBJECT_POLICY_EVIDENCE" => Some(Self::PolicyEvidence),
+            "REVALIDATION_SUBJECT_WAIVER_CONSENT" => Some(Self::WaiverConsent),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ExecutionStepStatus {
+    Unspecified = 0,
+    Succeeded = 1,
+    PartiallySucceeded = 2,
+    Failed = 3,
+    Cancelled = 4,
+    Expired = 5,
+    Superseded = 6,
+    SkippedPrerequisite = 7,
+}
+impl ExecutionStepStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EXECUTION_STEP_STATUS_UNSPECIFIED",
+            Self::Succeeded => "EXECUTION_STEP_STATUS_SUCCEEDED",
+            Self::PartiallySucceeded => "EXECUTION_STEP_STATUS_PARTIALLY_SUCCEEDED",
+            Self::Failed => "EXECUTION_STEP_STATUS_FAILED",
+            Self::Cancelled => "EXECUTION_STEP_STATUS_CANCELLED",
+            Self::Expired => "EXECUTION_STEP_STATUS_EXPIRED",
+            Self::Superseded => "EXECUTION_STEP_STATUS_SUPERSEDED",
+            Self::SkippedPrerequisite => "EXECUTION_STEP_STATUS_SKIPPED_PREREQUISITE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EXECUTION_STEP_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "EXECUTION_STEP_STATUS_SUCCEEDED" => Some(Self::Succeeded),
+            "EXECUTION_STEP_STATUS_PARTIALLY_SUCCEEDED" => Some(Self::PartiallySucceeded),
+            "EXECUTION_STEP_STATUS_FAILED" => Some(Self::Failed),
+            "EXECUTION_STEP_STATUS_CANCELLED" => Some(Self::Cancelled),
+            "EXECUTION_STEP_STATUS_EXPIRED" => Some(Self::Expired),
+            "EXECUTION_STEP_STATUS_SUPERSEDED" => Some(Self::Superseded),
+            "EXECUTION_STEP_STATUS_SKIPPED_PREREQUISITE" => {
+                Some(Self::SkippedPrerequisite)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ExecutionUnitStatus {
+    Unspecified = 0,
+    Succeeded = 1,
+    PartiallyFailed = 2,
+    Failed = 3,
+    Cancelled = 4,
+    SkippedPrerequisite = 5,
+    JitRejected = 6,
+    Expired = 7,
+    Superseded = 8,
+}
+impl ExecutionUnitStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EXECUTION_UNIT_STATUS_UNSPECIFIED",
+            Self::Succeeded => "EXECUTION_UNIT_STATUS_SUCCEEDED",
+            Self::PartiallyFailed => "EXECUTION_UNIT_STATUS_PARTIALLY_FAILED",
+            Self::Failed => "EXECUTION_UNIT_STATUS_FAILED",
+            Self::Cancelled => "EXECUTION_UNIT_STATUS_CANCELLED",
+            Self::SkippedPrerequisite => "EXECUTION_UNIT_STATUS_SKIPPED_PREREQUISITE",
+            Self::JitRejected => "EXECUTION_UNIT_STATUS_JIT_REJECTED",
+            Self::Expired => "EXECUTION_UNIT_STATUS_EXPIRED",
+            Self::Superseded => "EXECUTION_UNIT_STATUS_SUPERSEDED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EXECUTION_UNIT_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "EXECUTION_UNIT_STATUS_SUCCEEDED" => Some(Self::Succeeded),
+            "EXECUTION_UNIT_STATUS_PARTIALLY_FAILED" => Some(Self::PartiallyFailed),
+            "EXECUTION_UNIT_STATUS_FAILED" => Some(Self::Failed),
+            "EXECUTION_UNIT_STATUS_CANCELLED" => Some(Self::Cancelled),
+            "EXECUTION_UNIT_STATUS_SKIPPED_PREREQUISITE" => {
+                Some(Self::SkippedPrerequisite)
+            }
+            "EXECUTION_UNIT_STATUS_JIT_REJECTED" => Some(Self::JitRejected),
+            "EXECUTION_UNIT_STATUS_EXPIRED" => Some(Self::Expired),
+            "EXECUTION_UNIT_STATUS_SUPERSEDED" => Some(Self::Superseded),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AdapterOutcomeKind {
+    Unspecified = 0,
+    Succeeded = 1,
+    Failed = 2,
+    Cancelled = 3,
+    TimedOut = 4,
+    NotStarted = 5,
+}
+impl AdapterOutcomeKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ADAPTER_OUTCOME_KIND_UNSPECIFIED",
+            Self::Succeeded => "ADAPTER_OUTCOME_KIND_SUCCEEDED",
+            Self::Failed => "ADAPTER_OUTCOME_KIND_FAILED",
+            Self::Cancelled => "ADAPTER_OUTCOME_KIND_CANCELLED",
+            Self::TimedOut => "ADAPTER_OUTCOME_KIND_TIMED_OUT",
+            Self::NotStarted => "ADAPTER_OUTCOME_KIND_NOT_STARTED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ADAPTER_OUTCOME_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "ADAPTER_OUTCOME_KIND_SUCCEEDED" => Some(Self::Succeeded),
+            "ADAPTER_OUTCOME_KIND_FAILED" => Some(Self::Failed),
+            "ADAPTER_OUTCOME_KIND_CANCELLED" => Some(Self::Cancelled),
+            "ADAPTER_OUTCOME_KIND_TIMED_OUT" => Some(Self::TimedOut),
+            "ADAPTER_OUTCOME_KIND_NOT_STARTED" => Some(Self::NotStarted),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PostVerificationKind {
+    Unspecified = 0,
+    Satisfied = 1,
+    ExpectedResidual = 2,
+    Missing = 3,
+    NotSatisfied = 4,
+    Unknown = 5,
+    Unreadable = 6,
+    Failed = 7,
+}
+impl PostVerificationKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "POST_VERIFICATION_KIND_UNSPECIFIED",
+            Self::Satisfied => "POST_VERIFICATION_KIND_SATISFIED",
+            Self::ExpectedResidual => "POST_VERIFICATION_KIND_EXPECTED_RESIDUAL",
+            Self::Missing => "POST_VERIFICATION_KIND_MISSING",
+            Self::NotSatisfied => "POST_VERIFICATION_KIND_NOT_SATISFIED",
+            Self::Unknown => "POST_VERIFICATION_KIND_UNKNOWN",
+            Self::Unreadable => "POST_VERIFICATION_KIND_UNREADABLE",
+            Self::Failed => "POST_VERIFICATION_KIND_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "POST_VERIFICATION_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "POST_VERIFICATION_KIND_SATISFIED" => Some(Self::Satisfied),
+            "POST_VERIFICATION_KIND_EXPECTED_RESIDUAL" => Some(Self::ExpectedResidual),
+            "POST_VERIFICATION_KIND_MISSING" => Some(Self::Missing),
+            "POST_VERIFICATION_KIND_NOT_SATISFIED" => Some(Self::NotSatisfied),
+            "POST_VERIFICATION_KIND_UNKNOWN" => Some(Self::Unknown),
+            "POST_VERIFICATION_KIND_UNREADABLE" => Some(Self::Unreadable),
+            "POST_VERIFICATION_KIND_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ApplyStartFailureKind {
+    Unspecified = 0,
+    AuthorizationAlreadyClaimed = 1,
+    InvalidOverlay = 2,
+    ManifestBindingMismatch = 3,
+    Expired = 4,
+    InvalidExecutionGraph = 5,
+    PreparationSuperseded = 6,
+    ForceConfirmationBindingMismatch = 7,
+}
+impl ApplyStartFailureKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "APPLY_START_FAILURE_KIND_UNSPECIFIED",
+            Self::AuthorizationAlreadyClaimed => {
+                "APPLY_START_FAILURE_KIND_AUTHORIZATION_ALREADY_CLAIMED"
+            }
+            Self::InvalidOverlay => "APPLY_START_FAILURE_KIND_INVALID_OVERLAY",
+            Self::ManifestBindingMismatch => {
+                "APPLY_START_FAILURE_KIND_MANIFEST_BINDING_MISMATCH"
+            }
+            Self::Expired => "APPLY_START_FAILURE_KIND_EXPIRED",
+            Self::InvalidExecutionGraph => {
+                "APPLY_START_FAILURE_KIND_INVALID_EXECUTION_GRAPH"
+            }
+            Self::PreparationSuperseded => {
+                "APPLY_START_FAILURE_KIND_PREPARATION_SUPERSEDED"
+            }
+            Self::ForceConfirmationBindingMismatch => {
+                "APPLY_START_FAILURE_KIND_FORCE_CONFIRMATION_BINDING_MISMATCH"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "APPLY_START_FAILURE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "APPLY_START_FAILURE_KIND_AUTHORIZATION_ALREADY_CLAIMED" => {
+                Some(Self::AuthorizationAlreadyClaimed)
+            }
+            "APPLY_START_FAILURE_KIND_INVALID_OVERLAY" => Some(Self::InvalidOverlay),
+            "APPLY_START_FAILURE_KIND_MANIFEST_BINDING_MISMATCH" => {
+                Some(Self::ManifestBindingMismatch)
+            }
+            "APPLY_START_FAILURE_KIND_EXPIRED" => Some(Self::Expired),
+            "APPLY_START_FAILURE_KIND_INVALID_EXECUTION_GRAPH" => {
+                Some(Self::InvalidExecutionGraph)
+            }
+            "APPLY_START_FAILURE_KIND_PREPARATION_SUPERSEDED" => {
+                Some(Self::PreparationSuperseded)
+            }
+            "APPLY_START_FAILURE_KIND_FORCE_CONFIRMATION_BINDING_MISMATCH" => {
+                Some(Self::ForceConfirmationBindingMismatch)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RuntimeRejectCode {
+    Unspecified = 0,
+    CapabilityNotNegotiated = 1,
+    InvalidState = 2,
+    UnknownProjection = 3,
+    StaleBinding = 4,
+    LimitExceeded = 5,
+    RevalidationFailed = 6,
+    ConfirmationMismatch = 7,
+    InternalError = 8,
+    BusinessUnsupported = 9,
+    MalformedRequest = 10,
+    DuplicateRequestId = 11,
+}
+impl RuntimeRejectCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RUNTIME_REJECT_CODE_UNSPECIFIED",
+            Self::CapabilityNotNegotiated => {
+                "RUNTIME_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED"
+            }
+            Self::InvalidState => "RUNTIME_REJECT_CODE_INVALID_STATE",
+            Self::UnknownProjection => "RUNTIME_REJECT_CODE_UNKNOWN_PROJECTION",
+            Self::StaleBinding => "RUNTIME_REJECT_CODE_STALE_BINDING",
+            Self::LimitExceeded => "RUNTIME_REJECT_CODE_LIMIT_EXCEEDED",
+            Self::RevalidationFailed => "RUNTIME_REJECT_CODE_REVALIDATION_FAILED",
+            Self::ConfirmationMismatch => "RUNTIME_REJECT_CODE_CONFIRMATION_MISMATCH",
+            Self::InternalError => "RUNTIME_REJECT_CODE_INTERNAL_ERROR",
+            Self::BusinessUnsupported => "RUNTIME_REJECT_CODE_BUSINESS_UNSUPPORTED",
+            Self::MalformedRequest => "RUNTIME_REJECT_CODE_MALFORMED_REQUEST",
+            Self::DuplicateRequestId => "RUNTIME_REJECT_CODE_DUPLICATE_REQUEST_ID",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RUNTIME_REJECT_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "RUNTIME_REJECT_CODE_CAPABILITY_NOT_NEGOTIATED" => {
+                Some(Self::CapabilityNotNegotiated)
+            }
+            "RUNTIME_REJECT_CODE_INVALID_STATE" => Some(Self::InvalidState),
+            "RUNTIME_REJECT_CODE_UNKNOWN_PROJECTION" => Some(Self::UnknownProjection),
+            "RUNTIME_REJECT_CODE_STALE_BINDING" => Some(Self::StaleBinding),
+            "RUNTIME_REJECT_CODE_LIMIT_EXCEEDED" => Some(Self::LimitExceeded),
+            "RUNTIME_REJECT_CODE_REVALIDATION_FAILED" => Some(Self::RevalidationFailed),
+            "RUNTIME_REJECT_CODE_CONFIRMATION_MISMATCH" => {
+                Some(Self::ConfirmationMismatch)
+            }
+            "RUNTIME_REJECT_CODE_INTERNAL_ERROR" => Some(Self::InternalError),
+            "RUNTIME_REJECT_CODE_BUSINESS_UNSUPPORTED" => Some(Self::BusinessUnsupported),
+            "RUNTIME_REJECT_CODE_MALFORMED_REQUEST" => Some(Self::MalformedRequest),
+            "RUNTIME_REJECT_CODE_DUPLICATE_REQUEST_ID" => Some(Self::DuplicateRequestId),
             _ => None,
         }
     }

@@ -2,30 +2,44 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/attr.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#include <sys/snapshot.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
+#include <sys/vnode.h>
 #include <unistd.h>
+
+enum {
+    DP_ITEM_RAW_HEADER_SIZE = sizeof(uint32_t) + sizeof(attribute_set_t),
+    DP_ITEM_RAW_COMMON_SIZE = sizeof(dev_t) + sizeof(fsobj_type_t) +
+                              sizeof(uint32_t) + sizeof(uint64_t),
+    DP_ITEM_RAW_FILE_SIZE = sizeof(uint32_t) + sizeof(off_t) + sizeof(off_t),
+    DP_ITEM_RAW_EXTENDED_SIZE = sizeof(off_t) + sizeof(uint64_t) +
+                                sizeof(uint64_t) + sizeof(uint32_t),
+    DP_ITEM_RAW_DIRECTORY_SIZE = DP_ITEM_RAW_HEADER_SIZE +
+                                 DP_ITEM_RAW_COMMON_SIZE +
+                                 DP_ITEM_RAW_EXTENDED_SIZE,
+    DP_ITEM_RAW_MAX_SIZE = DP_ITEM_RAW_DIRECTORY_SIZE + DP_ITEM_RAW_FILE_SIZE,
+};
+
+_Static_assert(sizeof(dev_t) == sizeof(uint32_t), "unexpected Darwin dev_t size");
+_Static_assert(sizeof(fsobj_type_t) == sizeof(uint32_t),
+               "unexpected Darwin object type size");
+_Static_assert(sizeof(off_t) == sizeof(uint64_t), "unexpected Darwin off_t size");
+_Static_assert(sizeof(pid_t) == sizeof(int32_t), "unexpected Darwin pid_t size");
 
 typedef struct __attribute__((packed, aligned(4))) {
     uint32_t length;
     attribute_set_t returned;
     dev_t device;
     fsobj_type_t object_type;
-    uint32_t flags;
     uint64_t file_id;
-    uint32_t link_count;
-    off_t total_size;
-    off_t allocated_size;
-    off_t private_size;
-    uint64_t clone_id;
-    uint64_t extended_flags;
-    uint32_t clone_refcount;
-} dp_kernel_item_buffer;
+} dp_kernel_fd_identity_buffer;
 
 typedef struct __attribute__((packed, aligned(4))) {
     uint32_t length;
@@ -42,6 +56,32 @@ static void dp_store_u64(uint8_t *wire, size_t offset, uint64_t value) {
     memcpy(wire + offset, &value, sizeof(value));
 }
 
+static int dp_read_packed_field(const uint8_t *raw, size_t raw_length,
+                                size_t *cursor, void *value,
+                                size_t value_size) {
+    if (*cursor > raw_length || value_size > raw_length - *cursor) {
+        errno = EPROTO;
+        return -1;
+    }
+    memcpy(value, raw + *cursor, value_size);
+    *cursor += value_size;
+    return 0;
+}
+
+static int dp_read_claimed_field(const uint8_t *raw, size_t raw_length,
+                                 size_t offset, void *value, size_t value_size,
+                                 int claimed) {
+    if (!claimed) {
+        return 0;
+    }
+    if (offset > raw_length || value_size > raw_length - offset) {
+        errno = EPROTO;
+        return -1;
+    }
+    memcpy(value, raw + offset, value_size);
+    return 0;
+}
+
 int dp_set_materialization_off(void) {
     return setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
                           IOPOL_SCOPE_PROCESS,
@@ -51,6 +91,162 @@ int dp_set_materialization_off(void) {
 int dp_get_materialization_policy(void) {
     return getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
                           IOPOL_SCOPE_PROCESS);
+}
+
+uint64_t dp_item_probe_options(void) {
+    return FSOPT_NOFOLLOW | FSOPT_RESOLVE_BENEATH | FSOPT_REPORT_FULLSIZE |
+           FSOPT_PACK_INVAL_ATTRS | FSOPT_ATTR_CMN_EXTENDED |
+           FSOPT_RETURN_REALDEV;
+}
+
+int dp_parse_item_buffer(const uint8_t *raw, size_t raw_capacity,
+                         uint8_t *wire, size_t wire_capacity,
+                         size_t *wire_length) {
+    const size_t returned_end = DP_ITEM_RAW_HEADER_SIZE;
+    if (wire_length == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *wire_length = 0;
+    if (raw == NULL || wire == NULL ||
+        raw_capacity < returned_end || wire_capacity < DP_ITEM_WIRE_V1_SIZE) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint32_t raw_length = 0;
+    memcpy(&raw_length, raw, sizeof(raw_length));
+    if (raw_length < returned_end || raw_length > raw_capacity) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    attribute_set_t returned = {0};
+    memcpy(&returned, raw + sizeof(uint32_t), sizeof(returned));
+    const uint32_t requested_common =
+        ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_DEVID | ATTR_CMN_OBJTYPE |
+        ATTR_CMN_FLAGS | ATTR_CMN_FILEID;
+    const uint32_t requested_file =
+        ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE;
+    const uint32_t requested_extended =
+        ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_CLONEID |
+        ATTR_CMNEXT_EXT_FLAGS | ATTR_CMNEXT_CLONE_REFCNT;
+    if ((returned.commonattr & ATTR_CMN_RETURNED_ATTRS) == 0 ||
+        (returned.commonattr & ~requested_common) != 0 ||
+        returned.volattr != 0 || returned.dirattr != 0 ||
+        (returned.fileattr & ~requested_file) != 0 ||
+        (returned.forkattr & ~requested_extended) != 0) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    dev_t device = 0;
+    fsobj_type_t object_type = 0;
+    uint32_t flags = 0;
+    uint64_t file_id = 0;
+    uint32_t link_count = 0;
+    off_t total_size = 0;
+    off_t allocated_size = 0;
+    off_t private_size = 0;
+    uint64_t clone_id = 0;
+    uint64_t extended_flags = 0;
+    uint32_t clone_refcount = 0;
+    size_t cursor = returned_end;
+
+#define DP_READ_PACKED(value)                                                     \
+    do {                                                                          \
+        if (dp_read_packed_field(raw, raw_length, &cursor, &(value),              \
+                                 sizeof(value)) != 0) {                            \
+            return -1;                                                            \
+        }                                                                         \
+    } while (0)
+
+    /*
+     * FSOPT_PACK_INVAL_ATTRS reserves every requested common and extended
+     * slot, even when its returned bit is clear. Darwin omits the complete
+     * file-attribute group for directories, so later extended fields must be
+     * read from a type-dependent cursor rather than fixed struct offsets.
+     */
+    DP_READ_PACKED(device);
+    DP_READ_PACKED(object_type);
+    DP_READ_PACKED(flags);
+    DP_READ_PACKED(file_id);
+
+    int has_file_layout;
+    if ((returned.commonattr & ATTR_CMN_OBJTYPE) != 0) {
+        has_file_layout = object_type != VDIR;
+    } else if (raw_length == DP_ITEM_RAW_DIRECTORY_SIZE) {
+        has_file_layout = 0;
+    } else if (raw_length == DP_ITEM_RAW_MAX_SIZE) {
+        has_file_layout = 1;
+    } else {
+        errno = EPROTO;
+        return -1;
+    }
+
+    if (!has_file_layout && returned.fileattr != 0) {
+        errno = EPROTO;
+        return -1;
+    }
+    if (has_file_layout) {
+        DP_READ_PACKED(link_count);
+        DP_READ_PACKED(total_size);
+        DP_READ_PACKED(allocated_size);
+    }
+    DP_READ_PACKED(private_size);
+    DP_READ_PACKED(clone_id);
+    DP_READ_PACKED(extended_flags);
+    DP_READ_PACKED(clone_refcount);
+
+#undef DP_READ_PACKED
+
+    if (cursor != raw_length) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    memset(wire, 0, DP_ITEM_WIRE_V1_SIZE);
+    dp_store_u32(wire, 0, DP_ITEM_WIRE_V1_SIZE);
+    dp_store_u32(wire, 4, returned.commonattr);
+    dp_store_u32(wire, 8, returned.volattr);
+    dp_store_u32(wire, 12, returned.dirattr);
+    dp_store_u32(wire, 16, returned.fileattr);
+    dp_store_u32(wire, 20, returned.forkattr);
+    if ((returned.commonattr & ATTR_CMN_DEVID) != 0) {
+        dp_store_u64(wire, 24, (uint64_t)(int64_t)device);
+    }
+    if ((returned.commonattr & ATTR_CMN_OBJTYPE) != 0) {
+        dp_store_u32(wire, 32, (uint32_t)object_type);
+    }
+    if ((returned.commonattr & ATTR_CMN_FLAGS) != 0) {
+        dp_store_u32(wire, 36, flags);
+    }
+    if ((returned.commonattr & ATTR_CMN_FILEID) != 0) {
+        dp_store_u64(wire, 40, file_id);
+    }
+    if ((returned.fileattr & ATTR_FILE_LINKCOUNT) != 0) {
+        dp_store_u32(wire, 48, link_count);
+    }
+    if ((returned.fileattr & ATTR_FILE_TOTALSIZE) != 0) {
+        dp_store_u64(wire, 52, (uint64_t)total_size);
+    }
+    if ((returned.fileattr & ATTR_FILE_ALLOCSIZE) != 0) {
+        dp_store_u64(wire, 60, (uint64_t)allocated_size);
+    }
+    if ((returned.forkattr & ATTR_CMNEXT_PRIVATESIZE) != 0) {
+        dp_store_u64(wire, 68, (uint64_t)private_size);
+    }
+    if ((returned.forkattr & ATTR_CMNEXT_CLONEID) != 0) {
+        dp_store_u64(wire, 76, clone_id);
+    }
+    if ((returned.forkattr & ATTR_CMNEXT_EXT_FLAGS) != 0) {
+        dp_store_u64(wire, 84, extended_flags);
+    }
+    if ((returned.forkattr & ATTR_CMNEXT_CLONE_REFCNT) != 0) {
+        dp_store_u32(wire, 92, clone_refcount);
+    }
+    *wire_length = DP_ITEM_WIRE_V1_SIZE;
+    return 0;
 }
 
 int dp_probe_item_at(int parent_fd, const uint8_t *name, size_t name_length,
@@ -76,39 +272,82 @@ int dp_probe_item_at(int parent_fd, const uint8_t *name, size_t name_length,
     attributes.forkattr = ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_CLONEID |
                           ATTR_CMNEXT_EXT_FLAGS | ATTR_CMNEXT_CLONE_REFCNT;
 
-    dp_kernel_item_buffer raw = {0};
-    unsigned long options = FSOPT_NOFOLLOW | FSOPT_RESOLVE_BENEATH |
-                            FSOPT_REPORT_FULLSIZE | FSOPT_PACK_INVAL_ATTRS |
-                            FSOPT_ATTR_CMN_EXTENDED;
+    uint8_t raw[DP_ITEM_RAW_MAX_SIZE] = {0};
+    unsigned long options = (unsigned long)dp_item_probe_options();
     if (getattrlistat(parent_fd, component, &attributes, &raw, sizeof(raw), options) != 0) {
         return -1;
     }
-    if (raw.length < sizeof(raw) || raw.length > sizeof(raw)) {
+    return dp_parse_item_buffer(raw, sizeof(raw), wire, wire_capacity, wire_length);
+}
+
+int dp_probe_fd_identity(int fd, dp_fd_identity_v1 *result) {
+    if (fd < 0 || result == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    struct attrlist attributes = {0};
+    attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+    attributes.commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_DEVID |
+                            ATTR_CMN_OBJTYPE | ATTR_CMN_FILEID;
+
+    uint8_t raw[sizeof(dp_kernel_fd_identity_buffer)] = {0};
+    unsigned long options = FSOPT_REPORT_FULLSIZE | FSOPT_PACK_INVAL_ATTRS |
+                            FSOPT_RETURN_REALDEV;
+    if (fgetattrlist(fd, &attributes, raw, sizeof(raw), options) != 0) {
+        return -1;
+    }
+
+    const size_t returned_end = offsetof(dp_kernel_fd_identity_buffer, device);
+    uint32_t raw_length = 0;
+    memcpy(&raw_length, raw, sizeof(raw_length));
+    if (raw_length < returned_end || raw_length > sizeof(raw)) {
+        errno = EPROTO;
+        return -1;
+    }
+    attribute_set_t returned = {0};
+    memcpy(&returned, raw + offsetof(dp_kernel_fd_identity_buffer, returned),
+           sizeof(returned));
+    const uint32_t requested_common =
+        ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_DEVID | ATTR_CMN_OBJTYPE |
+        ATTR_CMN_FILEID;
+    if ((returned.commonattr & ATTR_CMN_RETURNED_ATTRS) == 0 ||
+        (returned.commonattr & ~requested_common) != 0 ||
+        returned.volattr != 0 || returned.dirattr != 0 ||
+        returned.fileattr != 0 || returned.forkattr != 0) {
         errno = EPROTO;
         return -1;
     }
 
-    memset(wire, 0, DP_ITEM_WIRE_V1_SIZE);
-    dp_store_u32(wire, 0, DP_ITEM_WIRE_V1_SIZE);
-    dp_store_u32(wire, 4, raw.returned.commonattr);
-    dp_store_u32(wire, 8, raw.returned.volattr);
-    dp_store_u32(wire, 12, raw.returned.dirattr);
-    dp_store_u32(wire, 16, raw.returned.fileattr);
-    dp_store_u32(wire, 20, raw.returned.forkattr);
-    dp_store_u64(wire, 24, (uint64_t)(int64_t)raw.device);
-    dp_store_u32(wire, 32, (uint32_t)raw.object_type);
-    dp_store_u32(wire, 36, raw.flags);
-    dp_store_u64(wire, 40, raw.file_id);
-    dp_store_u32(wire, 48, raw.link_count);
-    dp_store_u64(wire, 52, (uint64_t)raw.total_size);
-    dp_store_u64(wire, 60, (uint64_t)raw.allocated_size);
-    dp_store_u64(wire, 68, (uint64_t)raw.private_size);
-    dp_store_u64(wire, 76, raw.clone_id);
-    dp_store_u64(wire, 84, raw.extended_flags);
-    dp_store_u32(wire, 92, raw.clone_refcount);
-    dp_store_u32(wire, 96, 0);
-    dp_store_u32(wire, 100, 0);
-    *wire_length = DP_ITEM_WIRE_V1_SIZE;
+    dev_t device = 0;
+    fsobj_type_t object_type = 0;
+    uint64_t file_id = 0;
+    if (dp_read_claimed_field(raw, raw_length,
+                              offsetof(dp_kernel_fd_identity_buffer, device),
+                              &device, sizeof(device),
+                              (returned.commonattr & ATTR_CMN_DEVID) != 0) != 0 ||
+        dp_read_claimed_field(raw, raw_length,
+                              offsetof(dp_kernel_fd_identity_buffer, object_type),
+                              &object_type, sizeof(object_type),
+                              (returned.commonattr & ATTR_CMN_OBJTYPE) != 0) != 0 ||
+        dp_read_claimed_field(raw, raw_length,
+                              offsetof(dp_kernel_fd_identity_buffer, file_id),
+                              &file_id, sizeof(file_id),
+                              (returned.commonattr & ATTR_CMN_FILEID) != 0) != 0) {
+        return -1;
+    }
+
+    memset(result, 0, sizeof(*result));
+    result->returned_common = returned.commonattr;
+    if ((returned.commonattr & ATTR_CMN_DEVID) != 0) {
+        result->real_device = (int64_t)device;
+    }
+    if ((returned.commonattr & ATTR_CMN_FILEID) != 0) {
+        result->file_id = file_id;
+    }
+    if ((returned.commonattr & ATTR_CMN_OBJTYPE) != 0) {
+        result->object_type = (uint32_t)object_type;
+    }
     return 0;
 }
 
@@ -154,6 +393,265 @@ int dp_probe_volume_fd(int fd, dp_volume_evidence_v1 *result) {
     strlcpy(result->filesystem_type, filesystem.f_fstypename,
             sizeof(result->filesystem_type));
     return 0;
+}
+
+int dp_list_snapshot_attributes(int fd, uint8_t *buffer, size_t buffer_size) {
+    if (fd < 0 || buffer == NULL || buffer_size == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct attrlist attributes = {0};
+    attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+    attributes.commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME;
+    return fs_snapshot_list(fd, &attributes, buffer, buffer_size, 0);
+}
+
+static int dp_spawn_process_group_impl(
+    const char *executable,
+    const uint8_t *arguments,
+    size_t arguments_size,
+    size_t argument_count,
+    const uint8_t *environment,
+    size_t environment_size,
+    size_t environment_count,
+    const dp_spawn_inherited_fd_v1 *inherited_fds,
+    size_t inherited_fd_count,
+    dp_spawned_process_group_v1 *result) {
+    if (executable == NULL || executable[0] == '\0' || result == NULL ||
+        (arguments_size > 0 && arguments == NULL) ||
+        (argument_count == 0 && arguments_size != 0) ||
+        (environment_size > 0 && environment == NULL) ||
+        (environment_count == 0 && environment_size != 0) ||
+        (inherited_fd_count > 0 && inherited_fds == NULL) ||
+        inherited_fd_count > 16 ||
+        argument_count > SIZE_MAX / sizeof(char *) - 2 ||
+        environment_count > SIZE_MAX / sizeof(char *) - 1) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (size_t index = 0; index < inherited_fd_count; index++) {
+        const int source_fd = inherited_fds[index].source_fd;
+        const int child_fd = inherited_fds[index].child_fd;
+        if (source_fd < 3 || child_fd < 3 || source_fd == child_fd ||
+            fcntl(source_fd, F_GETFD) < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        for (size_t compared = 0; compared < inherited_fd_count; compared++) {
+            if (index != compared &&
+                (source_fd == inherited_fds[compared].source_fd ||
+                 child_fd == inherited_fds[compared].child_fd ||
+                 child_fd == inherited_fds[compared].source_fd)) {
+                errno = EINVAL;
+                return -1;
+            }
+        }
+    }
+
+    char **argv = calloc(argument_count + 2, sizeof(*argv));
+    char **environment_variables =
+        calloc(environment_count + 1, sizeof(*environment_variables));
+    if (argv == NULL || environment_variables == NULL) {
+        free(argv);
+        free(environment_variables);
+        return -1;
+    }
+    argv[0] = (char *)executable;
+    size_t cursor = 0;
+    for (size_t index = 0; index < argument_count; index++) {
+        if (cursor >= arguments_size) {
+            free(argv);
+            free(environment_variables);
+            errno = EINVAL;
+            return -1;
+        }
+        const uint8_t *terminator =
+            memchr(arguments + cursor, '\0', arguments_size - cursor);
+        if (terminator == NULL) {
+            free(argv);
+            free(environment_variables);
+            errno = EINVAL;
+            return -1;
+        }
+        argv[index + 1] = (char *)(arguments + cursor);
+        cursor = (size_t)(terminator - arguments) + 1;
+    }
+    if (cursor != arguments_size) {
+        free(argv);
+        free(environment_variables);
+        errno = EINVAL;
+        return -1;
+    }
+    cursor = 0;
+    for (size_t index = 0; index < environment_count; index++) {
+        if (cursor >= environment_size) {
+            free(argv);
+            free(environment_variables);
+            errno = EINVAL;
+            return -1;
+        }
+        const uint8_t *terminator =
+            memchr(environment + cursor, '\0', environment_size - cursor);
+        if (terminator == NULL ||
+            memchr(environment + cursor, '=', terminator - (environment + cursor)) == NULL) {
+            free(argv);
+            free(environment_variables);
+            errno = EINVAL;
+            return -1;
+        }
+        environment_variables[index] = (char *)(environment + cursor);
+        cursor = (size_t)(terminator - environment) + 1;
+    }
+    if (cursor != environment_size) {
+        free(argv);
+        free(environment_variables);
+        errno = EINVAL;
+        return -1;
+    }
+
+    int output_pipe[2] = {-1, -1};
+    int error_pipe[2] = {-1, -1};
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int actions_initialized = 0;
+    int attributes_initialized = 0;
+    int error = 0;
+
+    if (pipe(output_pipe) != 0 || pipe(error_pipe) != 0) {
+        error = errno;
+        goto cleanup;
+    }
+    if (fcntl(output_pipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(output_pipe[1], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(error_pipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(error_pipe[1], F_SETFD, FD_CLOEXEC) != 0) {
+        error = errno;
+        goto cleanup;
+    }
+
+    error = posix_spawn_file_actions_init(&actions);
+    if (error != 0) {
+        goto cleanup;
+    }
+    actions_initialized = 1;
+    error = posix_spawn_file_actions_addopen(
+        &actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (error == 0) {
+        error = posix_spawn_file_actions_adddup2(
+            &actions, output_pipe[1], STDOUT_FILENO);
+    }
+    if (error == 0) {
+        error = posix_spawn_file_actions_adddup2(
+            &actions, error_pipe[1], STDERR_FILENO);
+    }
+    if (error == 0) {
+        error = posix_spawn_file_actions_addclose(&actions, output_pipe[0]);
+    }
+    if (error == 0) {
+        error = posix_spawn_file_actions_addclose(&actions, error_pipe[0]);
+    }
+    for (size_t index = 0; error == 0 && index < inherited_fd_count;
+         index++) {
+        error = posix_spawn_file_actions_adddup2(
+            &actions, inherited_fds[index].source_fd,
+            inherited_fds[index].child_fd);
+    }
+    for (size_t index = 0; error == 0 && index < inherited_fd_count;
+         index++) {
+        if (inherited_fds[index].source_fd != inherited_fds[index].child_fd) {
+            error = posix_spawn_file_actions_addclose(
+                &actions, inherited_fds[index].source_fd);
+        }
+    }
+    if (error != 0) {
+        goto cleanup;
+    }
+
+    error = posix_spawnattr_init(&attributes);
+    if (error != 0) {
+        goto cleanup;
+    }
+    attributes_initialized = 1;
+    error = posix_spawnattr_setpgroup(&attributes, 0);
+    if (error == 0) {
+        error = posix_spawnattr_setflags(
+            &attributes, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT);
+    }
+    if (error != 0) {
+        goto cleanup;
+    }
+
+    pid_t process_id = -1;
+    error = posix_spawn(
+        &process_id, executable, &actions, &attributes, argv,
+        environment_variables);
+    if (error != 0) {
+        goto cleanup;
+    }
+
+    close(output_pipe[1]);
+    output_pipe[1] = -1;
+    close(error_pipe[1]);
+    error_pipe[1] = -1;
+    result->process_id = process_id;
+    result->standard_output_fd = output_pipe[0];
+    result->standard_error_fd = error_pipe[0];
+    output_pipe[0] = -1;
+    error_pipe[0] = -1;
+
+cleanup:
+    if (attributes_initialized) {
+        posix_spawnattr_destroy(&attributes);
+    }
+    if (actions_initialized) {
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    for (size_t index = 0; index < 2; index++) {
+        if (output_pipe[index] >= 0) {
+            close(output_pipe[index]);
+        }
+        if (error_pipe[index] >= 0) {
+            close(error_pipe[index]);
+        }
+    }
+    free(argv);
+    free(environment_variables);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
+int dp_spawn_process_group(const char *executable,
+                           const uint8_t *arguments,
+                           size_t arguments_size,
+                           size_t argument_count,
+                           const uint8_t *environment,
+                           size_t environment_size,
+                           size_t environment_count,
+                           dp_spawned_process_group_v1 *result) {
+    return dp_spawn_process_group_impl(
+        executable, arguments, arguments_size, argument_count,
+        environment, environment_size, environment_count,
+        NULL, 0, result);
+}
+
+int dp_spawn_process_group_with_inherited_fds(
+    const char *executable,
+    const uint8_t *arguments,
+    size_t arguments_size,
+    size_t argument_count,
+    const uint8_t *environment,
+    size_t environment_size,
+    size_t environment_count,
+    const dp_spawn_inherited_fd_v1 *inherited_fds,
+    size_t inherited_fd_count,
+    dp_spawned_process_group_v1 *result) {
+    return dp_spawn_process_group_impl(
+        executable, arguments, arguments_size, argument_count,
+        environment, environment_size, environment_count,
+        inherited_fds, inherited_fd_count, result);
 }
 
 uint32_t dp_attr_common_device(void) { return ATTR_CMN_DEVID; }

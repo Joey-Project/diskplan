@@ -1,16 +1,20 @@
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use diskplan::{ClientError, EngineSession, handshake_with_engine};
-use diskplan_core::framing::{FrameError, read_frame, write_frame};
-use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello};
+use diskplan_core::framing::{FrameError, MAX_FRAME_LENGTH, read_frame, write_frame};
+use diskplan_core::handshake::{AcceptedHandshakeError, rust_client_hello, validate_accepted};
 use diskplan_proto::diskplan::v1::{
-    BusinessEnvelope, Envelope, HelloAccepted, HelloRejected, ProtocolVersion, RejectCode, envelope,
+    BusinessEnvelope, ControlAccepted, ControlRejectCode, EngineEvent, Envelope, Hello,
+    HelloAccepted, HelloRejected, ProtocolVersion, RejectCode, ScanControlKind, ScanControlRequest,
+    ScanMachineState, ScanProgress, ScanSetupRejectCode, ScanState, StartScanRequest, engine_event,
+    envelope,
 };
 use prost::Message;
 use tempfile::TempDir;
@@ -27,7 +31,14 @@ fn rust_client_negotiates_and_keeps_swift_engine_ready() {
     let mut session = EngineSession::connect(&engine).unwrap();
     assert_eq!(
         session.accepted().negotiated_capabilities,
-        ["canonical-binary-v1", "framing-v1", "plan-bootstrap"]
+        [
+            "canonical-binary-v1",
+            "framing-v1",
+            "plan-bootstrap",
+            "raw-path-bytes-v1",
+            "scan-control-v1",
+            "scan-stream-v1"
+        ]
     );
     let response = session.request_business(2, "scan", Vec::new()).unwrap();
     let Some(envelope::Body::HelloRejected(rejected)) = response.body else {
@@ -78,70 +89,795 @@ fn swift_engine_rejects_pre_handshake_major_and_capability_errors() {
 }
 
 #[test]
-fn fake_engine_acceptance_is_validated_fail_closed() {
-    let cases = [
-        (accepted_without_version(), ExpectedInvalid::MissingVersion),
-        (
-            accepted_envelope(2, 1, 1, &["framing-v1"]),
-            ExpectedInvalid::Sequence,
-        ),
-        (
-            accepted_envelope(1, 2, 0, &["framing-v1"]),
-            ExpectedInvalid::Major,
-        ),
-        (
-            accepted_envelope(1, 1, 2, &["framing-v1"]),
-            ExpectedInvalid::Minor,
-        ),
-        (
-            accepted_envelope(1, 1, 1, &["framing-v1", "framing-v1"]),
-            ExpectedInvalid::Canonical,
-        ),
-        (
-            accepted_envelope(1, 1, 1, &["framing-v1", "rogue"]),
-            ExpectedInvalid::Unoffered,
-        ),
-        (
-            accepted_envelope(1, 1, 1, &["canonical-binary-v1"]),
-            ExpectedInvalid::MissingRequired,
-        ),
-    ];
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn swift_engine_gates_scan_stream_on_negotiated_capabilities() {
+    let engine = required_engine_path();
+    let mut child = Command::new(&engine)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let (sender, frames) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            let frame = read_frame(&mut stdout);
+            let terminal = !matches!(frame, Ok(Some(_)));
+            if sender.send(frame).is_err() || terminal {
+                break;
+            }
+        }
+    });
 
-    for (response, expected) in cases {
+    let mut hello = rust_client_hello();
+    hello.optional_capabilities = vec!["scan-control-v1".into()];
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 1,
+            body: Some(envelope::Body::Hello(hello)),
+        },
+    );
+    assert!(matches!(
+        receive_raw_envelope(&frames).body,
+        Some(envelope::Body::HelloAccepted(_))
+    ));
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 10,
+            body: Some(envelope::Body::StartScanRequest(StartScanRequest {
+                request_id: 10,
+                profile: "standard".into(),
+                ..Default::default()
+            })),
+        },
+    );
+    assert_control_rejected_with_setup(
+        receive_raw_engine_event(&frames),
+        10,
+        ControlRejectCode::Unavailable,
+        ScanSetupRejectCode::CapabilityNotNegotiated,
+    );
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 11,
+            body: Some(envelope::Body::Business(BusinessEnvelope {
+                r#type: "still-ready".into(),
+                payload: Vec::new(),
+            })),
+        },
+    );
+    let response = (0..10_000)
+        .find_map(|_| {
+            let response = receive_raw_envelope(&frames);
+            matches!(response.body, Some(envelope::Body::HelloRejected(_))).then_some(response)
+        })
+        .expect("business rejection must remain observable amid natural scan events");
+    assert!(matches!(
+        response.body,
+        Some(envelope::Body::HelloRejected(_))
+    ));
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn swift_engine_reports_typed_scan_setup_rejections() {
+    let engine = required_engine_path();
+    let mut session = EngineSession::connect(&engine).unwrap();
+    session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 10,
+            profile: "standard".into(),
+            roots: vec![EngineSession::scan_root(
+                "relative",
+                b"not/absolute".to_vec(),
+            )],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+
+    assert_control_rejected_with_setup(
+        read_until_event(&mut session, |event| event.request_id == 10),
+        10,
+        ControlRejectCode::MalformedRequest,
+        ScanSetupRejectCode::InvalidRoot,
+    );
+
+    let lexical_aliases: [&[u8]; 7] = [
+        b"//",
+        b"/tmp/",
+        b"/tmp//child",
+        b"/tmp/./child",
+        b"/tmp/../child",
+        b"/./tmp",
+        b"/../tmp",
+    ];
+    for (offset, raw_path) in lexical_aliases.into_iter().enumerate() {
+        let request_id = 11 + offset as u64;
+        session
+            .send_start_scan_request(StartScanRequest {
+                request_id,
+                profile: "standard".into(),
+                roots: vec![EngineSession::scan_root(
+                    format!("alias-{offset}"),
+                    raw_path.to_vec(),
+                )],
+                maximum_duration_millis: 0,
+                batch_size: 1,
+            })
+            .unwrap();
+        assert_control_rejected_with_setup(
+            read_until_event(&mut session, |event| event.request_id == request_id),
+            request_id,
+            ControlRejectCode::MalformedRequest,
+            ScanSetupRejectCode::InvalidRoot,
+        );
+    }
+
+    let oversized_roots = (0..17)
+        .map(|index| {
+            let mut raw_path = vec![b'a'; 256 * 1_024];
+            raw_path[0] = b'/';
+            EngineSession::scan_root(format!("oversized-{index}"), raw_path)
+        })
+        .collect();
+    session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 20,
+            profile: "standard".into(),
+            roots: oversized_roots,
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    assert_control_rejected_with_setup(
+        read_until_event(&mut session, |event| event.request_id == 20),
+        20,
+        ControlRejectCode::MalformedRequest,
+        ScanSetupRejectCode::InvalidBudget,
+    );
+
+    let response = session
+        .request_business(21, "still-ready", Vec::new())
+        .unwrap();
+    assert!(matches!(
+        response.body,
+        Some(envelope::Body::HelloRejected(_))
+    ));
+    session.shutdown().unwrap();
+
+    let mut root_session = EngineSession::connect(&engine).unwrap();
+    root_session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 30,
+            profile: "quick".into(),
+            roots: vec![EngineSession::scan_root("filesystem-root", b"/".to_vec())],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut root_session, |event| event.request_id == 30),
+        30,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    let finalized = read_until_event(&mut root_session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    let Some(engine_event::Body::ScanFinalized(finalized)) = finalized.body else {
+        unreachable!();
+    };
+    assert_eq!(
+        finalized
+            .checkpoint
+            .expect("filesystem-root final checkpoint")
+            .resolved_roots[0]
+            .raw_absolute_path,
+        b"/"
+    );
+    root_session.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn swift_engine_rejects_legacy_plan_control_without_plan_events() {
+    let engine = required_engine_path();
+    let fixture = TempDir::new().unwrap();
+    for index in 0..900 {
+        fs::write(
+            fixture.path().join(format!("entry-{index:04}")),
+            b"evidence",
+        )
+        .unwrap();
+    }
+    let mut session = EngineSession::connect(&engine).unwrap();
+    session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 20,
+            profile: "standard".into(),
+            roots: vec![EngineSession::scan_root(
+                "fixture",
+                fixture.path().as_os_str().as_bytes().to_vec(),
+            )],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    session
+        .send_scan_control(21, ScanControlKind::PauseScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut session, |event| event.request_id == 20),
+        20,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    assert_control_accepted(
+        read_until_event(&mut session, |event| event.request_id == 21),
+        21,
+        ScanControlKind::PauseScan,
+        ScanState::Paused,
+    );
+
+    session
+        .send_scan_control(22, ScanControlKind::PauseAndBuildProvisionalPlan)
+        .unwrap();
+    assert_control_rejected(
+        read_until_event(&mut session, |event| event.request_id == 22),
+        22,
+        ControlRejectCode::Unavailable,
+    );
+    session
+        .send_scan_control(23, ScanControlKind::CancelScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut session, |event| event.request_id == 23),
+        23,
+        ScanControlKind::CancelScan,
+        ScanState::Cancelling,
+    );
+    let mut saw_finalized = false;
+    loop {
+        let event = session.read_engine_event().unwrap();
+        match event.body {
+            Some(engine_event::Body::ProvisionalPlanReady(_))
+            | Some(engine_event::Body::ProvisionalPlanInvalidated(_)) => {
+                panic!("Phase 1 emitted a plan event")
+            }
+            Some(engine_event::Body::ScanFinalized(_)) => saw_finalized = true,
+            Some(engine_event::Body::ScanCancelled(_)) => break,
+            _ => {}
+        }
+    }
+    assert!(saw_finalized);
+    session.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn rust_client_drives_swift_scan_control_protocol() {
+    let engine = required_engine_path();
+    let fixture = TempDir::new().unwrap();
+    for index in 0..900 {
+        fs::write(
+            fixture.path().join(format!("entry-{index:04}")),
+            b"evidence",
+        )
+        .unwrap();
+    }
+    let mut session = EngineSession::connect(&engine).unwrap();
+    session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 100,
+            profile: "standard".into(),
+            roots: vec![EngineSession::scan_root(
+                "fixture",
+                fixture.path().as_os_str().as_bytes().to_vec(),
+            )],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    session
+        .send_scan_control(101, ScanControlKind::PauseScan)
+        .unwrap();
+
+    assert_control_accepted(
+        read_until_event(&mut session, |event| {
+            matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
+                && event.request_id == 100
+        }),
+        100,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    assert_control_accepted(
+        read_until_event(&mut session, |event| event.request_id == 101),
+        101,
+        ScanControlKind::PauseScan,
+        ScanState::Paused,
+    );
+
+    session
+        .send_scan_control(102, ScanControlKind::CheckpointProvisionalEvidence)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut session, |event| {
+            matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
+                && event.request_id == 102
+        }),
+        102,
+        ScanControlKind::CheckpointProvisionalEvidence,
+        ScanState::Paused,
+    );
+    let checkpoint_event = read_until_event(&mut session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanCheckpointReady(_)))
+    });
+    assert_eq!(checkpoint_event.request_id, 0);
+    assert!(!checkpoint_event.scan_session_id.is_empty());
+    let Some(engine_event::Body::ScanCheckpointReady(ready)) = checkpoint_event.body else {
+        unreachable!();
+    };
+    let checkpoint = ready.checkpoint.expect("checkpoint evidence");
+    assert!(checkpoint.resumable_in_process);
+    assert!(checkpoint.provisional);
+    assert_eq!(
+        checkpoint.progress.as_ref().unwrap().candidates,
+        0,
+        "Phase 1 must not classify candidates"
+    );
+    assert_eq!(
+        checkpoint.progress.as_ref().unwrap().reclaim_estimate_bytes,
+        0,
+        "Phase 1 must not project a plan-level reclaim estimate"
+    );
+    assert_eq!(checkpoint.resolved_roots.len(), 1);
+    assert_eq!(
+        checkpoint.resolved_roots[0].raw_absolute_path,
+        fixture.path().as_os_str().as_bytes()
+    );
+    assert_eq!(
+        checkpoint
+            .collector_configuration
+            .unwrap()
+            .process_activity_collector_id,
+        "precollected-or-unavailable"
+    );
+    assert!(!checkpoint.apfs_snapshots.unwrap().known);
+
+    session
+        .send_scan_control(103, ScanControlKind::CheckpointScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut session, |event| {
+            matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
+                && event.request_id == 103
+        }),
+        103,
+        ScanControlKind::CheckpointScan,
+        ScanState::Paused,
+    );
+    let checkpoint_event = read_until_event(&mut session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanCheckpointReady(_)))
+    });
+    let Some(engine_event::Body::ScanCheckpointReady(ready)) = checkpoint_event.body else {
+        unreachable!();
+    };
+    assert!(!ready.checkpoint.unwrap().provisional);
+
+    session
+        .send_scan_control(104, ScanControlKind::FinalizePartialScan)
+        .unwrap();
+
+    assert_control_accepted(
+        read_until_event(&mut session, |event| {
+            matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
+                && event.request_id == 104
+        }),
+        104,
+        ScanControlKind::FinalizePartialScan,
+        ScanState::FinalizingPartial,
+    );
+    let finalized_event = read_until_event(&mut session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    assert_eq!(finalized_event.request_id, 0);
+    let Some(engine_event::Body::ScanFinalized(finalized)) = finalized_event.body else {
+        unreachable!();
+    };
+    assert_eq!(
+        finalized.checkpoint.unwrap().machine_state,
+        ScanMachineState::Partial as i32,
+        "explicit finalization must remain typed partial evidence"
+    );
+
+    session
+        .send_scan_control(105, ScanControlKind::CheckpointScan)
+        .unwrap();
+    assert_control_rejected(
+        read_until_event(&mut session, |event| event.request_id == 105),
+        105,
+        ControlRejectCode::InvalidState,
+    );
+
+    let response = session
+        .request_business(106, "still-ready", Vec::new())
+        .unwrap();
+    assert!(matches!(
+        response.body,
+        Some(envelope::Body::HelloRejected(_))
+    ));
+    session.shutdown().unwrap();
+
+    let mut resume_session = EngineSession::connect(&engine).unwrap();
+    resume_session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 200,
+            profile: "standard".into(),
+            roots: vec![EngineSession::scan_root(
+                "resume-fixture",
+                fixture.path().as_os_str().as_bytes().to_vec(),
+            )],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    resume_session
+        .send_scan_control(201, ScanControlKind::PauseScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut resume_session, |event| event.request_id == 200),
+        200,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    assert_control_accepted(
+        read_until_event(&mut resume_session, |event| event.request_id == 201),
+        201,
+        ScanControlKind::PauseScan,
+        ScanState::Paused,
+    );
+    resume_session
+        .send_scan_control(202, ScanControlKind::ResumeScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut resume_session, |event| event.request_id == 202),
+        202,
+        ScanControlKind::ResumeScan,
+        ScanState::Running,
+    );
+    let finalized = read_until_event(&mut resume_session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    assert_eq!(finalized.request_id, 0);
+    let response = resume_session
+        .request_business(203, "still-ready-after-resume", Vec::new())
+        .unwrap();
+    assert!(matches!(
+        response.body,
+        Some(envelope::Body::HelloRejected(_))
+    ));
+    resume_session.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn rust_client_cancels_scan_with_final_evidence_and_keeps_session_ready() {
+    let engine = required_engine_path();
+    let fixture = TempDir::new().unwrap();
+    for index in 0..900 {
+        fs::write(
+            fixture.path().join(format!("cancel-{index:04}")),
+            b"evidence",
+        )
+        .unwrap();
+    }
+    let mut session = EngineSession::connect(&engine).unwrap();
+    session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 200,
+            profile: "standard".into(),
+            roots: vec![EngineSession::scan_root(
+                "cancel-fixture",
+                fixture.path().as_os_str().as_bytes().to_vec(),
+            )],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    session
+        .send_scan_control(201, ScanControlKind::CancelScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut session, |event| event.request_id == 200),
+        200,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    assert_control_accepted(
+        read_until_event(&mut session, |event| {
+            event.request_id == 201
+                && matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
+        }),
+        201,
+        ScanControlKind::CancelScan,
+        ScanState::Cancelling,
+    );
+    let finalized = read_until_event(&mut session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    let Some(engine_event::Body::ScanFinalized(finalized)) = finalized.body else {
+        unreachable!();
+    };
+    assert_eq!(
+        finalized.checkpoint.unwrap().machine_state,
+        ScanMachineState::Cancelled as i32
+    );
+    let cancelled = read_until_event(&mut session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanCancelled(_)))
+    });
+    assert_eq!(cancelled.request_id, 0);
+
+    let response = session
+        .request_business(202, "still-ready", Vec::new())
+        .unwrap();
+    assert!(matches!(
+        response.body,
+        Some(envelope::Body::HelloRejected(_))
+    ));
+    session.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn shutdown_drains_cancelled_terminal_tail_after_finalized_evidence() {
+    let engine = required_engine_path();
+    let fixture = TempDir::new().unwrap();
+    for index in 0..900 {
+        fs::write(fixture.path().join(format!("tail-{index:04}")), b"evidence").unwrap();
+    }
+    let mut session = EngineSession::connect(&engine).unwrap();
+    session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 210,
+            profile: "standard".into(),
+            roots: vec![EngineSession::scan_root(
+                "shutdown-tail-fixture",
+                fixture.path().as_os_str().as_bytes().to_vec(),
+            )],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+    session
+        .send_scan_control(211, ScanControlKind::CancelScan)
+        .unwrap();
+    assert_control_accepted(
+        read_until_event(&mut session, |event| event.request_id == 210),
+        210,
+        ScanControlKind::StartScan,
+        ScanState::Running,
+    );
+    assert_control_accepted(
+        read_until_event(&mut session, |event| {
+            event.request_id == 211
+                && matches!(event.body, Some(engine_event::Body::ControlAccepted(_)))
+        }),
+        211,
+        ScanControlKind::CancelScan,
+        ScanState::Cancelling,
+    );
+    let finalized = read_until_event(&mut session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    let Some(engine_event::Body::ScanFinalized(finalized)) = finalized.body else {
+        unreachable!();
+    };
+    assert_eq!(
+        finalized.checkpoint.unwrap().machine_state,
+        ScanMachineState::Cancelled as i32
+    );
+
+    // Deliberately leave ScanCancelled in the capacity-one decoder and close stdin as q does.
+    // Shutdown must validate that single ordered terminal tail frame while waiting for clean EOF.
+    session.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn swift_engine_orders_root_failures_deterministically() {
+    let engine = required_engine_path();
+    let fixture = TempDir::new().unwrap();
+    let mut session = EngineSession::connect(&engine).unwrap();
+    let root = |root_id: &str, leaf: &str| {
+        EngineSession::scan_root(
+            root_id,
+            fixture.path().join(leaf).as_os_str().as_bytes().to_vec(),
+        )
+    };
+    session
+        .send_start_scan_request(StartScanRequest {
+            request_id: 300,
+            profile: "standard".into(),
+            roots: vec![
+                root("z-root", "3"),
+                root("a-root", "1"),
+                root("m-root", "2"),
+            ],
+            maximum_duration_millis: 0,
+            batch_size: 1,
+        })
+        .unwrap();
+
+    let finalized = read_until_event(&mut session, |event| {
+        matches!(event.body, Some(engine_event::Body::ScanFinalized(_)))
+    });
+    let Some(engine_event::Body::ScanFinalized(finalized)) = finalized.body else {
+        unreachable!();
+    };
+    let checkpoint = finalized.checkpoint.expect("finalized checkpoint evidence");
+    assert_eq!(
+        checkpoint
+            .root_failures
+            .iter()
+            .map(|failure| failure.root_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a-root", "m-root", "z-root"]
+    );
+    session.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "requires DISKPLAN_ENGINE_BIN; run scripts/test-cross-language.sh"]
+fn swift_engine_malformed_embedding_consumes_request_id() {
+    let engine = required_engine_path();
+    let mut child = Command::new(engine)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let (sender, frames) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            let frame = read_frame(&mut stdout);
+            let terminal = !matches!(frame, Ok(Some(_)));
+            if sender.send(frame).is_err() || terminal {
+                break;
+            }
+        }
+    });
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 1,
+            body: Some(envelope::Body::Hello(rust_client_hello())),
+        },
+    );
+    assert!(matches!(
+        receive_raw_envelope(&frames).body,
+        Some(envelope::Body::HelloAccepted(_))
+    ));
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 100,
+            body: Some(envelope::Body::StartScanRequest(StartScanRequest {
+                request_id: 100,
+                profile: "quick".into(),
+                roots: Vec::new(),
+                maximum_duration_millis: 0,
+                batch_size: 1,
+            })),
+        },
+    );
+    for _ in 0..3 {
+        assert!(matches!(
+            receive_raw_envelope(&frames).body,
+            Some(envelope::Body::EngineEvent(_))
+        ));
+    }
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 999,
+            body: Some(envelope::Body::ScanControlRequest(ScanControlRequest {
+                request_id: 101,
+                control: ScanControlKind::PauseScan as i32,
+            })),
+        },
+    );
+    assert_control_rejected(
+        receive_raw_control_rejection(&frames, 101),
+        101,
+        ControlRejectCode::MalformedRequest,
+    );
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 101,
+            body: Some(envelope::Body::ScanControlRequest(ScanControlRequest {
+                request_id: 101,
+                control: ScanControlKind::PauseScan as i32,
+            })),
+        },
+    );
+    assert_control_rejected(
+        receive_raw_control_rejection(&frames, 101),
+        101,
+        ControlRejectCode::DuplicateRequestId,
+    );
+
+    send_raw_envelope(
+        &mut stdin,
+        Envelope {
+            sequence: 102,
+            body: Some(envelope::Body::Business(BusinessEnvelope {
+                r#type: "still-ready".into(),
+                payload: Vec::new(),
+            })),
+        },
+    );
+    let response = (0..10_000)
+        .find_map(|_| {
+            let response = receive_raw_envelope(&frames);
+            matches!(response.body, Some(envelope::Body::HelloRejected(_))).then_some(response)
+        })
+        .expect("business rejection must remain observable amid natural scan events");
+    assert!(matches!(
+        response.body,
+        Some(envelope::Body::HelloRejected(_))
+    ));
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn fake_engine_acceptance_is_validated_fail_closed() {
+    let hello = rust_client_hello();
+    for mutation in AcceptanceMutation::ALL {
+        let (response, expected) = mutated_acceptance(&hello, mutation);
         let frame = encode_frame(&response);
         let (_root, path) = fake_engine_script(&emit_then_drain(&frame, false));
         let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
             .err()
             .expect("invalid acceptance must fail");
-        match (error, expected) {
+        match (error, &expected) {
             (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::MissingSelectedVersion),
-                ExpectedInvalid::MissingVersion,
-            )
-            | (ClientError::ResponseSequenceMismatch { .. }, ExpectedInvalid::Sequence)
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::MajorMismatch { .. }),
-                ExpectedInvalid::Major,
-            )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::MinorOutOfRange { .. }),
-                ExpectedInvalid::Minor,
-            )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::NonCanonicalCapabilities),
-                ExpectedInvalid::Canonical,
-            )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::UnofferedCapability(_)),
-                ExpectedInvalid::Unoffered,
-            )
-            | (
-                ClientError::InvalidAcceptance(AcceptedHandshakeError::MissingRequiredCapability(
-                    _,
-                )),
-                ExpectedInvalid::MissingRequired,
-            ) => {}
-            (actual, expected) => panic!("unexpected error for {expected:?}: {actual:?}"),
+                ClientError::ResponseSequenceMismatch {
+                    expected: actual_expected,
+                    actual,
+                },
+                AcceptedHandshakeError::SequenceMismatch {
+                    expected: fixture_expected,
+                    actual: fixture_actual,
+                },
+            ) => {
+                assert_eq!(actual_expected, *fixture_expected);
+                assert_eq!(actual, *fixture_actual);
+            }
+            (ClientError::InvalidAcceptance(actual), fixture_expected) => {
+                assert_eq!(&actual, fixture_expected);
+            }
+            (actual, expected) => {
+                panic!("unexpected error for {mutation:?} / {expected:?}: {actual:?}")
+            }
         }
     }
 }
@@ -172,41 +908,86 @@ fn fake_engine_rejection_sequence_is_validated_before_the_rejection_is_accepted(
 }
 
 #[test]
-fn fake_engine_transport_failures_and_exit_are_typed_and_bounded() {
-    let cases = [
-        (
-            "printf '%b' '\\x00\\x00\\x00\\x01\\xff'\n",
-            ExpectedFailure::Protobuf,
-        ),
-        (
-            "printf '%b' '\\x00\\x00\\x00\\x03\\x01\\x02'\n",
-            ExpectedFailure::Truncated,
-        ),
-        (
-            "printf '%b' '\\x01\\x00\\x00\\x01'\n",
-            ExpectedFailure::Oversized,
-        ),
-        ("exit 17\n", ExpectedFailure::Exit),
-    ];
+fn fake_engine_event_sequence_gap_fails_closed() {
+    let mut frames = encode_frame(&accepted_envelope(
+        1,
+        1,
+        2,
+        &["framing-v1", "scan-control-v1"],
+    ));
+    frames.extend(encode_frame(&engine_event_envelope(1)));
+    frames.extend(encode_frame(&engine_event_envelope(3)));
+    let (_root, path) = fake_engine_script(&emit_then_drain(&frames, false));
+    let mut session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT).unwrap();
 
-    for (body, expected) in cases {
-        let (_root, path) = fake_engine_script(body);
+    assert_eq!(session.read_engine_event().unwrap().event_sequence, 1);
+    let error = session
+        .read_engine_event()
+        .expect_err("a sequence gap must fail closed");
+    assert!(matches!(
+        error,
+        ClientError::EventSequenceMismatch {
+            previous: 1,
+            actual: 3
+        }
+    ));
+}
+
+#[test]
+fn fake_engine_transport_failures_and_exit_are_typed_and_bounded() {
+    for mutation in TransportFrameMutation::ALL {
+        let fixture = fake_engine_transport_fixture(mutation);
+        assert_eq!(fixture.emitted_variants.len(), 2);
+        assert_eq!(
+            fixture.emitted_variants[0],
+            FakeEnvelopeVariant::HelloAccepted
+        );
+        assert_eq!(
+            fixture.emitted_variants[1],
+            FakeEnvelopeVariant::EngineEvent
+        );
+        assert_eq!(fixture.mutated_frame_index, 1);
+        assert_eq!(fixture.mutated_request_id, 1);
+        let (_root, path) = fake_engine_script(&fixture.body);
         let started = Instant::now();
-        let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
-            .err()
-            .expect("fake engine must fail");
+        let mut session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+            .expect("the unmodified acceptance frame must complete the handshake");
+        let error = session
+            .read_engine_event()
+            .expect_err("the selected post-handshake frame mutation must fail");
         assert!(started.elapsed() < TEST_OPERATION_BOUND);
-        match (error, expected) {
-            (ClientError::Protobuf(_), ExpectedFailure::Protobuf)
+        match (error, mutation) {
+            (ClientError::InvalidEventProvenance(detail), TransportFrameMutation::UnknownField) => {
+                assert!(
+                    detail.ends_with("envelope or nested message is not canonical protobuf"),
+                    "unexpected canonical-admission detail: {detail}"
+                )
+            }
+            (ClientError::Protobuf(_), TransportFrameMutation::InvalidProtobuf)
             | (
                 ClientError::Frame(FrameError::TruncatedPayload { .. }),
-                ExpectedFailure::Truncated,
+                TransportFrameMutation::TruncatedPayload,
             )
-            | (ClientError::Frame(FrameError::Oversized { .. }), ExpectedFailure::Oversized)
-            | (ClientError::EngineFailure { code: Some(17) }, ExpectedFailure::Exit) => {}
-            (actual, expected) => panic!("unexpected error for {expected:?}: {actual:?}"),
+            | (
+                ClientError::Frame(FrameError::Oversized { .. }),
+                TransportFrameMutation::OversizedLength,
+            ) => {}
+            (actual, mutation) => {
+                panic!("unexpected error for {mutation:?}: {actual:?}")
+            }
         }
     }
+
+    let (_root, path) = fake_engine_script("exit 17\n");
+    let started = Instant::now();
+    let error = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+        .err()
+        .expect("fake engine exit must fail the handshake");
+    assert!(started.elapsed() < TEST_OPERATION_BOUND);
+    assert!(matches!(
+        error,
+        ClientError::EngineFailure { code: Some(17) }
+    ));
 }
 
 #[test]
@@ -224,21 +1005,53 @@ fn fake_engine_timeout_is_bounded_and_process_is_terminated() {
 fn timeout_terminates_and_reaps_the_engine_process_group() {
     let root = tempfile::tempdir().unwrap();
     let descendant_pid_path = root.path().join("descendant.pid");
+    let staged_pid_path = root.path().join("descendant.pid.staging");
+    let accepted = encode_frame(&accepted_envelope(
+        1,
+        1,
+        1,
+        &[
+            "canonical-binary-v1",
+            "framing-v1",
+            "plan-bootstrap",
+            "scan-control-v1",
+        ],
+    ));
     let body = format!(
-        "sleep 10 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
-        descendant_pid_path.display()
+        "sleep 10 &\n\
+         descendant_pid=$!\n\
+         printf '%s\\n' \"$descendant_pid\" > '{}'\n\
+         mv '{}' '{}'\n\
+         printf '%b' '{}'\n\
+         wait\n",
+        staged_pid_path.display(),
+        staged_pid_path.display(),
+        descendant_pid_path.display(),
+        shell_bytes(&accepted),
     );
     let path = write_fake_engine(&root, &body);
 
-    let error = EngineSession::connect_with_timeout(&path, PROCESS_GROUP_TEST_TIMEOUT)
-        .err()
-        .expect("silent engine must time out");
-    assert!(matches!(error, ClientError::Timeout { .. }));
-    let descendant_pid: u32 = fs::read_to_string(&descendant_pid_path)
-        .expect("fake engine must record its descendant PID")
-        .trim()
-        .parse()
-        .unwrap();
+    // The accepted handshake is the readiness barrier: the fake engine closes the
+    // staged PID record and atomically publishes it before emitting the response.
+    // This removes scheduler latency from the timeout under test while retaining a
+    // bounded, typed handshake failure if the engine exits or frames incorrectly.
+    let mut session = EngineSession::connect_with_timeout(&path, TEST_TIMEOUT)
+        .expect("fake engine must publish its descendant before accepting the handshake");
+    let descendant_pid = read_published_process_id(&descendant_pid_path)
+        .expect("the readiness handshake must bind a complete descendant PID record");
+
+    session.send_start_scan(2, "standard").unwrap();
+    let error = session
+        .read_engine_event_with_timeout(PROCESS_GROUP_TEST_TIMEOUT)
+        .expect_err("silent engine must time out after the readiness handshake");
+    assert!(matches!(
+        error,
+        ClientError::Timeout {
+            phase: "engine event",
+            timeout: PROCESS_GROUP_TEST_TIMEOUT,
+        }
+    ));
+    drop(session);
     assert!(
         wait_for_pid_exit(descendant_pid, Duration::from_secs(2)),
         "descendant process {descendant_pid} survived engine-session cleanup"
@@ -295,7 +1108,10 @@ fn frame_flood_is_backpressured_and_sigkill_cleanup_remains_bounded() {
     let error = session
         .shutdown()
         .expect_err("the queued flood frame must be reported during shutdown");
-    assert!(matches!(error, ClientError::ExtraFrameAfterShutdown));
+    assert!(
+        matches!(error, ClientError::ExtraFrameAfterShutdown),
+        "unexpected shutdown error: {error:?}"
+    );
     let elapsed = started.elapsed();
     assert!(
         fs::read_to_string(&term_seen).is_ok_and(|value| value == "t"),
@@ -319,10 +1135,10 @@ fn handshake_helper_rejects_trailing_bytes_and_extra_frames_on_shutdown() {
     let trailing_body = format!("{}printf '%s' 'oops'\n", emit_then_drain(&accepted, false));
     let (_root, path) = fake_engine_script(&trailing_body);
     let error = handshake_with_engine(&path).expect_err("trailing bytes must fail shutdown");
-    assert!(matches!(
-        error,
-        ClientError::Frame(FrameError::Oversized { .. })
-    ));
+    assert!(
+        matches!(error, ClientError::Frame(FrameError::Oversized { .. })),
+        "unexpected trailing-byte shutdown error: {error:?}"
+    );
 
     let extra_frame_body = format!(
         "{}printf '%b' '{}'\n",
@@ -331,7 +1147,10 @@ fn handshake_helper_rejects_trailing_bytes_and_extra_frames_on_shutdown() {
     );
     let (_root, path) = fake_engine_script(&extra_frame_body);
     let error = handshake_with_engine(&path).expect_err("extra frame must fail shutdown");
-    assert!(matches!(error, ClientError::ExtraFrameAfterShutdown));
+    assert!(
+        matches!(error, ClientError::ExtraFrameAfterShutdown),
+        "unexpected shutdown error: {error:?}"
+    );
 }
 
 #[test]
@@ -368,8 +1187,8 @@ fn fake_engine_fragmented_frames_cleanly_shutdown_and_extra_frames_are_not_silen
     ));
 }
 
-#[derive(Debug)]
-enum ExpectedInvalid {
+#[derive(Clone, Copy, Debug)]
+enum AcceptanceMutation {
     MissingVersion,
     Sequence,
     Major,
@@ -379,22 +1198,46 @@ enum ExpectedInvalid {
     MissingRequired,
 }
 
-fn accepted_without_version() -> Envelope {
-    Envelope {
-        sequence: 1,
-        body: Some(envelope::Body::HelloAccepted(HelloAccepted {
-            selected_version: None,
-            negotiated_capabilities: vec!["framing-v1".into()],
-        })),
-    }
+impl AcceptanceMutation {
+    const ALL: [Self; 7] = [
+        Self::MissingVersion,
+        Self::Sequence,
+        Self::Major,
+        Self::Minor,
+        Self::Canonical,
+        Self::Unoffered,
+        Self::MissingRequired,
+    ];
 }
 
-#[derive(Debug)]
-enum ExpectedFailure {
-    Protobuf,
-    Truncated,
-    Oversized,
-    Exit,
+#[derive(Clone, Copy, Debug)]
+enum TransportFrameMutation {
+    InvalidProtobuf,
+    UnknownField,
+    TruncatedPayload,
+    OversizedLength,
+}
+
+impl TransportFrameMutation {
+    const ALL: [Self; 4] = [
+        Self::InvalidProtobuf,
+        Self::UnknownField,
+        Self::TruncatedPayload,
+        Self::OversizedLength,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FakeEnvelopeVariant {
+    HelloAccepted,
+    EngineEvent,
+}
+
+struct FakeEngineTransportFixture {
+    body: String,
+    emitted_variants: [FakeEnvelopeVariant; 2],
+    mutated_frame_index: usize,
+    mutated_request_id: u64,
 }
 
 fn required_engine_path() -> PathBuf {
@@ -413,12 +1256,299 @@ fn accepted_envelope(sequence: u64, major: u32, minor: u32, capabilities: &[&str
     }
 }
 
+fn canonical_acceptance_for(hello: &Hello) -> Envelope {
+    let mut negotiated_capabilities = hello.required_capabilities.clone();
+    negotiated_capabilities.sort();
+    let response = Envelope {
+        sequence: 1,
+        body: Some(envelope::Body::HelloAccepted(HelloAccepted {
+            selected_version: hello.version,
+            negotiated_capabilities,
+        })),
+    };
+    let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_ref() else {
+        unreachable!("fixture constructs a HelloAccepted envelope");
+    };
+    validate_accepted(hello, 1, response.sequence, accepted)
+        .expect("baseline fake-engine acceptance must be valid");
+    response
+}
+
+fn mutated_acceptance(
+    hello: &Hello,
+    mutation: AcceptanceMutation,
+) -> (Envelope, AcceptedHandshakeError) {
+    let mut response = canonical_acceptance_for(hello);
+    let baseline = response.encode_to_vec();
+    let offered_version = *hello
+        .version
+        .as_ref()
+        .expect("the built-in client hello has a version");
+    match mutation {
+        AcceptanceMutation::Sequence => {
+            assert_eq!(response.sequence, 1);
+            response.sequence = 2;
+        }
+        AcceptanceMutation::MissingVersion => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            assert_eq!(accepted.selected_version.as_ref(), Some(&offered_version));
+            accepted.selected_version = None;
+        }
+        AcceptanceMutation::Major => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            let selected = accepted
+                .selected_version
+                .as_mut()
+                .expect("baseline acceptance has a version");
+            selected.major = offered_version
+                .major
+                .checked_add(1)
+                .expect("fixture major has successor");
+            assert_ne!(selected.major, offered_version.major);
+        }
+        AcceptanceMutation::Minor => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            let selected = accepted
+                .selected_version
+                .as_mut()
+                .expect("baseline acceptance has a version");
+            selected.minor = offered_version
+                .minor
+                .checked_add(1)
+                .expect("fixture minor has successor");
+            assert!(selected.minor > offered_version.minor);
+        }
+        AcceptanceMutation::Canonical => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            let required = hello
+                .required_capabilities
+                .first()
+                .expect("the built-in client hello has a required capability")
+                .clone();
+            accepted.negotiated_capabilities.push(required.clone());
+            assert_eq!(
+                accepted
+                    .negotiated_capabilities
+                    .iter()
+                    .filter(|capability| **capability == required)
+                    .count(),
+                2
+            );
+        }
+        AcceptanceMutation::Unoffered => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            let rogue = "fixture-unoffered".to_owned();
+            assert!(
+                !hello
+                    .required_capabilities
+                    .iter()
+                    .chain(&hello.optional_capabilities)
+                    .any(|capability| capability == &rogue)
+            );
+            accepted.negotiated_capabilities.push(rogue);
+            accepted.negotiated_capabilities.sort();
+        }
+        AcceptanceMutation::MissingRequired => {
+            let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_mut() else {
+                unreachable!("fixture constructs a HelloAccepted envelope");
+            };
+            accepted.negotiated_capabilities.clear();
+            assert!(hello.required_capabilities.iter().all(|required| {
+                !accepted
+                    .negotiated_capabilities
+                    .iter()
+                    .any(|capability| capability == required)
+            }));
+        }
+    }
+    assert_ne!(response.encode_to_vec(), baseline);
+    let Some(envelope::Body::HelloAccepted(accepted)) = response.body.as_ref() else {
+        unreachable!("acceptance mutation preserves the envelope variant");
+    };
+    let observed = validate_accepted(hello, 1, response.sequence, accepted)
+        .expect_err("the exact acceptance mutation must be rejected");
+    let expected = match mutation {
+        AcceptanceMutation::MissingVersion => AcceptedHandshakeError::MissingSelectedVersion,
+        AcceptanceMutation::Sequence => AcceptedHandshakeError::SequenceMismatch {
+            expected: 1,
+            actual: 2,
+        },
+        AcceptanceMutation::Major => AcceptedHandshakeError::MajorMismatch {
+            expected: offered_version.major,
+            actual: offered_version.major + 1,
+        },
+        AcceptanceMutation::Minor => AcceptedHandshakeError::MinorOutOfRange {
+            offered: offered_version.minor,
+            selected: offered_version.minor + 1,
+        },
+        AcceptanceMutation::Canonical => AcceptedHandshakeError::NonCanonicalCapabilities,
+        AcceptanceMutation::Unoffered => {
+            AcceptedHandshakeError::UnofferedCapability("fixture-unoffered".into())
+        }
+        AcceptanceMutation::MissingRequired => AcceptedHandshakeError::MissingRequiredCapability(
+            hello.required_capabilities[0].clone(),
+        ),
+    };
+    assert_eq!(observed, expected);
+    (response, observed)
+}
+
+fn fake_engine_transport_fixture(mutation: TransportFrameMutation) -> FakeEngineTransportFixture {
+    let hello = rust_client_hello();
+    let accepted = canonical_acceptance_for(&hello);
+    let target = engine_event_envelope(1);
+    let Some(envelope::Body::EngineEvent(event)) = target.body.as_ref() else {
+        unreachable!("transport fixture target is an EngineEvent");
+    };
+    assert_eq!(event.request_id, 1);
+    let target_payload = target.encode_to_vec();
+    assert!(target_payload.len() > 1);
+
+    let mut bytes = encode_frame(&accepted);
+    match mutation {
+        TransportFrameMutation::InvalidProtobuf => {
+            bytes.extend_from_slice(&1_u32.to_be_bytes());
+            bytes.push(0xff);
+        }
+        TransportFrameMutation::UnknownField => {
+            let mut noncanonical = target_payload.clone();
+            noncanonical.extend_from_slice(&[0x98, 0x06, 0x01]);
+            bytes.extend_from_slice(&(noncanonical.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&noncanonical);
+        }
+        TransportFrameMutation::TruncatedPayload => {
+            bytes.extend_from_slice(&(target_payload.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&target_payload[..target_payload.len() - 1]);
+        }
+        TransportFrameMutation::OversizedLength => {
+            bytes.extend_from_slice(&((MAX_FRAME_LENGTH as u32) + 1).to_be_bytes());
+        }
+    }
+    FakeEngineTransportFixture {
+        body: emit_then_close_stdout(&bytes),
+        emitted_variants: [
+            FakeEnvelopeVariant::HelloAccepted,
+            FakeEnvelopeVariant::EngineEvent,
+        ],
+        mutated_frame_index: 1,
+        mutated_request_id: event.request_id,
+    }
+}
+
+fn engine_event_envelope(sequence: u64) -> Envelope {
+    let (request_id, body) = if sequence == 1 {
+        (
+            1,
+            engine_event::Body::ControlAccepted(ControlAccepted {
+                control: ScanControlKind::StartScan as i32,
+                resulting_state: ScanState::Running as i32,
+            }),
+        )
+    } else {
+        (0, engine_event::Body::ScanProgress(ScanProgress::default()))
+    };
+    Envelope {
+        sequence,
+        body: Some(envelope::Body::EngineEvent(EngineEvent {
+            event_sequence: sequence,
+            request_id,
+            scan_session_id: "fake-session".into(),
+            body: Some(body),
+        })),
+    }
+}
+
+#[track_caller]
+fn read_until_event(
+    session: &mut EngineSession,
+    predicate: impl Fn(&EngineEvent) -> bool,
+) -> EngineEvent {
+    for _ in 0..10_000 {
+        let event = session.read_engine_event().unwrap();
+        if predicate(&event) {
+            return event;
+        }
+    }
+    panic!("event predicate was not satisfied");
+}
+
 fn encode_frame(envelope: &Envelope) -> Vec<u8> {
     let mut payload = Vec::new();
     envelope.encode(&mut payload).unwrap();
     let mut frame = Vec::new();
     write_frame(&mut frame, &payload).unwrap();
     frame
+}
+
+fn send_raw_envelope(stdin: &mut ChildStdin, envelope: Envelope) {
+    let payload = envelope.encode_to_vec();
+    write_frame(stdin, &payload).unwrap();
+}
+
+fn receive_raw_envelope(frames: &mpsc::Receiver<Result<Option<Vec<u8>>, FrameError>>) -> Envelope {
+    let payload = frames
+        .recv_timeout(Duration::from_secs(2))
+        .expect("Swift engine frame timed out")
+        .expect("Swift engine frame failed")
+        .expect("Swift engine closed stdout");
+    Envelope::decode(payload.as_slice()).unwrap()
+}
+
+fn receive_raw_engine_event(
+    frames: &mpsc::Receiver<Result<Option<Vec<u8>>, FrameError>>,
+) -> EngineEvent {
+    let envelope = receive_raw_envelope(frames);
+    let Some(envelope::Body::EngineEvent(event)) = envelope.body else {
+        panic!("expected engine event");
+    };
+    event
+}
+
+fn receive_raw_control_rejection(
+    frames: &mpsc::Receiver<Result<Option<Vec<u8>>, FrameError>>,
+    request_id: u64,
+) -> EngineEvent {
+    for _ in 0..10_000 {
+        let event = receive_raw_engine_event(frames);
+        if event.request_id == request_id
+            && matches!(event.body, Some(engine_event::Body::ControlRejected(_)))
+        {
+            return event;
+        }
+    }
+    panic!("control rejection was not observed within the bounded event budget");
+}
+
+fn assert_control_rejected(event: EngineEvent, request_id: u64, code: ControlRejectCode) {
+    assert_eq!(event.request_id, request_id);
+    let Some(engine_event::Body::ControlRejected(rejected)) = event.body else {
+        panic!("expected control rejection");
+    };
+    assert_eq!(rejected.code, code as i32);
+}
+
+fn assert_control_rejected_with_setup(
+    event: EngineEvent,
+    request_id: u64,
+    code: ControlRejectCode,
+    setup_code: ScanSetupRejectCode,
+) {
+    assert_eq!(event.request_id, request_id);
+    let Some(engine_event::Body::ControlRejected(rejected)) = event.body else {
+        panic!("expected control rejection");
+    };
+    assert_eq!(rejected.code, code as i32);
+    assert_eq!(rejected.setup_code, setup_code as i32);
 }
 
 fn emit_then_drain(bytes: &[u8], fragmented: bool) -> String {
@@ -433,6 +1563,11 @@ fn emit_then_drain(bytes: &[u8], fragmented: bool) -> String {
     } else {
         format!("printf '%b' '{escaped}'\ncat >/dev/null\n")
     }
+}
+
+fn emit_then_close_stdout(bytes: &[u8]) -> String {
+    let escaped = shell_bytes(bytes);
+    format!("printf '%b' '{escaped}'\nexec 1>&-\ncat >/dev/null\n")
 }
 
 fn fake_engine_script(body: &str) -> (TempDir, PathBuf) {
@@ -452,6 +1587,25 @@ fn write_fake_engine(root: &TempDir, body: &str) -> PathBuf {
 
 fn shell_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect()
+}
+
+fn read_published_process_id(path: &Path) -> Result<u32, String> {
+    let bytes = fs::read(path).map_err(|error| format!("PID publication read failed: {error}"))?;
+    let record = bytes
+        .strip_suffix(b"\n")
+        .ok_or_else(|| "PID publication framing error: missing final newline".to_owned())?;
+    if record.is_empty() || record.contains(&b'\n') {
+        return Err("PID publication framing error: expected exactly one record".to_owned());
+    }
+    let value = std::str::from_utf8(record)
+        .map_err(|error| format!("PID publication framing error: {error}"))?;
+    let process_id = value
+        .parse::<u32>()
+        .map_err(|error| format!("PID publication parse error: {error}"))?;
+    if process_id == 0 {
+        return Err("PID publication parse error: process ID is zero".to_owned());
+    }
+    Ok(process_id)
 }
 
 fn wait_for_pid_exit(process_id: u32, timeout: Duration) -> bool {
@@ -525,4 +1679,19 @@ fn assert_rejection(response: Envelope, expected: RejectCode) {
         panic!("expected rejection");
     };
     assert_eq!(rejected.code, expected as i32);
+}
+
+fn assert_control_accepted(
+    event: diskplan_proto::diskplan::v1::EngineEvent,
+    request_id: u64,
+    control: ScanControlKind,
+    state: ScanState,
+) {
+    assert_eq!(event.request_id, request_id);
+    let body = event.body;
+    let Some(engine_event::Body::ControlAccepted(accepted)) = body else {
+        panic!("expected control acceptance, got {body:?}");
+    };
+    assert_eq!(accepted.control, control as i32);
+    assert_eq!(accepted.resulting_state, state as i32);
 }

@@ -171,6 +171,16 @@ candidate/path nodes
 - snapshot 是 blocker，不自动成为清理目标。
 - partial clone 只使用 private-size lower bound。
 - apply 前重新验证所有 owner、refcount、link count 和 snapshot blockers。
+- 共享任一 owner 的多个 release set 属于一个 connected execution component；执行计划必须在
+  首次 mutation 前携带并重验该 component 中所有已激活 group 的 topology、aggregate
+  postcondition 和去重 owner contract。同一 owner 只能执行一次，所有 group post-verify
+  成功后才能分别确认实际释放量。
+- release component partition 使用按 raw UTF-8 group/candidate identity 规范化的 union-find；
+  每个 membership 只参与常数次合并，不能用重复 enqueue/sort 的图遍历放大共享 owner fan-out。
+- aggregate folding 只对 contraction-safe action DAG 开放：把 aggregate 与 owner actions 收缩为
+  单步后必须仍然无环。任何 `owner -> external prerequisite chain -> owner` 的 leave/re-enter
+  路径在 immutable-plan 构造时拒绝；overlay 对本次选择的全部 component 同时收缩再做防御性
+  验证，跨 component prerequisite 保持原方向。
 
 ## 9. File Provider Contract
 
@@ -333,9 +343,17 @@ explicit protection/type hint 同样受这个边界约束：protection 可以直
 
 v1 的 dirty/untracked Git 内容及其 dependent remove chain 固定为 report-only：plan 可保留专门的 `discard-local-work` action、完整证据和 successor baseline 用于解释，但该 action 不可 stage、不可 waiver，apply preparation 不得为它签发 capability。只有 clean worktree 的 descriptor-bound quarantine remove 可执行。
 
+duplicate-survivor fact 的声明者就是该 duplicate group 的成员；唯一 survivor 必须是成员，
+不能由全局存在但未声明该 group 的无关 candidate 冒充。survivor 的受保护属性是整个绑定
+namespace，因此 direct、ancestor、descendant、path alias 或 object-identity alias mutation
+都必须拒绝，而不是只保护 exact path。
+
 ### 13.1 Canonical IDs And Bindings
 
 所有用于执行授权或 cache 命中的 ID/hash 都来自 versioned closed typed binding schema，不能由各模块临时选择字段。权威 schema 与 `.proto` 同仓维护，但摘要输入使用独立的 `canonical-binary-v1` 编码，避免依赖未保证 canonical 的普通 Protobuf serialization：
+
+任何会返回带 candidate/file/group ID 的 StorageGraph validation error，都必须先按 raw UTF-8
+ID 规范化对应 collection，再执行可观察验证；输入数组排列不能改变首个 typed diagnostic。
 
 - record 使用固定 field order；整数为 fixed-width big-endian；bytes/path 使用 length prefix 并保留 filesystem raw name bytes；timestamp 使用 UTC seconds+nanos；禁止 map；具有集合语义的 repeated field 按其 canonical byte key 排序；absent、unknown、unreadable、failed 和 empty 使用不同 typed variants；
 - digest 使用 SHA-256，并以 `diskplan/<binding-kind>/v1\0` 做 domain separation；不同 kind 至少包括 evidence、action-lineage、action、plan、waiver-consent、waiver-credential 和 agent-cache；
@@ -391,6 +409,8 @@ directory child-entry churn、directory size/link-count/mtime 变化只有在 ac
 - Git adapter 记录 HEAD/index、staged/unstaged/unmerged state、worktree registration 和 administrative metadata，并验证 worktree root identity；
 - nested repositories、submodules、linked worktrees 和 sparse-checkout state 被显式识别；其本地内容必须分别证明 recoverable 或作为用户可见的 unique/local changes 进入同一 action；
 - action 执行前重新验证 filesystem coverage、Git state 和所有已声明 local-change entries，任何新增或未观察项目都阻止 stage/apply。
+
+首版专用 adapter 只执行 linked-worktree 的 `.git` gitdir-file 布局：linkage 中的 registration ID 必须精确匹配 registration evidence，administrative directory 和 common directory 必须是两个不同的已绑定 object，并保留两者的精确 identity、registration/metadata digest 和 raw registration binding。执行时再从 no-follow 打开的 `.git` 文件固定 administrative directory，并通过 descriptor-relative parent traversal 证明它位于 common Git directory 的 `worktrees` namespace 下。ordinary worktree 的 in-root common `.git` directory 不属于当前 adapter 的删除模型，因此保持 report-only；不能用伪造的 admin/common identity 相等来绕过此边界。
 
 上述 coverage 在 v1 只用于解释 dirty worktree、冻结 future adapter contract 与拒绝理由；它不启用 destructive waiver。所有 dirty discard/remove action 都是 report-only，adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。未来若引入可执行 discard，必须作为新的专用 adapter/waiver 版本重新验收，不能复用当前 plan 或 consent。
 
@@ -528,6 +548,8 @@ history、saved plan、audit 和 execution artifacts 使用同一安全 writer�
 ```
 
 Rust launcher 只从自己的 versioned directory 定位 engine。升级通过安装新目录并切换 symlink；installer 不修改 TCC。signed/notarized app bundle、Homebrew packaging 和 universal binaries 后置。
+
+release bundle 由一个 canonical package contract 封闭：每个 payload 必须绑定 canonical relative path、exact mode、size、SHA-256、role 和 compatibility version。Swift/Rust executables、权威 `.proto`、compatibility fixtures、built-in rules、default policy 和 runtime capability metadata 必须同包发布。native installer 使用由同一 contract 生成的固定 allowlist，未验证的 runtime manifest 不能扩大路径权限。symlink、special file、path escape、duplicate/case-fold collision、missing/extra entry 和 schema mismatch 全部 fail closed；nested copy/proof/remove 继续 descriptor-relative/no-follow。archive 的 mtime、uid/gid 和 enumeration order 固定化，相同 bytes 必须产生相同 archive。history、saved plan、audit 和 execution record capability 只在包内声明且默认关闭，packaging 不写入用户数据。generated bindings、build tree、VCS/local temporary state 和 `docs/project_journal/INDEX.md` 不入包。
 
 ## 20. Implementation Gates And Parallel Work
 

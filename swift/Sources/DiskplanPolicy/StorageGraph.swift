@@ -278,6 +278,8 @@ public struct EvaluatedReleaseOwner: Equatable, Sendable {
 public struct ReleaseGraphEvaluation: Equatable, Sendable {
   public let graphDigest: PolicyDigest
   public let provenance: StorageGraphProvenance
+  public let candidateIDs: [String]
+  public let evaluatedActionIDByCandidate: [Data: ActionID]
   public let immediatePrivateReclaimByCandidate: [Data: UInt64]
   public let releaseSets: [EvaluatedReleaseSet]
   public let blockers: [ReleaseBlocker]
@@ -323,10 +325,13 @@ public struct StorageReleaseGraph: Equatable, Sendable {
       Set(fileObjects.map { Data($0.id.utf8) }).count == fileObjects.count,
       Set(allocationGroups.map { Data($0.id.utf8) }).count == allocationGroups.count
     else { throw PolicyModelError.duplicateIdentifier }
+    let canonicalCandidates = candidates.sorted { rawStringPrecedesForGraph($0.id, $1.id) }
+    let canonicalFiles = fileObjects.sorted { rawStringPrecedesForGraph($0.id, $1.id) }
+    let canonicalGroups = allocationGroups.sorted { rawStringPrecedesForGraph($0.id, $1.id) }
     let candidateByID = Dictionary(
-      uniqueKeysWithValues: candidates.map { (Data($0.id.utf8), $0) }
+      uniqueKeysWithValues: canonicalCandidates.map { (Data($0.id.utf8), $0) }
     )
-    let evidence = candidates.map(\.evidence).sorted { $0.evidenceID < $1.evidenceID }
+    let evidence = canonicalCandidates.map(\.evidence).sorted { $0.evidenceID < $1.evidenceID }
     let evidenceHash = PolicyBindings.digest(kind: "evidence-set") { encoder in
       encoder.array(evidence) { $0.bindingBytes }
     }
@@ -337,7 +342,7 @@ public struct StorageReleaseGraph: Equatable, Sendable {
       schemaVersion: globalFacts.schemaVersion,
       semanticReferenceTimeSeconds: globalFacts.semanticReferenceTimeSeconds
     )
-    for candidate in candidates {
+    for candidate in canonicalCandidates {
       guard candidate.target == candidate.namespaceBinding.targetPath,
         candidate.targetIdentity == candidate.namespaceBinding.targetIdentity,
         rawStringEqual(candidate.evidence.policyVersion, globalFacts.policyVersion),
@@ -352,7 +357,7 @@ public struct StorageReleaseGraph: Equatable, Sendable {
       else { throw PolicyModelError.invalidStorageGraph("candidate-binding:\(candidate.id)") }
     }
     var ownerFileIDByPath: [FileOwnerLink: String] = [:]
-    for file in fileObjects {
+    for file in canonicalFiles {
       guard
         file.provenance.bindingBytes
           == GraphObservationProvenance(globalFacts: globalFacts).bindingBytes
@@ -388,7 +393,7 @@ public struct StorageReleaseGraph: Equatable, Sendable {
       }
     }
     var referencedFileIDs = Set<Data>()
-    for group in allocationGroups {
+    for group in canonicalGroups {
       guard
         group.provenance.bindingBytes
           == GraphObservationProvenance(globalFacts: globalFacts).bindingBytes
@@ -406,12 +411,9 @@ public struct StorageReleaseGraph: Equatable, Sendable {
       }
       referencedFileIDs.formUnion(uniqueOwners)
     }
-    for file in fileObjects where !referencedFileIDs.contains(Data(file.id.utf8)) {
+    for file in canonicalFiles where !referencedFileIDs.contains(Data(file.id.utf8)) {
       throw PolicyModelError.invalidStorageGraph("disconnected-file-object:\(file.id)")
     }
-    let canonicalCandidates = candidates.sorted { rawStringPrecedesForGraph($0.id, $1.id) }
-    let canonicalFiles = fileObjects.sorted { rawStringPrecedesForGraph($0.id, $1.id) }
-    let canonicalGroups = allocationGroups.sorted { rawStringPrecedesForGraph($0.id, $1.id) }
     self.globalFacts = globalFacts
     self.provenance = graphProvenance
     self.candidates = canonicalCandidates
@@ -654,6 +656,8 @@ public struct StorageReleaseGraph: Equatable, Sendable {
     return ReleaseGraphEvaluation(
       graphDigest: graphDigest,
       provenance: provenance,
+      candidateIDs: candidates.map(\.id),
+      evaluatedActionIDByCandidate: actionByCandidateID.mapValues(\.id),
       immediatePrivateReclaimByCandidate: immediate,
       releaseSets: releaseSets,
       blockers: globalBlockers

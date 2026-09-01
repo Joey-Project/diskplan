@@ -1,7 +1,7 @@
 ---
 id: 20260828-a5d210
 title: Phase 5 Best-Effort Apply
-status: completed
+status: active
 created: 2026-08-28
 updated: 2026-09-01
 branch: wip/phase5-best-effort-apply
@@ -115,13 +115,16 @@ superseded_by:
 - [x] Run the final India targeted/full validation plus local journal, formatting, parse, and diff
   gates.
 - [x] Complete frozen-range review and the signed landing commits.
+- [ ] Revalidate the signed integration merge with targeted Phase 5 and serial full Swift gates on
+  India-mac-mini-m4-hoteng.
 
 ## Handoff
 
-- Phase: Phase 5 best-effort apply and the accepted dirty-Git report-only boundary are complete at
-  the frozen review, static, focused, and serial full Swift gates.
-- Next step: integrate the signed final branch head, then remove the India validation worktree,
-  `.build` directory, and retained Phase 5 logs.
+- Phase: Phase 5 best-effort apply and the accepted dirty-Git report-only boundary are complete;
+  the merge with the current Protocol 1.5, batch, and TUI integration baseline is awaiting fresh
+  dynamic validation.
+- Next step: validate the signed integration merge on India, then integrate the branch and remove
+  the remote validation worktree, `.build` directory, and retained Phase 5 logs.
 - Dependency: the final live production route must consume the separately owned concrete
   revalidation collector and typed survivor/terminal-namespace invariant proofs. This slice does
   not fabricate or weaken those inputs and does not depend on their two pending hookup decisions.
@@ -265,3 +268,12 @@ superseded_by:
   `781158a72c126f6b3714c3567f131942629cd74163b377c4530519f93ca8d573`, and verified the process
   group quiescent. Because the final successor is journal-only, this is the final dynamic code
   evidence; the docs-only head receives a separate accuracy review before integration.
+- The Phase 5 branch now merges integration baseline
+  `08891e7437eee779411741573f15dc37b7e407db`. Conflict resolution retains the Phase 5
+  attempt-scoped recovery, descriptor-bound mutation, and dirty-Git report-only boundaries while
+  adopting the integration policy's executable Git subset: only an exact linked-worktree
+  registration with distinct administrative/common objects is executable; ordinary worktrees
+  remain report-only. The merge also retains the integration branch's Protocol 1.5, batch, TUI,
+  deterministic policy diagnostics, and DEBUG-only test authority changes. The earlier India
+  evidence predates this merge, so the signed merge head requires fresh targeted and serial full
+  Swift gates.

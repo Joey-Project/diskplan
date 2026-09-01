@@ -98,7 +98,7 @@ func agentSuggestionsAreExcludedFromDeterministicResolution() {
 
 @Test
 func typedGateResultsPreserveEveryDimensionAndReason() throws {
-  let evaluation = try PolicyEvaluation(votes: baseVotes())
+  let evaluation = try testingEvaluation(votes: baseVotes())
   #expect(evaluation.votes.map(\.dimension) == GateDimension.allCases)
   for (index, vote) in evaluation.votes.enumerated() {
     guard case .satisfied(let reasons) = vote.result else {
@@ -113,10 +113,10 @@ func typedGateResultsPreserveEveryDimensionAndReason() throws {
 @Test
 func everyHardRejectAloneAndCombinedBlocksWithoutScoring() throws {
   for dimension in GateDimension.allCases {
-    let evaluation = try PolicyEvaluation(votes: votes(rejecting: [dimension]))
+    let evaluation = try testingEvaluation(votes: votes(rejecting: [dimension]))
     #expect(evaluation.stageability == .blocked)
   }
-  let combined = try PolicyEvaluation(votes: votes(rejecting: Set(GateDimension.allCases)))
+  let combined = try testingEvaluation(votes: votes(rejecting: Set(GateDimension.allCases)))
   #expect(combined.stageability == .blocked)
   #expect(
     combined.votes.filter { if case .rejected = $0.result { true } else { false } }.count == 7)
@@ -132,7 +132,7 @@ func safeAfterExitIsAnUnmetConditionNotAHardRejectOrWaiver() throws {
       reasons: [reason("open-handle", 20), reason("mapped-image", 21)]
     )
   )
-  let evaluation = try PolicyEvaluation(votes: inputs)
+  let evaluation = try testingEvaluation(votes: inputs)
   #expect(evaluation.recommendation == .safeAfterExit)
   #expect(evaluation.stageability == .blocked)
   #expect(evaluation.unmetRevalidationConditions == [.activityCleared])
@@ -154,7 +154,7 @@ func exactWaiverPredicatesAreRetainedAndCannotAttachToHardDimensions() throws {
       predicates: [second, first], reasons: [reason("semantic-review", 33)]
     )
   )
-  let evaluation = try PolicyEvaluation(votes: all)
+  let evaluation = try testingEvaluation(votes: all)
   #expect(evaluation.stageability == .requiresConsents([first, second].sorted()))
 
   all[Int(GateDimension.identityAndAccess.rawValue)] = GateVote(
@@ -168,7 +168,7 @@ func exactWaiverPredicatesAreRetainedAndCannotAttachToHardDimensions() throws {
     throws: PolicyModelError.invalidWaiverDimension(
       .unknownRebuildCost, actual: .identityAndAccess
     )
-  ) { try PolicyEvaluation(votes: all) }
+  ) { try testingEvaluation(votes: all) }
 }
 
 @Test
@@ -182,7 +182,9 @@ func everyClosedWaiverKindWorksOnlyOnItsDeclaredDimension() throws {
         predicates: [predicate], reasons: [reason("waiver-\(index)", UInt8(60 + index))]
       )
     )
-    #expect(try PolicyEvaluation(votes: allowed).stageability == .requiresConsents([predicate]))
+    #expect(
+      try testingEvaluation(votes: allowed).stageability == .requiresConsents([predicate])
+    )
   }
 
   let nonWaivableDimensions: [GateDimension] = [
@@ -201,7 +203,7 @@ func everyClosedWaiverKindWorksOnlyOnItsDeclaredDimension() throws {
         reasons: [reason("forbidden", 81)]
       )
     )
-    #expect(throws: PolicyModelError.self) { try PolicyEvaluation(votes: invalid) }
+    #expect(throws: PolicyModelError.self) { try testingEvaluation(votes: invalid) }
   }
 }
 
@@ -216,6 +218,59 @@ func oneVotePolicyHasSevenNamedTypedInputs() throws {
   )
   #expect(evaluation.votes.count == 7)
   #expect(evaluation.stageability == .stageable)
+}
+
+@Test
+func evaluationAuthorityBindsFrozenEvidenceAndRejectsForgedVotesAtActionBoundary() throws {
+  let facts = globalFacts()
+  let evidence = snapshot(
+    candidateID: "protected", path: "protected", object: 1,
+    explicitProtection: .known(.protected),
+    globalFactsOverride: facts
+  )
+  let evaluation = try OneVotePolicy.evaluate(
+    OneVotePolicyInputs.build(evidence: evidence, globalFacts: facts)
+  )
+  let source = evaluation.sourceBinding
+  #expect(source.captureID == evidence.captureID)
+  #expect(source.evidenceID == evidence.evidenceID)
+  #expect(source.globalFactsHash == facts.globalFactsHash)
+  #expect(source.policyVersion == evidence.policyVersion)
+  #expect(source.schemaVersion == evidence.schemaVersion)
+  #expect(source.semanticReferenceTimeSeconds == evidence.semanticReferenceTimeSeconds)
+  #expect(
+    source.classificationResolutionHash
+      == ClassificationResolver.resolve(evidence.classificationClaims).bindingHash
+  )
+  #expect(evaluation.stageability == .blocked)
+
+  let forged = try PolicyEvaluation.testing(
+    votes: baseVotes(), evidence: evidence, globalFacts: facts
+  )
+  #expect(forged.sourceBinding == source)
+  #expect(forged.stageability == .stageable)
+  #expect(throws: PolicyModelError.actionEvidenceMismatch) {
+    try ActionDefinition.build(
+      prototype: ActionPrototype.build(request: .genericRemove, evidence: evidence),
+      evidence: evidence,
+      globalFacts: facts,
+      prerequisites: [],
+      evaluation: forged,
+      displayMetrics: metrics(path: "protected")
+    )
+  }
+}
+
+@Test
+func publicDisplayMetricsCannotClaimAnAuthoritativeSafeTier() {
+  let metrics = ActionDisplayMetrics(
+    immediateReclaimBytes: .known(1),
+    inactiveDurationSeconds: .known(2),
+    rebuildCost: .known(3),
+    cleanupCost: .known(4),
+    canonicalRawPath: Data("target".utf8)
+  )
+  #expect(metrics.tier == .blocked)
 }
 
 @Test
@@ -355,7 +410,9 @@ func typedFactAndGatePayloadPermutationsCanonicalizeBeforeHashing() throws {
       reasons: [reason("first", 56), reason("second", 57)]
     )
   )
-  #expect(try PolicyEvaluation(votes: forward) == PolicyEvaluation(votes: reverse))
+  #expect(
+    try testingEvaluation(votes: forward) == testingEvaluation(votes: reverse)
+  )
 }
 
 @Test
@@ -614,6 +671,67 @@ func releaseTopologyUsesRawUTF8IdentityForGroupAndFileIDs() {
   )
   #expect(first != differentGroup)
   #expect(first != differentFile)
+}
+
+@Test
+func storageGraphInvalidDiagnosticsArePermutationInvariant() throws {
+  let foreignFacts = globalFacts(configuration: Data("foreign".utf8))
+  let invalidCandidates = [
+    storageCandidate("z", ["z"], 1, facts: foreignFacts),
+    storageCandidate("a", ["a"], 1, facts: foreignFacts),
+  ]
+  for candidates in [invalidCandidates, Array(invalidCandidates.reversed())] {
+    #expect(throws: PolicyModelError.invalidStorageGraph("candidate-binding:a")) {
+      try StorageReleaseGraph(
+        globalFacts: globalFacts(),
+        candidates: candidates,
+        fileObjects: [],
+        allocationGroups: []
+      )
+    }
+  }
+
+  let owner = storageCandidate("owner", ["owner"], 1)
+  let outsidePath = try RawTargetPath(components: [Data("outside".utf8)])
+  let invalidFiles = ["z-file", "a-file"].map { fileID in
+    FileObjectNode(
+      provenance: graphProvenance(),
+      id: fileID,
+      observedOwners: [FileOwnerLink(candidateID: owner.id, path: outsidePath)],
+      linkCount: .known(1)
+    )
+  }
+  for files in [invalidFiles, Array(invalidFiles.reversed())] {
+    #expect(throws: PolicyModelError.invalidStorageGraph("owner-outside-candidate:a-file")) {
+      try StorageReleaseGraph(
+        globalFacts: globalFacts(),
+        candidates: [owner],
+        fileObjects: files,
+        allocationGroups: []
+      )
+    }
+  }
+
+  let invalidGroups = ["z-group", "a-group"].map { groupID in
+    AllocationGroupNode(
+      provenance: graphProvenance(facts: foreignFacts),
+      id: groupID,
+      ownerFileObjectIDs: ["missing"],
+      cloneRefCount: .known(1),
+      sharedBytes: .known(1),
+      snapshotBlocker: .known(false)
+    )
+  }
+  for groups in [invalidGroups, Array(invalidGroups.reversed())] {
+    #expect(throws: PolicyModelError.invalidStorageGraph("group-provenance:a-group")) {
+      try StorageReleaseGraph(
+        globalFacts: globalFacts(),
+        candidates: [],
+        fileObjects: [],
+        allocationGroups: groups
+      )
+    }
+  }
 }
 
 @Test
@@ -880,7 +998,7 @@ func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
     ),
     gitWorktreeEvidence(
       localChanges: .present(changeSetDigest: digest(60)),
-      linkage: .known(.linked(registrationID: digest(75)))
+      linkage: .known(.linked(registrationID: digest(76)))
     ),
     gitWorktreeEvidence(
       localChanges: .present(changeSetDigest: digest(60)),
@@ -918,17 +1036,17 @@ func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
 }
 
 @Test
-func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
-  let ordinaryEvidence = snapshot(
-    candidateID: "ordinary", path: "ordinary", object: 1,
+func gitWorktreeRegistrationTopologyAndSparseFactsFailClosed() throws {
+  let linkedEvidence = snapshot(
+    candidateID: "linked", path: "linked", object: 1,
     adapterScope: .gitWorktree,
     gitWorktree: gitWorktreeEvidence()
   )
-  let ordinaryAction = try makeAction(
-    evidence: ordinaryEvidence,
+  let linkedAction = try makeAction(
+    evidence: linkedEvidence,
     request: .gitWorktreeRemove
   )
-  #expect(ordinaryAction.evaluation.stageability == .stageable)
+  #expect(linkedAction.evaluation.stageability == .stageable)
 
   let changedRegistration = try GitWorktreeRegistrationEvidence(
     registeredWorktreeIdentity: ObjectIdentity(
@@ -942,7 +1060,7 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
     headResolutionDigest: digest(78)
   )
   let changedEvidence = snapshot(
-    candidateID: "ordinary", path: "ordinary", object: 1,
+    candidateID: "linked", path: "linked", object: 1,
     adapterScope: .gitWorktree,
     gitWorktree: gitWorktreeEvidence(registration: .known(changedRegistration))
   )
@@ -950,23 +1068,56 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
     evidence: changedEvidence,
     request: .gitWorktreeRemove
   )
-  #expect(changedEvidence.evidenceID != ordinaryEvidence.evidenceID)
-  #expect(changedAction.lineageID != ordinaryAction.lineageID)
-  #expect(changedAction.id != ordinaryAction.id)
+  #expect(changedAction.evaluation.stageability == .stageable)
+  #expect(changedEvidence.evidenceID != linkedEvidence.evidenceID)
+  #expect(changedAction.lineageID != linkedAction.lineageID)
+  #expect(changedAction.id != linkedAction.id)
 
-  let linkedEvidence = snapshot(
-    candidateID: "linked", path: "linked", object: 1,
-    adapterScope: .gitWorktree,
-    gitWorktree: gitWorktreeEvidence(
-      linkage: .known(.linked(registrationID: digest(75))))
+  let sameIdentityRegistration = try GitWorktreeRegistrationEvidence(
+    registeredWorktreeIdentity: ObjectIdentity(
+      device: 1, object: 1, generation: .known(1), type: .directory),
+    administrativeDirectoryIdentity: ObjectIdentity(
+      device: 1, object: 700, generation: .known(1), type: .directory),
+    commonDirectoryIdentity: ObjectIdentity(
+      device: 1, object: 700, generation: .known(1), type: .directory),
+    registrationID: digest(75),
+    metadataDigest: digest(74),
+    headResolutionDigest: digest(77)
   )
-  let linkedEvaluation = try OneVotePolicy.evaluate(
-    OneVotePolicyInputs.build(evidence: linkedEvidence, globalFacts: globalFacts())
-  )
-  #expect(linkedEvaluation.stageability == .blocked)
-  #expect(linkedEvidence.evidenceID != ordinaryEvidence.evidenceID)
-  #expect(throws: PolicyModelError.invalidActionContract) {
-    try ActionPrototype.build(request: .gitWorktreeRemove, evidence: linkedEvidence)
+  let topologyMatrix: [(String, GitWorktreeEvidence)] = [
+    (
+      "linked-registration-id-mismatch",
+      gitWorktreeEvidence(linkage: .known(.linked(registrationID: digest(76))))
+    ),
+    (
+      "linked-same-admin-common-identity",
+      gitWorktreeEvidence(registration: .known(sameIdentityRegistration))
+    ),
+    (
+      "ordinary-distinct-admin-common-identity",
+      gitWorktreeEvidence(linkage: .known(.ordinary))
+    ),
+    (
+      "ordinary-same-admin-common-identity",
+      gitWorktreeEvidence(
+        registration: .known(sameIdentityRegistration),
+        linkage: .known(.ordinary)
+      )
+    ),
+  ]
+  for (label, worktree) in topologyMatrix {
+    let evidence = snapshot(
+      candidateID: label, path: label, object: 1,
+      adapterScope: .gitWorktree,
+      gitWorktree: worktree
+    )
+    let evaluation = try OneVotePolicy.evaluate(
+      OneVotePolicyInputs.build(evidence: evidence, globalFacts: globalFacts())
+    )
+    #expect(evaluation.stageability == .blocked)
+    #expect(throws: PolicyModelError.invalidActionContract) {
+      try ActionPrototype.build(request: .gitWorktreeRemove, evidence: evidence)
+    }
   }
 
   let sparseEvidence = snapshot(
@@ -979,14 +1130,13 @@ func gitWorktreeRegistrationLinkageAndSparseFactsFailClosed() throws {
     OneVotePolicyInputs.build(evidence: sparseEvidence, globalFacts: globalFacts())
   )
   #expect(sparseEvaluation.stageability == .blocked)
-  #expect(sparseEvidence.evidenceID != ordinaryEvidence.evidenceID)
+  #expect(sparseEvidence.evidenceID != linkedEvidence.evidenceID)
   #expect(throws: PolicyModelError.invalidActionContract) {
     try ActionPrototype.build(request: .gitWorktreeRemove, evidence: sparseEvidence)
   }
 
   let invalidFacts = [
     gitWorktreeEvidence(worktreeObject: 2),
-    gitWorktreeEvidence(linkage: .known(.linked(registrationID: digest(75)))),
     gitWorktreeEvidence(
       sparseCheckout: .known(.enabled(configurationDigest: digest(76)))),
     gitWorktreeEvidence(registration: .unknown(.unavailableViaPublicAPI)),
@@ -1172,7 +1322,7 @@ func planRejectsCrossSnapshotGitContractDowngrades() throws {
       localChanges: .present(changeSetDigest: digest(60)))
   )
   let aliasEvidence = snapshot(
-    candidateID: "alias", path: "tree/worktree", object: 20)
+    candidateID: "alias", path: "tree/alias", object: 20)
   let alias = try makeAction(evidence: aliasEvidence)
   #expect(throws: PolicyModelError.invalidActionContract) {
     try makePlan(
@@ -1189,6 +1339,34 @@ func planRejectsCrossSnapshotGitContractDowngrades() throws {
       evidence: [ancestorEvidence, dirtyGitEvidence]
     )
   }
+
+  let nestedEvidence = snapshot(
+    candidateID: "nested", path: "tree/worktree/cache", object: 22)
+  let nested = try makeAction(evidence: nestedEvidence)
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try makePlan(
+      actions: [nested],
+      evidence: [nestedEvidence, dirtyGitEvidence]
+    )
+  }
+
+  let disjointEvidence = snapshot(
+    candidateID: "disjoint", path: "tree/other", object: 23)
+  let disjoint = try makeAction(evidence: disjointEvidence)
+  let disjointPlan = try makePlan(
+    actions: [disjoint],
+    evidence: [disjointEvidence, dirtyGitEvidence]
+  )
+  let disjointOverlay = DecisionOverlay.create(
+    plan: disjointPlan,
+    selectedActionIDs: [disjoint.id],
+    waiverConsents: [],
+    userNotes: []
+  )
+  #expect(
+    try DecisionOverlayValidator.validate(disjointOverlay, against: disjointPlan)
+      .executionSteps.map(\.action) == [disjoint]
+  )
 }
 
 @Test
@@ -1200,12 +1378,21 @@ func duplicateSurvivorConsentPreservesTheSurvivorNamespace() throws {
         groupID: "duplicates", survivorCandidateID: "b", evidenceHash: digest(88))
     ]
   )
-  let bEvidence = snapshot(candidateID: "b", path: "survivor-root/b", object: 2)
+  let bEvidence = snapshot(
+    candidateID: "b", path: "survivor-root/b", object: 2,
+    semanticReviewFacts: [
+      .duplicateSurvivorChoice(
+        groupID: "duplicates", survivorCandidateID: "b", evidenceHash: digest(88))
+    ]
+  )
   let ancestorEvidence = snapshot(
     candidateID: "ancestor", path: "survivor-root", object: 3)
+  let descendantEvidence = snapshot(
+    candidateID: "descendant", path: "survivor-root/b/cache", object: 4)
   let a = try makeAction(evidence: aEvidence)
   let b = try makeAction(evidence: bEvidence)
   let ancestor = try makeAction(evidence: ancestorEvidence)
+  let descendant = try makeAction(evidence: descendantEvidence)
   guard case .requiresConsents(let predicates) = a.evaluation.stageability,
     let predicate = predicates.first(where: { $0.kind == .duplicateSurvivorChoice })
   else {
@@ -1218,6 +1405,20 @@ func duplicateSurvivorConsentPreservesTheSurvivorNamespace() throws {
     reason: "keep exact survivor",
     consentEventID: "duplicate-event"
   )
+  guard case .requiresConsents(let survivorPredicates) = b.evaluation.stageability,
+    let survivorPredicate = survivorPredicates.first(where: {
+      $0.kind == .duplicateSurvivorChoice
+    })
+  else {
+    Issue.record("expected survivor duplicate consent")
+    return
+  }
+  let survivorConsent = WaiverConsentCore.create(
+    action: b,
+    predicate: survivorPredicate,
+    reason: "confirm survivor contract",
+    consentEventID: "survivor-event"
+  )
 
   let directPlan = try makePlan(
     actions: [a, b], evidence: [aEvidence, bEvidence]
@@ -1225,7 +1426,7 @@ func duplicateSurvivorConsentPreservesTheSurvivorNamespace() throws {
   let directOverlay = DecisionOverlay.create(
     plan: directPlan,
     selectedActionIDs: [a.id, b.id],
-    waiverConsents: [consent],
+    waiverConsents: [consent, survivorConsent],
     userNotes: []
   )
   #expect(throws: PolicyModelError.invalidActionContract) {
@@ -1238,7 +1439,7 @@ func duplicateSurvivorConsentPreservesTheSurvivorNamespace() throws {
   let survivorRemovalOverlay = DecisionOverlay.create(
     plan: factOnlyOnUnselectedDuplicatePlan,
     selectedActionIDs: [b.id],
-    waiverConsents: [],
+    waiverConsents: [survivorConsent],
     userNotes: []
   )
   #expect(throws: PolicyModelError.invalidActionContract) {
@@ -1259,6 +1460,42 @@ func duplicateSurvivorConsentPreservesTheSurvivorNamespace() throws {
   )
   #expect(throws: PolicyModelError.invalidActionContract) {
     try DecisionOverlayValidator.validate(ancestorOverlay, against: ancestorPlan)
+  }
+
+  let descendantPlan = try makePlan(
+    actions: [a, descendant],
+    evidence: [aEvidence, bEvidence, descendantEvidence]
+  )
+  let descendantOverlay = DecisionOverlay.create(
+    plan: descendantPlan,
+    selectedActionIDs: [a.id, descendant.id],
+    waiverConsents: [consent],
+    userNotes: []
+  )
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try DecisionOverlayValidator.validate(descendantOverlay, against: descendantPlan)
+  }
+
+  let decoyEvidence = snapshot(candidateID: "decoy", path: "decoy", object: 5)
+  let wrongGroupMemberA = snapshot(
+    candidateID: "wrong-a", path: "wrong-a", object: 6,
+    semanticReviewFacts: [
+      .duplicateSurvivorChoice(
+        groupID: "wrong-group", survivorCandidateID: "decoy", evidenceHash: digest(90))
+    ]
+  )
+  let wrongGroupMemberB = snapshot(
+    candidateID: "wrong-b", path: "wrong-b", object: 7,
+    semanticReviewFacts: [
+      .duplicateSurvivorChoice(
+        groupID: "wrong-group", survivorCandidateID: "decoy", evidenceHash: digest(90))
+    ]
+  )
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try makePlan(
+      actions: [],
+      evidence: [wrongGroupMemberA, wrongGroupMemberB, decoyEvidence]
+    )
   }
 }
 
@@ -1452,7 +1689,7 @@ func evidenceAndGlobalFactMutationsChangePlanHash() throws {
       globalFacts: changedFacts,
       evidenceSnapshots: [firstEvidence],
       actions: [firstAction],
-      releaseSets: []
+      releaseGraphBundle: nil
     )
   }
   let changedGlobalEvidence = snapshot(
@@ -1468,7 +1705,7 @@ func evidenceAndGlobalFactMutationsChangePlanHash() throws {
     globalFacts: changedFacts,
     evidenceSnapshots: [changedGlobalEvidence],
     actions: [changedGlobalAction],
-    releaseSets: []
+    releaseGraphBundle: nil
   )
   #expect(first.planHash != changedGlobal.planHash)
 
@@ -1499,7 +1736,7 @@ func evidenceAndGlobalFactMutationsChangePlanHash() throws {
       globalFacts: duplicateCoverageFacts,
       evidenceSnapshots: [firstEvidence],
       actions: [firstAction],
-      releaseSets: []
+      releaseGraphBundle: nil
     )
   }
 }
@@ -1534,6 +1771,53 @@ func planRejectsDanglingCyclesAndMismatchedPrerequisiteLineage() throws {
 }
 
 @Test
+func wideDagExecutionOrderingIsDeterministicAcrossInputPermutations() throws {
+  let width = 256
+  let sourceEvidence = (0..<width).map { index in
+    snapshot(
+      candidateID: "source-\(index)", path: "source-\(index)",
+      object: UInt64(index + 100)
+    )
+  }
+  let sources = try sourceEvidence.map { try makeAction(evidence: $0) }
+  let leafEvidence = (0..<width).map { index in
+    snapshot(
+      candidateID: "leaf-\(index)", path: "leaf-\(index)",
+      object: UInt64(index + width + 100)
+    )
+  }
+  let leaves = try leafEvidence.enumerated().map { index, evidence in
+    try makeAction(evidence: evidence, prerequisites: [sources[index]])
+  }
+  let actions = sources + leaves
+  let plan = try makePlan(
+    actions: Array(actions.reversed()), evidence: sourceEvidence + leafEvidence)
+  let forward = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: actions.map(\.id),
+    waiverConsents: [],
+    userNotes: []
+  )
+  let reverse = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: actions.reversed().map(\.id),
+    waiverConsents: [],
+    userNotes: []
+  )
+  let forwardIDs = try DecisionOverlayValidator.validate(forward, against: plan)
+    .executionSteps.map(\.action.id)
+  let reverseIDs = try DecisionOverlayValidator.validate(reverse, against: plan)
+    .executionSteps.map(\.action.id)
+  #expect(forwardIDs == reverseIDs)
+  let orderedIndex = Dictionary(uniqueKeysWithValues: forwardIDs.enumerated().map { ($0.1, $0.0) })
+  for index in 0..<width {
+    let sourceIndex = try #require(orderedIndex[sources[index].id])
+    let leafIndex = try #require(orderedIndex[leaves[index].id])
+    #expect(sourceIndex < leafIndex)
+  }
+}
+
+@Test
 func planReleaseSetBuildsOnlyFromCompleteEvaluatedGraph() throws {
   let graph = try completeStorageGraph()
   let evaluated = try evaluateGraph(graph, selectedCandidateIDs: ["a", "b"])
@@ -1541,11 +1825,10 @@ func planReleaseSetBuildsOnlyFromCompleteEvaluatedGraph() throws {
   let bEvidence = snapshot(candidateID: "b", path: "b", object: 2)
   let a = try makeAction(evidence: aEvidence)
   let b = try makeAction(evidence: bEvidence)
-  let release = try #require(
-    PlanReleaseSet.buildAll(
-      from: evaluated, candidateActions: actionBindings([("a", a), ("b", b)])
-    ).first
+  let releaseBundle = try PlanReleaseSet.buildAll(
+    from: evaluated, candidateActions: actionBindings([("a", a), ("b", b)])
   )
+  let release = try #require(releaseBundle.releaseSets.first)
   #expect(release.ownerCandidateIDs == ["a", "b"])
   #expect(release.conditionalReclaimBytes == 100)
   #expect(release.graphDigest == graph.graphDigest)
@@ -1566,7 +1849,7 @@ func planReleaseSetBuildsOnlyFromCompleteEvaluatedGraph() throws {
     candidateID: "a", path: "a", object: 1, rootObject: 999
   )
   let wrongA = try makeAction(evidence: wrongAEvidence)
-  #expect(throws: PolicyModelError.releaseOwnerBindingMismatch("a")) {
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
     try PlanReleaseSet.buildAll(
       from: evaluated, candidateActions: actionBindings([("a", wrongA), ("b", b)])
     )
@@ -1574,7 +1857,7 @@ func planReleaseSetBuildsOnlyFromCompleteEvaluatedGraph() throws {
 
   let alternateA = try makeAction(evidence: aEvidence, prerequisites: [b])
   #expect(alternateA.id != a.id)
-  #expect(throws: PolicyModelError.releaseOwnerBindingMismatch("a")) {
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
     try PlanReleaseSet.buildAll(
       from: evaluated, candidateActions: actionBindings([("a", alternateA), ("b", b)])
     )
@@ -1647,12 +1930,11 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
   let evaluated = try graph.evaluate(
     selectedCandidateActions: actionBindings([("a", a), ("b", b)])
   )
-  let release = try #require(
-    PlanReleaseSet.buildAll(
-      from: evaluated,
-      candidateActions: actionBindings([("a", a), ("b", b)])
-    ).first
+  let releaseBundle = try PlanReleaseSet.buildAll(
+    from: evaluated,
+    candidateActions: actionBindings([("a", a), ("b", b)])
   )
+  let release = try #require(releaseBundle.releaseSets.first)
   let releaseAction = try makeAction(
     evidence: aEvidence,
     facts: graph.globalFacts,
@@ -1663,21 +1945,15 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
     actions: [a, b, releaseAction],
     evidence: [aEvidence, bEvidence],
     facts: graph.globalFacts,
-    releaseSets: [release]
+    releaseGraphBundle: releaseBundle
   )
   #expect(plan.releaseSets == [release])
 
-  let unsequencedReleaseAction = try makeAction(
-    evidence: aEvidence,
-    facts: graph.globalFacts,
-    request: .completeReleaseSetRemove(binding: release.actionBinding)
-  )
   #expect(throws: PolicyModelError.invalidActionContract) {
-    try makePlan(
-      actions: [a, b, unsequencedReleaseAction],
-      evidence: [aEvidence, bEvidence],
+    try makeAction(
+      evidence: aEvidence,
       facts: graph.globalFacts,
-      releaseSets: [release]
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
     )
   }
 
@@ -1686,7 +1962,7 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
       actions: [a, b, releaseAction],
       evidence: [aEvidence, bEvidence],
       facts: graph.globalFacts,
-      releaseSets: []
+      releaseGraphBundle: nil
     )
   }
 
@@ -1694,12 +1970,11 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
   let changedEvaluation = try changedGraph.evaluate(
     selectedCandidateActions: actionBindings([("a", a), ("b", b)])
   )
-  let changedRelease = try #require(
-    PlanReleaseSet.buildAll(
-      from: changedEvaluation,
-      candidateActions: actionBindings([("a", a), ("b", b)])
-    ).first
+  let changedBundle = try PlanReleaseSet.buildAll(
+    from: changedEvaluation,
+    candidateActions: actionBindings([("a", a), ("b", b)])
   )
+  let changedRelease = try #require(changedBundle.releaseSets.first)
   let unmatchedAction = try makeAction(
     evidence: aEvidence,
     facts: graph.globalFacts,
@@ -1711,7 +1986,7 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
       actions: [a, b, unmatchedAction],
       evidence: [aEvidence, bEvidence],
       facts: graph.globalFacts,
-      releaseSets: [release]
+      releaseGraphBundle: releaseBundle
     )
   }
 
@@ -1739,7 +2014,642 @@ func completeReleaseActionRequiresExactVerifiedPlanReleaseSetBinding() throws {
         $0.id < $1.id
       })
   #expect(validated.executionSteps.first?.prerequisiteStepActionIDs == [])
+  #expect(validated.executionSteps.first?.releaseGraphManifest == releaseBundle.manifest)
   #expect(validated.activatedReleaseSets == [release])
+}
+
+@Test
+func completeReleaseBuildersRejectNonOwnerAndMismatchedOwnerAnchors() throws {
+  let graph = try completeStorageGraph(includeReleaseActionScope: true)
+  let aEvidence = try #require(graph.candidates.first { $0.id == "a" }?.evidence)
+  let bEvidence = try #require(graph.candidates.first { $0.id == "b" }?.evidence)
+  let a = try makeAction(evidence: aEvidence, facts: graph.globalFacts)
+  let b = try makeAction(evidence: bEvidence, facts: graph.globalFacts)
+  let bindings = actionBindings([("a", a), ("b", b)])
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let release = try #require(bundle.releaseSets.first)
+  let outsiderEvidence = snapshot(
+    candidateID: "outsider", path: "outsider", object: 3,
+    additionalAdapterScopes: [
+      .completeReleaseSetRemove(allocationGroupID: release.allocationGroupID)
+    ],
+    globalFactsOverride: graph.globalFacts
+  )
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try ActionPrototype.build(
+      request: .completeReleaseSetRemove(binding: release.actionBinding),
+      evidence: outsiderEvidence
+    )
+  }
+
+  let prototype = try ActionPrototype.build(
+    request: .completeReleaseSetRemove(binding: release.actionBinding),
+    evidence: aEvidence
+  )
+  let forgedAnchor = ActionDefinition(
+    lineageID: a.lineageID,
+    id: a.id,
+    prototype: try genericPrototype(outsiderEvidence),
+    evidence: outsiderEvidence,
+    globalFactsHash: a.globalFactsHash,
+    prerequisiteLineageIDs: [],
+    prerequisiteActionIDs: [],
+    evaluation: try bindEvaluation(
+      allowEvaluation(), evidence: outsiderEvidence, facts: graph.globalFacts),
+    displayMetrics: metrics(path: "outsider")
+  )
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try ActionDefinition.build(
+      prototype: prototype,
+      evidence: aEvidence,
+      globalFacts: graph.globalFacts,
+      prerequisites: [forgedAnchor, b],
+      evaluation: try bindEvaluation(
+        allowEvaluation(), evidence: aEvidence, facts: graph.globalFacts),
+      displayMetrics: metrics(path: "a")
+    )
+  }
+}
+
+@Test
+func actionBuilderRejectsPrerequisiteLineageMultiplicity() throws {
+  let firstEvidence = snapshot(candidateID: "first", path: "shared", object: 11)
+  let secondEvidence = snapshot(candidateID: "second", path: "shared", object: 11)
+  let dependentEvidence = snapshot(candidateID: "dependent", path: "dependent", object: 12)
+  let first = try makeAction(evidence: firstEvidence)
+  let second = try makeAction(evidence: secondEvidence)
+  #expect(first.id != second.id)
+  #expect(first.lineageID == second.lineageID)
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try makeAction(evidence: dependentEvidence, prerequisites: [first, second])
+  }
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try makeAction(evidence: dependentEvidence, prerequisites: [first, first])
+  }
+}
+
+@Test
+func releaseGraphManifestRejectsSlicesMixesDuplicatesAndMissingGroups() throws {
+  let graph = try twoGroupStorageGraph()
+  let actions = try graph.candidates.map {
+    try makeAction(evidence: $0.evidence, facts: graph.globalFacts)
+  }
+  let bindings = zip(graph.candidates, actions).map { pair in
+    CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+  }
+  let evaluation = try graph.evaluate(selectedCandidateActions: bindings)
+  let bundle = try PlanReleaseSet.buildAll(
+    from: evaluation, candidateActions: bindings
+  )
+  let reversedBundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: Array(bindings.reversed())),
+    candidateActions: Array(bindings.reversed())
+  )
+  #expect(bundle == reversedBundle)
+  #expect(bundle.manifest.allocationGroupIDs == ["group-one", "group-two"])
+  #expect(bundle.manifest.allocationGroupCount == 2)
+  #expect(bundle.manifest.candidateActions.map(\.candidateID) == ["a", "b", "c", "d"])
+  #expect(bundle.manifest.connectedComponents.count == 2)
+  _ = try makePlan(
+    actions: actions,
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+
+  let first = try #require(bundle.releaseSets.first)
+  let last = try #require(bundle.releaseSets.last)
+  let sliced = PlanReleaseGraphBundle(
+    uncheckedManifest: bundle.manifest, releaseSets: [first]
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try makePlan(
+      actions: actions,
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: sliced
+    )
+  }
+
+  let missing = PlanReleaseGraphBundle(
+    uncheckedManifest: bundle.manifest, releaseSets: [last]
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try makePlan(
+      actions: actions,
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: missing
+    )
+  }
+
+  let duplicated = PlanReleaseGraphBundle(
+    uncheckedManifest: bundle.manifest, releaseSets: [first, first, last]
+  )
+  #expect(throws: PolicyModelError.duplicateIdentifier) {
+    try makePlan(
+      actions: actions,
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: duplicated
+    )
+  }
+
+  let secondGroup = graph.allocationGroups[1]
+  let changedSecondGroup = AllocationGroupNode(
+    provenance: secondGroup.provenance,
+    id: secondGroup.id,
+    ownerFileObjectIDs: secondGroup.ownerFileObjectIDs,
+    cloneRefCount: secondGroup.cloneRefCount,
+    sharedBytes: .known(201),
+    snapshotBlocker: secondGroup.snapshotBlocker
+  )
+  let changedGraph = try StorageReleaseGraph(
+    globalFacts: graph.globalFacts,
+    candidates: graph.candidates,
+    fileObjects: graph.fileObjects,
+    allocationGroups: [graph.allocationGroups[0], changedSecondGroup]
+  )
+  let changedEvaluation = try changedGraph.evaluate(selectedCandidateActions: bindings)
+  let changedBundle = try PlanReleaseSet.buildAll(
+    from: changedEvaluation, candidateActions: bindings
+  )
+  let mixed = PlanReleaseGraphBundle(
+    uncheckedManifest: bundle.manifest,
+    releaseSets: [first, try #require(changedBundle.releaseSets.last)]
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try makePlan(
+      actions: actions,
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: mixed
+    )
+  }
+
+  let originalA = try #require(actions.first { $0.evidence.candidateID == "a" })
+  let originalB = try #require(actions.first { $0.evidence.candidateID == "b" })
+  let alternateA = try makeAction(
+    evidence: originalA.evidence,
+    facts: graph.globalFacts,
+    prerequisites: [originalB]
+  )
+  let alternateBindings = bindings.map { binding in
+    binding.candidateID == "a"
+      ? CandidateActionBinding(candidateID: "a", action: alternateA) : binding
+  }
+  let alternateBundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: alternateBindings),
+    candidateActions: alternateBindings
+  )
+  let mismatchedCandidateMap = PlanReleaseGraphBundle(
+    uncheckedManifest: alternateBundle.manifest,
+    releaseSets: bundle.releaseSets
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try makePlan(
+      actions: actions + [alternateA],
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: mismatchedCandidateMap
+    )
+  }
+}
+
+@Test
+func releaseManifestBindsPrivateOnlyCandidatesToTheirEvaluatedActionIDs() throws {
+  let base = try completeStorageGraph()
+  let privateOnly = storageCandidate("c", ["c"], 30)
+  let graph = try StorageReleaseGraph(
+    globalFacts: base.globalFacts,
+    candidates: base.candidates + [privateOnly],
+    fileObjects: base.fileObjects,
+    allocationGroups: base.allocationGroups
+  )
+  let actions = try graph.candidates.map {
+    try makeAction(evidence: $0.evidence, facts: graph.globalFacts)
+  }
+  let bindings = zip(graph.candidates, actions).map { pair in
+    CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+  }
+  let evaluation = try graph.evaluate(selectedCandidateActions: bindings)
+  let bundle = try PlanReleaseSet.buildAll(
+    from: evaluation, candidateActions: bindings
+  )
+  #expect(bundle.manifest.candidateActions.map(\.candidateID) == ["a", "b", "c"])
+
+  let omittedEvaluation = try graph.evaluate(
+    selectedCandidateActions: Array(bindings.prefix(2))
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try PlanReleaseSet.buildAll(from: omittedEvaluation, candidateActions: bindings)
+  }
+
+  let originalA = actions[0]
+  let originalC = actions[2]
+  let alternateC = try makeAction(
+    evidence: originalC.evidence,
+    facts: graph.globalFacts,
+    prerequisites: [originalA]
+  )
+  let substitutedBindings = bindings.map { binding in
+    binding.candidateID == "c"
+      ? CandidateActionBinding(candidateID: "c", action: alternateC) : binding
+  }
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try PlanReleaseSet.buildAll(
+      from: evaluation, candidateActions: substitutedBindings
+    )
+  }
+
+  let blockedSource = snapshot(
+    candidateID: "blocked-source", path: "blocked-source", object: 99,
+    explicitProtection: .known(.protected)
+  )
+  let blockedSourceAction = try makeAction(evidence: blockedSource)
+  let blockedC = ActionDefinition(
+    lineageID: alternateC.lineageID,
+    id: alternateC.id,
+    prototype: alternateC.prototype,
+    evidence: alternateC.evidence,
+    globalFactsHash: alternateC.globalFactsHash,
+    prerequisiteLineageIDs: alternateC.prerequisiteLineageIDs,
+    prerequisiteActionIDs: alternateC.prerequisiteActionIDs,
+    evaluation: blockedSourceAction.evaluation,
+    displayMetrics: alternateC.displayMetrics
+  )
+  let blockedBindings = bindings.map { binding in
+    binding.candidateID == "c"
+      ? CandidateActionBinding(candidateID: "c", action: blockedC) : binding
+  }
+  let blockedGraphEvaluation = try graph.evaluate(
+    selectedCandidateActions: blockedBindings
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try PlanReleaseSet.buildAll(
+      from: blockedGraphEvaluation, candidateActions: blockedBindings
+    )
+  }
+}
+
+@Test
+func fullReleaseManifestAllowsAggregateActionsForOnlyOneVerifiedGroup() throws {
+  let graph = try twoGroupStorageGraph()
+  let actions = try graph.candidates.map {
+    try makeAction(evidence: $0.evidence, facts: graph.globalFacts)
+  }
+  let bindings = zip(graph.candidates, actions).map { pair in
+    CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let firstRelease = try #require(
+    bundle.releaseSets.first { $0.allocationGroupID == "group-one" }
+  )
+  let ownerActions = actions.filter { firstRelease.ownerActionIDs.contains($0.id) }
+  let anchor = try #require(ownerActions.first { $0.evidence.candidateID == "a" })
+  let aggregate = try makeAction(
+    evidence: anchor.evidence,
+    facts: graph.globalFacts,
+    prerequisites: ownerActions,
+    request: .completeReleaseSetRemove(binding: firstRelease.actionBinding)
+  )
+  let plan = try makePlan(
+    actions: actions + [aggregate],
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: firstRelease.ownerActionIDs + [aggregate.id],
+    waiverConsents: [],
+    userNotes: []
+  )
+  let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
+  #expect(validated.activatedReleaseSets == [firstRelease])
+  #expect(validated.executionSteps.map(\.action) == [aggregate])
+  #expect(validated.executionSteps.first?.releaseGraphManifest == bundle.manifest)
+}
+
+@Test
+func overlappingReleaseSetsExecuteAsOneCompleteComponent() throws {
+  let graph = try overlappingReleaseComponentGraph()
+  let owners = try graph.candidates.map {
+    try makeAction(evidence: $0.evidence, facts: graph.globalFacts)
+  }
+  let bindings = zip(graph.candidates, owners).map { pair in
+    CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let aggregates = try bundle.releaseSets.map { release -> ActionDefinition in
+    let releaseOwners = owners.filter { release.ownerActionIDs.contains($0.id) }
+    let anchorID = release.allocationGroupID == "group-one" ? "b" : "c"
+    let anchor = try #require(releaseOwners.first { $0.evidence.candidateID == anchorID })
+    return try makeAction(
+      evidence: anchor.evidence,
+      facts: graph.globalFacts,
+      prerequisites: releaseOwners,
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
+    )
+  }
+  let plan = try makePlan(
+    actions: owners + aggregates,
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+  let full = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: (owners + aggregates).map(\.id),
+    waiverConsents: [],
+    userNotes: []
+  )
+  let validated = try DecisionOverlayValidator.validate(full, against: plan)
+  let step = try #require(validated.executionSteps.first)
+  #expect(validated.executionSteps.count == 1)
+  #expect(step.componentActions == aggregates.sorted { $0.id < $1.id })
+  #expect(step.releaseSet == nil)
+  #expect(step.releaseSets == bundle.releaseSets)
+  #expect(step.jitRevalidationActions == (owners + aggregates).sorted { $0.id < $1.id })
+  #expect(validated.activatedReleaseSets == bundle.releaseSets)
+
+  let partial = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: owners.map(\.id) + [aggregates[0].id],
+    waiverConsents: [],
+    userNotes: []
+  )
+  #expect(throws: PolicyModelError.incompleteReleaseGraph) {
+    try DecisionOverlayValidator.validate(partial, against: plan)
+  }
+}
+
+@Test
+func releaseComponentManifestScalesForOneOwnerAcrossManyGroups() throws {
+  let groupCount = 512
+  let graph = try manyConnectedReleaseGroupsGraph(groupCount: groupCount)
+  let owner = try makeAction(
+    evidence: try #require(graph.candidates.first?.evidence),
+    facts: graph.globalFacts
+  )
+  let bindings = [CandidateActionBinding(candidateID: "owner", action: owner)]
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let component = try #require(bundle.manifest.connectedComponents.first)
+  #expect(bundle.releaseSets.count == groupCount)
+  #expect(bundle.manifest.connectedComponents.count == 1)
+  #expect(component.allocationGroupIDs.count == groupCount)
+  #expect(component.candidateIDs == ["owner"])
+}
+
+@Test
+func completeReleasePlanRejectsLeaveAndReenterContraction() throws {
+  let graph = try releaseContractionGraph()
+  let actionByCandidate = try contractionCandidateActions(graph: graph)
+  let bindings = graph.candidates.map {
+    CandidateActionBinding(candidateID: $0.id, action: actionByCandidate[$0.id]!)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let release = try #require(bundle.releaseSets.first)
+  let owners = release.ownerCandidateIDs.map { actionByCandidate[$0]! }
+  let anchor = try #require(owners.first { $0.evidence.candidateID == "a" })
+  let aggregate = try makeAction(
+    evidence: anchor.evidence,
+    facts: graph.globalFacts,
+    prerequisites: owners,
+    request: .completeReleaseSetRemove(binding: release.actionBinding)
+  )
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try makePlan(
+      actions: Array(actionByCandidate.values) + [aggregate],
+      evidence: graph.candidates.map(\.evidence),
+      facts: graph.globalFacts,
+      releaseGraphBundle: bundle
+    )
+  }
+}
+
+@Test
+func disjointReleaseContractionsPreserveCrossComponentPrerequisites() throws {
+  let graph = try crossComponentReleaseGraph()
+  let actionByCandidate = try crossComponentCandidateActions(graph: graph)
+  let bindings = graph.candidates.map {
+    CandidateActionBinding(candidateID: $0.id, action: actionByCandidate[$0.id]!)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let aggregates = try bundle.releaseSets.map { release -> ActionDefinition in
+    let owners = release.ownerCandidateIDs.map { actionByCandidate[$0]! }
+    let anchorCandidateID = release.allocationGroupID == "group-one" ? "a" : "c"
+    let anchor = try #require(
+      owners.first { $0.evidence.candidateID == anchorCandidateID })
+    return try makeAction(
+      evidence: anchor.evidence,
+      facts: graph.globalFacts,
+      prerequisites: owners,
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
+    )
+  }
+  let plan = try makePlan(
+    actions: Array(actionByCandidate.values) + aggregates,
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: plan.actions.map(\.id),
+    waiverConsents: [],
+    userNotes: []
+  )
+  let validated = try DecisionOverlayValidator.validate(overlay, against: plan)
+  let x = try #require(actionByCandidate["x"])
+  let xIndex = try #require(validated.executionSteps.firstIndex { $0.action.id == x.id })
+  let componentIndices = validated.executionSteps.indices.filter {
+    !validated.executionSteps[$0].releaseSets.isEmpty
+  }
+  #expect(componentIndices.count == 2)
+  #expect(try #require(componentIndices.first) < xIndex)
+  #expect(xIndex < (try #require(componentIndices.last)))
+}
+
+@Test
+func simultaneousReleaseContractionsRejectCrossComponentCycle() throws {
+  let graph = try twoGroupStorageGraph()
+  let evidenceByCandidate = Dictionary(
+    uniqueKeysWithValues: graph.candidates.map { ($0.id, $0.evidence) })
+  let a = try makeAction(
+    evidence: evidenceByCandidate["a"]!, facts: graph.globalFacts)
+  let d = try makeAction(
+    evidence: evidenceByCandidate["d"]!, facts: graph.globalFacts)
+  let c = try makeAction(
+    evidence: evidenceByCandidate["c"]!, facts: graph.globalFacts,
+    prerequisites: [a]
+  )
+  let b = try makeAction(
+    evidence: evidenceByCandidate["b"]!, facts: graph.globalFacts,
+    prerequisites: [d]
+  )
+  let actionByCandidate = ["a": a, "b": b, "c": c, "d": d]
+  let bindings = graph.candidates.map {
+    CandidateActionBinding(candidateID: $0.id, action: actionByCandidate[$0.id]!)
+  }
+  let bundle = try PlanReleaseSet.buildAll(
+    from: graph.evaluate(selectedCandidateActions: bindings),
+    candidateActions: bindings
+  )
+  let aggregates = try bundle.releaseSets.map { release -> ActionDefinition in
+    let owners = release.ownerCandidateIDs.map { actionByCandidate[$0]! }
+    let anchorCandidateID = release.allocationGroupID == "group-one" ? "a" : "c"
+    let anchor = try #require(
+      owners.first { $0.evidence.candidateID == anchorCandidateID })
+    return try makeAction(
+      evidence: anchor.evidence,
+      facts: graph.globalFacts,
+      prerequisites: owners,
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
+    )
+  }
+  let plan = try makePlan(
+    actions: Array(actionByCandidate.values) + aggregates,
+    evidence: graph.candidates.map(\.evidence),
+    facts: graph.globalFacts,
+    releaseGraphBundle: bundle
+  )
+  let overlay = DecisionOverlay.create(
+    plan: plan,
+    selectedActionIDs: plan.actions.map(\.id),
+    waiverConsents: [],
+    userNotes: []
+  )
+  #expect(throws: PolicyModelError.invalidActionContract) {
+    try DecisionOverlayValidator.validate(overlay, against: plan)
+  }
+}
+
+@Test
+func completeReleaseLineageIgnoresReferenceEpochButBindsSemanticTopology() throws {
+  func aggregateAction(
+    facts: FrozenGlobalFacts,
+    changedTopology: Bool
+  ) throws -> ActionDefinition {
+    let original = try completeStorageGraph(
+      includeReleaseActionScope: true, facts: facts
+    )
+    let graph: StorageReleaseGraph
+    if changedTopology {
+      let changedFiles = original.fileObjects.map { file -> FileObjectNode in
+        guard file.id == "file-a" else { return file }
+        return FileObjectNode(
+          provenance: file.provenance,
+          id: "file-a-v2",
+          observedOwners: file.observedOwners,
+          linkCount: file.linkCount
+        )
+      }
+      let originalGroup = original.allocationGroups[0]
+      let changedGroup = AllocationGroupNode(
+        provenance: originalGroup.provenance,
+        id: originalGroup.id,
+        ownerFileObjectIDs: originalGroup.ownerFileObjectIDs.map {
+          $0 == "file-a" ? "file-a-v2" : $0
+        },
+        cloneRefCount: originalGroup.cloneRefCount,
+        sharedBytes: originalGroup.sharedBytes,
+        snapshotBlocker: originalGroup.snapshotBlocker
+      )
+      graph = try StorageReleaseGraph(
+        globalFacts: facts,
+        candidates: original.candidates,
+        fileObjects: changedFiles,
+        allocationGroups: [changedGroup]
+      )
+    } else {
+      graph = original
+    }
+    let ownerActions = try graph.candidates.map {
+      try makeAction(evidence: $0.evidence, facts: facts)
+    }
+    let bindings = zip(graph.candidates, ownerActions).map { pair in
+      CandidateActionBinding(candidateID: pair.0.id, action: pair.1)
+    }
+    let bundle = try PlanReleaseSet.buildAll(
+      from: graph.evaluate(selectedCandidateActions: bindings),
+      candidateActions: bindings
+    )
+    let release = try #require(bundle.releaseSets.first)
+    let anchor = try #require(ownerActions.first { $0.evidence.candidateID == "a" })
+    return try makeAction(
+      evidence: anchor.evidence,
+      facts: facts,
+      prerequisites: ownerActions,
+      request: .completeReleaseSetRemove(binding: release.actionBinding)
+    )
+  }
+
+  let epoch100 = try aggregateAction(
+    facts: globalFacts(semanticReferenceTimeSeconds: 100),
+    changedTopology: false
+  )
+  let epoch101 = try aggregateAction(
+    facts: globalFacts(semanticReferenceTimeSeconds: 101),
+    changedTopology: false
+  )
+  #expect(epoch100.lineageID == epoch101.lineageID)
+  #expect(epoch100.id != epoch101.id)
+
+  let changedTopology = try aggregateAction(
+    facts: globalFacts(semanticReferenceTimeSeconds: 101),
+    changedTopology: true
+  )
+  #expect(epoch101.lineageID != changedTopology.lineageID)
+}
+
+@Test
+func releaseTopologyEncodingCanonicalizesEquivalentArrayOrders() throws {
+  let firstPath = try RawTargetPath(components: [Data("a".utf8)])
+  let secondPath = try RawTargetPath(components: [Data("b".utf8)])
+  let owners = [
+    FileOwnerLink(candidateID: "a", path: firstPath),
+    FileOwnerLink(candidateID: "b", path: secondPath),
+  ]
+  let first = FileTopologyExpectation(
+    fileObjectID: "first", owners: owners, linkCount: .known(2)
+  )
+  let second = FileTopologyExpectation(
+    fileObjectID: "second", owners: Array(owners.reversed()), linkCount: .known(2)
+  )
+  let forward = ReleaseTopologyExpectation(
+    allocationGroupID: "group",
+    fileObjects: [first, second],
+    cloneRefCount: .known(4),
+    sharedBytes: .known(100),
+    snapshotBlocker: .known(false)
+  )
+  let reverse = ReleaseTopologyExpectation(
+    allocationGroupID: "group",
+    fileObjects: [second, first],
+    cloneRefCount: .known(4),
+    sharedBytes: .known(100),
+    snapshotBlocker: .known(false)
+  )
+  #expect(encodeReleaseTopologyExpectation(forward) == encodeReleaseTopologyExpectation(reverse))
 }
 
 @Test
@@ -1799,6 +2709,15 @@ func overlayRejectsInjectedStaleBlockedAndMissingPrerequisiteSelections() throws
   #expect(throws: PolicyModelError.injectedSelection(injectedID)) {
     try DecisionOverlayValidator.validate(injected, against: plan)
   }
+  let smallerInjectedID = ActionID(digest: digest(87))
+  for ids in [[injectedID, smallerInjectedID], [smallerInjectedID, injectedID]] {
+    let multipleInjected = DecisionOverlay.create(
+      plan: plan, selectedActionIDs: ids, waiverConsents: [], userNotes: []
+    )
+    #expect(throws: PolicyModelError.injectedSelection(smallerInjectedID)) {
+      try DecisionOverlayValidator.validate(multipleInjected, against: plan)
+    }
+  }
 
   let otherPlan = try makePlan(actions: [a], evidence: [aEvidence])
   let stale = DecisionOverlay.create(
@@ -1829,6 +2748,70 @@ func overlayRejectsDuplicateSelectedLineageWithoutWaivers() throws {
   )
   #expect(throws: PolicyModelError.ambiguousSelectedLineage(first.lineageID)) {
     try DecisionOverlayValidator.validate(overlay, against: plan)
+  }
+}
+
+@Test
+func overlayDiagnosticsChooseCanonicalLineageAndWaiverErrors() throws {
+  let firstEvidence = snapshot(candidateID: "a", path: "first", object: 1)
+  let secondEvidence = snapshot(candidateID: "b", path: "first", object: 1)
+  let thirdEvidence = snapshot(candidateID: "c", path: "second", object: 2)
+  let fourthEvidence = snapshot(candidateID: "d", path: "second", object: 2)
+  let actions = try [firstEvidence, secondEvidence, thirdEvidence, fourthEvidence].map {
+    try makeAction(evidence: $0)
+  }
+  #expect(actions[0].lineageID == actions[1].lineageID)
+  #expect(actions[2].lineageID == actions[3].lineageID)
+  let plan = try makePlan(
+    actions: actions,
+    evidence: [firstEvidence, secondEvidence, thirdEvidence, fourthEvidence]
+  )
+  let expectedLineage = min(actions[0].lineageID, actions[2].lineageID)
+  for selected in [actions.map(\.id), actions.reversed().map(\.id)] {
+    let overlay = DecisionOverlay.create(
+      plan: plan, selectedActionIDs: selected, waiverConsents: [], userNotes: []
+    )
+    #expect(throws: PolicyModelError.ambiguousSelectedLineage(expectedLineage)) {
+      try DecisionOverlayValidator.validate(overlay, against: plan)
+    }
+  }
+
+  let stageableEvidence = snapshot(candidateID: "stageable", path: "stageable", object: 9)
+  let stageable = try makeAction(evidence: stageableEvidence)
+  let stageablePlan = try makePlan(actions: [stageable], evidence: [stageableEvidence])
+  let predicates = [
+    WaiverPredicate(
+      kind: .normalKeepPolicy,
+      predicate: "normal-keep",
+      valueBucket: "known",
+      semanticEvidenceHash: digest(92)
+    ),
+    WaiverPredicate(
+      kind: .agentAssistedClassification,
+      predicate: "classification",
+      valueBucket: "known",
+      semanticEvidenceHash: digest(93)
+    ),
+  ]
+  let consents = predicates.enumerated().map { index, predicate in
+    WaiverConsentCore.create(
+      action: stageable,
+      predicate: predicate,
+      reason: "unexpected",
+      consentEventID: "unexpected-\(index)"
+    )
+  }
+  let expectedPredicate = try #require(predicates.min())
+  for orderedConsents in [consents, Array(consents.reversed())] {
+    let overlay = DecisionOverlay.create(
+      plan: stageablePlan,
+      selectedActionIDs: [stageable.id],
+      waiverConsents: Array(orderedConsents),
+      userNotes: []
+    )
+    #expect(throws: PolicyModelError.unexpectedWaiver(stageable.id, expectedPredicate.kind)) {
+      try DecisionOverlayValidator.validate(overlay, against: stageablePlan)
+    }
   }
 }
 
@@ -1986,13 +2969,12 @@ func overlayActivatesSharedReleaseOnlyWhenEveryOwnerActionIsSelected() throws {
   let bEvidence = snapshot(candidateID: "b", path: "b", object: 2)
   let a = try makeAction(evidence: aEvidence)
   let b = try makeAction(evidence: bEvidence)
-  let release = try #require(
-    PlanReleaseSet.buildAll(
-      from: evaluated, candidateActions: actionBindings([("a", a), ("b", b)])
-    ).first
+  let releaseBundle = try PlanReleaseSet.buildAll(
+    from: evaluated, candidateActions: actionBindings([("a", a), ("b", b)])
   )
+  let release = try #require(releaseBundle.releaseSets.first)
   let plan = try makePlan(
-    actions: [a, b], evidence: [aEvidence, bEvidence], releaseSets: [release]
+    actions: [a, b], evidence: [aEvidence, bEvidence], releaseGraphBundle: releaseBundle
   )
   let partial = DecisionOverlay.create(
     plan: plan, selectedActionIDs: [a.id], waiverConsents: [], userNotes: []
@@ -2000,6 +2982,8 @@ func overlayActivatesSharedReleaseOnlyWhenEveryOwnerActionIsSelected() throws {
   let partialResult = try DecisionOverlayValidator.validate(partial, against: plan)
   #expect(partialResult.selectedActions == [a])
   #expect(partialResult.activatedReleaseSets.isEmpty)
+  #expect(partialResult.releaseGraphManifest == releaseBundle.manifest)
+  #expect(partialResult.executionSteps.first?.releaseGraphManifest == releaseBundle.manifest)
 
   let full = DecisionOverlay.create(
     plan: plan, selectedActionIDs: [a.id, b.id], waiverConsents: [], userNotes: []
@@ -2181,6 +3165,132 @@ func displayOrderIsSeparateFromCanonicalActionIDOrder() throws {
   #expect(ActionOrdering.canonical([unknown, known]).map(\.id) == [known.id, unknown.id].sorted())
 }
 
+@Test
+func displayTierIsDerivedFromFinalSafetyAndRejectsForgedPlanMetrics() throws {
+  let safeEvidence = snapshot(candidateID: "safe", path: "z-safe", object: 1)
+  let safe = try makeAction(evidence: safeEvidence)
+  #expect(safe.displayMetrics.tier == .safe)
+
+  let forceEvidence = snapshot(
+    candidateID: "force", path: "a-force", object: 2,
+    forceRequirement: .requiresForceWithWarning
+  )
+  let force = try makeAction(evidence: forceEvidence)
+  #expect(force.evaluation.stageability == .stageable)
+  #expect(force.displayMetrics.tier == .review)
+
+  let providerEvidence = snapshot(
+    candidateID: "provider", path: "0-provider", object: 3,
+    targetProviderState: .fileProviderManaged
+  )
+  let provider = try makeAction(evidence: providerEvidence)
+  #expect(provider.evaluation.recommendation == .managedByProvider)
+  #expect(provider.evaluation.stageability == .blocked)
+  #expect(provider.displayMetrics.tier == .blocked)
+
+  let blockedEvidence = snapshot(
+    candidateID: "blocked", path: "00-blocked", object: 4,
+    explicitProtection: .known(.protected)
+  )
+  let blocked = try makeAction(evidence: blockedEvidence)
+  #expect(blocked.evaluation.stageability == .blocked)
+  #expect(blocked.displayMetrics.tier == .blocked)
+
+  #expect(
+    ActionOrdering.display([provider, force, safe]).map(\.id)
+      == [safe.id, force.id, provider.id]
+  )
+
+  let forgedTier = ActionDisplayMetrics.testing(
+    tier: .safe,
+    immediateReclaimBytes: blocked.displayMetrics.immediateReclaimBytes,
+    inactiveDurationSeconds: blocked.displayMetrics.inactiveDurationSeconds,
+    rebuildCost: blocked.displayMetrics.rebuildCost,
+    cleanupCost: blocked.displayMetrics.cleanupCost,
+    canonicalRawPath: blocked.displayMetrics.canonicalRawPath
+  )
+  let forgedBlocked = ActionDefinition(
+    lineageID: blocked.lineageID,
+    id: blocked.id,
+    prototype: blocked.prototype,
+    evidence: blocked.evidence,
+    globalFactsHash: blocked.globalFactsHash,
+    prerequisiteLineageIDs: blocked.prerequisiteLineageIDs,
+    prerequisiteActionIDs: blocked.prerequisiteActionIDs,
+    evaluation: blocked.evaluation,
+    displayMetrics: forgedTier
+  )
+  #expect(throws: PolicyModelError.invalidActionBinding(blocked.id)) {
+    try makePlan(actions: [forgedBlocked], evidence: [blockedEvidence])
+  }
+}
+
+@Test
+func sourceBoundVotesAuthoritativelyDeriveRecommendationAndRejectTransplants() throws {
+  let rebuildableEvidence = snapshot(
+    candidateID: "rebuildable", path: "rebuildable", object: 1,
+    recoverability: .known(.reviewRequired),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(101))
+    ]
+  )
+  let rebuildable = try makeAction(evidence: rebuildableEvidence)
+  #expect(rebuildable.evaluation.sourceBinding.evidenceID == rebuildableEvidence.evidenceID)
+  #expect(rebuildable.evaluation.recommendation == .likelyRebuildable)
+  #expect(rebuildable.evaluation.stageability != .stageable)
+  #expect(rebuildable.displayMetrics.tier == .rebuildable)
+
+  let reviewEvidence = snapshot(
+    candidateID: "review", path: "review", object: 2,
+    recoverability: .known(.reviewRequired),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(102)),
+      .unknownRebuildCost(valueBucket: "unknown", evidenceHash: digest(103)),
+    ]
+  )
+  let review = try makeAction(evidence: reviewEvidence)
+  #expect(review.evaluation.sourceBinding.evidenceID == reviewEvidence.evidenceID)
+  #expect(review.evaluation.recommendation == .needsSemanticReview)
+  #expect(review.displayMetrics.tier == .review)
+
+  let semanticReviewEvidence = snapshot(
+    candidateID: "semantic", path: "semantic", object: 3,
+    recoverability: .known(.reviewRequired),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(104))
+    ],
+    semanticReviewFacts: [
+      .recencyAgePolicy(valueBucket: "recent", evidenceHash: digest(105))
+    ]
+  )
+  let semanticReview = try makeAction(evidence: semanticReviewEvidence)
+  #expect(semanticReview.evaluation.recommendation == .needsSemanticReview)
+  #expect(semanticReview.displayMetrics.tier == .review)
+
+  let blockedEvidence = snapshot(
+    candidateID: "blocked-recommendation", path: "blocked-recommendation", object: 4,
+    explicitProtection: .known(.protected)
+  )
+  let blocked = try makeAction(evidence: blockedEvidence)
+  #expect(blocked.evaluation.recommendation == .keep)
+  #expect(blocked.displayMetrics.tier == .blocked)
+
+  let forgedRecommendation = ActionDefinition(
+    lineageID: review.lineageID,
+    id: review.id,
+    prototype: review.prototype,
+    evidence: review.evidence,
+    globalFactsHash: review.globalFactsHash,
+    prerequisiteLineageIDs: review.prerequisiteLineageIDs,
+    prerequisiteActionIDs: review.prerequisiteActionIDs,
+    evaluation: rebuildable.evaluation,
+    displayMetrics: review.displayMetrics
+  )
+  #expect(throws: PolicyModelError.invalidActionBinding(review.id)) {
+    try makePlan(actions: [forgedRecommendation], evidence: [reviewEvidence])
+  }
+}
+
 private func claim(
   _ facet: ClassificationFacet,
   _ value: String,
@@ -2241,7 +3351,30 @@ private func votes(rejecting rejected: Set<GateDimension>) -> [GateVote] {
 }
 
 private func allowEvaluation() throws -> PolicyEvaluation {
-  try PolicyEvaluation(votes: baseVotes())
+  try testingEvaluation(votes: baseVotes())
+}
+
+private func testingEvaluation(votes: [GateVote]) throws -> PolicyEvaluation {
+  let facts = globalFacts()
+  return try PolicyEvaluation.testing(
+    votes: votes,
+    evidence: snapshot(
+      candidateID: "test-evaluation", path: "test-evaluation", object: 1,
+      globalFactsOverride: facts
+    ),
+    globalFacts: facts
+  )
+}
+
+func publicPolicyFixture() -> (evidence: FrozenEvidenceSnapshot, facts: FrozenGlobalFacts) {
+  let facts = globalFacts()
+  return (
+    snapshot(
+      candidateID: "public-api", path: "public-api", object: 1,
+      globalFactsOverride: facts
+    ),
+    facts
+  )
 }
 
 private func gitWorktreeEvidence(
@@ -2251,7 +3384,8 @@ private func gitWorktreeEvidence(
   indexDigest: Observation<PolicyDigest> = .known(digest(71)),
   localChanges: GitLocalChangesState = .clean,
   registration: Observation<GitWorktreeRegistrationEvidence>? = nil,
-  linkage: Observation<GitWorktreeLinkageState> = .known(.ordinary),
+  linkage: Observation<GitWorktreeLinkageState> = .known(
+    .linked(registrationID: digest(75))),
   sparseCheckout: Observation<GitSparseCheckoutState> = .known(.disabled),
   nestedRepositories: Observation<GitContainedRepositoryState> = .known(.none),
   submodules: Observation<GitContainedRepositoryState> = .known(.none),
@@ -2494,7 +3628,6 @@ private func metrics(
   immediate: KnownOrUnknown<UInt64> = .known(1)
 ) -> ActionDisplayMetrics {
   ActionDisplayMetrics(
-    tier: .safe,
     immediateReclaimBytes: immediate,
     inactiveDurationSeconds: .known(10),
     rebuildCost: .known(1),
@@ -2554,7 +3687,7 @@ private func makePlan(
   actions: [ActionDefinition],
   evidence: [FrozenEvidenceSnapshot],
   facts: FrozenGlobalFacts = globalFacts(),
-  releaseSets: [PlanReleaseSet] = []
+  releaseGraphBundle: PlanReleaseGraphBundle? = nil
 ) throws -> ImmutablePlan {
   try ImmutablePlan(
     policyVersion: "policy-1",
@@ -2562,7 +3695,7 @@ private func makePlan(
     globalFacts: facts,
     evidenceSnapshots: evidence,
     actions: actions,
-    releaseSets: releaseSets
+    releaseGraphBundle: releaseGraphBundle
   )
 }
 
@@ -2589,13 +3722,23 @@ private func storageCandidate(
   _ path: [String],
   _ bytes: UInt64,
   providerState: ProviderState = .local,
-  additionalAdapterScopes: [AdapterScopeEvidence] = []
+  additionalAdapterScopes: [AdapterScopeEvidence] = [],
+  facts: FrozenGlobalFacts = globalFacts()
 ) -> StorageCandidate {
-  let object: UInt64 = id == "a" ? 1 : (id == "b" ? 2 : 100)
+  let object: UInt64
+  switch id {
+  case "a": object = 1
+  case "b": object = 2
+  case "c": object = 3
+  case "d": object = 4
+  default: object = 100
+  }
   let evidence = snapshot(
     candidateID: id, path: path.joined(separator: "/"), object: object,
     additionalAdapterScopes: additionalAdapterScopes,
-    targetProviderState: providerState
+    targetProviderState: providerState,
+    semanticReferenceTimeSeconds: facts.semanticReferenceTimeSeconds,
+    globalFactsOverride: facts
   )
   return try! StorageCandidate(
     id: id,
@@ -2632,10 +3775,11 @@ private func allocationGroup(
   _ id: String,
   owners: [String],
   refCount: UInt32,
-  bytes: UInt64
+  bytes: UInt64,
+  facts: FrozenGlobalFacts = globalFacts()
 ) -> AllocationGroupNode {
   AllocationGroupNode(
-    provenance: graphProvenance(),
+    provenance: graphProvenance(facts: facts),
     id: id,
     ownerFileObjectIDs: owners,
     cloneRefCount: .known(refCount),
@@ -2652,36 +3796,282 @@ private func graphProvenance(
 
 private func completeStorageGraph(
   providerCandidateID: String? = nil,
-  includeReleaseActionScope: Bool = false
+  includeReleaseActionScope: Bool = false,
+  facts: FrozenGlobalFacts = globalFacts()
 ) throws -> StorageReleaseGraph {
   let releaseScopes: [AdapterScopeEvidence] =
     includeReleaseActionScope ? [.completeReleaseSetRemove(allocationGroupID: "clone")] : []
-  let a = storageCandidate("a", ["a"], 10, additionalAdapterScopes: releaseScopes)
+  let a = storageCandidate(
+    "a", ["a"], 10, additionalAdapterScopes: releaseScopes, facts: facts
+  )
   let b = storageCandidate(
     "b", ["b"], 20,
-    providerState: providerCandidateID == "b" ? .fileProviderManaged : .local
+    providerState: providerCandidateID == "b" ? .fileProviderManaged : .local,
+    facts: facts
   )
   return try StorageReleaseGraph(
-    globalFacts: globalFacts(),
+    globalFacts: facts,
     candidates: [a, b],
     fileObjects: [
       FileObjectNode(
-        provenance: graphProvenance(),
+        provenance: graphProvenance(facts: facts),
         id: "file-a",
         observedOwners: [FileOwnerLink(candidateID: "a", path: a.target)],
         linkCount: .known(1)
       ),
       FileObjectNode(
-        provenance: graphProvenance(),
+        provenance: graphProvenance(facts: facts),
         id: "file-b",
         observedOwners: [FileOwnerLink(candidateID: "b", path: b.target)],
         linkCount: .known(1)
       ),
     ],
     allocationGroups: [
-      allocationGroup("clone", owners: ["file-a", "file-b"], refCount: 2, bytes: 100)
+      allocationGroup(
+        "clone", owners: ["file-a", "file-b"], refCount: 2, bytes: 100, facts: facts
+      )
     ]
   )
+}
+
+private func twoGroupStorageGraph(
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let a = storageCandidate(
+    "a", ["a"], 10,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-one")],
+    facts: facts
+  )
+  let b = storageCandidate("b", ["b"], 20, facts: facts)
+  let c = storageCandidate(
+    "c", ["c"], 30,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-two")],
+    facts: facts
+  )
+  let d = storageCandidate("d", ["d"], 40, facts: facts)
+  let candidates = [a, b, c, d]
+  let files = candidates.map { candidate in
+    FileObjectNode(
+      provenance: graphProvenance(facts: facts),
+      id: "file-\(candidate.id)",
+      observedOwners: [
+        FileOwnerLink(candidateID: candidate.id, path: candidate.target)
+      ],
+      linkCount: .known(1)
+    )
+  }
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: candidates,
+    fileObjects: files,
+    allocationGroups: [
+      allocationGroup(
+        "group-one", owners: ["file-a", "file-b"], refCount: 2, bytes: 100,
+        facts: facts
+      ),
+      allocationGroup(
+        "group-two", owners: ["file-c", "file-d"], refCount: 2, bytes: 200,
+        facts: facts
+      ),
+    ]
+  )
+}
+
+private func overlappingReleaseComponentGraph(
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let a = storageCandidate("a", ["a"], 10, facts: facts)
+  let b = storageCandidate(
+    "b", ["b"], 20,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-one")],
+    facts: facts
+  )
+  let c = storageCandidate(
+    "c", ["c"], 30,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-two")],
+    facts: facts
+  )
+  func file(
+    _ id: String,
+    owner: StorageCandidate,
+    path: RawTargetPath? = nil
+  ) -> FileObjectNode {
+    FileObjectNode(
+      provenance: graphProvenance(facts: facts),
+      id: id,
+      observedOwners: [FileOwnerLink(candidateID: owner.id, path: path ?? owner.target)],
+      linkCount: .known(1)
+    )
+  }
+  let aOne = try RawTargetPath(components: [Data("a".utf8), Data("one".utf8)])
+  let aTwo = try RawTargetPath(components: [Data("a".utf8), Data("two".utf8)])
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: [a, b, c],
+    fileObjects: [
+      file("file-a-one", owner: a, path: aOne),
+      file("file-b", owner: b),
+      file("file-a-two", owner: a, path: aTwo),
+      file("file-c", owner: c),
+    ],
+    allocationGroups: [
+      allocationGroup(
+        "group-one", owners: ["file-a-one", "file-b"], refCount: 2, bytes: 100,
+        facts: facts
+      ),
+      allocationGroup(
+        "group-two", owners: ["file-a-two", "file-c"], refCount: 2, bytes: 200,
+        facts: facts
+      ),
+    ]
+  )
+}
+
+private func manyConnectedReleaseGroupsGraph(
+  groupCount: Int,
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let owner = storageCandidate("owner", ["owner"], 0, facts: facts)
+  let files = try (0..<groupCount).map { index -> FileObjectNode in
+    let path = try RawTargetPath(
+      components: [Data("owner".utf8), Data("file-\(index)".utf8)])
+    return FileObjectNode(
+      provenance: graphProvenance(facts: facts),
+      id: "file-\(index)",
+      observedOwners: [FileOwnerLink(candidateID: owner.id, path: path)],
+      linkCount: .known(1)
+    )
+  }
+  let groups = (0..<groupCount).map { index in
+    allocationGroup(
+      "group-\(index)",
+      owners: ["file-\(index)"],
+      refCount: 1,
+      bytes: 1,
+      facts: facts
+    )
+  }
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: [owner],
+    fileObjects: files,
+    allocationGroups: groups
+  )
+}
+
+private func releaseContractionGraph(
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let a = storageCandidate(
+    "a", ["a"], 10,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "clone")],
+    facts: facts
+  )
+  let b = storageCandidate("b", ["b"], 20, facts: facts)
+  let x = storageCandidate("x", ["x"], 0, facts: facts)
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: [a, b, x],
+    fileObjects: [a, b].map { candidate in
+      FileObjectNode(
+        provenance: graphProvenance(facts: facts),
+        id: "file-\(candidate.id)",
+        observedOwners: [
+          FileOwnerLink(candidateID: candidate.id, path: candidate.target)
+        ],
+        linkCount: .known(1)
+      )
+    },
+    allocationGroups: [
+      allocationGroup(
+        "clone", owners: ["file-a", "file-b"], refCount: 2, bytes: 100,
+        facts: facts
+      )
+    ]
+  )
+}
+
+private func contractionCandidateActions(
+  graph: StorageReleaseGraph
+) throws -> [String: ActionDefinition] {
+  let evidenceByCandidate = Dictionary(
+    uniqueKeysWithValues: graph.candidates.map { ($0.id, $0.evidence) })
+  let b = try makeAction(
+    evidence: evidenceByCandidate["b"]!, facts: graph.globalFacts)
+  let x = try makeAction(
+    evidence: evidenceByCandidate["x"]!, facts: graph.globalFacts,
+    prerequisites: [b]
+  )
+  let a = try makeAction(
+    evidence: evidenceByCandidate["a"]!, facts: graph.globalFacts,
+    prerequisites: [x]
+  )
+  return ["a": a, "b": b, "x": x]
+}
+
+private func crossComponentReleaseGraph(
+  facts: FrozenGlobalFacts = globalFacts()
+) throws -> StorageReleaseGraph {
+  let a = storageCandidate(
+    "a", ["a"], 10,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-one")],
+    facts: facts
+  )
+  let b = storageCandidate("b", ["b"], 20, facts: facts)
+  let c = storageCandidate(
+    "c", ["c"], 30,
+    additionalAdapterScopes: [.completeReleaseSetRemove(allocationGroupID: "group-two")],
+    facts: facts
+  )
+  let d = storageCandidate("d", ["d"], 40, facts: facts)
+  let x = storageCandidate("x", ["x"], 0, facts: facts)
+  let releaseOwners = [a, b, c, d]
+  return try StorageReleaseGraph(
+    globalFacts: facts,
+    candidates: releaseOwners + [x],
+    fileObjects: releaseOwners.map { candidate in
+      FileObjectNode(
+        provenance: graphProvenance(facts: facts),
+        id: "file-\(candidate.id)",
+        observedOwners: [
+          FileOwnerLink(candidateID: candidate.id, path: candidate.target)
+        ],
+        linkCount: .known(1)
+      )
+    },
+    allocationGroups: [
+      allocationGroup(
+        "group-one", owners: ["file-a", "file-b"], refCount: 2, bytes: 100,
+        facts: facts
+      ),
+      allocationGroup(
+        "group-two", owners: ["file-c", "file-d"], refCount: 2, bytes: 200,
+        facts: facts
+      ),
+    ]
+  )
+}
+
+private func crossComponentCandidateActions(
+  graph: StorageReleaseGraph
+) throws -> [String: ActionDefinition] {
+  let evidenceByCandidate = Dictionary(
+    uniqueKeysWithValues: graph.candidates.map { ($0.id, $0.evidence) })
+  let a = try makeAction(
+    evidence: evidenceByCandidate["a"]!, facts: graph.globalFacts)
+  let b = try makeAction(
+    evidence: evidenceByCandidate["b"]!, facts: graph.globalFacts)
+  let x = try makeAction(
+    evidence: evidenceByCandidate["x"]!, facts: graph.globalFacts,
+    prerequisites: [b]
+  )
+  let c = try makeAction(
+    evidence: evidenceByCandidate["c"]!, facts: graph.globalFacts,
+    prerequisites: [x]
+  )
+  let d = try makeAction(
+    evidence: evidenceByCandidate["d"]!, facts: graph.globalFacts)
+  return ["a": a, "b": b, "c": c, "d": d, "x": x]
 }
 
 private func replaceGroup(

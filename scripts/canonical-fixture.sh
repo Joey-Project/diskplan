@@ -24,7 +24,8 @@ cleanup() {
 trap cleanup EXIT
 
 cd "${REPO_ROOT}"
-swift run DiskplanFixtureGenerator "${FIXTURE_DIR}/evidence.json" "${TEMP_ROOT}"
+swift run --disable-automatic-resolution DiskplanFixtureGenerator \
+    "${FIXTURE_DIR}/evidence.json" "${TEMP_ROOT}"
 
 if [[ "${MODE}" == "generate" ]]; then
     cargo run --locked --quiet -p generated-source-publish -- \
