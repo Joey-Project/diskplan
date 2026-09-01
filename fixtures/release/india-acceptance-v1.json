@@ -72,6 +72,17 @@
       "timeout_seconds": 1800
     },
     {
+      "capability": "execution.release-postverification-binding-v1",
+      "depends_on": ["handshake"],
+      "executor": "swift-test",
+      "expected_test_count": 1,
+      "id": "release_postverification_binding",
+      "max_output_bytes": 1048576,
+      "requirement": "required",
+      "swift_filter": "DiskplanExecutionTests.releasePostverificationComponentBindingMatchesCanonicalReleaseFixture",
+      "timeout_seconds": 1800
+    },
+    {
       "capability": "activity.open-fd-cwd-mmap-process-snapshot",
       "depends_on": ["handshake"],
       "executor": "swift-test",

@@ -306,6 +306,7 @@ public actor ExecutionPreparationEngine {
     return .claimed(
       ClaimedApplyAuthorization(
         manifest: record.manifest,
+        registryCurrentBindingHash: record.manifest.currentBindingHash,
         collector: record.collector,
         generation: record.generation,
         confirmedForceActionIDs: record.confirmedForceActionIDs,
@@ -513,8 +514,10 @@ enum Revalidator {
       let actionIDs = request.validatedOverlay.executionSteps.map(\.action.id)
       let jit = request.validatedOverlay.executionSteps.map { $0.jitRevalidationActions.map(\.id) }
       let binding = manifestDigest(
-        request: request,
-        actionOutcomes: sortedOutcomes,
+        planHash: request.plan.planHash,
+        overlayHash: request.validatedOverlay.overlayHash,
+        epoch: request.epoch,
+        actionOutcomeIDs: sortedOutcomes.map(\.actionID),
         units: units,
         currentCaptureID: snapshot.captureID,
         policyBindings: policyBindings,
@@ -1364,23 +1367,64 @@ enum Revalidator {
     }
   }
 
+  static func manifestCurrentBindingMatchesPlan(
+    _ manifest: ExecutionManifest,
+    plan: ImmutablePlan
+  ) -> Bool {
+    guard let expected = recomputedManifestCurrentBindingHash(manifest, plan: plan) else {
+      return false
+    }
+    return manifest.currentBindingHash == expected
+  }
+
+  static func recomputedManifestCurrentBindingHash(
+    _ manifest: ExecutionManifest,
+    plan: ImmutablePlan
+  ) -> PolicyDigest? {
+    let planActionIDs = Set(plan.actions.map(\.id))
+    let jitActionIDs = Set(manifest.jitRevalidationActionIDs.flatMap { $0 }).sorted()
+    let allReleaseUnits = compoundUnits(plan.releaseSets)
+    let claimedUnitIDs = manifest.compoundReleaseUnits.map {
+      ExecutionUnitID.compoundRelease($0.allocationGroupIDs)
+    }
+    guard manifest.planHash == plan.planHash,
+      manifest.executionActionIDs.count == manifest.jitRevalidationActionIDs.count,
+      manifest.executionActionIDs.allSatisfy(planActionIDs.contains),
+      jitActionIDs.allSatisfy(planActionIDs.contains),
+      Set(claimedUnitIDs).count == claimedUnitIDs.count,
+      manifest.compoundReleaseUnits.allSatisfy({ allReleaseUnits.contains($0) })
+    else { return nil }
+    return manifestDigest(
+      planHash: manifest.planHash,
+      overlayHash: manifest.overlayHash,
+      epoch: manifest.epoch,
+      actionOutcomeIDs: jitActionIDs,
+      units: allReleaseUnits,
+      currentCaptureID: manifest.currentCaptureID,
+      policyBindings: manifest.currentPolicyBindings,
+      consentRequirements: manifest.consentRequirements
+    )
+  }
+
   private static func manifestDigest(
-    request: RevalidationRequest,
-    actionOutcomes: [ActionRevalidationOutcome],
+    planHash: PolicyDigest,
+    overlayHash: PolicyDigest,
+    epoch: ExecutionEpochContext,
+    actionOutcomeIDs: [ActionID],
     units: [CompoundReleaseUnit],
     currentCaptureID: PolicyDigest,
     policyBindings: [CurrentPolicyBinding],
     consentRequirements: [ExecutionConsentRequirement]
   ) -> PolicyDigest {
     var encoder = BindingEncoder(domain: "diskplan-current-execution-binding-v1")
-    encoder.data(request.plan.planHash.bytes)
-    encoder.data(request.validatedOverlay.overlayHash.bytes)
+    encoder.data(planHash.bytes)
+    encoder.data(overlayHash.bytes)
     encoder.data(currentCaptureID.bytes)
-    encoder.string(request.epoch.epochID)
-    encoder.int64(request.epoch.semanticReferenceTimeSeconds)
-    encoder.int64(request.epoch.issuedAtSeconds)
-    encoder.int64(request.epoch.deadlineSeconds)
-    encoder.array(actionOutcomes) { $0.actionID.digest.bytes }
+    encoder.string(epoch.epochID)
+    encoder.int64(epoch.semanticReferenceTimeSeconds)
+    encoder.int64(epoch.issuedAtSeconds)
+    encoder.int64(epoch.deadlineSeconds)
+    encoder.array(actionOutcomeIDs) { $0.digest.bytes }
     encoder.array(units) { unit in
       var nested = BindingEncoder(domain: "compound-release-unit-v1")
       nested.array(unit.allocationGroupIDs) { Data($0.utf8) }
@@ -1410,8 +1454,8 @@ enum Revalidator {
       nested.data(requirement.currentEvidenceID.bytes)
       nested.data(requirement.currentGlobalFactsHash.bytes)
       nested.data(encode(predicate: requirement.currentPredicate))
-      nested.string(request.epoch.epochID)
-      nested.int64(request.epoch.deadlineSeconds)
+      nested.string(epoch.epochID)
+      nested.int64(epoch.deadlineSeconds)
       return nested.bytes
     }
     return encoder.digest

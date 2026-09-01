@@ -37,6 +37,7 @@ class IndiaAcceptanceTests(unittest.TestCase):
                 "bounded_full_audit",
                 "file_provider_no_materialization",
                 "apfs_owner_graph",
+                "release_postverification_binding",
                 "activity_snapshot",
                 "million_entry_performance",
                 "batch_dry_run",
@@ -50,6 +51,34 @@ class IndiaAcceptanceTests(unittest.TestCase):
         apfs = next(lane for lane in lanes if lane.lane_id == "apfs_owner_graph")
         self.assertEqual(apfs.expected_test_count, 4)
         self.assertEqual(len((apfs.swift_filter or "").split("|")), 4)
+        binding = next(
+            lane for lane in lanes if lane.lane_id == "release_postverification_binding"
+        )
+        self.assertEqual(binding.expected_test_count, 1)
+        self.assertEqual(
+            binding.swift_filter,
+            "DiskplanExecutionTests."
+            "releasePostverificationComponentBindingMatchesCanonicalReleaseFixture",
+        )
+
+    def test_release_postverification_golden_fixture_is_exactly_bound(self) -> None:
+        fixture_path = (
+            Path(__file__).parents[2]
+            / "fixtures/release/release-postverification-component-v1.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(fixture),
+            {"schema", "binding_kind", "domain_hex", "canonical_hex", "sha256"},
+        )
+        domain = bytes.fromhex(fixture["domain_hex"])
+        canonical = bytes.fromhex(fixture["canonical_hex"])
+        self.assertEqual(
+            domain,
+            b"diskplan/release-postverification-component/v1\0",
+        )
+        self.assertTrue(canonical.startswith(domain))
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(), fixture["sha256"])
 
     def test_release_target_rejects_every_hostname_except_india(self) -> None:
         accepted = india_acceptance.HostFacts(

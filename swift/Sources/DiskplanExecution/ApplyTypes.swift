@@ -2,6 +2,37 @@ import Darwin
 import DiskplanPolicy
 import Foundation
 
+/// Canonical engine-internal binding writer. The domain is emitted verbatim as
+/// `diskplan/<binding-kind>/v1\0`; fields then use fixed-width integers and length-prefixed bytes.
+struct VersionedExecutionBindingEncoderV1 {
+  private(set) var bytes: Data
+
+  init(bindingKind: String) {
+    bytes = Data("diskplan/\(bindingKind)/v1\0".utf8)
+  }
+
+  mutating func data(_ value: Data) {
+    uint64(UInt64(value.count))
+    bytes.append(value)
+  }
+
+  mutating func string(_ value: String) { data(Data(value.utf8)) }
+
+  mutating func uint8(_ value: UInt8) { bytes.append(value) }
+
+  mutating func uint64(_ value: UInt64) {
+    var bigEndian = value.bigEndian
+    withUnsafeBytes(of: &bigEndian) { bytes.append(contentsOf: $0) }
+  }
+
+  mutating func int64(_ value: Int64) { uint64(UInt64(bitPattern: value)) }
+
+  mutating func array<Element>(_ values: [Element], encode: (Element) -> Data) {
+    uint64(UInt64(values.count))
+    for value in values { data(encode(value)) }
+  }
+}
+
 struct JITRevalidationRequest: Equatable, Sendable {
   let plan: ImmutablePlan
   let validatedOverlay: ValidatedDecisionOverlay

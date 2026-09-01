@@ -128,204 +128,404 @@ struct ReleasePostverificationExecutionBinding: Equatable, Sendable {
 }
 
 final class EngineReleasePostverificationComponentHandle: @unchecked Sendable {
-  fileprivate let token: Data
-  private init(token: Data) { self.token = token }
+  private let lock = NSLock()
+  private var binding: TrustedReleasePostverificationComponentBinding?
 
-  fileprivate static func issue(token: Data) -> Self { Self(token: token) }
+  fileprivate init(binding: TrustedReleasePostverificationComponentBinding) {
+    self.binding = binding
+  }
+
+  fileprivate func claim() -> TrustedReleasePostverificationComponentBinding? {
+    lock.lock()
+    defer { lock.unlock() }
+    defer { binding = nil }
+    return binding
+  }
 }
 
 private struct TrustedReleasePostverificationComponentBinding: Sendable {
   let execution: ReleasePostverificationExecutionBinding
   let componentID: PolicyDigest
+  let schema: ReleasePostverificationComponentBindingV1
+  let groups: [ReleasePostverificationGroupExpectation]
+}
+
+enum ReleasePostverificationManifestClaimError: Error, Equatable, Sendable {
+  case manifestPlanMismatch
+  case claimBindingMismatch
+  case invalidExecutionBinding
+  case unitNotInClaimedManifest
+  case unitAlreadyAuthorized
+  case invalidConnectedClosure
+  case descriptorLocatorMembershipMismatch
+  case descriptorLocatorBindingMismatch(ActionID)
+}
+
+/// Versioned, engine-internal schema. It is never serialized over IPC, so `ipc.proto` does not
+/// carry a duplicate representation; the shared compatibility fixture freezes these exact bytes.
+struct ReleasePostverificationComponentBindingV1: Equatable, Sendable {
+  static let bindingKind = "release-postverification-component"
+  let manifestCurrentBindingHash: PolicyDigest
+  let planHash: PolicyDigest
+  let overlayHash: PolicyDigest
+  let epoch: ExecutionEpochContext
+  let planCaptureID: PolicyDigest
+  let jitCaptureID: PolicyDigest
+  let allocationGroupIDs: [String]
+  let ownerActionIDs: [ActionID]
+
+  func canonicalBytes(
+    execution: ReleasePostverificationExecutionBinding,
+    owners: [ReleasePostverificationOwnerLocator],
+    groups: [ReleasePostverificationGroupExpectation]
+  ) -> Data {
+    var encoder = VersionedExecutionBindingEncoderV1(bindingKind: Self.bindingKind)
+    encoder.data(manifestCurrentBindingHash.bytes)
+    encoder.data(planHash.bytes)
+    encoder.data(overlayHash.bytes)
+    encoder.string(epoch.epochID)
+    encoder.int64(epoch.semanticReferenceTimeSeconds)
+    encoder.int64(epoch.issuedAtSeconds)
+    encoder.int64(epoch.deadlineSeconds)
+    encoder.data(planCaptureID.bytes)
+    encoder.data(jitCaptureID.bytes)
+    encoder.array(allocationGroupIDs) { Data($0.utf8) }
+    encoder.array(ownerActionIDs) { $0.digest.bytes }
+    encoder.data(execution.executionBindingHash.bytes)
+    encoder.int64(execution.freshnessLimitSeconds)
+    encoder.array(owners.sorted { $0.actionID < $1.actionID }) { owner in
+      var nested = VersionedExecutionBindingEncoderV1(bindingKind: "release-owner-locator")
+      nested.data(owner.actionID.digest.bytes)
+      nested.string(owner.candidateID)
+      Self.encode(owner.expectedIdentity, into: &nested)
+      nested.array(owner.namespace) { component in
+        var namespace = VersionedExecutionBindingEncoderV1(
+          bindingKind: "release-namespace-locator")
+        namespace.uint8(component.rawNameFromParent == nil ? 0 : 1)
+        if let rawName = component.rawNameFromParent { namespace.data(rawName) }
+        Self.encode(component.authorizedSeal, into: &namespace)
+        return namespace.bytes
+      }
+      nested.data(owner.rawLeafName)
+      return nested.bytes
+    }
+    encoder.array(
+      groups.sorted {
+        RawUTF8Key($0.allocationGroupID) < RawUTF8Key($1.allocationGroupID)
+      }
+    ) { group in
+      var nested = VersionedExecutionBindingEncoderV1(bindingKind: "release-group-expectation")
+      nested.string(group.allocationGroupID)
+      nested.array(group.ownerActionIDs.sorted()) { $0.digest.bytes }
+      let topology = group.topology
+      nested.string(topology.allocationGroupID)
+      nested.array(
+        topology.fileObjects.sorted {
+          Data($0.fileObjectID.utf8).lexicographicallyPrecedes(Data($1.fileObjectID.utf8))
+        }
+      ) { fileObject in
+        var file = VersionedExecutionBindingEncoderV1(bindingKind: "release-file-expectation")
+        file.string(fileObject.fileObjectID)
+        file.array(
+          fileObject.owners.sorted {
+            let left = Data($0.candidateID.utf8)
+            let right = Data($1.candidateID.utf8)
+            return left == right ? $0.path < $1.path : left.lexicographicallyPrecedes(right)
+          }
+        ) { link in
+          var owner = VersionedExecutionBindingEncoderV1(bindingKind: "release-file-owner")
+          owner.string(link.candidateID)
+          owner.array(link.path.components) { $0 }
+          return owner.bytes
+        }
+        Self.encode(fileObject.linkCount, into: &file)
+        return file.bytes
+      }
+      Self.encode(topology.cloneRefCount, into: &nested)
+      Self.encode(topology.sharedBytes, into: &nested)
+      Self.encode(topology.snapshotBlocker, into: &nested)
+      return nested.bytes
+    }
+    return encoder.bytes
+  }
+
+  func digest(
+    execution: ReleasePostverificationExecutionBinding,
+    owners: [ReleasePostverificationOwnerLocator],
+    groups: [ReleasePostverificationGroupExpectation]
+  ) -> PolicyDigest {
+    try! PolicyDigest(
+      bytes: Data(
+        SHA256.hash(
+          data: canonicalBytes(
+            execution: execution, owners: owners, groups: groups))))
+  }
+
+  private static func encode(
+    _ value: ObjectIdentity,
+    into encoder: inout VersionedExecutionBindingEncoderV1
+  ) {
+    encoder.uint64(value.device)
+    encoder.uint64(value.object)
+    encode(value.generation, into: &encoder)
+    encoder.string(value.type.rawValue)
+  }
+
+  private static func encode(
+    _ value: ReleaseDescriptorNamespaceSeal,
+    into encoder: inout VersionedExecutionBindingEncoderV1
+  ) {
+    encode(value.identity, into: &encoder)
+    encoder.uint64(UInt64(value.access.mode))
+    encoder.uint64(UInt64(value.access.ownerUserID))
+    encoder.uint64(UInt64(value.access.ownerGroupID))
+    encoder.uint64(UInt64(value.access.authorizationFlags))
+    encoder.data(value.access.aclDigest.bytes)
+    encoder.data(value.access.mountIdentity)
+  }
+
+  private static func encode<Value: FixedWidthInteger & Equatable & Sendable>(
+    _ observation: Observation<Value>,
+    into encoder: inout VersionedExecutionBindingEncoderV1
+  ) {
+    encodeObservation(observation, into: &encoder) { value, nested in
+      nested.uint64(UInt64(truncatingIfNeeded: value))
+    }
+  }
+
+  private static func encode(
+    _ observation: Observation<Bool>,
+    into encoder: inout VersionedExecutionBindingEncoderV1
+  ) {
+    encodeObservation(observation, into: &encoder) { value, nested in
+      nested.uint8(value ? 1 : 0)
+    }
+  }
+
+  private static func encodeObservation<Value: Equatable & Sendable>(
+    _ observation: Observation<Value>,
+    into encoder: inout VersionedExecutionBindingEncoderV1,
+    known: (Value, inout VersionedExecutionBindingEncoderV1) -> Void
+  ) {
+    switch observation {
+    case .absent: encoder.uint8(0)
+    case .known(let value):
+      encoder.uint8(1)
+      known(value, &encoder)
+    case .unknown(let reason):
+      encoder.uint8(2)
+      encoder.string(reason.rawValue)
+    case .unreadable(let failure):
+      encoder.uint8(3)
+      encoder.string(failure.code)
+      encoder.string(failure.collector)
+    case .failed(let failure):
+      encoder.uint8(4)
+      encoder.string(failure.code)
+      encoder.string(failure.collector)
+    }
+  }
 }
 
 final class EngineReleasePostverificationManifestAuthority: @unchecked Sendable {
+  private let manifest: ExecutionManifest
+  private let plan: ImmutablePlan
   private let lock = NSLock()
-  private var bindings: [Data: TrustedReleasePostverificationComponentBinding] = [:]
+  private var authorizedUnits = Set<ExecutionUnitID>()
+
+  convenience init(
+    claimedAuthorization: ClaimedApplyAuthorization,
+    plan: ImmutablePlan
+  ) throws {
+    try self.init(
+      claimedManifest: claimedAuthorization.manifest,
+      registryCurrentBindingHash: claimedAuthorization.registryCurrentBindingHash,
+      plan: plan
+    )
+  }
+
+  #if DEBUG
+    convenience init(
+      testingClaimedManifest: ExecutionManifest,
+      registryCurrentBindingHash: PolicyDigest? = nil,
+      plan: ImmutablePlan
+    ) throws {
+      try self.init(
+        claimedManifest: testingClaimedManifest,
+        registryCurrentBindingHash: registryCurrentBindingHash
+          ?? testingClaimedManifest.currentBindingHash,
+        plan: plan
+      )
+    }
+  #endif
+
+  private init(
+    claimedManifest manifest: ExecutionManifest,
+    registryCurrentBindingHash: PolicyDigest,
+    plan: ImmutablePlan
+  ) throws {
+    guard manifest.planHash == plan.planHash else {
+      throw ReleasePostverificationManifestClaimError.manifestPlanMismatch
+    }
+    guard registryCurrentBindingHash == manifest.currentBindingHash,
+      Revalidator.manifestCurrentBindingMatchesPlan(manifest, plan: plan)
+    else {
+      throw ReleasePostverificationManifestClaimError.claimBindingMismatch
+    }
+    guard manifest.currentCaptureID != plan.globalFacts.captureID,
+      manifest.epoch.deadlineSeconds > manifest.epoch.issuedAtSeconds
+    else {
+      throw ReleasePostverificationManifestClaimError.invalidExecutionBinding
+    }
+    self.manifest = manifest
+    self.plan = plan
+  }
 
   func authorize(
-    execution: ReleasePostverificationExecutionBinding,
-    owners: [ReleasePostverificationOwnerLocator],
-    groups: [ReleasePostverificationGroupExpectation]
+    unitID: ExecutionUnitID,
+    descriptorLocators: [ReleasePostverificationOwnerLocator]
   ) throws -> EngineReleasePostverificationComponentHandle {
-    let componentID = try ReleasePostverificationCanonicalBinding.digest(
+    guard case .compoundRelease = unitID else {
+      throw ReleasePostverificationManifestClaimError.unitNotInClaimedManifest
+    }
+    let matches = manifest.compoundReleaseUnits.filter {
+      ExecutionUnitID.compoundRelease($0.allocationGroupIDs) == unitID
+    }
+    guard matches.count == 1, let unit = matches.first else {
+      throw ReleasePostverificationManifestClaimError.unitNotInClaimedManifest
+    }
+    let groupKeys = Set(unit.allocationGroupIDs.map(RawUTF8Key.init))
+    let graphComponents =
+      plan.releaseGraphManifest?.connectedComponents.filter {
+        Set($0.allocationGroupIDs.map(RawUTF8Key.init)) == groupKeys
+      } ?? []
+    guard graphComponents.count == 1 else {
+      throw ReleasePostverificationManifestClaimError.invalidConnectedClosure
+    }
+    let releaseSets = plan.releaseSets.filter {
+      groupKeys.contains(RawUTF8Key($0.allocationGroupID))
+    }.sorted { RawUTF8Key($0.allocationGroupID) < RawUTF8Key($1.allocationGroupID) }
+    guard releaseSets.count == unit.allocationGroupIDs.count,
+      Set(releaseSets.map { RawUTF8Key($0.allocationGroupID) }) == groupKeys
+    else {
+      throw ReleasePostverificationManifestClaimError.invalidConnectedClosure
+    }
+    var ownerBindings: [ActionID: ReleaseSetOwnerBinding] = [:]
+    for owner in releaseSets.flatMap(\.owners) {
+      if let existing = ownerBindings[owner.actionID], existing != owner {
+        throw ReleasePostverificationManifestClaimError.invalidConnectedClosure
+      }
+      ownerBindings[owner.actionID] = owner
+    }
+    guard Set(ownerBindings.keys) == Set(unit.ownerActionIDs),
+      Set(graphComponents[0].candidateIDs.map(RawUTF8Key.init))
+        == Set(ownerBindings.values.map { RawUTF8Key($0.candidateID) }),
+      Set(descriptorLocators.map(\.actionID)) == Set(unit.ownerActionIDs),
+      Set(descriptorLocators.map(\.actionID)).count == descriptorLocators.count
+    else {
+      throw ReleasePostverificationManifestClaimError.descriptorLocatorMembershipMismatch
+    }
+    for locator in descriptorLocators {
+      guard let expected = ownerBindings[locator.actionID],
+        Self.locator(locator, matches: expected)
+      else {
+        throw ReleasePostverificationManifestClaimError.descriptorLocatorBindingMismatch(
+          locator.actionID
+        )
+      }
+    }
+    let groups = releaseSets.map {
+      ReleasePostverificationGroupExpectation(
+        allocationGroupID: $0.allocationGroupID,
+        topology: ReleaseAllocationTopologyExpectation($0.topologyExpectation),
+        ownerActionIDs: $0.ownerActionIDs.sorted()
+      )
+    }
+    let execution = ReleasePostverificationExecutionBinding(
+      executionBindingHash: manifest.currentBindingHash,
+      epoch: manifest.epoch,
+      planCaptureID: plan.globalFacts.captureID,
+      jitCaptureID: manifest.currentCaptureID,
+      freshnessLimitSeconds: manifest.epoch.deadlineSeconds - manifest.epoch.issuedAtSeconds
+    )
+    let schema = ReleasePostverificationComponentBindingV1(
+      manifestCurrentBindingHash: manifest.currentBindingHash,
+      planHash: manifest.planHash,
+      overlayHash: manifest.overlayHash,
+      epoch: manifest.epoch,
+      planCaptureID: plan.globalFacts.captureID,
+      jitCaptureID: manifest.currentCaptureID,
+      allocationGroupIDs: unit.allocationGroupIDs,
+      ownerActionIDs: unit.ownerActionIDs
+    )
+    let componentID = schema.digest(
       execution: execution,
-      owners: owners,
+      owners: descriptorLocators,
       groups: groups
     )
     lock.lock()
-    var generator = SystemRandomNumberGenerator()
-    var token: Data
-    repeat {
-      token = Data((0..<32).map { _ in
-        UInt8.random(in: .min ... .max, using: &generator)
-      })
-    } while bindings[token] != nil
-    bindings[token] = TrustedReleasePostverificationComponentBinding(
-      execution: execution,
-      componentID: componentID
-    )
-    lock.unlock()
-    return EngineReleasePostverificationComponentHandle.issue(token: token)
-  }
-
-  fileprivate func claim(
-    _ handle: EngineReleasePostverificationComponentHandle
-  ) -> TrustedReleasePostverificationComponentBinding? {
-    lock.lock()
     defer { lock.unlock() }
-    return bindings.removeValue(forKey: handle.token)
-  }
-}
-
-private enum ReleasePostverificationCanonicalBinding {
-  private struct Encoder {
-    var bytes = Data("diskplan/release-component-binding/v1".utf8)
-
-    mutating func append(_ value: Data) {
-      append(UInt64(value.count))
-      bytes.append(value)
+    guard authorizedUnits.insert(unitID).inserted else {
+      throw ReleasePostverificationManifestClaimError.unitAlreadyAuthorized
     }
-
-    mutating func append(_ value: String) { append(Data(value.utf8)) }
-    mutating func append(_ value: Bool) { bytes.append(value ? 1 : 0) }
-    mutating func append(_ value: UInt32) { append(UInt64(value)) }
-    mutating func append(_ value: Int64) { append(UInt64(bitPattern: value)) }
-    mutating func append(_ value: UInt64) {
-      var bigEndian = value.bigEndian
-      bytes.append(Data(bytes: &bigEndian, count: MemoryLayout<UInt64>.size))
-    }
-
-    mutating func append(_ value: ObjectIdentity) {
-      append(value.device)
-      append(value.object)
-      append(value.generation)
-      append(value.type.rawValue)
-    }
-
-    mutating func append(_ value: ReleaseDescriptorNamespaceSeal) {
-      append(value.identity)
-      append(UInt64(value.access.mode))
-      append(UInt64(value.access.ownerUserID))
-      append(UInt64(value.access.ownerGroupID))
-      append(UInt64(value.access.authorizationFlags))
-      append(value.access.aclDigest.bytes)
-      append(value.access.mountIdentity)
-    }
-
-    mutating func append<Value: FixedWidthInteger & Equatable & Sendable>(
-      _ value: Observation<Value>
-    ) {
-      switch value {
-      case .absent: append("absent")
-      case .known(let known):
-        append("known")
-        append(UInt64(truncatingIfNeeded: known))
-      case .unknown(let reason):
-        append("unknown")
-        append(reason.rawValue)
-      case .unreadable(let failure):
-        append("unreadable")
-        append(failure.code)
-        append(failure.collector)
-      case .failed(let failure):
-        append("failed")
-        append(failure.code)
-        append(failure.collector)
-      }
-    }
-
-    mutating func append(_ value: Observation<Bool>) {
-      switch value {
-      case .absent: append("absent")
-      case .known(let known):
-        append("known")
-        append(known)
-      case .unknown(let reason):
-        append("unknown")
-        append(reason.rawValue)
-      case .unreadable(let failure):
-        append("unreadable")
-        append(failure.code)
-        append(failure.collector)
-      case .failed(let failure):
-        append("failed")
-        append(failure.code)
-        append(failure.collector)
-      }
-    }
+    return EngineReleasePostverificationComponentHandle(
+      binding: TrustedReleasePostverificationComponentBinding(
+        execution: execution,
+        componentID: componentID,
+        schema: schema,
+        groups: groups
+      ))
   }
 
-  static func digest(
-    execution: ReleasePostverificationExecutionBinding,
-    owners: [ReleasePostverificationOwnerLocator],
-    groups: [ReleasePostverificationGroupExpectation]
-  ) throws -> PolicyDigest {
-    var encoder = Encoder()
-    encoder.append(execution.executionBindingHash.bytes)
-    encoder.append(execution.epoch.epochID)
-    encoder.append(execution.epoch.semanticReferenceTimeSeconds)
-    encoder.append(execution.epoch.issuedAtSeconds)
-    encoder.append(execution.epoch.deadlineSeconds)
-    encoder.append(execution.planCaptureID.bytes)
-    encoder.append(execution.jitCaptureID.bytes)
-    encoder.append(execution.freshnessLimitSeconds)
-    let sortedOwners = owners.sorted { $0.actionID < $1.actionID }
-    encoder.append(UInt64(sortedOwners.count))
-    for owner in sortedOwners {
-      encoder.append(owner.actionID.digest.bytes)
-      encoder.append(owner.candidateID)
-      encoder.append(owner.expectedIdentity)
-      encoder.append(UInt64(owner.namespace.count))
-      for component in owner.namespace {
-        encoder.append(component.rawNameFromParent != nil)
-        if let name = component.rawNameFromParent { encoder.append(name) }
-        encoder.append(component.authorizedSeal)
+  private static func locator(
+    _ locator: ReleasePostverificationOwnerLocator,
+    matches expected: ReleaseSetOwnerBinding
+  ) -> Bool {
+    let namespace = expected.namespaceBinding
+    let expectedNames: [Data?] =
+      [nil]
+      + namespace.parentChain.map {
+        $0.relativePath.components.last
       }
-      encoder.append(owner.rawLeafName)
+    let expectedIdentities = [namespace.rootIdentity] + namespace.parentChain.map(\.identity)
+    let expectedSeals = [namespace.rootSeal] + namespace.parentChain.map(\.seal)
+    guard Data(locator.candidateID.utf8) == Data(expected.candidateID.utf8),
+      locator.expectedIdentity == expected.targetIdentity,
+      locator.rawLeafName == namespace.targetPath.components.last,
+      locator.namespace.count == expectedNames.count
+    else { return false }
+    for index in locator.namespace.indices {
+      let component = locator.namespace[index]
+      guard component.rawNameFromParent == expectedNames[index],
+        component.authorizedSeal.identity == expectedIdentities[index],
+        sealAccess(component.authorizedSeal.access, matches: expectedSeals[index])
+      else { return false }
     }
-    let sortedGroups = groups.sorted {
-      RawUTF8Key($0.allocationGroupID) < RawUTF8Key($1.allocationGroupID)
-    }
-    encoder.append(UInt64(sortedGroups.count))
-    for group in sortedGroups {
-      encoder.append(group.allocationGroupID)
-      let ownerIDs = group.ownerActionIDs.sorted()
-      encoder.append(UInt64(ownerIDs.count))
-      for ownerID in ownerIDs { encoder.append(ownerID.digest.bytes) }
-      let topology = group.topology
-      encoder.append(topology.allocationGroupID)
-      let fileObjects = topology.fileObjects.sorted {
-        Data($0.fileObjectID.utf8).lexicographicallyPrecedes(Data($1.fileObjectID.utf8))
-      }
-      encoder.append(UInt64(fileObjects.count))
-      for fileObject in fileObjects {
-        encoder.append(fileObject.fileObjectID)
-        let links = fileObject.owners.sorted {
-          let left = Data($0.candidateID.utf8)
-          let right = Data($1.candidateID.utf8)
-          return left == right ? $0.path < $1.path : left.lexicographicallyPrecedes(right)
-        }
-        encoder.append(UInt64(links.count))
-        for link in links {
-          encoder.append(link.candidateID)
-          encoder.append(UInt64(link.path.components.count))
-          for component in link.path.components { encoder.append(component) }
-        }
-        encoder.append(fileObject.linkCount)
-      }
-      encoder.append(topology.cloneRefCount)
-      encoder.append(topology.sharedBytes)
-      encoder.append(topology.snapshotBlocker)
-    }
-    return try PolicyDigest(bytes: Data(SHA256.hash(data: encoder.bytes)))
+    return true
+  }
+
+  private static func sealAccess(
+    _ access: ReleaseDescriptorAccessSeal,
+    matches expected: NamespaceSealEvidence
+  ) -> Bool {
+    guard expected.trustedNamespace == .ownerPrivate,
+      expected.providerBoundary == .known(.local),
+      case .known(let accessPolicy) = expected.accessPolicy,
+      Data(accessPolicy.utf8) == Data("owner-private".utf8),
+      case .known(let aclDigest) = expected.aclDigest,
+      case .known(let mountIdentity) = expected.mountIdentity
+    else { return false }
+    return access.ownerUserID == Darwin.geteuid()
+      && access.mode & UInt32(S_IFMT) == UInt32(S_IFDIR)
+      && access.mode & 0o7777 == 0o700
+      && access.aclDigest == aclDigest
+      && access.mountIdentity.base64EncodedString() == mountIdentity
   }
 }
 
 struct ReleasePostverificationComponentRequest: Sendable {
   let componentHandle: EngineReleasePostverificationComponentHandle
   let owners: [ReleasePostverificationOwnerLocator]
-  let groups: [ReleasePostverificationGroupExpectation]
 }
 
 enum ReleasePostverificationFreezeError: Error, Equatable, Sendable {
@@ -472,9 +672,10 @@ final class EngineReleaseTopologyCollectionOperation: @unchecked Sendable {
 }
 
 final class EngineReleasePostverificationTopologyCollector: @unchecked Sendable {
-  typealias Collection = @Sendable (
-    EngineReleaseTopologyCollectionOperation
-  ) async throws -> Observation<CurrentReleaseTopologyCapture>
+  typealias Collection =
+    @Sendable (
+      EngineReleaseTopologyCollectionOperation
+    ) async throws -> Observation<CurrentReleaseTopologyCapture>
 
   private let collection: Collection
 
@@ -922,7 +1123,6 @@ private final class ReleaseTopologyCaptureRegistry: @unchecked Sendable {
 }
 
 struct DescriptorBoundReleasePostverificationCore: Sendable {
-  private let manifestAuthority: EngineReleasePostverificationManifestAuthority
   private let descriptorProbe: any ReleasePostverificationDescriptorProbing
   private let topologyCollector: EngineReleasePostverificationTopologyCollector
   private let nowSeconds: @Sendable () -> Int64
@@ -930,7 +1130,6 @@ struct DescriptorBoundReleasePostverificationCore: Sendable {
   private let captureRegistry: ReleaseTopologyCaptureRegistry
 
   init(
-    manifestAuthority: EngineReleasePostverificationManifestAuthority,
     topologyCollector: EngineReleasePostverificationTopologyCollector,
     descriptorProbe: any ReleasePostverificationDescriptorProbing =
       POSIXReleasePostverificationDescriptorProbe(),
@@ -942,7 +1141,6 @@ struct DescriptorBoundReleasePostverificationCore: Sendable {
       return Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
     }
   ) {
-    self.manifestAuthority = manifestAuthority
     self.topologyCollector = topologyCollector
     self.descriptorProbe = descriptorProbe
     self.nowSeconds = nowSeconds
@@ -954,19 +1152,19 @@ struct DescriptorBoundReleasePostverificationCore: Sendable {
     _ request: ReleasePostverificationComponentRequest
   ) throws -> FrozenReleasePostverificationComponent {
     let frozenAtSeconds = nowSeconds()
-    guard let trusted = manifestAuthority.claim(request.componentHandle) else {
+    guard let trusted = request.componentHandle.claim() else {
       throw ReleasePostverificationFreezeError.componentHandleUnknownOrReplayed
     }
     guard
-      try ReleasePostverificationCanonicalBinding.digest(
+      trusted.schema.digest(
         execution: trusted.execution,
         owners: request.owners,
-        groups: request.groups
+        groups: trusted.groups
       ) == trusted.componentID
     else {
       throw ReleasePostverificationFreezeError.componentBindingMismatch
     }
-    guard !request.owners.isEmpty, !request.groups.isEmpty else {
+    guard !request.owners.isEmpty, !trusted.groups.isEmpty else {
       throw ReleasePostverificationFreezeError.emptyComponent
     }
     guard trusted.execution.planCaptureID != trusted.execution.jitCaptureID,
@@ -997,7 +1195,7 @@ struct DescriptorBoundReleasePostverificationCore: Sendable {
     }
     let allOwnerIDs = seenOwners
     var seenGroups = Set<RawUTF8Key>()
-    for group in request.groups {
+    for group in trusted.groups {
       guard seenGroups.insert(RawUTF8Key(group.allocationGroupID)).inserted else {
         throw ReleasePostverificationFreezeError.duplicateAllocationGroup(
           group.allocationGroupID
@@ -1032,7 +1230,7 @@ struct DescriptorBoundReleasePostverificationCore: Sendable {
       componentID: trusted.componentID,
       frozenAtSeconds: frozenAtSeconds,
       owners: frozenOwners,
-      groups: request.groups.sorted {
+      groups: trusted.groups.sorted {
         RawUTF8Key($0.allocationGroupID) < RawUTF8Key($1.allocationGroupID)
       }
     )
@@ -1386,14 +1584,17 @@ struct DescriptorBoundReleasePostverificationCore: Sendable {
       guard let expected = transitions[owner.actionID] else {
         return .ownerSlotChangedAfterTopology(owner.actionID)
       }
-      switch (expected, descriptorProbe.ownerSlot(
-        parentDescriptor: owner.namespace.last!.descriptor,
-        rawLeafName: owner.rawLeafName
-      )) {
+      switch (
+        expected,
+        descriptorProbe.ownerSlot(
+          parentDescriptor: owner.namespace.last!.descriptor,
+          rawLeafName: owner.rawLeafName
+        )
+      ) {
       case (.missing, .missing):
         continue
       case (.identityChanged(let expectedIdentity), .present(let currentIdentity))
-        where expectedIdentity == currentIdentity:
+      where expectedIdentity == currentIdentity:
         continue
       case (_, .unreadable(let failure)):
         return .ownerSlotUnreadable(owner.actionID, failure)

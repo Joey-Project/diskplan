@@ -37,6 +37,10 @@ superseded_by:
   authorization. Runtime warnings remain a secondary event.
 - Connected APFS units require a typed `allocationGroupReleased` topology proof after their
   owner steps; target absence alone cannot claim shared-space release.
+- Release postverification now derives each complete connected owner/group/topology component
+  from the exact unit in the one-shot registry-backed apply claim. The authority recomputes the
+  claim's current binding against the immutable plan, accepts only matching descriptor locators,
+  and rejects missing, extra, replayed, or replaced members before freezing descriptor state.
 - Git worktree removal now uses exclusive same-filesystem quarantine, descriptor identity and
   subtree verification, typed restore/retained recovery, and post-removal administrative
   cleanup. Administrative cancellation, deadline, or failure after root deletion is a typed
@@ -119,6 +123,8 @@ superseded_by:
 - [x] Complete frozen-range review and the signed landing commits.
 - [x] Revalidate the signed integration merge with targeted Phase 5 and serial full Swift gates on
   India-mac-mini-m4-hoteng.
+- [x] Bind descriptor-held release postverification to the registry claim, freeze its engine-only
+  v1 component encoding in a shared golden fixture, and make that fixture a required India lane.
 
 ## Handoff
 
@@ -336,3 +342,11 @@ superseded_by:
   remains applicable because subsequent commits did not change execution production or tests; it
   passed all 152 tests in 0.461 seconds with a 22.613-second supervisor, SHA-256 prefix `8bc66b75`,
   and a quiescent process group.
+- India release-postverification closure validation passed the exact v1 golden fixture (1/1) and
+  the complete `DiskplanExecutionTests` suite (185/185). Their bounded supervisors emitted output
+  SHA-256 `c6b8979c13fba2c486b2d5888f5d8994f3fa2bca3dc165e1e2f33b787b6b586c` and
+  `ad75d712d18bfca477aac3a60d4851895b830765a23abffc57c3496c7c5395bc`; both verified the
+  process group and terminal quiescence. The India release acceptance validator then passed all
+  18 tests with output SHA-256
+  `7bc83929f79c8678737a5724da0d7fb69194a01ca52394499c61abcb93823e0b` under the same
+  supervisor guarantees. Strict Swift formatting passed on the macOS 26 release host.

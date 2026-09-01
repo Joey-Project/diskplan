@@ -40,50 +40,53 @@ func freezeRejectsUnauthorizedIdentityAccessContainmentAndLeaf() throws {
   }
   let core = testCore(RecordingReleaseTopologySource(mode: .released))
 
-  var wrongIdentity = first.authorizedRootSeal
-  wrongIdentity = ReleaseDescriptorNamespaceSeal(
-    identity: ObjectIdentity(
-      device: wrongIdentity.identity.device,
-      object: wrongIdentity.identity.object &+ 1,
-      generation: wrongIdentity.identity.generation,
-      type: wrongIdentity.identity.type
-    ),
-    access: wrongIdentity.access
+  let foreignRoot = AuthorizedReleaseNamespaceComponent(
+    rawNameFromParent: nil,
+    descriptor: second.rootDescriptor,
+    authorizedSeal: first.authorizedRootSeal
+  )
+  let boundOwner = first.ownerLocator()
+  let wrongRootDescriptor = ReleasePostverificationOwnerLocator(
+    actionID: boundOwner.actionID,
+    candidateID: boundOwner.candidateID,
+    expectedIdentity: boundOwner.expectedIdentity,
+    namespace: [foreignRoot] + Array(boundOwner.namespace.dropFirst()),
+    rawLeafName: boundOwner.rawLeafName
   )
   #expect(
     throws: ReleasePostverificationFreezeError.namespaceIdentityMismatch(
       first.actionID, .root
     )
   ) {
-    try core.freeze(first.request(owner: first.ownerLocator(rootSeal: wrongIdentity)))
+    try core.freeze(first.request(owner: wrongRootDescriptor))
   }
 
-  let wrongAccess = ReleaseDescriptorNamespaceSeal(
-    identity: first.authorizedRootSeal.identity,
-    access: ReleaseDescriptorAccessSeal(
-      mode: first.authorizedRootSeal.access.mode,
-      ownerUserID: first.authorizedRootSeal.access.ownerUserID,
-      ownerGroupID: first.authorizedRootSeal.access.ownerGroupID,
-      authorizationFlags: first.authorizedRootSeal.access.authorizationFlags,
-      aclDigest: testDigest(199),
-      mountIdentity: first.authorizedRootSeal.access.mountIdentity
-    )
-  )
+  let accessRequest = try first.request()
+  guard Darwin.fchmod(first.rootDescriptor, 0o755) == 0 else {
+    throw POSIXError(.init(rawValue: errno) ?? .EIO)
+  }
   #expect(
     throws: ReleasePostverificationFreezeError.namespaceAccessMismatch(
       first.actionID, .root
     )
   ) {
-    try core.freeze(first.request(owner: first.ownerLocator(rootSeal: wrongAccess)))
+    try core.freeze(accessRequest)
+  }
+  guard
+    Darwin.fchmod(
+      first.rootDescriptor, mode_t(first.authorizedRootSeal.access.mode & 0o7777)
+    ) == 0
+  else {
+    throw POSIXError(.init(rawValue: errno) ?? .EIO)
   }
 
   let foreignParent = AuthorizedReleaseNamespaceComponent(
     rawNameFromParent: Data(first.namespaceName.utf8),
     descriptor: second.namespaceDescriptor,
-    authorizedSeal: second.authorizedParentSeal
+    authorizedSeal: first.authorizedParentSeal
   )
   #expect(
-    throws: ReleasePostverificationFreezeError.namespaceContainmentMismatch(
+    throws: ReleasePostverificationFreezeError.namespaceIdentityMismatch(
       first.actionID, .parentChain(index: 0)
     )
   ) {
@@ -94,18 +97,12 @@ func freezeRejectsUnauthorizedIdentityAccessContainmentAndLeaf() throws {
     )
   }
 
-  let wrongLeafIdentity = ObjectIdentity(
-    device: first.ownerIdentity.device,
-    object: first.ownerIdentity.object &+ 1,
-    generation: first.ownerIdentity.generation,
-    type: first.ownerIdentity.type
-  )
+  let targetRequest = try first.request()
+  try first.replaceOwner()
   #expect(
     throws: ReleasePostverificationFreezeError.targetIdentityMismatch(first.actionID)
   ) {
-    try core.freeze(
-      first.request(owner: first.ownerLocator(expectedIdentity: wrongLeafIdentity))
-    )
+    try core.freeze(targetRequest)
   }
 }
 
@@ -124,14 +121,16 @@ func accessSealIncludesACLAndMountIdentity() throws {
 func accessSealRejectsInCollectionPolicyDrift() throws {
   let fixture = try ReleasePostverificationFixture()
   defer { fixture.cleanUp() }
-  let mutator = OneShotDescriptorModeMutator(mode: 0o700)
+  let mutator = OneShotDescriptorModeMutator(mode: 0o755)
   let probe = POSIXReleasePostverificationDescriptorProbe { descriptor in
     mutator.mutate(descriptor)
   }
 
-  guard case .failed(let failure) = probe.namespaceSeal(
-    descriptor: fixture.namespaceDescriptor
-  ) else {
+  guard
+    case .failed(let failure) = probe.namespaceSeal(
+      descriptor: fixture.namespaceDescriptor
+    )
+  else {
     Issue.record("expected in-collection access drift to fail")
     return
   }
@@ -158,11 +157,106 @@ func manifestHandleRejectsCallerReplacementAndComponentShrink() throws {
     )
   }
 
-  let first = fixture.groupExpectation()
-  let second = fixture.groupExpectation(id: "allocation-group-b")
-  #expect(throws: ReleasePostverificationFreezeError.componentBindingMismatch) {
-    try core.freeze(
-      fixture.request(groups: [first], authorizedGroups: [first, second])
+  let authority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: fixture.manifest,
+    plan: fixture.plan
+  )
+  #expect(
+    throws: ReleasePostverificationManifestClaimError.descriptorLocatorMembershipMismatch
+  ) {
+    try authority.authorize(unitID: fixture.unitID, descriptorLocators: [])
+  }
+  let secondAuthority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: fixture.manifest,
+    plan: fixture.plan
+  )
+  #expect(
+    throws: ReleasePostverificationManifestClaimError.descriptorLocatorMembershipMismatch
+  ) {
+    try secondAuthority.authorize(
+      unitID: fixture.unitID,
+      descriptorLocators: [authorizedOwner, authorizedOwner]
+    )
+  }
+
+  let bindingAuthority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: fixture.manifest,
+    plan: fixture.plan
+  )
+  let invalidLocator = ReleasePostverificationOwnerLocator(
+    actionID: authorizedOwner.actionID,
+    candidateID: "caller-replacement",
+    expectedIdentity: authorizedOwner.expectedIdentity,
+    namespace: authorizedOwner.namespace,
+    rawLeafName: authorizedOwner.rawLeafName
+  )
+  #expect(
+    throws: ReleasePostverificationManifestClaimError.descriptorLocatorBindingMismatch(
+      fixture.actionID
+    )
+  ) {
+    try bindingAuthority.authorize(
+      unitID: fixture.unitID,
+      descriptorLocators: [invalidLocator]
+    )
+  }
+
+  let oneShotAuthority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: fixture.manifest,
+    plan: fixture.plan
+  )
+  _ = try oneShotAuthority.authorize(
+    unitID: fixture.unitID,
+    descriptorLocators: [authorizedOwner]
+  )
+  #expect(throws: ReleasePostverificationManifestClaimError.unitAlreadyAuthorized) {
+    try oneShotAuthority.authorize(
+      unitID: fixture.unitID,
+      descriptorLocators: [authorizedOwner]
+    )
+  }
+}
+
+@Test
+func manifestAuthorityRejectsPlanSubstitutionAndUnclaimedUnits() throws {
+  let fixture = try ReleasePostverificationFixture()
+  let substituted = try ReleasePostverificationFixture(namespaceName: "substituted")
+  defer {
+    fixture.cleanUp()
+    substituted.cleanUp()
+  }
+
+  #expect(throws: ReleasePostverificationManifestClaimError.manifestPlanMismatch) {
+    try EngineReleasePostverificationManifestAuthority(
+      testingClaimedManifest: fixture.manifest,
+      plan: substituted.plan
+    )
+  }
+
+  let authority = try EngineReleasePostverificationManifestAuthority(
+    testingClaimedManifest: fixture.manifest,
+    plan: fixture.plan
+  )
+  #expect(throws: ReleasePostverificationManifestClaimError.unitNotInClaimedManifest) {
+    try authority.authorize(
+      unitID: .action(fixture.actionID),
+      descriptorLocators: [fixture.ownerLocator()]
+    )
+  }
+
+  #expect(throws: ReleasePostverificationManifestClaimError.claimBindingMismatch) {
+    try EngineReleasePostverificationManifestAuthority(
+      testingClaimedManifest: fixture.manifest,
+      registryCurrentBindingHash: testDigest(254),
+      plan: fixture.plan
+    )
+  }
+
+  let replacedBindingManifest = fixture.manifestReplacingCurrentBindingHash(testDigest(253))
+  #expect(throws: ReleasePostverificationManifestClaimError.claimBindingMismatch) {
+    try EngineReleasePostverificationManifestAuthority(
+      testingClaimedManifest: replacedBindingManifest,
+      plan: fixture.plan
     )
   }
 }
@@ -202,7 +296,9 @@ func parentAndRootReplacementCannotUseMissingLeafInNewTree() async throws {
 
 @Test
 func ownerReplacementStillRequiresTopologyCapture() async throws {
-  let fixture = try ReleasePostverificationFixture()
+  let fixture = try ReleasePostverificationFixture(
+    allocationGroupIDs: ["allocation-group-a", "allocation-group-b"]
+  )
   defer { fixture.cleanUp() }
   let topology = RecordingReleaseTopologySource(mode: .missing)
   let core = testCore(topology)
@@ -244,7 +340,7 @@ func topologyCaptureCannotRaceNamespaceAccessOrContainmentReplacement() async th
   let accessFixture = try ReleasePostverificationFixture()
   defer { accessFixture.cleanUp() }
   let accessTopology = RecordingReleaseTopologySource(mode: .released) {
-    try accessFixture.changeNamespaceMode(to: 0o700)
+    try accessFixture.changeNamespaceMode(to: 0o755)
   }
   let accessCore = testCore(accessTopology)
   let accessFrozen = try accessCore.freeze(accessFixture.request())
@@ -252,9 +348,10 @@ func topologyCaptureCannotRaceNamespaceAccessOrContainmentReplacement() async th
   let accessReport = await accessCore.postverify(accessFrozen)
   #expect(
     accessReport.groups.allSatisfy {
-      $0.outcome == .rejected(
-        .namespaceAccessMismatch(accessFixture.actionID, .parentChain(index: 0))
-      )
+      $0.outcome
+        == .rejected(
+          .namespaceAccessMismatch(accessFixture.actionID, .parentChain(index: 0))
+        )
     }
   )
 
@@ -269,11 +366,12 @@ func topologyCaptureCannotRaceNamespaceAccessOrContainmentReplacement() async th
   let replacementReport = await replacementCore.postverify(replacementFrozen)
   #expect(
     replacementReport.groups.allSatisfy {
-      $0.outcome == .rejected(
-        .namespaceContainmentMismatch(
-          replacementFixture.actionID, .parentChain(index: 0)
+      $0.outcome
+        == .rejected(
+          .namespaceContainmentMismatch(
+            replacementFixture.actionID, .parentChain(index: 0)
+          )
         )
-      )
     }
   )
 }
@@ -287,7 +385,7 @@ func namespaceAccessMutationIsDistinctFromChildEntryChurn() async throws {
   let frozen = try core.freeze(fixture.request())
 
   try fixture.removeOwner()
-  try fixture.changeNamespaceMode(to: 0o700)
+  try fixture.changeNamespaceMode(to: 0o755)
   let report = await core.postverify(frozen)
 
   #expect(
@@ -407,16 +505,15 @@ func captureIDIsOneShotAcrossComponents() async throws {
 
 @Test
 func connectedComponentPublishesNoPartialRelease() async throws {
-  let fixture = try ReleasePostverificationFixture()
+  let fixture = try ReleasePostverificationFixture(
+    allocationGroupIDs: ["allocation-group-a", "allocation-group-b"]
+  )
   defer { fixture.cleanUp() }
-  let second = fixture.groupExpectation(id: "allocation-group-b")
   let topology = RecordingReleaseTopologySource(
     mode: .groupStillAllocated("allocation-group-b")
   )
   let core = testCore(topology)
-  let frozen = try core.freeze(
-    fixture.request(groups: [fixture.groupExpectation(), second])
-  )
+  let frozen = try core.freeze(fixture.request())
   try fixture.removeOwner()
 
   let report = await core.postverify(frozen)
@@ -461,6 +558,178 @@ func fileObjectIDsUseRawUTF8Equality() async throws {
 }
 
 @Test
+func releasePostverificationComponentBindingMatchesCanonicalReleaseFixture() throws {
+  let fixtureURL = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("fixtures/release/release-postverification-component-v1.json")
+  let fixture = try JSONDecoder().decode(
+    ReleasePostverificationBindingFixture.self,
+    from: Data(contentsOf: fixtureURL)
+  )
+  let vector = try releasePostverificationBindingVector()
+  let canonicalBytes = vector.schema.canonicalBytes(
+    execution: vector.execution,
+    owners: vector.owners,
+    groups: vector.groups
+  )
+  let exactDomain = Data(
+    "diskplan/release-postverification-component/v1\0".utf8
+  )
+  #expect(fixture.schema == "diskplan.release-postverification-component-binding.fixture.v1")
+  #expect(fixture.bindingKind == ReleasePostverificationComponentBindingV1.bindingKind)
+  #expect(Data(hex: fixture.domainHex) == exactDomain)
+  #expect(canonicalBytes.starts(with: exactDomain))
+  #expect(canonicalBytes[exactDomain.count] == 0)
+  #expect(canonicalBytes.hex == fixture.canonicalHex)
+  #expect(
+    vector.schema.digest(
+      execution: vector.execution,
+      owners: vector.owners,
+      groups: vector.groups
+    ).hex == fixture.sha256)
+}
+
+private struct ReleasePostverificationBindingFixture: Decodable {
+  let schema: String
+  let bindingKind: String
+  let domainHex: String
+  let canonicalHex: String
+  let sha256: String
+
+  private enum CodingKeys: String, CodingKey {
+    case schema
+    case bindingKind = "binding_kind"
+    case domainHex = "domain_hex"
+    case canonicalHex = "canonical_hex"
+    case sha256
+  }
+}
+
+private func releasePostverificationBindingVector() throws -> (
+  schema: ReleasePostverificationComponentBindingV1,
+  execution: ReleasePostverificationExecutionBinding,
+  owners: [ReleasePostverificationOwnerLocator],
+  groups: [ReleasePostverificationGroupExpectation]
+) {
+  let epoch = try ExecutionEpochContext(
+    epochID: "fixture-epoch",
+    semanticReferenceTimeSeconds: 1_700_000_000,
+    issuedAtSeconds: 1_700_000_000,
+    deadlineSeconds: 1_700_000_300
+  )
+  let actionID = ActionID(digest: testDigest(10))
+  let ownerPath = try RawTargetPath(
+    components: [Data("namespace".utf8), Data([0x6f, 0x77, 0x6e, 0x65, 0x72, 0xcc, 0x81])]
+  )
+  let access = ReleaseDescriptorAccessSeal(
+    mode: 0o100600,
+    ownerUserID: 501,
+    ownerGroupID: 20,
+    authorizationFlags: 2,
+    aclDigest: testDigest(11),
+    mountIdentity: Data([0x00, 0x7f, 0x80, 0xff])
+  )
+  let rootIdentity = ObjectIdentity(
+    device: 0x0102_0304_0506_0708,
+    object: 0x1112_1314_1516_1718,
+    generation: .known(23),
+    type: .directory
+  )
+  let parentIdentity = ObjectIdentity(
+    device: 0x2122_2324_2526_2728,
+    object: 0x3132_3334_3536_3738,
+    generation: .unknown(.unsupported),
+    type: .directory
+  )
+  let targetIdentity = ObjectIdentity(
+    device: 0x4142_4344_4546_4748,
+    object: 0x5152_5354_5556_5758,
+    generation: .unreadable(ObservationFailure(code: "gen-denied", collector: "fixture")),
+    type: .regularFile
+  )
+  let owner = ReleasePostverificationOwnerLocator(
+    actionID: actionID,
+    candidateID: "candidate-\u{00e9}",
+    expectedIdentity: targetIdentity,
+    namespace: [
+      AuthorizedReleaseNamespaceComponent(
+        rawNameFromParent: nil,
+        descriptor: -1,
+        authorizedSeal: ReleaseDescriptorNamespaceSeal(
+          identity: rootIdentity, access: access)
+      ),
+      AuthorizedReleaseNamespaceComponent(
+        rawNameFromParent: Data("namespace".utf8),
+        descriptor: -1,
+        authorizedSeal: ReleaseDescriptorNamespaceSeal(
+          identity: parentIdentity, access: access)
+      ),
+    ],
+    rawLeafName: Data([0x6f, 0x77, 0x6e, 0x65, 0x72, 0xcc, 0x81])
+  )
+  let group = ReleasePostverificationGroupExpectation(
+    allocationGroupID: "group-\u{00e9}",
+    topology: ReleaseAllocationTopologyExpectation(
+      allocationGroupID: "group-\u{00e9}",
+      fileObjects: [
+        ReleaseFileTopologyExpectation(
+          fileObjectID: "file-e\u{0301}",
+          owners: [FileOwnerLink(candidateID: owner.candidateID, path: ownerPath)],
+          linkCount: .known(1)
+        )
+      ],
+      cloneRefCount: .known(1),
+      sharedBytes: .known(4_096),
+      snapshotBlocker: .known(false)
+    ),
+    ownerActionIDs: [actionID]
+  )
+  let execution = ReleasePostverificationExecutionBinding(
+    executionBindingHash: testDigest(9),
+    epoch: epoch,
+    planCaptureID: testDigest(5),
+    jitCaptureID: testDigest(6),
+    freshnessLimitSeconds: 300
+  )
+  return (
+    ReleasePostverificationComponentBindingV1(
+      manifestCurrentBindingHash: testDigest(9),
+      planHash: testDigest(1),
+      overlayHash: testDigest(2),
+      epoch: epoch,
+      planCaptureID: testDigest(5),
+      jitCaptureID: testDigest(6),
+      allocationGroupIDs: [group.allocationGroupID],
+      ownerActionIDs: [actionID]
+    ),
+    execution,
+    [owner],
+    [group]
+  )
+}
+
+extension Data {
+  fileprivate init?(hex: String) {
+    guard hex.count.isMultiple(of: 2) else { return nil }
+    var bytes: [UInt8] = []
+    bytes.reserveCapacity(hex.count / 2)
+    var index = hex.startIndex
+    while index < hex.endIndex {
+      let next = hex.index(index, offsetBy: 2)
+      guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+      bytes.append(byte)
+      index = next
+    }
+    self = Data(bytes)
+  }
+
+  fileprivate var hex: String { map { String(format: "%02x", $0) }.joined() }
+}
+
+@Test
 func topologyCollectorReceivesOpaqueCLOEXECDescriptorCapabilities() async throws {
   let fixture = try ReleasePostverificationFixture()
   defer { fixture.cleanUp() }
@@ -494,11 +763,9 @@ func duplicateOwnerAndRepeatedConsumptionFailClosed() async throws {
   let core = testCore(topology)
   let owner = fixture.ownerLocator()
   #expect(
-    throws: ReleasePostverificationFreezeError.duplicateOwner(fixture.actionID)
+    throws: ReleasePostverificationManifestClaimError.descriptorLocatorMembershipMismatch
   ) {
-    try core.freeze(
-      fixture.request(actualOwners: [owner, owner])
-    )
+    try fixture.request(actualOwners: [owner, owner])
   }
 
   let frozen = try core.freeze(fixture.request())
@@ -557,69 +824,69 @@ private final class RecordingReleaseTopologySource: @unchecked Sendable {
         )
       }
       try hook?()
-    if case .throwFailure = mode { throw TestTopologySourceError.failed }
-    if case .missing = mode { return .absent }
+      if case .throwFailure = mode { throw TestTopologySourceError.failed }
+      if case .missing = mode { return .absent }
 
-    var captureID = testDigest(240)
-    var executionBindingHash = request.executionBindingHash
-    var componentID = request.componentID
-    var epochID = request.epoch.epochID
-    var nonce = request.oneShotNonce
-    var capturedAt: Int64 = 200
-    if case .invalidCapture(let invalid) = mode {
-      switch invalid {
-      case .wrongExecutionBinding: executionBindingHash = testDigest(88)
-      case .wrongComponent: componentID = testDigest(89)
-      case .wrongEpoch: epochID = "wrong-epoch"
-      case .wrongNonce: nonce = Data(repeating: 91, count: 32)
-      case .stale: capturedAt = 150
-      case .extremePast: capturedAt = .min
-      case .planCapture: captureID = testDigest(1)
-      case .jitCapture: captureID = testDigest(2)
+      var captureID = testDigest(240)
+      var executionBindingHash = request.executionBindingHash
+      var componentID = request.componentID
+      var epochID = request.epoch.epochID
+      var nonce = request.oneShotNonce
+      var capturedAt: Int64 = 200
+      if case .invalidCapture(let invalid) = mode {
+        switch invalid {
+        case .wrongExecutionBinding: executionBindingHash = testDigest(88)
+        case .wrongComponent: componentID = testDigest(89)
+        case .wrongEpoch: epochID = "wrong-epoch"
+        case .wrongNonce: nonce = Data(repeating: 91, count: 32)
+        case .stale: capturedAt = 150
+        case .extremePast: capturedAt = .min
+        case .planCapture: captureID = testDigest(1)
+        case .jitCapture: captureID = testDigest(2)
+        }
       }
-    }
-    let groups = request.groups.map { expected -> CurrentReleaseTopologyGroup in
-      if case .groupStillAllocated(let retained) = mode,
-        RawUTF8Key(retained) == RawUTF8Key(expected.allocationGroupID)
-      {
+      let groups = request.groups.map { expected -> CurrentReleaseTopologyGroup in
+        if case .groupStillAllocated(let retained) = mode,
+          RawUTF8Key(retained) == RawUTF8Key(expected.allocationGroupID)
+        {
+          return CurrentReleaseTopologyGroup(
+            allocationGroupID: expected.allocationGroupID,
+            topology: .allocationGroupStillAllocated
+          )
+        }
+        var fileIDs = expected.topology.fileObjects.map {
+          Data($0.fileObjectID.utf8)
+        }
+        if case .rawFileObjectOverride(let override) = mode, !fileIDs.isEmpty {
+          fileIDs[0] = override
+        }
         return CurrentReleaseTopologyGroup(
           allocationGroupID: expected.allocationGroupID,
-          topology: .allocationGroupStillAllocated
-        )
-      }
-      var fileIDs = expected.topology.fileObjects.map {
-        Data($0.fileObjectID.utf8)
-      }
-      if case .rawFileObjectOverride(let override) = mode, !fileIDs.isEmpty {
-        fileIDs[0] = override
-      }
-      return CurrentReleaseTopologyGroup(
-        allocationGroupID: expected.allocationGroupID,
-        topology: .allocationGroupReleased(
-          AllocationGroupReleasedTopologyEvidence(
-            allocationGroupID: expected.allocationGroupID,
-            allocationGroupPresent: false,
-            fileObjects: fileIDs.map {
-              ReleasedFileObjectTopologyEvidence(
-                fileObjectID: $0,
-                remainingOwnerCount: 0
-              )
-            }
+          topology: .allocationGroupReleased(
+            AllocationGroupReleasedTopologyEvidence(
+              allocationGroupID: expected.allocationGroupID,
+              allocationGroupPresent: false,
+              fileObjects: fileIDs.map {
+                ReleasedFileObjectTopologyEvidence(
+                  fileObjectID: $0,
+                  remainingOwnerCount: 0
+                )
+              }
+            )
           )
         )
+      }
+      return .known(
+        CurrentReleaseTopologyCapture(
+          captureID: captureID,
+          executionBindingHash: executionBindingHash,
+          componentID: componentID,
+          epochID: epochID,
+          oneShotNonce: nonce,
+          capturedAtSeconds: capturedAt,
+          groups: groups
+        )
       )
-    }
-    return .known(
-      CurrentReleaseTopologyCapture(
-        captureID: captureID,
-        executionBindingHash: executionBindingHash,
-        componentID: componentID,
-        epochID: epochID,
-        oneShotNonce: nonce,
-        capturedAtSeconds: capturedAt,
-        groups: groups
-      )
-    )
     }
   }
 
@@ -768,7 +1035,7 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
   let namespaceName: String
   let rootDescriptor: Int32
   let namespaceDescriptor: Int32
-  let actionID = ActionID(digest: testDigest(7))
+  let actionID: ActionID
   let groupID = "allocation-group-a"
   let candidateID = "candidate-a"
   let ownerIdentity: ObjectIdentity
@@ -776,10 +1043,14 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
   let authorizedRootSeal: ReleaseDescriptorNamespaceSeal
   let authorizedParentSeal: ReleaseDescriptorNamespaceSeal
   let execution: ReleasePostverificationExecutionBinding
+  let plan: ImmutablePlan
+  let manifest: ExecutionManifest
+  let unitID: ExecutionUnitID
 
   init(
     namespaceName: String = "namespace",
-    fileObjectID: String = "file-object-a"
+    fileObjectID: String = "file-object-a",
+    allocationGroupIDs: [String] = ["allocation-group-a"]
   ) throws {
     self.namespaceName = namespaceName
     container = FileManager.default.temporaryDirectory
@@ -791,6 +1062,11 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       at: namespace,
       withIntermediateDirectories: true
     )
+    guard Darwin.chmod(root.path, 0o700) == 0,
+      Darwin.chmod(namespace.path, 0o700) == 0
+    else {
+      throw POSIXError(.init(rawValue: errno) ?? .EIO)
+    }
     try Data("payload".utf8).write(to: owner)
     rootDescriptor = root.path.withCString {
       Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -819,31 +1095,187 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       parentDescriptor: namespaceDescriptor,
       leaf: Data("owner".utf8)
     )
-    let ownerPath = try RawTargetPath(components: [Data("owner".utf8)])
-    topology = ReleaseAllocationTopologyExpectation(
-      allocationGroupID: groupID,
-      fileObjects: [
-        ReleaseFileTopologyExpectation(
-          fileObjectID: fileObjectID,
-          owners: [FileOwnerLink(candidateID: candidateID, path: ownerPath)],
-          linkCount: .known(1)
+    let rawRoot = try RawRootPath(absoluteBytes: Data(root.path.utf8))
+    let targetPath = try RawTargetPath(
+      components: [Data(namespaceName.utf8), Data("owner".utf8)]
+    )
+    let rootPolicySeal = Self.policySeal(authorizedRootSeal.access)
+    let parentPolicySeal = Self.policySeal(authorizedParentSeal.access)
+    let namespaceBinding = try ProtectedNamespaceBinding(
+      rawRoot: rawRoot,
+      rootIdentity: authorizedRootSeal.identity,
+      rootSeal: rootPolicySeal,
+      targetPath: targetPath,
+      targetIdentity: ownerIdentity,
+      parentChain: [
+        ParentNamespaceBinding(
+          relativePath: try RawTargetPath(components: [Data(namespaceName.utf8)]),
+          identity: authorizedParentSeal.identity,
+          seal: parentPolicySeal
+        )
+      ]
+    )
+    let facts = FrozenGlobalFacts(
+      captureID: testDigest(1),
+      profile: "standard",
+      configuration: Data("release-postverification".utf8),
+      coverage: [
+        GlobalCoverageFact(rawRoot: rawRoot, coverage: .complete, reasons: ["complete"])
+      ],
+      semanticReferenceTimeSeconds: 100,
+      policyVersion: "policy-1",
+      schemaVersion: "schema-1"
+    )
+    let evidence = try FrozenEvidenceSnapshot(
+      captureID: facts.captureID,
+      globalFactsHash: facts.globalFactsHash,
+      candidateID: candidateID,
+      namespaceBinding: namespaceBinding,
+      identity: .known(ownerIdentity),
+      coverage: .complete,
+      collectorStatus: .known(.complete),
+      activity: .known(.inactive),
+      explicitProtection: .known(.notProtected),
+      providerState: .known(.local),
+      recoverability: .known(.recoverable),
+      recoverabilityReviewFacts: [],
+      dependencyState: .known(.complete),
+      semanticReviewFacts: [],
+      accessPolicy: .known("owner-private"),
+      contentProtection: .known(.requiredDigest(testDigest(92))),
+      aclDigest: .known(testDigest(93)),
+      targetMountIdentity: .known("target-mount"),
+      removalForceRequirement: .known(.notRequired),
+      quarantineCapability: .known(true),
+      gitWorktree: nil,
+      adapterScope: .genericRemove,
+      additionalAdapterScopes: allocationGroupIDs.map {
+        .completeReleaseSetRemove(allocationGroupID: $0)
+      },
+      classificationClaims: completeClassificationClaims(),
+      semanticReferenceTimeSeconds: 100,
+      policyVersion: "policy-1",
+      schemaVersion: "schema-1"
+    )
+    let ownerAction = try makeAction(evidence: evidence, facts: facts)
+    actionID = ownerAction.id
+    let fixtureCandidateID = "candidate-a"
+    let candidate = try StorageCandidate(
+      id: fixtureCandidateID, evidence: evidence, immediatePrivateBytes: .known(1)
+    )
+    let provenance = GraphObservationProvenance(globalFacts: facts)
+    let fileObjects = try allocationGroupIDs.enumerated().map { index, _ in
+      let ownerPath =
+        index == 0
+        ? targetPath
+        : try RawTargetPath(
+          components: [
+            Data(namespaceName.utf8), Data("owner".utf8), Data("member-\(index + 1)".utf8),
+          ])
+      return FileObjectNode(
+        provenance: provenance,
+        id: index == 0 ? fileObjectID : "file-object-\(index + 1)",
+        observedOwners: [FileOwnerLink(candidateID: fixtureCandidateID, path: ownerPath)],
+        linkCount: .known(1)
+      )
+    }
+    let graph = try StorageReleaseGraph(
+      globalFacts: facts,
+      candidates: [candidate],
+      fileObjects: fileObjects,
+      allocationGroups: zip(allocationGroupIDs, fileObjects).map { groupID, file in
+        AllocationGroupNode(
+          provenance: provenance,
+          id: groupID,
+          ownerFileObjectIDs: [file.id],
+          cloneRefCount: .known(1),
+          sharedBytes: .known(4_096),
+          snapshotBlocker: .known(false)
+        )
+      }
+    )
+    let candidateBindings = [
+      CandidateActionBinding(candidateID: fixtureCandidateID, action: ownerAction)
+    ]
+    let releaseGraphBundle = try PlanReleaseSet.buildAll(
+      from: graph.evaluate(selectedCandidateActions: candidateBindings),
+      candidateActions: candidateBindings
+    )
+    let releaseActions = try releaseGraphBundle.releaseSets.map { releaseSet in
+      try makeAction(
+        evidence: evidence,
+        facts: facts,
+        prerequisites: [ownerAction],
+        request: .completeReleaseSetRemove(binding: releaseSet.actionBinding)
+      )
+    }
+    let builtPlan = try ImmutablePlan(
+      policyVersion: "policy-1",
+      schemaVersion: "schema-1",
+      globalFacts: facts,
+      evidenceSnapshots: [evidence],
+      actions: [ownerAction] + releaseActions,
+      releaseGraphBundle: releaseGraphBundle
+    )
+    plan = builtPlan
+    let epoch = try ExecutionEpochContext(
+      epochID: "epoch-release",
+      semanticReferenceTimeSeconds: 100,
+      issuedAtSeconds: 100,
+      deadlineSeconds: 300
+    )
+    let compound = try #require(builtPlan.releaseGraphManifest?.connectedComponents.first)
+    let releaseSetsByGroup = Dictionary(
+      uniqueKeysWithValues: builtPlan.releaseSets.map { (RawUTF8Key($0.allocationGroupID), $0) }
+    )
+    let compoundOwners = Set(
+      compound.allocationGroupIDs.flatMap {
+        releaseSetsByGroup[RawUTF8Key($0)]?.ownerActionIDs ?? []
+      }
+    ).sorted()
+    let manifestTemplate = ExecutionManifest(
+      planHash: builtPlan.planHash,
+      overlayHash: testDigest(8),
+      epoch: epoch,
+      currentCaptureID: testDigest(2),
+      executionActionIDs: [ownerAction.id] + releaseActions.map(\.id),
+      jitRevalidationActionIDs: Array(repeating: [], count: releaseActions.count + 1),
+      compoundReleaseUnits: [
+        CompoundReleaseUnit(
+          allocationGroupIDs: compound.allocationGroupIDs,
+          ownerActionIDs: compoundOwners
         )
       ],
-      cloneRefCount: .known(1),
-      sharedBytes: .known(4_096),
-      snapshotBlocker: .known(false)
+      currentPolicyBindings: [],
+      consentRequirements: [],
+      currentBindingHash: testDigest(3)
     )
+    let bindingHash = try #require(
+      Revalidator.recomputedManifestCurrentBindingHash(manifestTemplate, plan: builtPlan)
+    )
+    manifest = ExecutionManifest(
+      planHash: manifestTemplate.planHash,
+      overlayHash: manifestTemplate.overlayHash,
+      epoch: manifestTemplate.epoch,
+      currentCaptureID: manifestTemplate.currentCaptureID,
+      executionActionIDs: manifestTemplate.executionActionIDs,
+      jitRevalidationActionIDs: manifestTemplate.jitRevalidationActionIDs,
+      compoundReleaseUnits: manifestTemplate.compoundReleaseUnits,
+      currentPolicyBindings: manifestTemplate.currentPolicyBindings,
+      consentRequirements: manifestTemplate.consentRequirements,
+      currentBindingHash: bindingHash
+    )
+    unitID = .compoundRelease(compound.allocationGroupIDs)
     execution = ReleasePostverificationExecutionBinding(
-      executionBindingHash: testDigest(3),
-      epoch: try ExecutionEpochContext(
-        epochID: "epoch-release",
-        semanticReferenceTimeSeconds: 100,
-        issuedAtSeconds: 100,
-        deadlineSeconds: 300
-      ),
-      planCaptureID: testDigest(1),
-      jitCaptureID: testDigest(2),
-      freshnessLimitSeconds: 20
+      executionBindingHash: self.manifest.currentBindingHash,
+      epoch: self.manifest.epoch,
+      planCaptureID: builtPlan.globalFacts.captureID,
+      jitCaptureID: self.manifest.currentCaptureID,
+      freshnessLimitSeconds: self.manifest.epoch.deadlineSeconds
+        - self.manifest.epoch.issuedAtSeconds
+    )
+    topology = ReleaseAllocationTopologyExpectation(
+      try #require(builtPlan.releaseSets.first).topologyExpectation
     )
   }
 
@@ -877,37 +1309,50 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
 
   func groupExpectation(id: String? = nil) -> ReleasePostverificationGroupExpectation {
     let resolvedID = id ?? groupID
+    let releaseSet = plan.releaseSets.first {
+      RawUTF8Key($0.allocationGroupID) == RawUTF8Key(resolvedID)
+    }!
     return ReleasePostverificationGroupExpectation(
       allocationGroupID: resolvedID,
-      topology: ReleaseAllocationTopologyExpectation(
-        allocationGroupID: resolvedID,
-        fileObjects: topology.fileObjects,
-        cloneRefCount: topology.cloneRefCount,
-        sharedBytes: topology.sharedBytes,
-        snapshotBlocker: topology.snapshotBlocker
-      ),
-      ownerActionIDs: [actionID]
+      topology: ReleaseAllocationTopologyExpectation(releaseSet.topologyExpectation),
+      ownerActionIDs: releaseSet.ownerActionIDs.sorted()
+    )
+  }
+
+  func manifestReplacingCurrentBindingHash(
+    _ bindingHash: PolicyDigest
+  ) -> ExecutionManifest {
+    ExecutionManifest(
+      planHash: manifest.planHash,
+      overlayHash: manifest.overlayHash,
+      epoch: manifest.epoch,
+      currentCaptureID: manifest.currentCaptureID,
+      executionActionIDs: manifest.executionActionIDs,
+      jitRevalidationActionIDs: manifest.jitRevalidationActionIDs,
+      compoundReleaseUnits: manifest.compoundReleaseUnits,
+      currentPolicyBindings: manifest.currentPolicyBindings,
+      consentRequirements: manifest.consentRequirements,
+      currentBindingHash: bindingHash
     )
   }
 
   func request(
     owner: ReleasePostverificationOwnerLocator? = nil,
     actualOwners: [ReleasePostverificationOwnerLocator]? = nil,
-    groups: [ReleasePostverificationGroupExpectation]? = nil,
-    authorizedOwner: ReleasePostverificationOwnerLocator? = nil,
-    authorizedGroups: [ReleasePostverificationGroupExpectation]? = nil
+    authorizedOwner: ReleasePostverificationOwnerLocator? = nil
   ) throws -> ReleasePostverificationComponentRequest {
     let resolvedOwners = actualOwners ?? [owner ?? ownerLocator()]
-    let resolvedGroups = groups ?? [groupExpectation()]
-    let handle = try testManifestAuthority.authorize(
-      execution: execution,
-      owners: authorizedOwner.map { [$0] } ?? resolvedOwners,
-      groups: authorizedGroups ?? resolvedGroups
+    let authority = try EngineReleasePostverificationManifestAuthority(
+      testingClaimedManifest: manifest,
+      plan: plan
+    )
+    let handle = try authority.authorize(
+      unitID: unitID,
+      descriptorLocators: authorizedOwner.map { [$0] } ?? resolvedOwners
     )
     return ReleasePostverificationComponentRequest(
       componentHandle: handle,
-      owners: resolvedOwners,
-      groups: resolvedGroups
+      owners: resolvedOwners
     )
   }
 
@@ -970,6 +1415,18 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       type: .regularFile
     )
   }
+
+  private static func policySeal(
+    _ access: ReleaseDescriptorAccessSeal
+  ) -> NamespaceSealEvidence {
+    NamespaceSealEvidence(
+      trustedNamespace: .ownerPrivate,
+      accessPolicy: .known("owner-private"),
+      aclDigest: .known(access.aclDigest),
+      providerBoundary: .known(.local),
+      mountIdentity: .known(access.mountIdentity.base64EncodedString())
+    )
+  }
 }
 
 private func testCore(
@@ -978,15 +1435,12 @@ private func testCore(
     POSIXReleasePostverificationDescriptorProbe()
 ) -> DescriptorBoundReleasePostverificationCore {
   DescriptorBoundReleasePostverificationCore(
-    manifestAuthority: testManifestAuthority,
     topologyCollector: source.collector,
     descriptorProbe: descriptorProbe,
     nowSeconds: { 200 },
     nonceGenerator: { Data(repeating: 9, count: 32) }
   )
 }
-
-private let testManifestAuthority = EngineReleasePostverificationManifestAuthority()
 
 private func testDigest(_ byte: UInt8) -> PolicyDigest {
   try! PolicyDigest(bytes: Data(repeating: byte, count: 32))

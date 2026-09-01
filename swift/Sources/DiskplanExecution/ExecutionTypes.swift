@@ -642,6 +642,9 @@ public final class ApplyCapability: @unchecked Sendable {
 
 struct ClaimedApplyAuthorization: Sendable {
   let manifest: ExecutionManifest
+  /// Copied from the one-shot registry record independently of later consumers of `manifest`.
+  /// Engine-internal authorities compare both values before deriving mutation-adjacent state.
+  let registryCurrentBindingHash: PolicyDigest
   let collector: EngineRevalidationCollector
   let generation: UInt64
   let confirmedForceActionIDs: [ActionID]
