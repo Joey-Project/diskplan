@@ -446,7 +446,7 @@ package enum RuntimeEmissionBudget {
 final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private static let maximumConsumedReviewBindingCount = 100_000
   private let lock = NSCondition()
-  private let reviewCommitHookForTesting: (@Sendable () -> Void)?
+  private let reviewCommitHookForTesting: (@Sendable () throws -> Void)?
   private var plan: RuntimePlanReceipt?
   private var overlay: Diskplan_V1_DecisionOverlayAcknowledged?
   private var review: Diskplan_V1_ApplyReviewProjection?
@@ -457,7 +457,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
   private var activeEmissionToken: RuntimeAuthorityEmissionToken?
   private var reviewPublicationInFlight = false
 
-  init(reviewCommitHookForTesting: (@Sendable () -> Void)? = nil) {
+  init(reviewCommitHookForTesting: (@Sendable () throws -> Void)? = nil) {
     self.reviewCommitHookForTesting = reviewCommitHookForTesting
   }
 
@@ -672,7 +672,7 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
 
   fileprivate func commit(_ transaction: RuntimeAuthorityEmissionTransaction) throws {
     if case .review = transaction.prepared.transition {
-      reviewCommitHookForTesting?()
+      try reviewCommitHookForTesting?()
     }
     try withLock {
       guard
@@ -1449,8 +1449,8 @@ public final class RuntimeBusinessResponder: @unchecked Sendable {
       completed = true
       return true
     } catch {
-      authority.abortReviewPublication(transaction)
       rollback()
+      authority.abortReviewPublication(transaction)
       completed = true
       throw error
     }

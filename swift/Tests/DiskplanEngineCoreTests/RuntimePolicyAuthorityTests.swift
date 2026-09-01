@@ -1430,6 +1430,71 @@ import Testing
     })
 }
 
+@Test func failedReplacementReviewRestoresPreviousAuthorityBeforeConfirmWakes() async throws {
+  let reviewAID = Data("positive-review-a".utf8)
+  let reviewBID = Data("positive-review-b".utf8)
+  let commitHook = RuntimePositiveFailingCommitHook(failingInvocation: 2)
+  let backend = RuntimePositiveBackend(
+    waitForCancellation: false,
+    reviewIDs: [reviewAID, reviewBID]
+  )
+  let fixture = try runtimePositiveFixture(
+    backend: backend,
+    reviewCommitHook: { try commitHook.call() }
+  )
+  defer {
+    commitHook.open()
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let reviewA = try await prepareRuntimePositiveReview(fixture)
+  #expect(reviewA.applyReviewID.value == reviewAID)
+
+  var requestB = Diskplan_V1_PrepareApplyReviewRequest()
+  requestB.requestID = 4
+  requestB.projectionID = fixture.plan.projectionID
+  requestB.overlayID = fixture.overlay.overlayID
+  requestB.overlayRevision = fixture.overlay.revision
+  requestB.overlaySha256 = fixture.overlay.overlaySha256
+  try #require(fixture.authority.claim(.prepareApplyReview(requestB)) == nil)
+  try fixture.controller.handle(
+    .prepareApplyReview(requestB),
+    responder: fixture.responder(.prepareApplyReview(requestB))
+  )
+  try #require(commitHook.waitUntilEntered())
+  #expect(fixture.controller.preparedApplyReviewIDForTesting() == reviewBID)
+
+  let confirmation = runtimePositiveConfirmation(reviewA, requestID: 5)
+  let claimStarted = AuthorityTestFlag()
+  let claimFinished = AuthorityTestFlag()
+  let claim = Task.detached {
+    claimStarted.set()
+    let rejection = fixture.authority.claim(.confirmApply(confirmation))
+    claimFinished.set()
+    return rejection
+  }
+  try #require(claimStarted.wait(timeout: 2))
+  #expect(!claimFinished.wait(timeout: 0.05))
+
+  commitHook.open()
+  #expect((await claim.value)?.code == nil)
+  #expect(fixture.controller.preparedApplyReviewIDForTesting() == reviewAID)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  #expect(
+    await runtimeEventually {
+      backend.startCount == 1
+        && fixture.controller.activeExecutionIDForTesting() == nil
+    })
+
+  var replay = confirmation
+  replay.requestID = 6
+  #expect(fixture.authority.claim(.confirmApply(replay))?.code == .staleBinding)
+  #expect(backend.startCount == 1)
+}
+
 @Test func controllerInstallsReviewBeforePublicationAndRollsBackOnWriterFailure() async throws {
   let backend = RuntimePositiveBackend(waitForCancellation: false)
   let writer = RuntimePositiveWriter()
@@ -1487,7 +1552,7 @@ import Testing
     try? fixture.broker.finish()
   }
   let review = try await prepareRuntimePositiveReview(fixture)
-  var confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
   try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
   try fixture.controller.handle(
     .confirmApply(confirmation),
@@ -1496,10 +1561,13 @@ import Testing
   #expect(
     await runtimeEventually {
       backend.startCount == 1 && backend.cancelCount == 1 && backend.tailAwaitCount == 1
+        && fixture.controller.activeExecutionIDForTesting() == nil
     })
-  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
-  confirmation.requestID = 5
-  #expect(fixture.authority.claim(.confirmApply(confirmation))?.code == .staleBinding)
+  let replay = runtimePositiveConfirmation(review, requestID: 5)
+  #expect(
+    await runtimeEventually {
+      fixture.authority.claim(.confirmApply(replay))?.code == .staleBinding
+    })
 }
 
 @Test func controllerCancelsAndAwaitsWhenExecutionRegistrationFails() async throws {
@@ -1521,8 +1589,8 @@ import Testing
   #expect(
     await runtimeEventually {
       backend.startCount == 1 && backend.cancelCount == 1 && backend.tailAwaitCount == 1
+        && fixture.controller.activeExecutionIDForTesting() == nil
     })
-  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
 }
 
 @Test func controllerCancelsAndAwaitsOnPrefixWriterFailure() async throws {
@@ -2651,6 +2719,53 @@ private final class RuntimePositiveGate: @unchecked Sendable {
   }
 }
 
+private enum RuntimePositiveCommitHookError: Error {
+  case injected
+}
+
+private final class RuntimePositiveFailingCommitHook: @unchecked Sendable {
+  private let condition = NSCondition()
+  private let failingInvocation: Int
+  private var invocationCount = 0
+  private var entered = false
+  private var isOpen = false
+
+  init(failingInvocation: Int) {
+    self.failingInvocation = failingInvocation
+  }
+
+  func call() throws {
+    condition.lock()
+    invocationCount += 1
+    guard invocationCount == failingInvocation else {
+      condition.unlock()
+      return
+    }
+    entered = true
+    condition.broadcast()
+    while !isOpen { condition.wait() }
+    condition.unlock()
+    throw RuntimePositiveCommitHookError.injected
+  }
+
+  func waitUntilEntered(timeout: TimeInterval = 2) -> Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    let deadline = Date(timeIntervalSinceNow: timeout)
+    while !entered {
+      guard condition.wait(until: deadline) else { return entered }
+    }
+    return true
+  }
+
+  func open() {
+    condition.lock()
+    isOpen = true
+    condition.broadcast()
+    condition.unlock()
+  }
+}
+
 private final class AuthorityTestOutput: @unchecked Sendable {
   private let lock = NSLock()
   private var payloads: [Data] = []
@@ -2916,7 +3031,8 @@ private final class RuntimePositiveWriter: @unchecked Sendable {
 private func runtimePositiveFixture(
   backend: RuntimePositiveBackend,
   writer: RuntimePositiveWriter? = nil,
-  reviewCommitGate: RuntimePositiveGate? = nil
+  reviewCommitGate: RuntimePositiveGate? = nil,
+  reviewCommitHook: (@Sendable () throws -> Void)? = nil
 ) throws -> RuntimePositiveFixture {
   let result = authorityScanResult()
   let session = seededAuthoritySession(result: result)
@@ -2942,11 +3058,11 @@ private func runtimePositiveFixture(
       output.append(data)
     }
   }
-  let reviewCommitHook: (@Sendable () -> Void)? = reviewCommitGate.map { gate in
+  let gateHook: (@Sendable () throws -> Void)? = reviewCommitGate.map { gate in
     { @Sendable in gate.wait() }
   }
   let authority = RuntimeBusinessAuthorityState(
-    reviewCommitHookForTesting: reviewCommitHook
+    reviewCommitHookForTesting: reviewCommitHook ?? gateHook
   )
   var build = Diskplan_V1_BuildPlanRequest()
   build.requestID = 1
@@ -3060,10 +3176,12 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   private let lock = NSLock()
   private let waitForCancellation: Bool
   private let startGate: RuntimePositiveGate?
+  private let reviewIDs: [Data]
   private var starts = 0
   private var cancellations = 0
   private var dryRuns = 0
   private var tailAwaits = 0
+  private var reviewPreparationCount = 0
 
   var startCount: Int {
     lock.lock()
@@ -3092,11 +3210,14 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   init(
     waitForCancellation: Bool,
     executionID: Data = Data("positive-execution".utf8),
-    startGate: RuntimePositiveGate? = nil
+    startGate: RuntimePositiveGate? = nil,
+    reviewIDs: [Data] = [Data("positive-review".utf8)]
   ) {
+    precondition(!reviewIDs.isEmpty)
     self.waitForCancellation = waitForCancellation
     self.executionID = executionID
     self.startGate = startGate
+    self.reviewIDs = reviewIDs
   }
 
   func prepareDryRun(
@@ -3131,7 +3252,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     lifetimeSeconds _: Int64
   ) async throws -> RuntimePreparedApplyReview {
     var projection = Diskplan_V1_ApplyReviewProjection()
-    projection.applyReviewID.value = Data("positive-review".utf8)
+    projection.applyReviewID.value = nextReviewID()
     projection.projectionID = context.planManifest.projectionID
     projection.planSha256 = context.planManifest.planSha256
     projection.overlayID = context.overlayProjection.overlayID
@@ -3188,6 +3309,15 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     lock.lock()
     dryRuns += 1
     lock.unlock()
+  }
+
+  private func nextReviewID() -> Data {
+    lock.lock()
+    let index = min(reviewPreparationCount, reviewIDs.count - 1)
+    reviewPreparationCount += 1
+    let reviewID = reviewIDs[index]
+    lock.unlock()
+    return reviewID
   }
 
   private func recordStart() {
