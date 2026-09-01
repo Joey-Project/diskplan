@@ -63,16 +63,56 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
   private struct PreparedApply {
     let context: RuntimeExecutionPlanContext
     let projection: Diskplan_V1_ApplyReviewProjection
-    let authority: any RuntimePreparedApplyAuthority
+    let authority: RuntimeApplyAuthorityBox
   }
 
   private struct ActiveExecution {
-    let run: any RuntimeExecutionRun
+    let run: RuntimeExecutionRunHandle
     let context: RuntimeExecutionPlanContext
     let review: Diskplan_V1_ApplyReviewProjection
     let confirmationResponder: RuntimeBusinessResponder
     var events: [Diskplan_V1_ExecutionStreamEvent]
     var cancellationResponder: RuntimeBusinessResponder?
+    var prefixSent: Bool
+    var finishing: Bool
+  }
+
+  private final class RuntimeApplyAuthorityBox: @unchecked Sendable {
+    private enum State {
+      case fresh(RuntimePreparedApplyAttempt)
+      case claimed
+      case invalidated
+    }
+
+    private let lock = NSLock()
+    private var state: State
+
+    init(_ attempt: RuntimePreparedApplyAttempt) {
+      state = .fresh(attempt)
+    }
+
+    func claim() -> RuntimePreparedApplyAttempt? {
+      lock.lock()
+      defer { lock.unlock() }
+      guard case .fresh(let attempt) = state else { return nil }
+      state = .claimed
+      return attempt
+    }
+
+    func invalidate() {
+      lock.lock()
+      if case .fresh = state { state = .invalidated }
+      lock.unlock()
+    }
+  }
+
+  private final class PreparedApplyPublication: @unchecked Sendable {
+    let candidate: PreparedApply
+    var previous: PreparedApply?
+
+    init(_ candidate: PreparedApply) {
+      self.candidate = candidate
+    }
   }
 
   private let lock = NSLock()
@@ -85,7 +125,11 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
   private var ownedTasks: [UUID: RuntimeOwnedTask] = [:]
   private var stopping = false
 
-  public init(executionBackend: (any RuntimeExecutionBackend)? = nil) {
+  public init() {
+    executionBackend = nil
+  }
+
+  package init(executionBackend: any RuntimeExecutionBackend) {
     self.executionBackend = executionBackend
   }
 
@@ -393,18 +437,31 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
             ))
           return
         }
-        try responder.send(
+        let authority = RuntimeApplyAuthorityBox(prepared.attempt)
+        let candidate = PreparedApply(
+          context: context,
+          projection: sealed,
+          authority: authority
+        )
+        let publication = PreparedApplyPublication(candidate)
+        let installed = try responder.sendApplyReview(
           try .applyReview(
             sealed,
             negotiatedProtocolMinor: responder.negotiatedProtocolMinor
-          ))
-        self?.installPreparedApplyIfCurrent(
-          PreparedApply(
-            context: context,
-            projection: sealed,
-            authority: prepared.authority
-          )
+          ),
+          install: { self?.installPreparedApplyIfCurrent(publication) == true },
+          rollback: { self?.rollbackPreparedApply(publication) }
         )
+        guard installed else {
+          authority.invalidate()
+          try responder.send(
+            try .rejected(
+              code: .staleBinding,
+              summary: "plan or overlay changed during apply-review publication"
+            ))
+          return
+        }
+        publication.previous?.authority.invalidate()
       } catch {
         try? responder.rejectHandlerFailure()
       }
@@ -423,26 +480,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
         ))
       return
     }
-    lock.lock()
-    let prepared = preparedApply
-    if let prepared,
-      request.applyReviewID == prepared.projection.applyReviewID,
-      request.reviewBindingSha256 == prepared.projection.reviewBindingSha256,
-      Set(request.confirmedForceActionIds.map(\.value))
-        == Set(prepared.projection.forceWarningActionIds.map(\.value)),
-      request.confirmedForceActionIds.count
-        == Set(request.confirmedForceActionIds.map(\.value)).count
-    {
-      preparedApply = nil
-    }
-    lock.unlock()
-    guard let prepared,
-      request.applyReviewID == prepared.projection.applyReviewID,
-      request.reviewBindingSha256 == prepared.projection.reviewBindingSha256,
-      Set(request.confirmedForceActionIds.map(\.value))
-        == Set(prepared.projection.forceWarningActionIds.map(\.value)),
-      request.confirmedForceActionIds.count
-        == Set(request.confirmedForceActionIds.map(\.value)).count
+    guard let (prepared, attempt) = claimPreparedApply(request)
     else {
       try responder.send(
         try .rejected(
@@ -455,42 +493,32 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     startTask { [weak self] in
       guard let self else { return }
       do {
-        let run = try await executionBackend.startApply(
-          authority: prepared.authority,
+        let run = try await attempt.start(
           confirmation: RuntimeApplyConfirmation(
             review: prepared.projection,
             confirmedForceActionIDs: request.confirmedForceActionIds
           ),
           context: prepared.context
         )
-        guard !run.executionID.isEmpty,
-          run.executionID.count <= SealedRuntimeWire.maximumOpaqueIdentifierBytes,
-          run.applyStarted.executionID.value == run.executionID
-        else { throw RuntimeSessionControllerError.staleReceipt }
-        try responder.registerExecution(run.executionID)
         var started = run.applyStarted
         started.executionEventIndex = 1
-        try installActiveExecution(
-          run: run,
-          context: prepared.context,
-          review: prepared.projection,
-          responder: responder,
-          started: started
-        )
-
-        let remaining = try await run.remainingEvents()
-        guard !remaining.isEmpty,
-          remaining.dropLast().allSatisfy({ event in
-            if case .applyStarted? = event.body { return false }
-            if case .cancellationAcknowledged? = event.body { return false }
-            if case .applyFinished? = event.body { return false }
-            return event.body != nil
-          }),
-          remaining.last?.applyFinished != nil
-        else { throw RuntimeSessionControllerError.staleReceipt }
-        try finishExecution(run: run, remaining: remaining)
+        guard
+          installActiveExecution(
+            run: run,
+            context: prepared.context,
+            review: prepared.projection,
+            responder: responder,
+            started: started
+          )
+        else {
+          run.cancel()
+          _ = await run.awaitTail()
+          try? responder.rejectHandlerFailure()
+          return
+        }
+        await driveStartedExecution(run: run, fallbackResponder: responder)
       } catch {
-        failExecution(fallbackResponder: responder)
+        try? responder.rejectHandlerFailure()
       }
     }
   }
@@ -521,6 +549,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
       try responder.sendExecutionPrefix(prefix)
       active.events = prefix
       active.cancellationResponder = responder
+      active.prefixSent = true
       activeExecution = active
       lock.unlock()
       active.run.cancel()
@@ -530,35 +559,76 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     }
   }
 
+  private func driveStartedExecution(
+    run: RuntimeExecutionRunHandle,
+    fallbackResponder: RuntimeBusinessResponder
+  ) async {
+    do {
+      guard contextIsCurrentForActiveRun(run) else {
+        throw RuntimeSessionControllerError.staleReceipt
+      }
+      try fallbackResponder.registerExecution(run.executionID)
+      try fallbackResponder.sendExecutionPrefix([run.applyStarted])
+      markExecutionPrefixSent(run)
+    } catch {
+      await abortStartedExecutionBeforePrefix(run, fallbackResponder: fallbackResponder)
+      return
+    }
+
+    let tail = await run.awaitTail()
+    while !Task.isCancelled {
+      do {
+        try finishExecution(run: run, tail: tail)
+        return
+      } catch RuntimeTerminalCommitError.pendingCancellation {
+        await Task.yield()
+      } catch {
+        run.cancel()
+        _ = await run.awaitTail()
+        return
+      }
+    }
+    run.cancel()
+    _ = await run.awaitTail()
+  }
+
+  private func abortStartedExecutionBeforePrefix(
+    _ run: RuntimeExecutionRunHandle,
+    fallbackResponder: RuntimeBusinessResponder
+  ) async {
+    run.cancel()
+    _ = await run.awaitTail()
+    clearActiveExecution(run)
+    try? fallbackResponder.rejectHandlerFailure()
+  }
+
+  private func clearActiveExecution(_ run: RuntimeExecutionRunHandle) {
+    lock.lock()
+    if activeExecution?.run === run { activeExecution = nil }
+    lock.unlock()
+  }
+
   private func finishExecution(
-    run: any RuntimeExecutionRun,
-    remaining: [Diskplan_V1_ExecutionStreamEvent]
+    run: RuntimeExecutionRunHandle,
+    tail: RuntimeExecutionTail
   ) throws {
     lock.lock()
-    guard let active = activeExecution,
-      (active.run as AnyObject) === (run as AnyObject)
+    guard var active = activeExecution, active.run === run
     else {
       lock.unlock()
       return
     }
-    activeExecution = nil
+    active.finishing = true
+    activeExecution = active
     lock.unlock()
-    let events = active.events + remaining
-    if let cancellationResponder = active.cancellationResponder {
-      try cancellationResponder.finishExecution(events)
-    }
-    try active.confirmationResponder.finishExecution(events)
-  }
-
-  private func failExecution(fallbackResponder: RuntimeBusinessResponder) {
+    let events = active.events + tail.events
+    try active.confirmationResponder.finishExecution(
+      events,
+      mirroredTo: active.cancellationResponder
+    )
     lock.lock()
-    let active = activeExecution
-    activeExecution = nil
+    if activeExecution?.run === run { activeExecution = nil }
     lock.unlock()
-    if let cancellationResponder = active?.cancellationResponder {
-      try? cancellationResponder.rejectHandlerFailure()
-    }
-    try? (active?.confirmationResponder ?? fallbackResponder).rejectHandlerFailure()
   }
 
   private func executionContext(
@@ -607,39 +677,79 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
       && overlayProjection.overlaySha256 == context.overlayProjection.overlaySha256
   }
 
-  private func installPreparedApplyIfCurrent(_ prepared: PreparedApply) {
+  private func claimPreparedApply(
+    _ request: Diskplan_V1_ConfirmApplyRequest
+  ) -> (PreparedApply, RuntimePreparedApplyAttempt)? {
     lock.lock()
     defer { lock.unlock() }
-    guard contextIsCurrentUnderLock(prepared.context) else { return }
-    preparedApply = prepared
+    guard let prepared = preparedApply,
+      request.applyReviewID == prepared.projection.applyReviewID,
+      request.reviewBindingSha256 == prepared.projection.reviewBindingSha256,
+      Set(request.confirmedForceActionIds.map(\.value))
+        == Set(prepared.projection.forceWarningActionIds.map(\.value)),
+      request.confirmedForceActionIds.count
+        == Set(request.confirmedForceActionIds.map(\.value)).count,
+      let attempt = prepared.authority.claim()
+    else { return nil }
+    preparedApply = nil
+    return (prepared, attempt)
+  }
+
+  private func installPreparedApplyIfCurrent(_ publication: PreparedApplyPublication) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard contextIsCurrentUnderLock(publication.candidate.context) else { return false }
+    publication.previous = preparedApply
+    preparedApply = publication.candidate
+    return true
+  }
+
+  private func rollbackPreparedApply(_ publication: PreparedApplyPublication) {
+    lock.lock()
+    if preparedApply?.authority === publication.candidate.authority {
+      preparedApply = publication.previous
+    }
+    lock.unlock()
+    publication.candidate.authority.invalidate()
   }
 
   private func installActiveExecution(
-    run: any RuntimeExecutionRun,
+    run: RuntimeExecutionRunHandle,
     context: RuntimeExecutionPlanContext,
     review: Diskplan_V1_ApplyReviewProjection,
     responder: RuntimeBusinessResponder,
     started: Diskplan_V1_ExecutionStreamEvent
-  ) throws {
+  ) -> Bool {
     lock.lock()
     defer { lock.unlock() }
-    guard contextIsCurrentUnderLock(context) else {
-      throw RuntimeSessionControllerError.staleReceipt
-    }
+    guard activeExecution == nil else { return false }
     activeExecution = ActiveExecution(
       run: run,
       context: context,
       review: review,
       confirmationResponder: responder,
       events: [started],
-      cancellationResponder: nil
+      cancellationResponder: nil,
+      prefixSent: false,
+      finishing: false
     )
-    do {
-      try responder.sendExecutionPrefix([started])
-    } catch {
-      activeExecution = nil
-      throw error
+    return true
+  }
+
+  private func contextIsCurrentForActiveRun(_ run: RuntimeExecutionRunHandle) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let active = activeExecution, active.run === run else { return false }
+    return contextIsCurrentUnderLock(active.context)
+  }
+
+  private func markExecutionPrefixSent(_ run: RuntimeExecutionRunHandle) {
+    lock.lock()
+    if var active = activeExecution, active.run === run {
+      active.prefixSent = true
+      activeExecution = active
     }
+    lock.unlock()
   }
 
   func stopAndWait() {
@@ -657,6 +767,10 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     taskCondition.lock()
     while !ownedTasks.isEmpty { taskCondition.wait() }
     taskCondition.unlock()
+
+    lock.lock()
+    activeExecution = nil
+    lock.unlock()
   }
 
   @discardableResult

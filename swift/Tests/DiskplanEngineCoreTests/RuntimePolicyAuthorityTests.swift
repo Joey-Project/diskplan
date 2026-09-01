@@ -1,3 +1,4 @@
+import DiskplanCore
 import DiskplanPolicy
 import DiskplanProto
 import Foundation
@@ -1336,6 +1337,174 @@ import Testing
   try fixture.broker.finish()
 }
 
+@Test func controllerInstallsReviewBeforePublicationAndRollsBackOnWriterFailure() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: false)
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  writer.observeInstalledReview()
+  writer.block(at: .applyReview)
+  writer.fail(at: .applyReview)
+
+  var request = Diskplan_V1_PrepareApplyReviewRequest()
+  request.requestID = 3
+  request.projectionID = fixture.plan.projectionID
+  request.overlayID = fixture.overlay.overlayID
+  request.overlayRevision = fixture.overlay.revision
+  request.overlaySha256 = fixture.overlay.overlaySha256
+  try #require(fixture.authority.claim(.prepareApplyReview(request)) == nil)
+  try fixture.controller.handle(
+    .prepareApplyReview(request),
+    responder: fixture.responder(.prepareApplyReview(request))
+  )
+  try #require(writer.waitUntilBlocked())
+  #expect(writer.sawInstalledReview)
+  #expect(fixture.controller.preparedApplyReviewIDForTesting() != nil)
+
+  writer.release()
+  #expect(
+    await runtimeEventually {
+      fixture.controller.preparedApplyReviewIDForTesting() == nil
+    })
+  fixture.controller.stopAndWait()
+  #expect(backend.startCount == 0)
+  #expect(throws: (any Error).self) { try fixture.broker.finish() }
+}
+
+@Test func controllerCancelsAndAwaitsInvalidStartedRun() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: true, executionID: Data())
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  var confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  #expect(
+    await runtimeEventually {
+      backend.startCount == 1 && backend.cancelCount == 1 && backend.tailAwaitCount == 1
+    })
+  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
+  confirmation.requestID = 5
+  #expect(fixture.authority.claim(.confirmApply(confirmation))?.code == .staleBinding)
+}
+
+@Test func controllerCancelsAndAwaitsWhenExecutionRegistrationFails() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: true)
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+
+  // Deliberately bypass the server's authority claim to exercise the
+  // post-start registration failure path without adding a production seam.
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  #expect(
+    await runtimeEventually {
+      backend.startCount == 1 && backend.cancelCount == 1 && backend.tailAwaitCount == 1
+    })
+  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
+}
+
+@Test func controllerCancelsAndAwaitsOnPrefixWriterFailure() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: true)
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  let review = try await prepareRuntimePositiveReview(fixture)
+  writer.fail(at: .applyStarted)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  #expect(
+    await runtimeEventually {
+      backend.cancelCount == 1 && backend.tailAwaitCount == 1
+        && fixture.controller.activeExecutionIDForTesting() == nil
+    })
+  fixture.controller.stopAndWait()
+  #expect(throws: (any Error).self) { try fixture.broker.finish() }
+}
+
+@Test func controllerRetainsRunAndAwaitsOnTerminalWriterFailure() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: false)
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  let review = try await prepareRuntimePositiveReview(fixture)
+  writer.fail(at: .applyFinished)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  #expect(
+    await runtimeEventually {
+      backend.cancelCount == 1 && backend.tailAwaitCount == 1
+        && fixture.controller.activeExecutionIDForTesting() == backend.executionID
+    })
+  fixture.controller.stopAndWait()
+  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
+  #expect(throws: (any Error).self) { try fixture.broker.finish() }
+}
+
+@Test func lateCancellationCannotRaceFinishingTerminal() async throws {
+  let backend = RuntimePositiveBackend(waitForCancellation: false)
+  let writer = RuntimePositiveWriter()
+  let fixture = try runtimePositiveFixture(backend: backend, writer: writer)
+  defer {
+    writer.release()
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  writer.block(at: .applyFinished)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+  try #require(writer.waitUntilBlocked())
+
+  var cancellation = Diskplan_V1_CancelExecutionRequest()
+  cancellation.requestID = 5
+  cancellation.executionID.value = backend.executionID
+  #expect(fixture.authority.claim(.cancelExecution(cancellation))?.code == .staleBinding)
+  #expect(backend.cancelCount == 0)
+
+  writer.release()
+  #expect(
+    await runtimeEventually {
+      fixture.controller.activeExecutionIDForTesting() == nil
+    })
+}
+
+@Test func runtimeExecutionTailRejectsMissingTerminal() {
+  var started = Diskplan_V1_ExecutionStreamEvent()
+  started.executionID.value = Data("sealed-tail".utf8)
+  started.body = .applyStarted(Diskplan_V1_ApplyStartedProjection())
+  #expect(throws: SealedRuntimeWireError.self) {
+    try RuntimeExecutionTail(
+      applyStarted: started,
+      remainingEvents: [],
+      requiredForceWarningActionIDs: [],
+      negotiatedProtocolMinor: protocolMinor
+    )
+  }
+}
+
 @Test func equalCloneIDsOnDifferentDevicesRemainSeparateAllocationGroups() throws {
   let accumulator = BoundedAuthorityEvidenceAccumulator()
   for (rootID, directoryObject, fileObject, device) in [
@@ -2511,8 +2680,101 @@ private final class RuntimePositiveFixture: @unchecked Sendable {
   }
 }
 
+private enum RuntimePositiveWritePoint: Equatable {
+  case applyReview
+  case applyStarted
+  case applyFinished
+}
+
+private enum RuntimePositiveWriterError: Error {
+  case injected
+}
+
+private final class RuntimePositiveWriter: @unchecked Sendable {
+  let output = AuthorityTestOutput()
+  weak var controller: RuntimeSessionController?
+
+  private let condition = NSCondition()
+  private var failurePoint: RuntimePositiveWritePoint?
+  private var blockingPoint: RuntimePositiveWritePoint?
+  private var blocked = false
+  private var released = false
+  private var observeReviewInstallation = false
+  private var observedInstalledReview = false
+
+  func observeInstalledReview() {
+    condition.lock()
+    observeReviewInstallation = true
+    condition.unlock()
+  }
+
+  func fail(at point: RuntimePositiveWritePoint) {
+    condition.lock()
+    failurePoint = point
+    condition.unlock()
+  }
+
+  func block(at point: RuntimePositiveWritePoint) {
+    condition.lock()
+    blockingPoint = point
+    condition.unlock()
+  }
+
+  func waitUntilBlocked(timeout: TimeInterval = 2) -> Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    let deadline = Date(timeIntervalSinceNow: timeout)
+    while !blocked {
+      guard condition.wait(until: deadline) else { return blocked }
+    }
+    return true
+  }
+
+  func release() {
+    condition.lock()
+    released = true
+    condition.broadcast()
+    condition.unlock()
+  }
+
+  var sawInstalledReview: Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    return observedInstalledReview
+  }
+
+  func write(_ data: Data) throws {
+    let point = Self.writePoint(data)
+    condition.lock()
+    if point == .applyReview, observeReviewInstallation {
+      observedInstalledReview = controller?.preparedApplyReviewIDForTesting() != nil
+    }
+    if let blockingPoint, point == blockingPoint {
+      blocked = true
+      condition.broadcast()
+      while !released { condition.wait() }
+    }
+    let shouldFail = failurePoint.map { point == $0 } ?? false
+    condition.unlock()
+    if shouldFail { throw RuntimePositiveWriterError.injected }
+    output.append(data)
+  }
+
+  private static func writePoint(_ data: Data) -> RuntimePositiveWritePoint? {
+    guard let envelope = try? Diskplan_V1_Envelope(serializedBytes: data),
+      case .runtimeEvent(let runtimeEvent) = envelope.body
+    else { return nil }
+    if case .applyReviewProjection? = runtimeEvent.body { return .applyReview }
+    guard case .executionStreamEvent(let event)? = runtimeEvent.body else { return nil }
+    if case .applyStarted? = event.body { return .applyStarted }
+    if case .applyFinished? = event.body { return .applyFinished }
+    return nil
+  }
+}
+
 private func runtimePositiveFixture(
-  backend: RuntimePositiveBackend
+  backend: RuntimePositiveBackend,
+  writer: RuntimePositiveWriter? = nil
 ) throws -> RuntimePositiveFixture {
   let result = authorityScanResult()
   let session = seededAuthoritySession(result: result)
@@ -2529,8 +2791,15 @@ private func runtimePositiveFixture(
       isPartial: false,
       authoritySession: session
     ))
-  let output = AuthorityTestOutput()
-  let broker = SerialEventBroker { output.append($0) }
+  let output = writer?.output ?? AuthorityTestOutput()
+  writer?.controller = controller
+  let broker = SerialEventBroker { data in
+    if let writer {
+      try writer.write(data)
+    } else {
+      output.append(data)
+    }
+  }
   let authority = RuntimeBusinessAuthorityState()
   var build = Diskplan_V1_BuildPlanRequest()
   build.requestID = 1
@@ -2617,6 +2886,18 @@ private func prepareRuntimePositiveReview(
   return try #require(reviews.last)
 }
 
+private func runtimePositiveConfirmation(
+  _ review: Diskplan_V1_ApplyReviewProjection,
+  requestID: UInt64
+) -> Diskplan_V1_ConfirmApplyRequest {
+  var confirmation = Diskplan_V1_ConfirmApplyRequest()
+  confirmation.requestID = requestID
+  confirmation.applyReviewID = review.applyReviewID
+  confirmation.reviewBindingSha256 = review.reviewBindingSha256
+  confirmation.confirmedForceActionIds = review.forceWarningActionIds
+  return confirmation
+}
+
 private func runtimeEventually(
   _ predicate: @escaping @Sendable () -> Bool
 ) async -> Bool {
@@ -2627,26 +2908,14 @@ private func runtimeEventually(
   return predicate()
 }
 
-private final class RuntimePositiveAuthority: RuntimePreparedApplyAuthority, @unchecked Sendable {
-  private let lock = NSLock()
-  private var consumed = false
-
-  func consume() -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    guard !consumed else { return false }
-    consumed = true
-    return true
-  }
-}
-
 private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked Sendable {
-  let executionID = Data("positive-execution".utf8)
+  let executionID: Data
   private let lock = NSLock()
   private let waitForCancellation: Bool
   private var starts = 0
   private var cancellations = 0
   private var dryRuns = 0
+  private var tailAwaits = 0
 
   var startCount: Int {
     lock.lock()
@@ -2666,8 +2935,18 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     return dryRuns
   }
 
-  init(waitForCancellation: Bool) {
+  var tailAwaitCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return tailAwaits
+  }
+
+  init(
+    waitForCancellation: Bool,
+    executionID: Data = Data("positive-execution".utf8)
+  ) {
     self.waitForCancellation = waitForCancellation
+    self.executionID = executionID
   }
 
   func prepareDryRun(
@@ -2720,28 +2999,37 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     projection.reviewBindingSha256.value = Data(repeating: 0x83, count: 32)
     return RuntimePreparedApplyReview(
       projection: projection,
-      authority: RuntimePositiveAuthority()
+      attempt: RuntimePreparedApplyAttempt { [weak self] confirmation, context in
+        guard let self else { throw RuntimePositiveBackendError.unavailable }
+        return try await self.startApply(confirmation: confirmation, context: context)
+      }
     )
   }
 
-  func startApply(
-    authority: any RuntimePreparedApplyAuthority,
+  private func startApply(
     confirmation: RuntimeApplyConfirmation,
     context: RuntimeExecutionPlanContext
-  ) async throws -> any RuntimeExecutionRun {
-    guard let authority = authority as? RuntimePositiveAuthority,
-      authority.consume()
-    else { throw RuntimePositiveBackendError.replayed }
+  ) async throws -> RuntimeExecutionRunHandle {
     recordStart()
-    let cancellation: @Sendable () -> Void = { [weak self] in
-      self?.recordCancellation()
-    }
-    return RuntimePositiveRun(
-      executionID: executionID,
+    let sourceExecutionID =
+      executionID.isEmpty ? Data("invalid-physical-execution".utf8) : executionID
+    let source = try RuntimePositiveTailSource(
+      executionID: sourceExecutionID,
       review: confirmation.review,
       context: context,
-      waitForCancellation: waitForCancellation,
-      cancellation: cancellation
+      waitForCancellation: waitForCancellation
+    )
+    return try await RuntimeExecutionRunHandle.start(
+      executionID: executionID,
+      applyStarted: source.applyStarted,
+      awaitTail: { [weak self] in
+        self?.recordTailAwait()
+        return await source.awaitTail()
+      },
+      cancel: { [weak self] in
+        self?.recordCancellation()
+        source.release()
+      }
     )
   }
 
@@ -2762,30 +3050,30 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     cancellations += 1
     lock.unlock()
   }
+
+  private func recordTailAwait() {
+    lock.lock()
+    tailAwaits += 1
+    lock.unlock()
+  }
 }
 
 private enum RuntimePositiveBackendError: Error {
-  case replayed
+  case unavailable
 }
 
-private final class RuntimePositiveRun: RuntimeExecutionRun, @unchecked Sendable {
-  let executionID: Data
+private final class RuntimePositiveTailSource: @unchecked Sendable {
   let applyStarted: Diskplan_V1_ExecutionStreamEvent
   private let condition = NSCondition()
-  private let terminal: Diskplan_V1_ExecutionStreamEvent
-  private let cancellation: @Sendable () -> Void
+  private let tail: RuntimeExecutionTail
   private var released: Bool
-  private var cancellationObserved = false
 
   init(
     executionID: Data,
     review: Diskplan_V1_ApplyReviewProjection,
     context: RuntimeExecutionPlanContext,
-    waitForCancellation: Bool,
-    cancellation: @escaping @Sendable () -> Void
-  ) {
-    self.executionID = executionID
-    self.cancellation = cancellation
+    waitForCancellation: Bool
+  ) throws {
     released = !waitForCancellation
     var started = Diskplan_V1_ApplyStartedProjection()
     started.epoch = review.epoch
@@ -2816,13 +3104,17 @@ private final class RuntimePositiveRun: RuntimeExecutionRun, @unchecked Sendable
     var terminalEvent = Diskplan_V1_ExecutionStreamEvent()
     terminalEvent.executionID.value = executionID
     terminalEvent.body = .applyFinished(finished)
-    terminal = terminalEvent
-    _ = context
+    tail = try RuntimeExecutionTail(
+      applyStarted: startEvent,
+      remainingEvents: [terminalEvent],
+      requiredForceWarningActionIDs: review.forceWarningActionIds,
+      negotiatedProtocolMinor: context.negotiatedProtocolMinor
+    )
   }
 
-  func remainingEvents() async throws -> [Diskplan_V1_ExecutionStreamEvent] {
+  func awaitTail() async -> RuntimeExecutionTail {
     while true {
-      if isReleased() { return [terminal] }
+      if isReleased() { return tail }
       try? await Task.sleep(for: .milliseconds(2))
     }
   }
@@ -2833,14 +3125,11 @@ private final class RuntimePositiveRun: RuntimeExecutionRun, @unchecked Sendable
     return released
   }
 
-  func cancel() {
+  func release() {
     condition.lock()
-    let first = !cancellationObserved
-    cancellationObserved = true
     released = true
     condition.broadcast()
     condition.unlock()
-    if first { cancellation() }
   }
 }
 
