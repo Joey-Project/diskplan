@@ -1037,7 +1037,7 @@ import Testing
     releaseGraph: nil,
     releaseGraphFailure: nil
   )
-  let projected = try RuntimePlanDomainProjector.project(result).compactMap {
+  let projected = try RuntimePlanDomainProjector.project(result).records.compactMap {
     record -> Diskplan_V1_PlanActionProjection? in
     guard case .action(let action)? = record.body else { return nil }
     return action
@@ -1682,7 +1682,7 @@ import Testing
   }
 }
 
-@Test func controllerCancelsAwaitsClearsAndRejectsInvalidAuthoritativeTail() async throws {
+@Test func controllerCancelsAwaitsClearsAndAbortsInvalidAuthoritativeTail() async throws {
   let backend = RuntimePositiveBackend(
     waitForCancellation: false,
     producesInvalidTail: true
@@ -1704,12 +1704,55 @@ import Testing
     await runtimeEventually {
       backend.cancelCount == 1 && backend.tailAwaitCount == 1
         && fixture.controller.activeExecutionIDForTesting() == nil
-        && fixture.output.runtimeEvents().contains { event in
-          guard case .runtimeRejected(let rejection)? = event.body else { return false }
-          return rejection.code == .confirmationMismatch
-            && rejection.summary == "runtime business handler failed"
-        }
     })
+  #expect(
+    !fixture.output.runtimeEvents().contains { event in
+      if case .runtimeRejected? = event.body { true } else { false }
+    })
+  #expect(fixture.authority.liveApplyReviewIDForTesting() == nil)
+}
+
+@Test func controllerEmitsExactApplyStartFailureTerminalWithoutStartingRun() async throws {
+  let backend = RuntimePositiveBackend(
+    waitForCancellation: false,
+    startFailure: .invalidExecutionGraph
+  )
+  let fixture = try runtimePositiveFixture(backend: backend)
+  defer {
+    fixture.controller.stopAndWait()
+    try? fixture.broker.finish()
+  }
+  let review = try await prepareRuntimePositiveReview(fixture)
+  let confirmation = runtimePositiveConfirmation(review, requestID: 4)
+  try #require(fixture.authority.claim(.confirmApply(confirmation)) == nil)
+  try fixture.controller.handle(
+    .confirmApply(confirmation),
+    responder: fixture.responder(.confirmApply(confirmation))
+  )
+
+  #expect(
+    await runtimeEventually {
+      fixture.output.runtimeEvents().contains { event in
+        guard case .executionStreamEvent(let stream)? = event.body,
+          case .applyFinished(let finished)? = stream.body
+        else { return false }
+        return stream.executionID.value == backend.executionID
+          && finished.startFailure == .invalidExecutionGraph
+      }
+    })
+  let executionEvents: [Diskplan_V1_ExecutionStreamEvent] =
+    fixture.output.runtimeEvents().compactMap { event in
+      guard case .executionStreamEvent(let stream)? = event.body,
+        stream.executionID.value == backend.executionID
+      else { return nil }
+      return stream
+    }
+  #expect(executionEvents.count == 1)
+  #expect(backend.startCount == 1)
+  #expect(backend.cancelCount == 0)
+  #expect(backend.tailAwaitCount == 0)
+  #expect(fixture.controller.activeExecutionIDForTesting() == nil)
+  #expect(fixture.authority.liveApplyReviewIDForTesting() == nil)
 }
 
 @Test func equalCloneIDsOnDifferentDevicesRemainSeparateAllocationGroups() throws {
@@ -3212,6 +3255,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   private let waitForCancellation: Bool
   private let startGate: RuntimePositiveGate?
   private let producesInvalidTail: Bool
+  private let startFailure: Diskplan_V1_ApplyStartFailureKind?
   private let reviewIDs: [Data]
   private var starts = 0
   private var cancellations = 0
@@ -3248,6 +3292,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     executionID: Data = Data("positive-execution".utf8),
     startGate: RuntimePositiveGate? = nil,
     producesInvalidTail: Bool = false,
+    startFailure: Diskplan_V1_ApplyStartFailureKind? = nil,
     reviewIDs: [Data] = [Data("positive-review".utf8)]
   ) {
     precondition(!reviewIDs.isEmpty)
@@ -3255,6 +3300,7 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
     self.executionID = executionID
     self.startGate = startGate
     self.producesInvalidTail = producesInvalidTail
+    self.startFailure = startFailure
     self.reviewIDs = reviewIDs
   }
 
@@ -3318,9 +3364,23 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
   private func startApply(
     confirmation: RuntimeApplyConfirmation,
     context: RuntimeExecutionPlanContext
-  ) async throws -> RuntimeExecutionRunHandle {
+  ) async throws -> RuntimeApplyLaunchResult {
     startGate?.wait()
     recordStart()
+    if let startFailure {
+      var finished = Diskplan_V1_ApplyFinishedProjection()
+      finished.applyReviewID = confirmation.review.applyReviewID
+      finished.reviewBindingSha256 = confirmation.review.reviewBindingSha256
+      finished.startFailure = startFailure
+      var event = Diskplan_V1_ExecutionStreamEvent()
+      event.executionID.value = executionID
+      event.body = .applyFinished(finished)
+      return .startFailed(
+        try RuntimeApplyStartFailureTerminal(
+          validating: event,
+          negotiatedProtocolMinor: context.negotiatedProtocolMinor
+        ))
+    }
     let sourceExecutionID =
       executionID.isEmpty ? Data("invalid-physical-execution".utf8) : executionID
     let source = try RuntimePositiveTailSource(
@@ -3330,17 +3390,19 @@ private final class RuntimePositiveBackend: RuntimeExecutionBackend, @unchecked 
       waitForCancellation: waitForCancellation,
       producesInvalidTail: producesInvalidTail
     )
-    return try await RuntimeExecutionRunHandle.start(
-      executionID: executionID,
-      applyStarted: source.applyStarted,
-      awaitTail: { [weak self] in
-        self?.recordTailAwait()
-        return await source.awaitTail()
-      },
-      cancel: { [weak self] in
-        self?.recordCancellation()
-        source.release()
-      }
+    return .started(
+      try await RuntimeExecutionRunHandle.start(
+        executionID: executionID,
+        applyStarted: source.applyStarted,
+        awaitTail: { [weak self] in
+          self?.recordTailAwait()
+          return await source.awaitTail()
+        },
+        cancel: { [weak self] in
+          self?.recordCancellation()
+          source.release()
+        }
+      )
     )
   }
 
@@ -3385,7 +3447,7 @@ private enum RuntimePositiveBackendError: Error {
 private final class RuntimePositiveTailSource: @unchecked Sendable {
   let applyStarted: Diskplan_V1_ExecutionStreamEvent
   private let condition = NSCondition()
-  private let tail: RuntimeExecutionTail
+  private let tail: RuntimeExecutionTailOutcome
   private var released: Bool
 
   init(
@@ -3426,7 +3488,7 @@ private final class RuntimePositiveTailSource: @unchecked Sendable {
     terminalEvent.executionID.value = executionID
     terminalEvent.body = .applyFinished(finished)
     if producesInvalidTail {
-      tail = RuntimeExecutionTail(
+      tail = RuntimeExecutionTail.outcome(
         authoritativeProjection: RuntimeAuthoritativeExecutionProjection.validating(
           applyStarted: startEvent,
           remainingEvents: [],
@@ -3434,16 +3496,18 @@ private final class RuntimePositiveTailSource: @unchecked Sendable {
           negotiatedProtocolMinor: context.negotiatedProtocolMinor
         ))
     } else {
-      tail = try RuntimeExecutionTail(
-        applyStarted: startEvent,
-        remainingEvents: [terminalEvent],
-        requiredForceWarningActionIDs: review.forceWarningActionIds,
-        negotiatedProtocolMinor: context.negotiatedProtocolMinor
+      tail = .sealed(
+        try RuntimeExecutionTail(
+          applyStarted: startEvent,
+          remainingEvents: [terminalEvent],
+          requiredForceWarningActionIDs: review.forceWarningActionIds,
+          negotiatedProtocolMinor: context.negotiatedProtocolMinor
+        )
       )
     }
   }
 
-  func awaitTail() async -> RuntimeExecutionTail {
+  func awaitTail() async -> RuntimeExecutionTailOutcome {
     while true {
       if isReleased() { return tail }
       try? await Task.sleep(for: .milliseconds(2))

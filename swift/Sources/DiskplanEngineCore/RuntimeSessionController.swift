@@ -53,6 +53,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     let receipt: RuntimeFinalizedScanReceipt
     let result: RuntimePolicyAuthorityResult
     let records: [Diskplan_V1_PlanProjectionRecord]
+    let releaseSetIDByAllocationGroup: [Data: Data]
     let metadata: PlanProjectionWireMetadata
     let manifest: Diskplan_V1_PlanProjectionManifest
     var domainOverlay: DecisionOverlay?
@@ -214,10 +215,11 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     }
 
     let result = try receipt.authoritySession.makePlan()
-    let records = try RuntimePlanDomainProjector.project(
+    let projection = try RuntimePlanDomainProjector.project(
       result,
       negotiatedProtocolMinor: responder.negotiatedProtocolMinor
     )
+    let records = projection.records
     let metadata = PlanProjectionWireMetadata(
       scanSessionID: receipt.scanSessionID,
       scanCheckpointID: receipt.checkpointID,
@@ -250,6 +252,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
       receipt: receipt,
       result: result,
       records: records,
+      releaseSetIDByAllocationGroup: projection.releaseSetIDByAllocationGroup,
       metadata: metadata,
       manifest: wire.manifest,
       domainOverlay: nil,
@@ -505,13 +508,23 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     startTask { [weak self] in
       guard let self else { return }
       do {
-        let run = try await attempt.start(
+        let launch = try await attempt.start(
           confirmation: RuntimeApplyConfirmation(
             review: prepared.projection,
             confirmedForceActionIDs: request.confirmedForceActionIds
           ),
           context: prepared.context
         )
+        guard case .started(let run) = launch else {
+          if case .startFailed(let terminal) = launch {
+            do {
+              try responder.finishApplyStartFailure(terminal)
+            } catch {
+              try? responder.abortExecutionStreamWithoutEmission()
+            }
+          }
+          return
+        }
         var started = run.applyStarted
         started.executionEventIndex = 1
         guard
@@ -587,12 +600,15 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
       return
     }
 
-    let tail = await run.awaitTail()
-    guard !tail.validationFailed else {
+    let outcome = await run.awaitTail()
+    guard case .sealed(let tail) = outcome else {
       run.cancel()
       _ = await run.awaitTail()
+      let cancellationResponder = cancellationResponder(for: run)
       clearActiveExecution(run)
-      try? fallbackResponder.rejectHandlerFailure()
+      try? fallbackResponder.abortExecutionStreamWithoutEmission(
+        mirroredTo: cancellationResponder
+      )
       return
     }
     while !Task.isCancelled {
@@ -625,6 +641,15 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
     lock.lock()
     if activeExecution?.run === run { activeExecution = nil }
     lock.unlock()
+  }
+
+  private func cancellationResponder(
+    for run: RuntimeExecutionRunHandle
+  ) -> RuntimeBusinessResponder? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard activeExecution?.run === run else { return nil }
+    return activeExecution?.cancellationResponder
   }
 
   private func finishExecution(
@@ -671,6 +696,7 @@ public final class RuntimeSessionController: RuntimeScanAuthority, RuntimeBusine
       plan: live.result.plan,
       overlay: overlay,
       planRecords: live.records,
+      releaseSetIDByAllocationGroup: live.releaseSetIDByAllocationGroup,
       planManifest: live.manifest,
       overlayProjection: overlayProjection,
       negotiatedProtocolMinor: negotiatedProtocolMinor

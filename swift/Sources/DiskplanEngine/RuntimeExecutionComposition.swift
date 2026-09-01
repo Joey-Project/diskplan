@@ -70,8 +70,10 @@ package final class DiskplanRuntimeExecutionBackend: RuntimeExecutionBackend, @u
           confirmation.review.projectionID == review.projectionID,
           confirmation.review.planSha256 == review.planSha256,
           confirmation.review.overlaySha256 == review.overlaySha256,
-          confirmation.confirmedForceActionIDs.map(\.value)
-            == ready.forceWarningActionIDs.map(\.digest.bytes)
+          runtimeForceConfirmationMatches(
+            confirmed: confirmation.confirmedForceActionIDs.map(\.value),
+            expected: ready.forceWarningActionIDs.map(\.digest.bytes)
+          )
         else { throw DiskplanRuntimeExecutionProjectionError.confirmationBindingMismatch }
 
         let authorization = try await composition.preparation.authorizeApply(
@@ -95,51 +97,226 @@ package final class DiskplanRuntimeExecutionBackend: RuntimeExecutionBackend, @u
   }
 }
 
+func runtimeForceConfirmationMatches(confirmed: [Data], expected: [Data]) -> Bool {
+  Set(confirmed).count == confirmed.count
+    && Set(expected).count == expected.count
+    && Set(confirmed) == Set(expected)
+}
+
 enum DiskplanRuntimeExecutionProjectionError: Error, Equatable {
   case unexpectedPreparationResult
   case missingActionPreview
   case missingReleaseSet
   case confirmationBindingMismatch
-  case applyStartFailed(ApplyStartFailure?)
   case eventStreamInvariant
   case invalidGeneratedIdentifier
 }
 
-private actor RuntimeApplyEventCapture: ExecutionEventSink {
-  enum Start: Sendable {
-    case started(String)
-    case completed(BestEffortApplyReport)
+struct RuntimeApplyCaptureBudget: Equatable, Sendable {
+  static let runtimeDefault = RuntimeApplyCaptureBudget(
+    maximumEventCount: 25_000,
+    maximumAccountedBytes: 32 * 1_024 * 1_024,
+    perEventOverheadBytes: 512,
+    terminalReserveBytes: 4 * 1_024
+  )
+
+  let maximumEventCount: UInt64
+  let maximumAccountedBytes: UInt64
+  let perEventOverheadBytes: UInt64
+  let terminalReserveBytes: UInt64
+}
+
+struct RuntimeProjectedExecutionBuffer: Sendable {
+  private(set) var events: [Diskplan_V1_ExecutionStreamEvent] = []
+  private(set) var observedEventCount: UInt64 = 0
+  private(set) var observedEncodedBytes: UInt64 = 0
+  private var accountedBytes: UInt64
+  private let budget: RuntimeApplyCaptureBudget
+
+  init(budget: RuntimeApplyCaptureBudget = .runtimeDefault) {
+    self.budget = budget
+    accountedBytes = budget.terminalReserveBytes
   }
 
-  private var events: [ExecutionEvent] = []
+  mutating func append(
+    _ candidates: [Diskplan_V1_ExecutionStreamEvent]
+  ) -> RuntimeExecutionTailFailure? {
+    for candidate in candidates {
+      let encodedCount: UInt64
+      do {
+        encodedCount = UInt64(try candidate.serializedData().count)
+      } catch {
+        return .projectionValidationFailed
+      }
+      guard let nextCount = adding(observedEventCount, 1),
+        let nextEncodedBytes = adding(observedEncodedBytes, encodedCount),
+        let withPayload = adding(accountedBytes, encodedCount),
+        let nextAccountedBytes = adding(withPayload, budget.perEventOverheadBytes)
+      else { return .projectionLimitExceeded(observedEventCount: .max, observedEncodedBytes: .max) }
+      observedEventCount = nextCount
+      observedEncodedBytes = nextEncodedBytes
+      guard nextCount <= budget.maximumEventCount,
+        nextAccountedBytes <= budget.maximumAccountedBytes
+      else {
+        return .projectionLimitExceeded(
+          observedEventCount: nextCount,
+          observedEncodedBytes: nextEncodedBytes
+        )
+      }
+      accountedBytes = nextAccountedBytes
+      events.append(candidate)
+    }
+    return nil
+  }
+
+  mutating func clear() {
+    events.removeAll(keepingCapacity: false)
+  }
+
+  private func adding(_ lhs: UInt64, _ rhs: UInt64) -> UInt64? {
+    let result = lhs.addingReportingOverflow(rhs)
+    return result.overflow ? nil : result.partialValue
+  }
+}
+
+private final class RuntimeApplyTaskControl: @unchecked Sendable {
+  private let lock = NSLock()
+  private var task: Task<BestEffortApplyReport, Never>?
+  private var cancellationRequested = false
+  private var cancellationDelivered = false
+
+  func install(_ task: Task<BestEffortApplyReport, Never>) {
+    lock.lock()
+    self.task = task
+    let shouldCancel = cancellationRequested && !cancellationDelivered
+    if shouldCancel { cancellationDelivered = true }
+    lock.unlock()
+    if shouldCancel { task.cancel() }
+  }
+
+  func cancel() {
+    lock.lock()
+    cancellationRequested = true
+    let task = cancellationDelivered ? nil : task
+    if task != nil { cancellationDelivered = true }
+    lock.unlock()
+    task?.cancel()
+  }
+}
+
+private actor RuntimeApplyEventCapture: ExecutionEventSink {
+  enum Start: Sendable {
+    case started(Diskplan_V1_ExecutionStreamEvent)
+    case completed(BestEffortApplyReport)
+    case failed(RuntimeExecutionTailFailure)
+  }
+
+  private let executionID: Data
+  private let review: Diskplan_V1_ApplyReviewProjection
+  private let projector: RuntimeExecutionProjector
+  private let taskControl: RuntimeApplyTaskControl
+  private var buffer = RuntimeProjectedExecutionBuffer()
+  private var started: Diskplan_V1_ExecutionStreamEvent?
   private var completion: BestEffortApplyReport?
+  private var failure: RuntimeExecutionTailFailure?
+  private var terminalSeen = false
   private var startWaiters: [CheckedContinuation<Start, Never>] = []
 
+  init(
+    executionID: Data,
+    review: Diskplan_V1_ApplyReviewProjection,
+    projector: RuntimeExecutionProjector,
+    taskControl: RuntimeApplyTaskControl
+  ) {
+    self.executionID = executionID
+    self.review = review
+    self.projector = projector
+    self.taskControl = taskControl
+  }
+
   func emit(_ event: ExecutionEvent) {
-    events.append(event)
-    guard case .applyStarted(let epochID) = event else { return }
-    let waiters = startWaiters
-    startWaiters.removeAll()
-    for waiter in waiters { waiter.resume(returning: .started(epochID)) }
+    guard failure == nil else { return }
+    if started == nil, case .applyStarted(let epochID) = event {
+      guard Data(epochID.utf8) == review.epoch.epochID.value else {
+        fail(.backendContractViolation)
+        return
+      }
+      let projected = projector.project(event, executionID: executionID, review: review)
+      guard projected.count == 1, case .applyStarted? = projected[0].body else {
+        fail(.backendContractViolation)
+        return
+      }
+      guard let projectionFailure = buffer.append(projected) else {
+        started = projected[0]
+        resumeStartWaiters(.started(projected[0]))
+        return
+      }
+      fail(projectionFailure)
+      return
+    }
+    guard started != nil else {
+      fail(.backendContractViolation)
+      return
+    }
+    guard !terminalSeen else {
+      fail(.backendContractViolation)
+      return
+    }
+    if case .applyStarted = event {
+      fail(.backendContractViolation)
+      return
+    }
+    let projected = projector.project(event, executionID: executionID, review: review)
+    if let projectionFailure = buffer.append(projected) {
+      fail(projectionFailure)
+    } else if case .applyFinished = event {
+      terminalSeen = true
+    }
   }
 
   func complete(_ report: BestEffortApplyReport) {
     completion = report
-    guard !events.contains(where: { if case .applyStarted = $0 { true } else { false } }) else {
-      return
+    if let failure {
+      resumeStartWaiters(.failed(failure))
+    } else if started == nil {
+      resumeStartWaiters(.completed(report))
     }
-    let waiters = startWaiters
-    startWaiters.removeAll()
-    for waiter in waiters { waiter.resume(returning: .completed(report)) }
   }
 
   func awaitStart() async -> Start {
-    if case .applyStarted(let epochID)? = events.first { return .started(epochID) }
+    if let failure { return .failed(failure) }
+    if let started { return .started(started) }
     if let completion { return .completed(completion) }
     return await withCheckedContinuation { startWaiters.append($0) }
   }
 
-  func snapshot() -> [ExecutionEvent] { events }
+  func tailOutcome(for report: BestEffortApplyReport) -> RuntimeExecutionTailOutcome {
+    if let failure { return .failed(failure) }
+    guard report.startFailure == nil, report.manifest != nil, terminalSeen, let started,
+      buffer.events.first == started
+    else { return .failed(.backendContractViolation) }
+    let projection = RuntimeAuthoritativeExecutionProjection.validating(
+      applyStarted: started,
+      remainingEvents: Array(buffer.events.dropFirst()),
+      requiredForceWarningActionIDs: review.forceWarningActionIds,
+      negotiatedProtocolMinor: projector.context.negotiatedProtocolMinor
+    )
+    return RuntimeExecutionTail.outcome(authoritativeProjection: projection)
+  }
+
+  private func fail(_ value: RuntimeExecutionTailFailure) {
+    guard failure == nil else { return }
+    failure = value
+    buffer.clear()
+    taskControl.cancel()
+    resumeStartWaiters(.failed(value))
+  }
+
+  private func resumeStartWaiters(_ value: Start) {
+    let waiters = startWaiters
+    startWaiters.removeAll()
+    for waiter in waiters { waiter.resume(returning: value) }
+  }
 }
 
 private enum RuntimeApplyRun {
@@ -151,8 +328,14 @@ private enum RuntimeApplyRun {
     overlay: DecisionOverlay,
     review: Diskplan_V1_ApplyReviewProjection,
     projector: RuntimeExecutionProjector
-  ) async throws -> RuntimeExecutionRunHandle {
-    let capture = RuntimeApplyEventCapture()
+  ) async throws -> RuntimeApplyLaunchResult {
+    let taskControl = RuntimeApplyTaskControl()
+    let capture = RuntimeApplyEventCapture(
+      executionID: executionID,
+      review: review,
+      projector: projector,
+      taskControl: taskControl
+    )
     let coordinator = composition.makeApplyCoordinator(observing: capture)
     let applyTask = Task {
       let report = await coordinator.apply(
@@ -163,35 +346,42 @@ private enum RuntimeApplyRun {
       await capture.complete(report)
       return report
     }
+    taskControl.install(applyTask)
     switch await capture.awaitStart() {
     case .completed(let report):
       _ = await applyTask.value
-      throw DiskplanRuntimeExecutionProjectionError.applyStartFailed(report.startFailure)
-    case .started(let epochID):
-      guard epochID == review.epoch.epochID.value.utf8String else {
-        applyTask.cancel()
+      guard let failure = report.startFailure, report.unitOutcomes.isEmpty,
+        report.auditFailures.isEmpty
+      else { throw DiskplanRuntimeExecutionProjectionError.eventStreamInvariant }
+      return .startFailed(
+        try projector.applyStartFailureTerminal(
+          executionID: executionID,
+          review: review,
+          failure: failure
+        ))
+    case .failed:
+      taskControl.cancel()
+      _ = await applyTask.value
+      throw DiskplanRuntimeExecutionProjectionError.eventStreamInvariant
+    case .started(let started):
+      guard case .applyStarted(let projectedStart)? = started.body,
+        projectedStart.epoch.epochID == review.epoch.epochID
+      else {
+        taskControl.cancel()
         _ = await applyTask.value
         throw DiskplanRuntimeExecutionProjectionError.eventStreamInvariant
       }
-    }
-
-    let started = projector.applyStarted(executionID: executionID, review: review)
-    return try await RuntimeExecutionRunHandle.start(
-      executionID: executionID,
-      applyStarted: started,
-      awaitTail: {
-        let report = await applyTask.value
-        let events = await capture.snapshot()
-        return projector.executionTail(
+      return .started(
+        try await RuntimeExecutionRunHandle.start(
           executionID: executionID,
-          review: review,
           applyStarted: started,
-          events: events,
-          report: report
-        )
-      },
-      cancel: { applyTask.cancel() }
-    )
+          awaitTail: {
+            let report = await applyTask.value
+            return await capture.tailOutcome(for: report)
+          },
+          cancel: { taskControl.cancel() }
+        ))
+    }
   }
 }
 
@@ -217,15 +407,16 @@ struct RuntimeExecutionProjector: Sendable {
       }
     }
     self.actions = actions
-    var releaseSetIDsByGroup: [String: Data] = [:]
-    for domain in context.plan.releaseSets {
-      let ownerIDs = domain.ownerActionIDs.map { $0.digest.bytes }
-      guard
-        let wire = releaseSets.values.first(where: { $0.actionIds.map(\.value) == ownerIDs })
-      else { throw DiskplanRuntimeExecutionProjectionError.missingReleaseSet }
-      releaseSetIDsByGroup[domain.allocationGroupID] = wire.releaseSetID.value
-    }
-    self.releaseSetIDsByGroup = releaseSetIDsByGroup
+    releaseSetIDsByGroup = try runtimeExactReleaseSetBindings(
+      domains: context.plan.releaseSets.map {
+        RuntimeReleaseSetDomainBinding(
+          allocationGroupID: $0.allocationGroupID,
+          ownerActionIDs: $0.ownerActionIDs.sorted().map { $0.digest.bytes }
+        )
+      },
+      exactIDsByAllocationGroup: context.releaseSetIDByAllocationGroup,
+      wireReleaseSets: releaseSets
+    )
   }
 
   func dryRun(_ report: DryRunReport) throws -> RuntimePreparedDryRun {
@@ -331,55 +522,57 @@ struct RuntimeExecutionProjector: Sendable {
     return event
   }
 
-  func executionTail(
+  func project(
+    _ event: ExecutionEvent,
+    executionID: Data,
+    review: Diskplan_V1_ApplyReviewProjection
+  ) -> [Diskplan_V1_ExecutionStreamEvent] {
+    switch event {
+    case .applyStarted:
+      return [applyStarted(executionID: executionID, review: review)]
+    case .unitFinished(let outcome):
+      var projected: [Diskplan_V1_ExecutionStreamEvent] = []
+      if outcome.status == .jitRejected, let jit = outcome.jitReport {
+        projected.append(
+          streamEvent(executionID, .unitJitRejected(jitRejected(outcome.id, jit))))
+      } else if outcome.status == .skippedPrerequisite {
+        projected.append(streamEvent(executionID, .unitSkippedPrerequisite(skipped(outcome))))
+      }
+      projected.append(
+        streamEvent(
+          executionID,
+          .unitFinished(unitFinished(outcome.id, outcome.status))
+        ))
+      return projected
+    case .unitStarted(let id):
+      return [streamEvent(executionID, .unitStarted(unitStarted(id)))]
+    case .forceRequiredWarning(let actionID):
+      return [streamEvent(executionID, .forceRequiredWarning(forceWarning(actionID)))]
+    case .stepFinished(let outcome):
+      return [streamEvent(executionID, .stepFinished(step(outcome)))]
+    case .releasePostVerificationFinished(let outcome):
+      return [
+        streamEvent(executionID, .releasePostVerificationFinished(releasePostverify(outcome)))
+      ]
+    case .auditWriteFailed(let failure):
+      return [streamEvent(executionID, .auditWriteFailed(auditFailure(failure)))]
+    case .applyFinished:
+      return [streamEvent(executionID, .applyFinished(applyFinished(review, failure: nil)))]
+    }
+  }
+
+  func applyStartFailureTerminal(
     executionID: Data,
     review: Diskplan_V1_ApplyReviewProjection,
-    applyStarted: Diskplan_V1_ExecutionStreamEvent,
-    events: [ExecutionEvent],
-    report: BestEffortApplyReport
-  ) -> RuntimeExecutionTail {
-    let outcomes = report.unitOutcomes.reduce(into: [ExecutionUnitID: ExecutionUnitOutcome]()) {
-      $0[$1.id] = $1
-    }
-    var projected: [Diskplan_V1_ExecutionStreamEvent] = []
-    for event in events.dropFirst() {
-      switch event {
-      case .applyStarted:
-        continue
-      case .unitFinished(let id, let status):
-        if let outcome = outcomes[id] {
-          if status == .jitRejected, let jit = outcome.jitReport {
-            projected.append(streamEvent(executionID, .unitJitRejected(jitRejected(id, jit))))
-          } else if status == .skippedPrerequisite {
-            projected.append(streamEvent(executionID, .unitSkippedPrerequisite(skipped(outcome))))
-          }
-        }
-        projected.append(streamEvent(executionID, .unitFinished(unitFinished(id, status))))
-      case .unitStarted(let id):
-        projected.append(streamEvent(executionID, .unitStarted(unitStarted(id))))
-      case .forceRequiredWarning(let actionID):
-        projected.append(streamEvent(executionID, .forceRequiredWarning(forceWarning(actionID))))
-      case .stepFinished(let outcome):
-        projected.append(streamEvent(executionID, .stepFinished(step(outcome))))
-      case .releasePostVerificationFinished(let outcome):
-        projected.append(
-          streamEvent(executionID, .releasePostVerificationFinished(releasePostverify(outcome))))
-      case .auditWriteFailed(let failure):
-        projected.append(streamEvent(executionID, .auditWriteFailed(auditFailure(failure))))
-      case .applyFinished:
-        projected.append(streamEvent(executionID, .applyFinished(applyFinished(review, report))))
-      }
-    }
-    if projected.last?.body.isApplyFinished != true {
-      projected.append(streamEvent(executionID, .applyFinished(applyFinished(review, report))))
-    }
-    let authoritativeProjection = RuntimeAuthoritativeExecutionProjection.validating(
-      applyStarted: applyStarted,
-      remainingEvents: projected,
-      requiredForceWarningActionIDs: review.forceWarningActionIds,
+    failure: ApplyStartFailure
+  ) throws -> RuntimeApplyStartFailureTerminal {
+    try RuntimeApplyStartFailureTerminal(
+      validating: streamEvent(
+        executionID,
+        .applyFinished(applyFinished(review, failure: failure))
+      ),
       negotiatedProtocolMinor: context.negotiatedProtocolMinor
     )
-    return RuntimeExecutionTail(authoritativeProjection: authoritativeProjection)
   }
 
   private func selectedActionIDs() -> [Data] {
@@ -564,10 +757,10 @@ struct RuntimeExecutionProjector: Sendable {
 
   private func applyFinished(
     _ review: Diskplan_V1_ApplyReviewProjection,
-    _ report: BestEffortApplyReport
+    failure: ApplyStartFailure?
   ) -> Diskplan_V1_ApplyFinishedProjection {
     var value = Diskplan_V1_ApplyFinishedProjection()
-    if let failure = report.startFailure {
+    if let failure {
       value.startFailure = projectApplyStartFailure(failure)
     }
     value.applyReviewID = review.applyReviewID
@@ -584,6 +777,36 @@ struct RuntimeExecutionProjector: Sendable {
     event.body = body
     return event
   }
+}
+
+struct RuntimeReleaseSetDomainBinding: Equatable, Sendable {
+  let allocationGroupID: String
+  let ownerActionIDs: [Data]
+}
+
+func runtimeExactReleaseSetBindings(
+  domains: [RuntimeReleaseSetDomainBinding],
+  exactIDsByAllocationGroup: [Data: Data],
+  wireReleaseSets: [Data: Diskplan_V1_PlanReleaseSetProjection]
+) throws -> [String: Data] {
+  guard exactIDsByAllocationGroup.count == domains.count,
+    Set(exactIDsByAllocationGroup.values).count == domains.count,
+    wireReleaseSets.count == domains.count
+  else { throw DiskplanRuntimeExecutionProjectionError.missingReleaseSet }
+  var result: [String: Data] = [:]
+  for domain in domains {
+    let allocationGroupID = Data(domain.allocationGroupID.utf8)
+    guard let releaseSetID = exactIDsByAllocationGroup[allocationGroupID],
+      let wire = wireReleaseSets[releaseSetID],
+      wire.releaseSetID.value == releaseSetID,
+      wire.actionIds.map(\.value) == domain.ownerActionIDs,
+      result.updateValue(releaseSetID, forKey: domain.allocationGroupID) == nil
+    else { throw DiskplanRuntimeExecutionProjectionError.missingReleaseSet }
+  }
+  guard Set(result.values) == Set(wireReleaseSets.keys) else {
+    throw DiskplanRuntimeExecutionProjectionError.missingReleaseSet
+  }
+  return result
 }
 
 private func opaque(_ value: Data) -> Diskplan_V1_OpaqueIdentifier {
@@ -605,16 +828,6 @@ private func nonempty(_ value: String, fallback: String) -> String {
     result.unicodeScalars.append(scalar)
   }
   return result.isEmpty ? fallback : result
-}
-
-extension Data {
-  fileprivate var utf8String: String? { String(data: self, encoding: .utf8) }
-}
-
-extension Optional where Wrapped == Diskplan_V1_ExecutionStreamEvent.OneOf_Body {
-  fileprivate var isApplyFinished: Bool {
-    if case .applyFinished? = self { true } else { false }
-  }
 }
 
 private func projectRevalidationSubject(

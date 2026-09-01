@@ -43,19 +43,19 @@ func runtimeCompositionProjectsReviewAndSealedApplyTail() async throws {
     negotiatedProtocolMinor: protocol15Minor
   )
 
-  let run = try await prepared.attempt.start(
+  let launch = try await prepared.attempt.start(
     confirmation: RuntimeApplyConfirmation(
       review: sealedReview,
       confirmedForceActionIDs: sealedReview.forceWarningActionIds
     ),
     context: context
   )
-  let tail = await run.awaitTail()
+  let run = try #require(startedRun(launch))
+  let tail = try #require(sealedTail(await run.awaitTail()))
   let hasFinishedUnit = tail.events.contains { event in
     if case .unitFinished? = event.body { true } else { false }
   }
 
-  #expect(!tail.validationFailed)
   #expect(tail.events.last?.body.isApplyFinished == true)
   #expect(hasFinishedUnit)
   guard case .applyFinished(let terminal)? = tail.events.last?.body else {
@@ -79,16 +79,17 @@ func runtimeCompositionCancellationStopsCoordinatorAndReturnsSealedTail() async 
     prepared.projection,
     negotiatedProtocolMinor: protocol15Minor
   )
-  let run = try await prepared.attempt.start(
+  let launch = try await prepared.attempt.start(
     confirmation: RuntimeApplyConfirmation(
       review: sealedReview,
       confirmedForceActionIDs: sealedReview.forceWarningActionIds
     ),
     context: context
   )
+  let run = try #require(startedRun(launch))
 
   run.cancel()
-  let tail = await run.awaitTail()
+  let tail = try #require(sealedTail(await run.awaitTail()))
   let hasCancelledUnit = tail.events.contains { event in
     if case .unitFinished(let unit)? = event.body {
       unit.status == .cancelled
@@ -97,7 +98,6 @@ func runtimeCompositionCancellationStopsCoordinatorAndReturnsSealedTail() async 
     }
   }
 
-  #expect(!tail.validationFailed)
   #expect(hasCancelledUnit)
 }
 
@@ -202,6 +202,155 @@ func runtimeCompositionRejectsInvalidGeneratedIdentifiers(identifier: Data) thro
   }
 }
 
+@Test
+func runtimeCompositionAcceptsReorderedUniqueForceConfirmationSet() {
+  let first = Data(repeating: 0x31, count: 32)
+  let second = Data(repeating: 0x32, count: 32)
+
+  #expect(
+    runtimeForceConfirmationMatches(
+      confirmed: [second, first],
+      expected: [first, second]
+    ))
+}
+
+@Test
+func runtimeCompositionRejectsDuplicateForceConfirmationSet() {
+  let first = Data(repeating: 0x31, count: 32)
+  let second = Data(repeating: 0x32, count: 32)
+
+  #expect(
+    !runtimeForceConfirmationMatches(
+      confirmed: [first, first, second],
+      expected: [first, second]
+    ))
+  #expect(
+    !runtimeForceConfirmationMatches(
+      confirmed: [first, second],
+      expected: [first, first, second]
+    ))
+}
+
+@Test
+func runtimeCompositionKeepsExactReleaseSetIDsWhenOwnerSetsMatch() throws {
+  let owner = Data(repeating: 0x44, count: 32)
+  let firstGroup = "allocation-a"
+  let secondGroup = "allocation-b"
+  let firstID = Data(repeating: 0xa1, count: 32)
+  let secondID = Data(repeating: 0xb2, count: 32)
+  var firstWire = Diskplan_V1_PlanReleaseSetProjection()
+  firstWire.releaseSetID.value = firstID
+  firstWire.actionIds = [opaqueIdentifier(owner)]
+  var secondWire = Diskplan_V1_PlanReleaseSetProjection()
+  secondWire.releaseSetID.value = secondID
+  secondWire.actionIds = [opaqueIdentifier(owner)]
+
+  let result = try runtimeExactReleaseSetBindings(
+    domains: [
+      RuntimeReleaseSetDomainBinding(
+        allocationGroupID: firstGroup,
+        ownerActionIDs: [owner]
+      ),
+      RuntimeReleaseSetDomainBinding(
+        allocationGroupID: secondGroup,
+        ownerActionIDs: [owner]
+      ),
+    ],
+    exactIDsByAllocationGroup: [
+      Data(firstGroup.utf8): firstID,
+      Data(secondGroup.utf8): secondID,
+    ],
+    wireReleaseSets: [firstID: firstWire, secondID: secondWire]
+  )
+
+  #expect(result[firstGroup] == firstID)
+  #expect(result[secondGroup] == secondID)
+}
+
+@Test
+func runtimeCompositionProjectsCompleteSkippedUnitOutcomeImmediately() throws {
+  let fixture = try Fixture()
+  let projector = try RuntimeExecutionProjector(
+    context: runtimeContext(fixture),
+    nextID: { Data("projected-event".utf8) }
+  )
+  let outcome = ExecutionUnitOutcome(
+    id: .action(fixture.action.id),
+    logicalActionIDs: [fixture.action.id],
+    prerequisiteActionIDs: [fixture.action.id],
+    status: .skippedPrerequisite,
+    jitReport: nil,
+    steps: []
+  )
+  let events = projector.project(
+    .unitFinished(outcome),
+    executionID: Data("execution".utf8),
+    review: Diskplan_V1_ApplyReviewProjection()
+  )
+
+  #expect(events.count == 2)
+  guard case .unitSkippedPrerequisite(let skipped)? = events.first?.body,
+    case .unitFinished(let finished)? = events.last?.body
+  else {
+    Issue.record("expected skipped-prerequisite detail followed by unit_finished")
+    return
+  }
+  #expect(skipped.blockingPrerequisites.count == 1)
+  #expect(finished.status == .skippedPrerequisite)
+}
+
+@Test
+func runtimeProjectedExecutionBufferRejectsEventCountOverflow() throws {
+  var first = Diskplan_V1_ExecutionStreamEvent()
+  first.executionID.value = Data("execution".utf8)
+  first.body = .applyStarted(Diskplan_V1_ApplyStartedProjection())
+  var second = Diskplan_V1_ExecutionStreamEvent()
+  second.executionID = first.executionID
+  second.body = .applyFinished(Diskplan_V1_ApplyFinishedProjection())
+  var buffer = RuntimeProjectedExecutionBuffer(
+    budget: RuntimeApplyCaptureBudget(
+      maximumEventCount: 1,
+      maximumAccountedBytes: .max,
+      perEventOverheadBytes: 0,
+      terminalReserveBytes: 0
+    ))
+  let encodedBytes = UInt64(
+    try first.serializedData().count + second.serializedData().count
+  )
+
+  #expect(buffer.append([first]) == nil)
+  #expect(
+    buffer.append([second])
+      == .projectionLimitExceeded(
+        observedEventCount: 2,
+        observedEncodedBytes: encodedBytes
+      ))
+  #expect(buffer.events == [first])
+}
+
+@Test
+func runtimeProjectedExecutionBufferRejectsSerializedMemoryOverflow() throws {
+  var event = Diskplan_V1_ExecutionStreamEvent()
+  event.executionID.value = Data("execution".utf8)
+  event.body = .applyStarted(Diskplan_V1_ApplyStartedProjection())
+  let encodedBytes = UInt64(try event.serializedData().count)
+  var buffer = RuntimeProjectedExecutionBuffer(
+    budget: RuntimeApplyCaptureBudget(
+      maximumEventCount: 1,
+      maximumAccountedBytes: encodedBytes + 511,
+      perEventOverheadBytes: 512,
+      terminalReserveBytes: 0
+    ))
+
+  #expect(
+    buffer.append([event])
+      == .projectionLimitExceeded(
+        observedEventCount: 1,
+        observedEncodedBytes: encodedBytes
+      ))
+  #expect(buffer.events.isEmpty)
+}
+
 private func productionTestComposition(
   fixture: Fixture,
   jitDelayNanoseconds: UInt64 = 0
@@ -287,6 +436,7 @@ private func runtimeContext(_ fixture: Fixture) -> RuntimeExecutionPlanContext {
     plan: fixture.plan,
     overlay: fixture.overlay,
     planRecords: [record],
+    releaseSetIDByAllocationGroup: [:],
     planManifest: manifest,
     overlayProjection: overlay,
     negotiatedProtocolMinor: protocol15Minor
@@ -319,6 +469,16 @@ private func opaqueIdentifier(_ bytes: Data) -> Diskplan_V1_OpaqueIdentifier {
   var value = Diskplan_V1_OpaqueIdentifier()
   value.value = bytes
   return value
+}
+
+private func startedRun(_ launch: RuntimeApplyLaunchResult) -> RuntimeExecutionRunHandle? {
+  guard case .started(let run) = launch else { return nil }
+  return run
+}
+
+private func sealedTail(_ outcome: RuntimeExecutionTailOutcome) -> RuntimeExecutionTail? {
+  guard case .sealed(let tail) = outcome else { return nil }
+  return tail
 }
 
 private func lowercaseHex(_ bytes: Data) -> Data {

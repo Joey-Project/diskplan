@@ -10,6 +10,7 @@ package struct RuntimeExecutionPlanContext: Sendable {
   package let plan: ImmutablePlan
   package let overlay: DecisionOverlay
   package let planRecords: [Diskplan_V1_PlanProjectionRecord]
+  package let releaseSetIDByAllocationGroup: [Data: Data]
   package let planManifest: Diskplan_V1_PlanProjectionManifest
   package let overlayProjection: Diskplan_V1_DecisionOverlayAcknowledged
   package let negotiatedProtocolMinor: UInt32
@@ -83,14 +84,27 @@ package struct RuntimeAuthoritativeExecutionProjection: Sendable {
   }
 }
 
+package enum RuntimeExecutionTailFailure: Equatable, Sendable {
+  case projectionLimitExceeded(observedEventCount: UInt64, observedEncodedBytes: UInt64)
+  case projectionValidationFailed
+  case backendContractViolation
+}
+
 /// A package-owned, semantically sealed tail for one already-started run.
 package struct RuntimeExecutionTail: Sendable {
   let events: [Diskplan_V1_ExecutionStreamEvent]
-  let validationFailed: Bool
 
-  package init(authoritativeProjection: RuntimeAuthoritativeExecutionProjection) {
-    events = authoritativeProjection.sealedEvents
-    validationFailed = authoritativeProjection.validationFailed
+  private init(sealedEvents: [Diskplan_V1_ExecutionStreamEvent]) {
+    events = sealedEvents
+  }
+
+  package static func outcome(
+    authoritativeProjection: RuntimeAuthoritativeExecutionProjection
+  ) -> RuntimeExecutionTailOutcome {
+    guard !authoritativeProjection.validationFailed else {
+      return .failed(.projectionValidationFailed)
+    }
+    return .sealed(RuntimeExecutionTail(sealedEvents: authoritativeProjection.sealedEvents))
   }
 
   package init(
@@ -109,8 +123,39 @@ package struct RuntimeExecutionTail: Sendable {
       throw SealedRuntimeWireError.invalid(field: "runtime execution tail")
     }
     events = projection.sealedEvents
-    validationFailed = false
   }
+}
+
+package enum RuntimeExecutionTailOutcome: Sendable {
+  case sealed(RuntimeExecutionTail)
+  case failed(RuntimeExecutionTailFailure)
+}
+
+package struct RuntimeApplyStartFailureTerminal: Sendable {
+  package let event: Diskplan_V1_ExecutionStreamEvent
+
+  package init(
+    validating event: Diskplan_V1_ExecutionStreamEvent,
+    negotiatedProtocolMinor: UInt32
+  ) throws {
+    guard case .applyFinished(let terminal)? = event.body,
+      terminal.startFailure != .unspecified
+    else { throw SealedRuntimeWireError.invalid(field: "apply start failure terminal") }
+    let sealed = try SealedRuntimeWire.sealExecutionStream(
+      [event],
+      requiredForceWarningActionIDs: [],
+      negotiatedProtocolMinor: negotiatedProtocolMinor
+    )
+    guard sealed.count == 1 else {
+      throw SealedRuntimeWireError.invalid(field: "apply start failure terminal")
+    }
+    self.event = sealed[0]
+  }
+}
+
+package enum RuntimeApplyLaunchResult: Sendable {
+  case started(RuntimeExecutionRunHandle)
+  case startFailed(RuntimeApplyStartFailureTerminal)
 }
 
 /// EngineCore-owned handle for one already-started best-effort execution.
@@ -124,13 +169,13 @@ package final class RuntimeExecutionRunHandle: @unchecked Sendable {
 
   private let cancellationLock = NSLock()
   private let cancellation: @Sendable () -> Void
-  private let tailTask: Task<RuntimeExecutionTail, Never>
+  private let tailTask: Task<RuntimeExecutionTailOutcome, Never>
   private var cancellationRequested = false
 
   private init(
     executionID: Data,
     applyStarted: Diskplan_V1_ExecutionStreamEvent,
-    tailTask: Task<RuntimeExecutionTail, Never>,
+    tailTask: Task<RuntimeExecutionTailOutcome, Never>,
     cancel: @escaping @Sendable () -> Void
   ) {
     self.executionID = executionID
@@ -142,7 +187,7 @@ package final class RuntimeExecutionRunHandle: @unchecked Sendable {
   package static func start(
     executionID: Data,
     applyStarted: Diskplan_V1_ExecutionStreamEvent,
-    awaitTail: @escaping @Sendable () async -> RuntimeExecutionTail,
+    awaitTail: @escaping @Sendable () async -> RuntimeExecutionTailOutcome,
     cancel: @escaping @Sendable () -> Void
   ) async throws -> RuntimeExecutionRunHandle {
     let tailTask = Task { await awaitTail() }
@@ -163,7 +208,7 @@ package final class RuntimeExecutionRunHandle: @unchecked Sendable {
     )
   }
 
-  package func awaitTail() async -> RuntimeExecutionTail {
+  package func awaitTail() async -> RuntimeExecutionTailOutcome {
     await tailTask.value
   }
 
@@ -181,12 +226,12 @@ package final class RuntimeExecutionRunHandle: @unchecked Sendable {
 package struct RuntimePreparedApplyAttempt: Sendable {
   fileprivate let starter:
     @Sendable (RuntimeApplyConfirmation, RuntimeExecutionPlanContext) async throws ->
-      RuntimeExecutionRunHandle
+      RuntimeApplyLaunchResult
 
   package init(
     start:
       @escaping @Sendable (RuntimeApplyConfirmation, RuntimeExecutionPlanContext) async throws ->
-      RuntimeExecutionRunHandle
+      RuntimeApplyLaunchResult
   ) {
     starter = start
   }
@@ -194,7 +239,7 @@ package struct RuntimePreparedApplyAttempt: Sendable {
   package func start(
     confirmation: RuntimeApplyConfirmation,
     context: RuntimeExecutionPlanContext
-  ) async throws -> RuntimeExecutionRunHandle {
+  ) async throws -> RuntimeApplyLaunchResult {
     try await starter(confirmation, context)
   }
 }

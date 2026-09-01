@@ -49,6 +49,17 @@ superseded_by:
   the exact Phase 5 coordinator event/report stream into EngineCore's sealed runtime wire. Dynamic
   detail text and generated identifiers are bounded before publication; an invalid authoritative
   tail is supervised as cancel-and-await plus a typed failure instead of crashing.
+- Allocation-group-to-release-set identity now travels from the authoritative plan projection into
+  execution context, so equal owner sets cannot collapse distinct allocation groups. Force
+  confirmation accepts only unique set equality and is independent of presentation order.
+- Phase 5 unit completion carries the complete authoritative outcome into an immediate wire
+  projection. The capture retains only projected events under a 25,000-event, 32 MiB in-memory
+  budget with 512 bytes of per-event accounting and a 4 KiB terminal reserve; overflow clears the
+  buffer and requests coordinator cancellation exactly once.
+- Apply launch distinguishes a started run from an authoritative pre-mutation start-failure
+  terminal. A started stream whose bounded projection cannot be completed is retained as an
+  EngineCore typed tail failure for the protocol 1.6 terminal mapper and is never projected as a
+  generic runtime rejection.
 - Production `DiskplanEngineMain` intentionally does not inject the bridge yet. The repository does
   not expose a production revalidation collector factory, so production apply remains fail-closed
   rather than substituting a fixture collector or bypassing Phase 4 authority.
@@ -59,6 +70,8 @@ superseded_by:
 - After the concrete revalidation collector factory lands, construct an
   `EngineExecutionComposition` from the live collector and inject the existing backend bridge into
   production main.
+- Connect the EngineCore typed started-stream failure outcome to the protocol 1.6
+  `execution_stream_failure` terminal after that schema branch lands.
 
 ## Evidence
 
@@ -95,6 +108,12 @@ superseded_by:
   reached. Log:
   `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-composition-8.log`;
   bounded output SHA-256: `0b606131347138f4b1315bcd725216133b40d388de18e67694f5445fd62136d1`.
+- India non-protocol bridge-fix gate ran the combined Execution and EngineCore filters under one
+  900-second process-group deadline and a 2 MiB retained-log quota. All 272 tests passed in 15.895
+  seconds; process-group verification and post-run quiescence passed, and the quota was not
+  reached. Log:
+  `/Users/cisco/Program/GitHub/diskplan/.codex-tmp/india-gates/runtime-positive-composition-9-retry2.log`;
+  bounded output SHA-256: `11f3c9cf35d1cb73825b8365bb8f6260c922c8edbcf06dfddec2f2f48410e888`.
 - Focused fixtures cover absent-backend fail-closed behavior, exact dry-run binding, single-use
   confirmation/replay, wrong execution-ID cancellation, mirrored cancelled terminal streams, and
   retained-run teardown, including gated backend start and review-publication races. Bridge

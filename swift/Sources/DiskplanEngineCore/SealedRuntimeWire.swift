@@ -370,21 +370,20 @@ package enum SealedRuntimeWire {
       return warning.actionID.value
     }
     try requireUniqueDigests(observedForceWarnings, field: "execution force warning action_id")
-    guard Set(observedForceWarnings) == Set(requiredForceWarnings) else {
-      throw SealedRuntimeWireError.invalid(field: "execution force warning set")
-    }
     let applyStartedCount = events.dropLast().reduce(0) {
       if case .applyStarted? = $1.body { $0 + 1 } else { $0 }
     }
     if terminal.startFailure != .unspecified {
-      guard validApplyStartFailure(terminal.startFailure), events.count == 1,
+      guard observedForceWarnings.isEmpty,
+        validApplyStartFailure(terminal.startFailure), events.count == 1,
         applyStartedCount == 0,
         summary.unitCount == 0, summary.auditFailureCount == 0
       else {
         throw SealedRuntimeWireError.invalid(field: "apply start failure stream")
       }
     } else {
-      guard applyStartedCount == 1,
+      guard Set(observedForceWarnings) == Set(requiredForceWarnings),
+        applyStartedCount == 1,
         case .applyStarted(let started)? = events.first?.body
       else {
         throw SealedRuntimeWireError.invalid(field: "missing apply_started")
