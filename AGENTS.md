@@ -10,4 +10,4 @@
 - Phase-one scanning is read-only. Never add a scan-path mutation as an optimization or probe.
 - Tests may mutate only test-created task-scoped temporary roots. Existing user data is limited to scanning and dry-run validation.
 - Default to targeted tests during development. Run broader local, remote macOS, and GitHub runner gates only at the checkpoints defined in the accepted plan.
-- macOS 26 on Apple Silicon is the release gate. Older supported deployment targets and newer unverified macOS releases are best effort through runtime capability checks.
+- macOS 26 on Apple Silicon is the release gate. The minimum deployment target is macOS 15; compatibility validation on that minimum and newer unverified macOS releases is best effort through runtime capability checks.
