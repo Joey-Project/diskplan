@@ -1,6 +1,6 @@
 ---
 id: 20261004-macos15-ci-runner
-title: Move macOS 14 deployment compatibility CI to macOS 15 runner
+title: Raise best-effort macOS deployment target to 15
 status: completed
 created: 2026-10-04
 updated: 2026-10-04
@@ -10,16 +10,17 @@ supersedes: []
 superseded_by:
 ---
 
-# Move macOS 14 deployment compatibility CI to macOS 15 runner
+# Raise best-effort macOS deployment target to 15
 
 ## Summary
 
-- Move the non-blocking deployment compatibility job to the `macos-15` arm64 runner.
-- Keep the product deployment target at macOS 14; the job checks that target while running on macOS 15.
+- Set the minimum product deployment target to macOS 15.
+- Use the `macos-15` runner for non-blocking deployment-target metadata verification.
 
 ## Current State
 
-- The workflow job, runner assertion, and CI reference document use `macos-15` for the best-effort runner.
+- SwiftPM, Cargo, and the Rust deployment assertion use macOS 15 as the minimum target.
+- The best-effort CI job verifies the Rust binary's macOS 15 minimum-target metadata; it does not run the CLI.
 - The required macOS 26 release gate is unchanged.
 
 ## Validation

@@ -7,9 +7,10 @@
   foundation on the Xcode version pinned in `scripts/ci/toolchain.lock`. The
   runtime assertion requires macOS 26 exactly; macOS 27+ remains best effort
   until promoted by the accepted release policy.
-- `Best effort / macOS 14 deployment compatibility (macOS 15 runner)` is
-  non-blocking. It verifies that the Rust launcher still records a macOS 14
-  deployment target on the `macos-15` arm64 runner.
+- `Best effort / macOS 15 deployment target` is non-blocking. It builds the
+  Rust launcher for arm64 and verifies that its Mach-O metadata records a
+  macOS 15 minimum deployment target on the `macos-15` runner. This checks the
+  build target; it does not exercise the launcher at runtime.
 
 GitHub's hosted-runner reference lists `macos-26` and `macos-15` as standard
 Apple Silicon labels:

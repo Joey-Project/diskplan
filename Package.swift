@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "diskplan",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .library(name: "DiskplanCore", targets: ["DiskplanCore"]),
         .library(name: "DiskplanMacOS", targets: ["DiskplanMacOS"]),

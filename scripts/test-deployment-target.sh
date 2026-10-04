@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly REPO_ROOT
-readonly EXPECTED_MINIMUM="14.0"
+readonly EXPECTED_MINIMUM="15.0"
 
 if (( $# > 1 )); then
     echo "usage: scripts/test-deployment-target.sh [aarch64-apple-darwin|x86_64-apple-darwin]" >&2

@@ -511,7 +511,7 @@ history、saved plan、audit 和 execution artifacts 使用同一安全 writer�
 
 - Required release gate: Apple Silicon, macOS 26.
 - macOS 27+ remains runtime-probed best effort until promoted to the required validation set.
-- Deployment target remains macOS 14 initially; macOS 14/15 are best effort and do not block release.
+- The minimum deployment target is macOS 15; macOS 15 remains best effort and does not block the macOS 26 release gate.
 - Each new macOS release can be promoted to required validation while older releases are downgraded to best effort.
 - APFS is the complete-capability filesystem; other filesystems degrade by capability.
 

@@ -144,7 +144,7 @@ jobs:
           compression-level: 9
 
   best-effort-macos-15-arm64:
-    name: Best effort / macOS 14 deployment compatibility (macOS 15 runner)
+    name: Best effort / macOS 15 deployment target
     runs-on: macos-15
     continue-on-error: true
     timeout-minutes: 20
