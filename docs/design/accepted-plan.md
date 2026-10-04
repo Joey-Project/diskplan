@@ -46,7 +46,7 @@ evidence -> deterministic classification -> recommendation -> uncertainty
 
 安全决策采用 one-vote reject（任一强否决证据即可阻止清理）。以下维度分别保留，不聚合成安全分数：
 
-- Explicit protection and provider boundaries.
+- Explicit protection and action-specific provider boundaries.
 - Evidence completeness.
 - Current activity.
 - Object identity and access policy.
@@ -62,6 +62,13 @@ evidence -> deterministic classification -> recommendation -> uncertainty
 ```
 
 但该顺序不代表安全真值。
+
+Read-only admission and mutation admission are separate. Missing ownership,
+activity, policy-overlay, or required execution evidence does not by itself reject
+metadata-only scanning or planning. It produces typed uncertainty and blocks the
+affected action. Unknown protection scope may block all mutations, but still does
+not block read-only reporting. This does not bypass TCC, mount boundaries,
+non-materialization constraints, structural budgets, or protocol/resource limits.
 
 ## 4. Activity Evidence
 
@@ -171,26 +178,116 @@ candidate/path nodes
 - snapshot 是 blocker，不自动成为清理目标。
 - partial clone 只使用 private-size lower bound。
 - apply 前重新验证所有 owner、refcount、link count 和 snapshot blockers。
+- 共享任一 owner 的多个 release set 属于一个 connected execution component；执行计划必须在
+  首次 mutation 前携带并重验该 component 中所有已激活 group 的 topology、aggregate
+  postcondition 和去重 owner contract。同一 owner 只能执行一次，所有 group post-verify
+  成功后才能分别确认实际释放量。
+- release component partition 使用按 raw UTF-8 group/candidate identity 规范化的 union-find；
+  每个 membership 只参与常数次合并，不能用重复 enqueue/sort 的图遍历放大共享 owner fan-out。
+- aggregate folding 只对 contraction-safe action DAG 开放：把 aggregate 与 owner actions 收缩为
+  单步后必须仍然无环。任何 `owner -> external prerequisite chain -> owner` 的 leave/re-enter
+  路径在 immutable-plan 构造时拒绝；overlay 对本次选择的全部 component 同时收缩再做防御性
+  验证，跨 component prerequisite 保持原方向。
 
 ## 9. File Provider Contract
 
-不维护 provider 名称/path 排除表。系统能力和 filesystem flags 用于发现 provider boundaries：
+不维护 provider 名称/path 排除表。Local residency and provider ownership are
+independent evidence dimensions; neither is a safety score.
 
-- `EF_IS_SYNC_ROOT`
-- `SF_DATALESS`
-- provider identifier/capability probes when available
+- Volume locality: per-volume system locality evidence, including
+  `volumeIsLocal` and a capability-checked `statfs`/`MNT_LOCAL` fallback. Locality
+  identifies storage attached to this host, not provider ownership. Remote mounts
+  do not receive local reclaim credit; an unknown volume does not invalidate
+  independently scannable local volumes.
+- Local residency: `SF_DATALESS`, measured nominal allocation, supported private
+  allocation lower bounds, and typed unknown/partial states. Dataless does not
+  mean exactly zero allocated bytes; metadata and other residual allocations must
+  not be represented as reclaimable file content without supporting evidence.
+- Ownership: confirmed provider-managed, confirmed local under a validated scoped
+  platform capability contract, or unknown. Positive sync-root, provider identity,
+  or capability evidence identifies managed boundaries. Absence of optional
+  provider services/identifiers, or a local-volume result, is not by itself proof
+  of non-provider ownership.
 
-本地 walker 使用 fd-relative `getattrlistbulk/getattrlistat`，不读取文件内容、不跟随 symlink、不跨 mount。provider root 使用 `NSFileCoordinator` immediate metadata only 和 `URLResourceValues`。
+本地 walker 使用 fd-relative `getattrlistbulk/getattrlistat`，不读取文件内容、不跟随 symlink、不跨 mount。
+The read-only collector must distinguish the evidence needed to inspect metadata
+from the stronger evidence needed to authorize mutation. It must not require an
+unavailable global non-provider oracle merely to report ordinary local objects.
+The accepted platform capability contract remains scoped, runtime-validated on
+macOS 26, and bound to the exact root/ancestry and candidate evidence; it must not
+claim a global system guarantee that its probes do not provide.
 
-可报告 user-visible materialized footprint；public API 无法获得的 hidden backing/staging 明确记录：
+The contract is not complete merely because an interface or a fixture can issue
+`confirmed-local`. Its first R1 gate is the concrete source/assumption/failure
+matrix in [locality and provider actions](locality-and-provider-actions.md).
+Production removal authority remains unavailable for a scope until that matrix
+has a supported implementation and real-host acceptance. An unsupported platform
+capability is a typed result, not permission to reinterpret optional API absence
+as a global ownership guarantee.
+
+Dataless directories are not enumerated. Materialized provider directories may
+be inspected only through a verified metadata-only, non-materializing capability;
+otherwise their children have explicit incomplete coverage. A read-only API call
+is not automatically safe from materialization. Provider coordination/resource
+value probes are enabled only under their verified runtime contract.
+
+Action selection is separate from measurement:
+
+| Evidence | Recommendation / mutation boundary |
+| --- | --- |
+| Remote volume | Informational; no local reclaim credit |
+| Local allocation, confirmed local ownership | Ordinary removal or a dedicated adapter, subject to all other gates |
+| Local resident content, confirmed provider ownership | `provider-evict-local-copy` when a verified adapter is available; otherwise guided/report-only |
+| Dataless provider object | Show measured residual allocation; no assumed content reclaim |
+| Local allocation, unknown ownership | Report allocation and uncertainty; no guessed removal or eviction |
+
+`provider-evict-local-copy` preserves the cloud object and its local placeholder;
+it is not cloud deletion, unpinning, reset, or hidden backing cleanup. It requires
+an explicitly enabled, runtime-verified standalone capability and explicit
+selection in the current immutable plan. An iCloud eviction capability and any
+third-party capability must be admitted separately; API availability alone does
+not establish standalone applicability. Unsupported providers receive a guided
+Remove Download recommendation followed by rescan, not UI automation or an
+undocumented command fallback.
+
+Eviction must reject unsynced/non-evictable data and current activity, must not
+silently unpin, and must never fall back to `rm` or forced removal. Its protected
+properties and postcondition differ from deletion: bind provider/object identity,
+access policy, sync eligibility, and the intended content-residency transition;
+verify the cloud object/placeholder remains and report the observed local
+allocation change without equating it to exact volume free space. Benign provider
+materialization/metadata transitions are not object replacement. Unknown or failed
+revalidation remains distinct from missing or mismatched evidence. The adapter
+must account for observer-owned descriptors that could themselves prevent
+eviction, without claiming an identity guarantee its pathname-based API cannot
+maintain.
+
+Each eviction adapter declares its permitted before/after state transitions and
+provider logical-identity continuity. It must not inherit a deletion adapter's
+blanket filesystem-identity equality or permit arbitrary identity drift. Platform
+invocation outcome, object/postcondition verification, and allocation measurement
+are separate authoritative results. An accepted request with unknown completion
+or post-verification is uncertain, not verified reclaim, and does not authorize an
+automatic retry. See the same focused contract for descriptor lifecycle, retry,
+and event projection requirements.
+
+APFS release sets continue to require every relevant owner. Eviction may satisfy
+an owner prerequisite only when its verified postcondition proves that the
+relevant local allocation reference was released; preserving a namespace entry
+does not automatically prove either release or retention of content blocks.
+Snapshot and unobserved-owner blockers remain non-waivable.
+
+可报告 user-visible resident footprint；public API 无法获得的 hidden backing/staging 明确记录：
 
 ```text
 provider_hidden_footprint: unavailable-via-public-api
 ```
 
-首版不执行 provider eviction、unpin、reset 或 hidden backing cleanup。
-
-所有位于 File Provider boundary 内、带 provider ownership/capability evidence，或标记 dataless 的 path 在首版都是 non-stageable hard gate，包括已经 materialized 的普通文件。它们只能得到 `managed-by-provider`/report-only 结果；`generic-remove`、Git、release-set 和其他删除 adapter 都必须 fail closed，不能让 cache/path recognizer 绕过 provider boundary。未来任何可能传播为 cloud delete、eviction、unpin 或 materialization 的动作都需要专用 provider adapter 和独立确认。
+Provider-owned and ownership-unknown objects remain non-stageable for
+`generic-remove`, Git removal, and other ordinary deletion adapters. A cache/path
+recognizer cannot override that boundary. Only the dedicated verified eviction
+action may free a managed local copy; provider deletion, unpin, reset, hidden
+backing cleanup, and implicit materialization remain outside the first version.
 
 ## 10. Coverage And Permissions
 
@@ -249,6 +346,17 @@ diskplan-engine (Swift)
 协议包括 `Hello`、request/response envelopes、progress events、decision overlay、revalidation result 和 execution events。stdout 只承载 binary frames，stderr 承载 diagnostics。major mismatch 拒绝运行；minor 通过 capability negotiation 兼容。
 
 Swift 使用 SwiftProtobuf，Rust 首版使用 `prost`。`.proto` 是权威 schema；生成代码和 cross-language golden frames 必须一起验证。
+
+Apply requires a negotiated Protocol 1.6 session. A successful execution stream
+still terminates with `apply_finished`. When mutation may already have started but
+the engine cannot safely construct that positive terminal, Protocol 1.6 instead
+emits exactly one `execution_stream_failure` terminal after a valid
+`apply_started`. The failure terminal is bound to the same execution ID, apply
+review ID, and review-binding digest, and its record digest and limits cover the
+actual emitted prefix plus the failure terminal. It reports only a closed
+projection-boundary failure kind and does not claim complete force-warning
+coverage or a successful unit summary. Older protocol minors reject this terminal
+and cannot enter apply.
 
 落盘 artifacts 仍使用可审计 JSON，不用 Protobuf 取代：
 
@@ -329,14 +437,21 @@ explicit protection/type hint 同样受这个边界约束：protection 可以直
 - Agent-assisted classification.
 - Task-semantic completion.
 - Duplicate survivor choice.
-- Fully observed local Git work discard.
 - Normal keep policy.
 
-dirty/untracked Git 内容必须使用专门的 `discard-local-work` action，不得伪装成普通删除。
+v1 的 dirty/untracked Git 内容及其 dependent remove chain 固定为 report-only：plan 可保留专门的 `discard-local-work` action、完整证据和 successor baseline 用于解释，但该 action 不可 stage、不可 waiver，apply preparation 不得为它签发 capability。只有 clean worktree 的 descriptor-bound quarantine remove 可执行。
+
+duplicate-survivor fact 的声明者就是该 duplicate group 的成员；唯一 survivor 必须是成员，
+不能由全局存在但未声明该 group 的无关 candidate 冒充。survivor 的受保护属性是整个绑定
+namespace，因此 direct、ancestor、descendant、path alias 或 object-identity alias mutation
+都必须拒绝，而不是只保护 exact path。
 
 ### 13.1 Canonical IDs And Bindings
 
 所有用于执行授权或 cache 命中的 ID/hash 都来自 versioned closed typed binding schema，不能由各模块临时选择字段。权威 schema 与 `.proto` 同仓维护，但摘要输入使用独立的 `canonical-binary-v1` 编码，避免依赖未保证 canonical 的普通 Protobuf serialization：
+
+任何会返回带 candidate/file/group ID 的 StorageGraph validation error，都必须先按 raw UTF-8
+ID 规范化对应 collection，再执行可观察验证；输入数组排列不能改变首个 typed diagnostic。
 
 - record 使用固定 field order；整数为 fixed-width big-endian；bytes/path 使用 length prefix 并保留 filesystem raw name bytes；timestamp 使用 UTC seconds+nanos；禁止 map；具有集合语义的 repeated field 按其 canonical byte key 排序；absent、unknown、unreadable、failed 和 empty 使用不同 typed variants；
 - digest 使用 SHA-256，并以 `diskplan/<binding-kind>/v1\0` 做 domain separation；不同 kind 至少包括 evidence、action-lineage、action、plan、waiver-consent、waiver-credential 和 agent-cache；
@@ -393,11 +508,13 @@ directory child-entry churn、directory size/link-count/mtime 变化只有在 ac
 - nested repositories、submodules、linked worktrees 和 sparse-checkout state 被显式识别；其本地内容必须分别证明 recoverable 或作为用户可见的 unique/local changes 进入同一 action；
 - action 执行前重新验证 filesystem coverage、Git state 和所有已声明 local-change entries，任何新增或未观察项目都阻止 stage/apply。
 
-只有满足上述 coverage 的 action 才能使用 `Fully observed local Git work discard` waiver；否则只能 report-only。adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。
+首版专用 adapter 只执行 linked-worktree 的 `.git` gitdir-file 布局：linkage 中的 registration ID 必须精确匹配 registration evidence，administrative directory 和 common directory 必须是两个不同的已绑定 object，并保留两者的精确 identity、registration/metadata digest 和 raw registration binding。执行时再从 no-follow 打开的 `.git` 文件固定 administrative directory，并通过 descriptor-relative parent traversal 证明它位于 common Git directory 的 `worktrees` namespace 下。ordinary worktree 的 in-root common `.git` directory 不属于当前 adapter 的删除模型，因此保持 report-only；不能用伪造的 admin/common identity 相等来绕过此边界。
+
+上述 coverage 在 v1 只用于解释 dirty worktree、冻结 future adapter contract 与拒绝理由；它不启用 destructive waiver。所有 dirty discard/remove action 都是 report-only，adapter 不得因 Git porcelain 未报告 ignored data 就推断目录可安全删除。未来若引入可执行 discard，必须作为新的专用 adapter/waiver 版本重新验收，不能复用当前 plan 或 consent。
 
 point-in-time coverage 仍不足以授权 pathname-based forced removal。所有会移除 worktree root 的 Git action 都必须把 namespace binding 延续到 use。mutation 前必须证明 source parent chain 是 owner-private、无 group/other writer、无 provider/mount boundary，并且 activity snapshot 没有其他 process reference；adapter 将它标记为 `trusted-exclusive-namespace`。同一用户的恶意或不可观测并发 namespace mutation不在首版可安全执行的 threat model 内；无法满足该 trust precondition 时必须 report-only，不能先移动后判断。
 
-满足 trust precondition 后，revalidation 通过已验证 parent descriptor no-follow 打开 root 并固定 object identity，再用 exclusive/no-clobber `renameatx_np` 将 exact slot 原子移入同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace。quarantine 后必须从 held descriptor 与 destination descriptor 双向确认是同一 object，并在受控 namespace 中重新完成 no-follow subtree coverage；identity/content/access/coverage 任一差异都禁止删除，尽力原子恢复原 slot，否则保留 quarantine 并在 event stream 报告可恢复 locator。只有确认后的绑定对象可递归删除，再 best-effort 清理 Git administrative state。overlay 必须显示 namespace trust、quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
+满足 trust precondition 后，revalidation 通过已验证 parent descriptor no-follow 打开 root 并固定 object identity，再用 exclusive/no-clobber `renameatx_np` 将 exact slot 原子移入同一 filesystem 上 engine-owned、owner-private 的 quarantine namespace。quarantine 后必须从 held descriptor 与 destination descriptor 双向确认是同一 object，并在受控 namespace 中重新完成 no-follow subtree coverage；token 分别绑定每个目录、普通文件和 symlink 的 identity、content 与 access policy（含 descriptor-bound ACL）。pre/post token 必须在任何 post-rename 取消或超时恢复之前比较。任一受保护属性差异都禁止删除；只有 typed recovery policy 明确允许的验证失败才可尽力原子恢复原 slot，且恢复路径必须先为当前 quarantine 建立稳定 descriptor-bound snapshot，再在 recovery hook/准备完成后、`renameatx_np` 提交前完整复验 identity、content 与 access policy。access-policy drift 必须保留 quarantine 供人工恢复，否则在 event stream 报告可恢复 locator 或 unverified binding。递归删除在每次 `unlinkat` 前重新以 descriptor-relative 方式验证该 exact node 的 identity、content 与 access policy；子节点已按 token 删除后不把目录 size/mtime churn 当作目录 content drift，新出现的 child 则由 non-empty removal fail closed。每次实际 mutation commit 还必须复验 descriptor-bound Git administrative coverage、admin/worktrees/common directory access seal 和 exact `HEAD` resolution；v1 无法绑定的 symbolic/packed-ref 形式只能 report-only。每次 attempt 的 outer quarantine directory 在 pre-rename exit、成功删除或成功 auto-restore 后只可按 held parent、directory seal 和 slot identity 清理；清理失败不得覆盖 primary outcome，而要作为 attempt-scoped retained locator 或 unverified binding 进入普通 step/event/report。之后再 best-effort 清理 Git administrative state。overlay 必须显示 namespace trust、quarantine 与 Git metadata cleanup 是同一 action 的 prerequisite/dependent steps。普通 `git worktree remove` 不能作为绕过该规则的强制删除 fallback。
 
 默认输出为 shell/TUI event stream。history、plan、audit、execution record 和 spill 均可选；`ENOSPC`、只读目录或日志失败不能阻止清理。
 
@@ -413,6 +530,7 @@ point-in-time coverage 仍不足以授权 pathname-based forced removal。所有
 - Complete APFS release sets.
 - App-exit cache cleanup after the user exits the app.
 - Generic local file/tree removal when the object is understood but no specialized cleanup protocol exists.
+- Provider local-copy eviction only when the dedicated adapter passes its standalone runtime and mutation acceptance gates; unsupported capabilities remain guided/report-only.
 
 ### 15.2 Execution Adapters
 
@@ -421,10 +539,11 @@ point-in-time coverage 仍不足以授权 pathname-based forced removal。所有
 - `codex-clean-tmp`
 - `versioned-artifact-remove`
 - `complete-release-set-remove`
+- `provider-evict-local-copy` (capability-gated; never an ordinary remove fallback)
 
 ### 15.3 Report-Only Types
 
-- File Provider eviction/unpin/reset and hidden backing cleanup.
+- Unsupported File Provider local-copy eviction; provider cloud deletion/unpin/reset and hidden backing cleanup.
 - APFS snapshot deletion.
 - CoreSpotlight rebuild.
 - SQLite VACUUM.
@@ -444,6 +563,29 @@ point-in-time coverage 仍不足以授权 pathname-based forced removal。所有
 3. Restricted user policy for protection, adapter enablement, thresholds, profile, budget, and agent mode.
 
 declarative rules 不能执行 shell、下载、创建任意 argv 或绕过 one-vote reject。外部 executable plugins 不进入首版；内部保留 future adapter protocol/capability boundaries。
+
+### 16.1 Read-Only Default And Mutation Authorization
+
+- The engine always has its versioned built-in policy. No optional user overlay
+  is a valid configuration, represented explicitly as `none`; it is not missing
+  authoritative policy.
+- An explicitly requested overlay that is absent, unreadable, or invalid produces
+  typed `policy-unverified` state. Metadata-only scan and plan continue under the
+  built-in policy, but mutations whose protection/enablement scope cannot be
+  verified are blocked. If that scope cannot be bounded, all mutations are
+  blocked, not the scan.
+- Explicitly disabling a broken overlay creates a fresh built-in-only plan. It
+  cannot retroactively authorize the existing plan or execution review.
+- Plan and execution binding include built-in policy version, overlay `none` or
+  digest, and effective policy digest. Relevant policy changes invalidate the
+  plan/review and require replanning and explicit current consent.
+- Adapter enablement and user selection are independent requirements. Built-in
+  safe cache semantics may enable ordinary removal by default; neither built-in
+  defaults, an overlay, nor an agent can authorize arbitrary paths/argv or bypass
+  action-specific evidence gates. Provider eviction is also a mutation.
+- Optional history, audit, saved-plan, and spill destinations are not required
+  policy inputs. Their absence or write failure must not disable in-memory
+  scan/plan/execution.
 
 agent modes：
 
@@ -530,9 +672,20 @@ history、saved plan、audit 和 execution artifacts 使用同一安全 writer�
 
 Rust launcher 只从自己的 versioned directory 定位 engine。升级通过安装新目录并切换 symlink；installer 不修改 TCC。signed/notarized app bundle、Homebrew packaging 和 universal binaries 后置。
 
+release bundle 由一个 canonical package contract 封闭：每个 payload 必须绑定 canonical relative path、exact mode、size、SHA-256、role 和 compatibility version。Swift/Rust executables、权威 `.proto`、compatibility fixtures、built-in rules、default policy 和 runtime capability metadata 必须同包发布。native installer 使用由同一 contract 生成的固定 allowlist，未验证的 runtime manifest 不能扩大路径权限。symlink、special file、path escape、duplicate/case-fold collision、missing/extra entry 和 schema mismatch 全部 fail closed；nested copy/proof/remove 继续 descriptor-relative/no-follow。archive 的 mtime、uid/gid 和 enumeration order 固定化，相同 bytes 必须产生相同 archive。history、saved plan、audit 和 execution record capability 只在包内声明且默认关闭，packaging 不写入用户数据。generated bindings、build tree、VCS/local temporary state 和 `docs/project_journal/INDEX.md` 不入包。
+
 ## 20. Implementation Gates And Parallel Work
 
 七个 Phase（Phase 0 至 Phase 6）表示依赖与验收 gate，不要求严格串行。共享 schema 稳定后，允许独立模块同步开发和验证。
+
+The phase scope is unchanged. A completed module or historical fixture run is not
+evidence that its behavior is reachable in the shipped product. Track three
+separate facts for each required behavior: implementation exists, it is integrated
+and production-wired, and the installed product passes its acceptance gate. A PR
+merged into an intermediate feature branch establishes only that branch's state,
+not default-branch delivery. The proposed recovery sequence and current evidence
+are recorded in the
+[October plan revision journal](../project_journal/2026/10/2026-10-04-plan-revision-61c9e4.md).
 
 ### Phase 0: High-Risk Capability Slice
 
@@ -566,6 +719,8 @@ Rust launcher 只从自己的 versioned directory 定位 engine。升级通过�
 
 - Identity/activity/provider/dependency revalidation.
 - Adapter dry-run and generic command preview.
+- The authoritative implementation contract is documented in
+  [`revalidation-and-dry-run.md`](https://github.com/Joey-Project/diskplan/blob/6e724784fee48d18a5ec110e5b2416e86ad25fea/docs/design/revalidation-and-dry-run.md).
 - Best-effort result stream and no-persistence mode.
 
 ### Phase 5: Apply
@@ -573,12 +728,25 @@ Rust launcher 只从自己的 versioned directory 定位 engine。升级通过�
 - Enable tested adapters incrementally.
 - Fixture-only actual mutation tests.
 - Partial failure, cancellation, and post-verify.
+- The authoritative implementation contract is documented in
+  [`best-effort-apply.md`](https://github.com/Joey-Project/diskplan/blob/6e724784fee48d18a5ec110e5b2416e86ad25fea/docs/design/best-effort-apply.md).
 
 ### Phase 6: Real-Host Release Acceptance
 
 - `India-mac-mini-m4-hoteng` standard and bounded full-audit.
 - APFS/File Provider/activity/performance validation.
 - Real candidates remain dry-run during automated acceptance.
+- Validate the actual installed Swift engine and Rust frontend, not only fixture
+  controllers or fake-engine projections. Exercise scan, immutable plan, explicit
+  overlay selection/edit, revalidation, dry-run, apply review, and fixture-only
+  apply as one production flow.
+- Maintain an adapter acceptance matrix: production reachability, capability,
+  evidence/policy binding, force warning where applicable, best-effort outcomes,
+  post-verification, and unsupported/report-only behavior. The executable scope
+  in Section 15 must not be silently reduced to the first cache action.
+- Required release evidence must be tied to the frozen candidate head and
+  installed artifact. Historical journal runs and stale PR checks are references,
+  not substitutes for the final affected checkpoints.
 
 并行约束：
 
@@ -598,4 +766,4 @@ Rust launcher 只从自己的 versioned directory 定位 engine。升级通过�
 - Privileged helper.
 - External executable adapter protocol.
 - gRPC/Unix-socket transport or background daemon.
-- Provider mutation, system index rebuild, database maintenance, process control, and package/container cleanup adapters.
+- Provider cloud deletion/unpin/reset/hidden-backing mutation, system index rebuild, database maintenance, process control, and package/container cleanup adapters. Verified local-copy eviction is the narrow exception defined in Section 9; no universal provider adapter is promised.
