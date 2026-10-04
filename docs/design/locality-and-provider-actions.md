@@ -49,7 +49,8 @@ validation. The ordinary-removal positive capability is still open.
 | --- | --- | --- |
 | Local-volume evidence | Storage filesystem is local to the host | Does not establish non-provider ownership; wire per-volume locality independently |
 | `SF_DATALESS` and allocation evidence | Dataless state and measurable local allocation, when safely collected | Flag absence is not an ownership proof; test protected ancestry/non-materialization and residual allocation |
-| `NSFileProviderManager.getIdentifierForUserVisibleFile` | Item/domain identity under the API's documented provider scope | Its negative result is not a global non-provider certificate |
+| `NSFileProviderManager.getIdentifierForUserVisibleFile` | Item/domain identity under the API's documented provider scope | `NSFileNoSuchFileError` also covers an item not yet assigned an identifier; no global non-provider certificate |
+| `NSFileProviderManager.getDomainsWithCompletionHandler` | Registered domains under the documented File Provider extension scope | Does not establish a complete cross-provider negative inventory |
 | `FileManager.getFileProviderServicesForItem` | Services exposed for the item | An empty successful dictionary does not establish non-provider ownership |
 | `localOrUnindicated` scan boundary | No indicated managed boundary in this scan observation | Cannot be promoted to confirmed-local without the missing scoped capability |
 | `identifierAbsent` topology observation | No identifier under the queried API contract | Dataless=false and sync-root=false do not strengthen it into global local-ownership authority |
@@ -67,7 +68,14 @@ Primary sources:
 
 - [Identifier API](https://developer.apple.com/documentation/fileprovider/nsfileprovidermanager/getidentifierforuservisiblefile(at:completionhandler:)):
   the documented negative result is scoped to the caller's File Provider
-  extension. It does not establish the desired global conclusion.
+  extension. The Xcode 26.6.0 SDK inspected on India additionally documents the
+  same `NSFileNoSuchFileError` for a provider item that has not yet been assigned
+  an identifier. A negative lookup cannot distinguish those cases and does not
+  establish the desired global conclusion.
+- [Registered domains](https://developer.apple.com/documentation/fileprovider/nsfileprovidermanager/getdomainswithcompletionhandler(_:)):
+  the documentation describes the File Provider extension's domains, not a
+  complete inventory across all installed providers. The SDK's shorter
+  registered-domains comment does not expand that documented scope.
 - [File Provider services](https://developer.apple.com/documentation/foundation/filemanager/getfileproviderservicesforitem(at:completionhandler:)):
   successful service discovery may return an empty dictionary; service absence
   cannot authorize ordinary removal.

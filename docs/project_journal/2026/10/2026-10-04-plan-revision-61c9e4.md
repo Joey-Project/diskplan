@@ -5,7 +5,7 @@ status: active
 created: 2026-10-04
 updated: 2026-10-04
 branch: wip/plan-revision-pr
-pr:
+pr: https://github.com/Joey-Project/diskplan/pull/29
 supersedes: []
 superseded_by:
 ---
@@ -42,7 +42,7 @@ delivery/review gates.
   `18e510655c5b2798a7c9a1c98763053fa122f5f1`. The documentation PR uses a new
   linked worktree at this base; it does not import the closure branch's 141
   non-main commits.
-- The only open PR observed is draft [#6](https://github.com/Joey-Project/diskplan/pull/6),
+- The initial audit's only open PR was draft [#6](https://github.com/Joey-Project/diskplan/pull/6),
   `wip/integrate-phase0-6` at `5e12e3b`, targeting `main`. Its historical checks
   include successful required macOS 26 gates but predate the current runner
   update and later closure branches.
@@ -50,6 +50,12 @@ delivery/review gates.
   to remote `main`. Its required macOS 26 and best-effort macOS 15 checks were
   reported successful by the live GitHub audit. The required release platform
   remains macOS 26 on Apple Silicon.
+- The docs-only plan revision is now [#29](https://github.com/Joey-Project/diskplan/pull/29),
+  based on current main, with signed head `30c939b` at the follow-up audit.
+  Its signature and three-file scope were verified. Internal Luna document
+  review had no remaining applicable findings; this is not a formal named lane.
+  Both required macOS 26 and best-effort macOS 15 GitHub checks passed at that
+  head. These results do not transfer to a later revision automatically.
 - Runtime PR #24 was merged into the integration branch, not `main`. PRs #25-27
   were merged into the production closure chain, not `main`. An intermediate
   `MERGED` state is not product delivery.
@@ -219,8 +225,10 @@ from historical or intermediate-branch evidence alone.
   including the unresolved ordinary-removal positive authority.
 - [x] Validate the three documentation files and journal frontmatter on India.
 - [x] Run the minimal read-only India capability probe on a test-created root.
-- [ ] Submit the signed documentation commit as a PR; independent internal
+- [x] Submit the signed documentation commit as PR #29.
+- [ ] Complete the applicable formal delivery gate; independent internal
   document review is not a substitute for a formal release/readiness lane.
+- [x] Freeze the retained implementation DAG and dirty-overlap map.
 - [ ] Close the ordinary-removal authority contract before changing eligibility.
 - [ ] R0: reconcile and land reviewable delivery layers.
 - [ ] R1: integrate revised evidence and Rules contracts.
@@ -295,3 +303,71 @@ Runner SHA-256:
 The small source files remain a local R1 experiment; they are not implementation
 changes in this documentation PR. Unneeded compiler/cache outputs are disposable
 only after the process has reached a verified terminal state.
+
+### R0 Follow-Up: Frozen Integration Map
+
+The read-only follow-up compared the seven retained implementation heads. Their
+union contains 164 commit objects outside `main`; 23 belong only to one selected
+head. Treat these counts as DAG evidence, not a linear series of cherry-picks.
+
+```text
+5e12e3b  Phase 0-6 integration
+  -> 381ab8c  shared runtime baseline (+18 commits)
+       -> 6e72478  production topology (+1)
+            -> 5ab8ee0  stageable cache (+1)
+            -> 12be062  release/postverify (+11, plus dirty work)
+       -> 653b985  frontend (+2)
+       -> 32caf3a  India acceptance (+2)
+
+5d2091d  runtime-adapter side branch
+  merge-base with 5e12e3b: 76a2ebb
+  unique after Phase 0-6: 7 commits, plus dirty work
+```
+
+The main macOS 15 update and Phase 0-6 tree overlap in `.github/CI.md`,
+`.github/workflows/foundation-ci.yml`, `Package.swift`, and `accepted-plan.md`.
+Integration must retain the current runner/deployment baseline and the accepted
+revision rather than choosing either side wholesale.
+
+The two dirty worktrees overlap directly in `Package.swift`,
+`RuntimePolicyAuthority.swift`, and `RuntimeEvidenceSession.swift`. Preserve them
+intact; clean committed heads omit their pending implementation. The follow-up
+did not merge branches, modify PR #6, or absorb its work. The frozen map completes
+the R0 inventory task, not default-branch integration or release acceptance.
+
+### R1 Follow-Up: System Authority Boundary
+
+India's Xcode 26.6.0 SDK `NSFileProviderManager.h`, lines 126-138, documents two
+meanings for `NSFileNoSuchFileError`: the URL is outside the caller's
+provider/domain, or the provider has not yet assigned the item an identifier.
+The inspected header SHA-256 is
+`23805015fc243f8ce5792dca3ff44a90be5d11f3cbc7196ded5cd7cbd46752cb`.
+This is stronger evidence of ambiguity, not a successful ordinary-removal
+capability test. The registered-domains API's short SDK comment does not expand
+the documented extension-specific scope into a system-wide registry.
+
+The source audit also checked allocation/volume locality, `SF_DATALESS`,
+`EF_IS_SYNC_ROOT`, optional services, provider storage roots, and known-folder
+support. None of the collected public contracts establishes the required
+cross-provider negative certificate for existing user cache/build roots. This
+does not claim that no unexamined or private platform mechanism exists.
+
+Safe independent implementation work is possible: retain `localOrUnindicated`
+and `identifierAbsent` as unknown, and separate read-only collection from
+mutation capture authorization. Existing unknown observations can express the
+smallest correction without inventing a new positive capability or changing
+the IPC schema. Test object identity, content, and access-policy signals must
+remain constant when testing ownership uncertainty.
+
+Authorizing ordinary removal despite this evidence gap requires a new explicit
+product-risk decision, such as a separately typed user-declared local scope. No
+such decision is accepted here. Until then, missing ownership authority remains
+report-only and provider eviction never falls back to removal. Test-created
+roots remain governed by the test-only mutation authorization, not a production
+non-provider oracle.
+
+At frozen docs head `30c939b`, the India scratch clone's adopted seven journals
+all passed the bundled journal validator. This follow-up read SDK metadata and
+public source material; it did not compile or test product code, delete existing
+user data, or exercise eviction. Temporary clone/helper copies are disposable
+after validation; the small original R1 probe sources remain intentionally local.

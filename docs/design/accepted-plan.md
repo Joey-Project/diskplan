@@ -683,7 +683,7 @@ evidence that its behavior is reachable in the shipped product. Track three
 separate facts for each required behavior: implementation exists, it is integrated
 and production-wired, and the installed product passes its acceptance gate. A PR
 merged into an intermediate feature branch establishes only that branch's state,
-not default-branch delivery. The proposed recovery sequence and current evidence
+not default-branch delivery. The accepted recovery sequence and current evidence
 are recorded in the
 [October plan revision journal](../project_journal/2026/10/2026-10-04-plan-revision-61c9e4.md).
 
