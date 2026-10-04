@@ -7,18 +7,19 @@
   foundation on the Xcode version pinned in `scripts/ci/toolchain.lock`. The
   runtime assertion requires macOS 26 exactly; macOS 27+ remains best effort
   until promoted by the accepted release policy.
-- `Best effort / macOS 14 deployment compatibility` is non-blocking. It verifies
-  the Rust launcher still records a macOS 14 deployment target while that public
-  runner remains available.
+- `Best effort / macOS 14 deployment compatibility (macOS 15 runner)` is
+  non-blocking. It verifies that the Rust launcher still records a macOS 14
+  deployment target on the `macos-15` arm64 runner.
 
-GitHub's hosted-runner reference listed `macos-26` and `macos-14` as standard M1
-labels on 2026-08-28:
+GitHub's hosted-runner reference lists `macos-26` and `macos-15` as standard
+Apple Silicon labels:
 <https://docs.github.com/en/actions/reference/runners/github-hosted-runners>.
-The image inventory is maintained at
-<https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md>.
+The image inventories are maintained at
+<https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md>
+and
+<https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md>.
 The first repository run must still confirm the selected labels and Xcode path
-in this repository. GitHub has announced that the macOS 14 image will be removed
-after 2026-11-02, so remove or replace only the best-effort job when that happens.
+in this repository.
 
 ## Immutable action pins
 
