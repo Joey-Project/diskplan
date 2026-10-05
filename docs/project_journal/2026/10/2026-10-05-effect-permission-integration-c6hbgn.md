@@ -57,7 +57,8 @@ with bounded source audits and separately owned implementation slices.
   post-verification fixture construction failures; validate the affected paths
   on India without relaxing production gates or historical golden bytes.
 - [ ] Complete the independent exact-head review and release gates.
-- [ ] Integrate concrete current/JIT collection and preserve fresh-policy capture.
+- [x] Integrate the complete concrete current/JIT capture checkpoint and preserve
+  fresh-policy capture; retain its three real admission failures for follow-up.
 - [x] Freeze the typed permission, per-action consent and canonical binding
   implementation interface in
   [effect-permission-bindings-v2.md](../../../design/effect-permission-bindings-v2.md).
@@ -272,8 +273,10 @@ The next published additive head `91d64fd7fc5b526a12b648dcc2ab3621c4fe4c62`
 passed Swift tests and Rust tests in required Foundation job `111801640281`
 (run `37321562135`), then failed strict Clippy at the new canonical consent
 negative test's single-arm `match`. Later fixture/process steps were skipped,
-not successful. The frontend/core owner is correcting that lint error without
-changing the negative assertions. The bounded exact-job log fetch exited 0,
+not successful. Signed frontend/core checkpoint
+`9d5b2d37d9331b80d3ce75d219698d561a4f9af1` corrects that lint error without
+changing the negative assertions. Its four canonical golden tests and scoped
+strict Clippy passed on India. The bounded exact-job log fetch exited 0,
 was quiescent and has SHA-256
 `44d2a194ce91cf79de85b177332bbe35f680b01a086f904f91815743cb609ebd`.
 Earlier escape-sequence-rejected fetch attempts are not valid CI-log receipts.
@@ -289,3 +292,44 @@ Provider traversal decisions are also conflated with ownership facts in current
 mappers. These are implementation gaps, not new design questions: repair them
 under the accepted two-tier effect-permission contract and retain independent
 identity, content, access, activity, coverage, mount and adapter gates.
+
+### Closed Recovery Checkpoints And Parallel Follow-Up
+
+Signed integration `40b695398060ccee79833ebf68e4b8d668f64016` preserves the full
+R0 checkpoint `31bee718c74532cd5013b63adace93f9dfe83335`, including all seven
+unique runtime-adapter ancestors, and frontend/core history through `9d5b2d`.
+It also contains frozen Rules runtime configuration `0709a830` and the checked
+[effect transport projection](2026-10-05-effect-transport-projection-83c29e.md)
+at `49ff78a4`. The latter passed two actual Swift Testing tests on India and an
+independent source-hash audit; it is a byte-preserving mapper, not permission
+authority. All four integration/source commits were signature-verified.
+
+The [R0 journal](2026-10-05-r0-runtime-capture-4f8a2d.md) records 144 selected
+Execution/Policy tests and 11 mechanism/lease/compile-fail tests passing on
+India, separately from three retained real production positive tests failing
+with four issues. Two invariant tests observe `unknown(incompleteCoverage)`;
+the descriptor-content test rejects binding with error 71. No assertion was
+changed into a skip, conditional success, or synthetic known-local issuer.
+This checkpoint is therefore not a passing full integration gate.
+
+Follow-up ownership is disjoint: metadata-only directory admission; bounded
+resident-content admission; Policy requirement/consent semantics; Engine plan,
+overlay and frozen Rules production consumers; Execution epoch provenance and
+post-verification integration; remaining release-runtime bridge; Rust plan-first
+consent UX; and India installed-acceptance proof hardening. The accepted read
+contract is native local APFS plus live dataless-materialization OFF and the
+existing identity, access, path-slot and coverage gates. It does not assert no
+remote metadata communication or infer non-Provider ownership. Unsupported
+filesystems and genuinely failed reads stay typed and partial; safely observed
+local allocation is not erased merely because ownership is unknown.
+
+The acceptance internal audit identified two proof gaps: untrusted manifest
+platform declarations must be checked against actual bound Mach-O payloads;
+delete/preserve outcomes must bind the original object rather than follow a
+replacement symlink with `Path.exists()`. Both are assigned for append-only
+correction and negative tests. Unit receipts are not installed acceptance.
+
+Live protocol defaults remain 1.6. Coherent 1.7 activation, exact combined-head
+validation, installed acceptance, formal whole-range review and PR landing are
+still pending. Original dirty trees remain untouched; closed clean worktrees
+may be reclaimed after their commits and branches are retained.
