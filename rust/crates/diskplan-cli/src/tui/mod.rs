@@ -19,6 +19,7 @@ use ratatui::backend::CrosstermBackend;
 use thiserror::Error;
 
 use crate::BoundEngine;
+use crate::batch::{BatchProfile, PlanningAgentMode};
 
 use self::app::run_application;
 use self::driver::EngineDriver;
@@ -30,13 +31,35 @@ pub enum TuiError {
     Io(#[from] io::Error),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InteractiveRuntimeOptions {
+    pub profile: BatchProfile,
+    pub agent_mode: PlanningAgentMode,
+}
+
+impl Default for InteractiveRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            profile: BatchProfile::Standard,
+            agent_mode: PlanningAgentMode::Ask,
+        }
+    }
+}
+
 pub async fn run(engine: &Path) -> Result<(), TuiError> {
     let engine = BoundEngine::open(engine)?;
     run_bound(&engine).await
 }
 
 pub async fn run_bound(engine: &BoundEngine) -> Result<(), TuiError> {
-    let (mut driver, engine_events) = EngineDriver::spawn(engine)?;
+    run_bound_with_options(engine, InteractiveRuntimeOptions::default()).await
+}
+
+pub async fn run_bound_with_options(
+    engine: &BoundEngine,
+    options: InteractiveRuntimeOptions,
+) -> Result<(), TuiError> {
+    let (mut driver, engine_events) = EngineDriver::spawn(engine, options)?;
     let mut guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut source = TerminalEventSource::new(engine_events);

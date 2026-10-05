@@ -12,5 +12,5 @@ expression: "snapshot(&state, 40, 12)"
 │23.0 GiB observed • evidence only     │
 └──────────────────────────────────────┘
 ────────────────────────────────────────
-q cancel  Space pause/resume  p finalize
+q cancel  Space pause/resume  p provisio
 scan is running

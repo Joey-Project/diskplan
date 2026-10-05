@@ -121,12 +121,18 @@ fn render_footer(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             Screen::Scan,
             ScanState::Finished | ScanState::FinalizedPartial | ScanState::Cancelled,
         ) => "waiting for finalized evidence  ? or / help",
-        (Screen::Scan, _) => "q cancel  Space pause/resume  p finalize partial + plan  ? or / help",
+        (Screen::Scan, _) => "q cancel  Space pause/resume  p provisional plan  ? or / help",
         (Screen::ProvisionalPlan, _) if state.plan.model().current_plan_id().is_none() => {
-            "q cancel  r resume + invalidate  ? help"
+            "q cancel  r resume + invalidate  F freeze partial  ? help"
         }
         (Screen::ProvisionalPlan, _) if state.plan.filter_editing() => {
             "filter: type  Backspace edit  Enter accept  Esc close"
+        }
+        (Screen::ProvisionalPlan, _) if state.plan.execution_active() => {
+            "execution active  q request cancellation  ? or / help"
+        }
+        (Screen::ProvisionalPlan, _) if state.plan.apply_review_visible() => {
+            "authoritative apply review  Enter confirm  Esc/b back  ? or / help"
         }
         (Screen::ProvisionalPlan, _) => {
             "j/k move  Enter/l expand  h collapse  Space stage  p plan  f filter  ? or / help"
@@ -525,6 +531,57 @@ fn plan_execution_preview(runtime: &PlanRuntime, width: u16) -> Vec<Line<'static
         return detail.finish();
     };
 
+    if let Some(review) = runtime.apply_review() {
+        detail.push_with(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            || {
+                format!(
+                    "AUTHORITATIVE APPLY REVIEW {} • binding {} • deadline {}",
+                    bounded_detail_field(&review.review_id),
+                    bounded_detail_field(&review.review_binding_digest),
+                    review.deadline_seconds
+                )
+            },
+        );
+        detail.push_with(Style::default(), || {
+            format!(
+                "{} selected actions • {} typed findings • {} exact force confirmations",
+                review.selected_action_count,
+                review.finding_count,
+                review.force_action_ids.len()
+            )
+        });
+        if runtime.execution_status().is_none() {
+            detail.push_static(
+                "Enter confirms this exact review; Esc/b returns without mutation.",
+                Style::default().fg(Color::Yellow),
+            );
+        }
+    }
+
+    if let Some(status) = runtime.execution_status() {
+        detail.push_with(
+            if status.terminal && status.verified {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Yellow)
+            },
+            || {
+                format!(
+                    "EXECUTION {} • events {} • cancel={} • terminal={} • verified={} • {}",
+                    status.execution_id.as_deref().unwrap_or("pending"),
+                    status.event_count,
+                    status.cancel_requested,
+                    status.terminal,
+                    status.verified,
+                    bounded_detail_field(&status.summary)
+                )
+            },
+        );
+    }
+
     for warning in &preview.final_warnings {
         if !detail.push_with(
             Style::default()
@@ -537,17 +594,17 @@ fn plan_execution_preview(runtime: &PlanRuntime, width: u16) -> Vec<Line<'static
     }
 
     detail.push_static(
-        "Engine-issued execution DAG order and prerequisite status",
+        "Engine-issued ordered action review and postconditions",
         Style::default().add_modifier(Modifier::BOLD),
     );
     detail.push_static(
-        "Commands and argv remain engine-owned and are never composed by the TUI.",
+        "Displayed commands and argv come from the engine and are never composed by the TUI.",
         Style::default().fg(Color::DarkGray),
     );
     for (index, unit) in preview.ordered_units.iter().enumerate() {
         if !detail.push_with(Style::default(), || {
             format!(
-                "{}. unit {} • {} • prerequisite status {}",
+                "{}. unit {} • {} • postcondition/status {}",
                 index + 1,
                 unit.id,
                 bounded_detail_field(&unit.label),
@@ -1101,12 +1158,15 @@ fn render_help(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
         (Screen::ProvisionalPlan, _) => vec![
             Line::from("q      cancel; press q again after finalized evidence"),
             Line::from("r      resume and invalidate this projection"),
+            Line::from("F      freeze partial evidence into an immutable plan"),
             Line::from("j/k ↑↓ move     Enter/l expand     h collapse/back"),
             Line::from("Space  stage/unstage engine action"),
             Line::from("e/t/g  Evidence / Targets / Dependencies"),
             Line::from("v      Coverage       p Plan summary"),
             Line::from("c      columns        s group-local sort"),
             Line::from("f      filter         D dry-run     A apply review"),
+            Line::from("Enter  confirm authoritative review; Esc/b back"),
+            Line::from("q      during execution: request cancellation once"),
             Line::from("? /    close this contextual help"),
         ],
     };
@@ -1220,17 +1280,17 @@ mod tests {
         let final_warning = execution_snapshot
             .find("FINAL WARNING final-force")
             .unwrap();
-        let dag_header = execution_snapshot
-            .find("Engine-issued execution DAG")
+        let review_header = execution_snapshot
+            .find("Engine-issued ordered action review")
             .unwrap();
         let unit = execution_snapshot.find("unit-remove-cache").unwrap();
-        assert!(final_warning < dag_header && dag_header < unit);
+        assert!(final_warning < review_header && review_header < unit);
         assert!(!execution_snapshot.contains("[detail truncated at encoded byte limit]"));
         insta::assert_snapshot!("execution_preview_warnings_80x24", execution_snapshot);
     }
 
     #[test]
-    fn overlong_warning_fields_preserve_identity_and_following_dag_at_80_columns() {
+    fn overlong_warning_fields_preserve_identity_and_following_review_at_80_columns() {
         let selected_snapshot = snapshot(&sample_overlong_warning_review_state(), 80, 24);
         let waiver = selected_snapshot
             .find("WAIVER waiver-overlong for action action-cache-1")
@@ -1249,11 +1309,11 @@ mod tests {
         let final_warning = execution_snapshot
             .find("FINAL WARNING final-overlong")
             .unwrap();
-        let dag_header = execution_snapshot
-            .find("Engine-issued execution DAG")
+        let review_header = execution_snapshot
+            .find("Engine-issued ordered action review")
             .unwrap();
         let unit = execution_snapshot.find("unit-overlong").unwrap();
-        assert!(final_warning < dag_header && dag_header < unit);
+        assert!(final_warning < review_header && review_header < unit);
         assert!(!execution_snapshot.contains("[detail truncated at encoded byte limit]"));
 
         let bounded = bounded_detail_field(&format!("{}TAIL", "警告".repeat(8_192)));

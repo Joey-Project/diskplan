@@ -192,6 +192,9 @@ pub enum OverlayStageResult {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlayStageEdit {
+    plan_id: PlanId,
+    evidence_reference: String,
+    overlay_digest: String,
     action_id: ActionId,
     stage: bool,
     base_revision: u64,
@@ -199,6 +202,18 @@ pub struct OverlayStageEdit {
 }
 
 impl OverlayStageEdit {
+    pub fn plan_id(&self) -> &PlanId {
+        &self.plan_id
+    }
+
+    pub fn evidence_reference(&self) -> &str {
+        &self.evidence_reference
+    }
+
+    pub fn overlay_digest(&self) -> &str {
+        &self.overlay_digest
+    }
+
     pub fn action_id(&self) -> &ActionId {
         &self.action_id
     }
@@ -290,6 +305,37 @@ pub struct EngineOverlaySnapshot {
     pub digest: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineApplyReviewSnapshot {
+    pub plan_id: PlanId,
+    pub overlay_digest: String,
+    pub review_id: String,
+    pub review_binding_digest: String,
+    pub force_action_ids: Vec<ActionId>,
+    pub selected_action_count: u64,
+    pub finding_count: u64,
+    pub deadline_seconds: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionStatusProjection {
+    pub authority_generation: u64,
+    pub execution_id: Option<String>,
+    pub event_count: u64,
+    pub summary: String,
+    pub cancel_requested: bool,
+    pub terminal: bool,
+    pub verified: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionCancelBinding {
+    pub review_id: String,
+    pub review_binding_digest: String,
+    pub authority_generation: u64,
+    pub execution_id: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum PlanRuntimeEvent {
     Load(EnginePlanSnapshot),
@@ -308,6 +354,15 @@ pub enum PlanRuntimeEvent {
         reason: String,
     },
     ExecutionPreviewReady(ExecutionPreviewProjection),
+    ApplyReviewReady {
+        review: EngineApplyReviewSnapshot,
+        preview: ExecutionPreviewProjection,
+    },
+    ApplyReviewDismissed,
+    ConfirmApplyRejected {
+        summary: String,
+    },
+    ExecutionStatus(ExecutionStatusProjection),
     OverlayAcknowledged(EngineOverlaySnapshot),
     DryRunReady {
         current: bool,
@@ -367,6 +422,8 @@ pub struct PlanRuntime {
     detail_viewport_top: usize,
     detail_viewport_height: usize,
     execution_preview: Option<ExecutionPreviewProjection>,
+    apply_review: Option<EngineApplyReviewSnapshot>,
+    execution_status: Option<ExecutionStatusProjection>,
 }
 
 impl PlanRuntime {
@@ -479,6 +536,55 @@ impl PlanRuntime {
 
     pub fn execution_preview(&self) -> Option<&ExecutionPreviewProjection> {
         self.execution_preview.as_ref()
+    }
+
+    pub fn apply_review(&self) -> Option<&EngineApplyReviewSnapshot> {
+        self.apply_review.as_ref()
+    }
+
+    pub fn execution_status(&self) -> Option<&ExecutionStatusProjection> {
+        self.execution_status.as_ref()
+    }
+
+    pub fn apply_review_visible(&self) -> bool {
+        self.apply_review.is_some() && self.execution_status.is_none()
+    }
+
+    pub fn execution_active(&self) -> bool {
+        self.execution_status
+            .as_ref()
+            .is_some_and(|status| !status.terminal)
+    }
+
+    pub fn execution_cancel_binding(&self) -> Option<ExecutionCancelBinding> {
+        let review = self.apply_review.as_ref()?;
+        let status = self.execution_status.as_ref()?;
+        (!status.terminal).then(|| ExecutionCancelBinding {
+            review_id: review.review_id.clone(),
+            review_binding_digest: review.review_binding_digest.clone(),
+            authority_generation: status.authority_generation,
+            execution_id: status.execution_id.clone(),
+        })
+    }
+
+    pub fn mark_execution_cancel_requested(&mut self) -> bool {
+        let Some(status) = self.execution_status.as_mut() else {
+            return false;
+        };
+        if status.terminal || status.cancel_requested {
+            false
+        } else {
+            status.cancel_requested = true;
+            true
+        }
+    }
+
+    pub fn reject_execution_cancel(&mut self) {
+        if let Some(status) = self.execution_status.as_mut()
+            && !status.terminal
+        {
+            status.cancel_requested = false;
+        }
     }
 
     pub fn provisional(&self) -> bool {
@@ -632,6 +738,8 @@ impl PlanRuntime {
             overlay.advance();
             self.pending_intents.clear();
             self.execution_preview = None;
+            self.apply_review = None;
+            self.execution_status = None;
             return OverlayStageResult::Unstaged;
         }
         match stageability {
@@ -644,6 +752,8 @@ impl PlanRuntime {
                 overlay.advance();
                 self.pending_intents.clear();
                 self.execution_preview = None;
+                self.apply_review = None;
+                self.execution_status = None;
                 OverlayStageResult::Staged {
                     force_warning: force_reason(force),
                 }
@@ -662,6 +772,8 @@ impl PlanRuntime {
                     overlay.advance();
                     self.pending_intents.clear();
                     self.execution_preview = None;
+                    self.apply_review = None;
+                    self.execution_status = None;
                     OverlayStageResult::Staged {
                         force_warning: force_reason(force),
                     }
@@ -704,6 +816,9 @@ impl PlanRuntime {
             }
         }
         Ok(OverlayStageEdit {
+            plan_id: overlay.plan_id.clone(),
+            evidence_reference: overlay.evidence_reference.clone(),
+            overlay_digest: overlay.digest.clone(),
             action_id,
             stage,
             base_revision: overlay.revision,
@@ -740,11 +855,13 @@ impl PlanRuntime {
             overlay.advance();
             self.pending_intents.clear();
             self.execution_preview = None;
+            self.apply_review = None;
+            self.execution_status = None;
         }
         Ok(())
     }
 
-    pub fn queue_intent(&mut self, kind: PlanIntentKind) -> Result<(), &'static str> {
+    pub fn queue_intent(&mut self, kind: PlanIntentKind) -> Result<PlanIntent, &'static str> {
         if self.provisional {
             return Err("freeze the partial scan before dry-run or apply review");
         }
@@ -754,21 +871,23 @@ impl PlanRuntime {
         if overlay.selected_actions.is_empty() {
             return Err("stage at least one engine action first");
         }
-        if !self
+        if self
             .pending_intents
             .iter()
             .any(|intent| intent.kind == kind)
         {
-            self.pending_intents.push(PlanIntent {
-                kind,
-                plan_id: overlay.plan_id.clone(),
-                evidence_reference: overlay.evidence_reference.clone(),
-                selected_action_ids: overlay.selected_action_order.clone(),
-                overlay_revision: overlay.revision,
-                overlay_digest: overlay.digest.clone(),
-            });
+            return Err("the same engine intent is already awaiting a response");
         }
-        Ok(())
+        let intent = PlanIntent {
+            kind,
+            plan_id: overlay.plan_id.clone(),
+            evidence_reference: overlay.evidence_reference.clone(),
+            selected_action_ids: overlay.selected_action_order.clone(),
+            overlay_revision: overlay.revision,
+            overlay_digest: overlay.digest.clone(),
+        };
+        self.pending_intents.push(intent.clone());
+        Ok(intent)
     }
 
     pub fn pending_intents(&self) -> &[PlanIntent] {
@@ -797,6 +916,8 @@ impl PlanRuntime {
                 self.compact_columns = false;
                 self.detail_viewport_top = 0;
                 self.execution_preview = None;
+                self.apply_review = None;
+                self.execution_status = None;
                 self.view = PlanView::Summary;
                 if snapshot.evidence_reference.trim().is_empty() {
                     return Err(PlanRuntimeError::EmptyEvidenceReference);
@@ -882,6 +1003,8 @@ impl PlanRuntime {
                 overlay.advance();
                 self.pending_intents.clear();
                 self.execution_preview = None;
+                self.apply_review = None;
+                self.execution_status = None;
                 Ok(())
             }
             PlanRuntimeEvent::ExecutionPreviewReady(preview) => {
@@ -897,6 +1020,59 @@ impl PlanRuntime {
                 self.execution_preview = Some(preview);
                 self.view = PlanView::ExecutionPreview;
                 self.detail_viewport_top = 0;
+                Ok(())
+            }
+            PlanRuntimeEvent::ApplyReviewReady { review, preview } => {
+                let Some(overlay) = self.overlay.as_ref() else {
+                    return Err(PlanRuntimeError::InvalidExecutionPreview);
+                };
+                if review.plan_id != overlay.plan_id
+                    || review.overlay_digest != overlay.digest
+                    || preview.plan_id != overlay.plan_id
+                    || preview.overlay_digest != overlay.digest
+                    || !execution_preview_is_valid(&preview, overlay)
+                    || review.selected_action_count != overlay.selected_actions.len() as u64
+                    || review.review_id.is_empty()
+                    || review.review_binding_digest.len() != 64
+                {
+                    return Err(PlanRuntimeError::InvalidExecutionPreview);
+                }
+                self.complete_intent(PlanIntentKind::ApplyReview);
+                self.execution_preview = Some(preview);
+                self.apply_review = Some(review);
+                self.execution_status = None;
+                self.view = PlanView::ExecutionPreview;
+                self.detail_viewport_top = 0;
+                Ok(())
+            }
+            PlanRuntimeEvent::ApplyReviewDismissed => {
+                self.apply_review = None;
+                self.execution_preview = None;
+                self.execution_status = None;
+                self.view = PlanView::SelectedActions;
+                Ok(())
+            }
+            PlanRuntimeEvent::ConfirmApplyRejected { .. } => {
+                if self.apply_review.is_none() || self.execution_status.is_none() {
+                    return Err(PlanRuntimeError::InvalidExecutionPreview);
+                }
+                self.execution_status = None;
+                self.view = PlanView::ExecutionPreview;
+                Ok(())
+            }
+            PlanRuntimeEvent::ExecutionStatus(status) => {
+                if self.apply_review.is_none() && self.execution_status.is_none() {
+                    return Err(PlanRuntimeError::InvalidExecutionPreview);
+                }
+                if status.authority_generation == 0
+                    || self.execution_status.as_ref().is_some_and(|current| {
+                        current.authority_generation != status.authority_generation
+                    })
+                {
+                    return Err(PlanRuntimeError::InvalidExecutionPreview);
+                }
+                self.execution_status = Some(status);
+                self.view = PlanView::ExecutionPreview;
                 Ok(())
             }
             PlanRuntimeEvent::OverlayAcknowledged(snapshot) => {
@@ -951,6 +1127,8 @@ impl PlanRuntime {
                 self.pending_intents.clear();
                 self.pending_overlay_edit = None;
                 self.execution_preview = None;
+                self.apply_review = None;
+                self.execution_status = None;
                 Ok(())
             }
             PlanRuntimeEvent::DryRunReady { .. } => {
@@ -962,6 +1140,7 @@ impl PlanRuntime {
                     "overlay edit" => self.pending_overlay_edit = None,
                     "dry-run" => self.complete_intent(PlanIntentKind::DryRun),
                     "apply review" => self.complete_intent(PlanIntentKind::ApplyReview),
+                    "cancel execution" => self.reject_execution_cancel(),
                     _ => {}
                 }
                 Ok(())
@@ -1001,6 +1180,8 @@ impl PlanRuntime {
         self.pending_intents.clear();
         self.pending_overlay_edit = None;
         self.execution_preview = None;
+        self.apply_review = None;
+        self.execution_status = None;
         Ok(())
     }
 
@@ -1480,6 +1661,146 @@ mod tests {
         );
         assert!(runtime.execution_preview().is_none());
         assert!(!runtime.set_view(PlanView::ExecutionPreview));
+    }
+
+    #[test]
+    fn authoritative_review_requires_explicit_confirmation_state_before_execution() {
+        let mut runtime = runtime(
+            false,
+            Stageability::Stageable,
+            ForceRequirement::Required {
+                reason: "engine requires force".into(),
+            },
+        );
+        select_action(&mut runtime);
+        assert!(matches!(
+            runtime.toggle_selected_stage(),
+            OverlayStageResult::Staged { .. }
+        ));
+        runtime.queue_intent(PlanIntentKind::ApplyReview).unwrap();
+        let overlay = runtime.overlay().unwrap();
+        let plan_id = overlay.plan_id().clone();
+        let overlay_digest = overlay.digest().to_owned();
+        let preview = ExecutionPreviewProjection {
+            plan_id: plan_id.clone(),
+            overlay_digest: overlay_digest.clone(),
+            ordered_units: vec![ExecutionUnitProjection {
+                id: ExecutionUnitId::new("action:action-1"),
+                covered_action_ids: vec![ActionId::new("action-1")],
+                label: "Engine action action-1".into(),
+                prerequisite_unit_ids: Vec::new(),
+                prerequisite_status: "engine-ordered".into(),
+            }],
+            final_warnings: vec![ExecutionWarningProjection {
+                id: ExecutionWarningId::new("force:action-1"),
+                message: "Force confirmation required".into(),
+            }],
+        };
+        runtime
+            .apply_event(PlanRuntimeEvent::ApplyReviewReady {
+                review: EngineApplyReviewSnapshot {
+                    plan_id,
+                    overlay_digest,
+                    review_id: "review-1".into(),
+                    review_binding_digest: "44".repeat(32),
+                    force_action_ids: vec![ActionId::new("action-1")],
+                    selected_action_count: 1,
+                    finding_count: 0,
+                    deadline_seconds: 300,
+                },
+                preview,
+            })
+            .unwrap();
+        assert!(runtime.apply_review_visible());
+        assert!(!runtime.execution_active());
+        assert!(runtime.pending_intents().is_empty());
+
+        runtime
+            .apply_event(PlanRuntimeEvent::ExecutionStatus(
+                ExecutionStatusProjection {
+                    authority_generation: 7,
+                    execution_id: None,
+                    event_count: 0,
+                    summary: "waiting for ApplyStarted".into(),
+                    cancel_requested: false,
+                    terminal: false,
+                    verified: false,
+                },
+            ))
+            .unwrap();
+        assert!(!runtime.apply_review_visible());
+        assert!(runtime.execution_active());
+        assert_eq!(
+            runtime
+                .execution_cancel_binding()
+                .unwrap()
+                .authority_generation,
+            7
+        );
+        assert!(runtime.mark_execution_cancel_requested());
+        runtime
+            .apply_event(PlanRuntimeEvent::OperationRejected {
+                operation: "cancel execution",
+                summary: "stale visible generation".into(),
+            })
+            .unwrap();
+        assert!(!runtime.execution_status().unwrap().cancel_requested);
+
+        let wrong_generation = runtime.apply_event(PlanRuntimeEvent::ExecutionStatus(
+            ExecutionStatusProjection {
+                authority_generation: 8,
+                execution_id: Some("execution-other".into()),
+                event_count: 1,
+                summary: "stale generation".into(),
+                cancel_requested: false,
+                terminal: false,
+                verified: false,
+            },
+        ));
+        assert_eq!(
+            wrong_generation,
+            Err(PlanRuntimeError::InvalidExecutionPreview)
+        );
+        assert_eq!(runtime.execution_status().unwrap().authority_generation, 7);
+
+        runtime
+            .apply_event(PlanRuntimeEvent::ConfirmApplyRejected {
+                summary: "pre-claim rejection".into(),
+            })
+            .unwrap();
+        assert!(runtime.apply_review_visible());
+        assert!(!runtime.execution_active());
+        assert!(runtime.execution_status().is_none());
+
+        runtime
+            .apply_event(PlanRuntimeEvent::ExecutionStatus(
+                ExecutionStatusProjection {
+                    authority_generation: 8,
+                    execution_id: None,
+                    event_count: 0,
+                    summary: "waiting for ApplyStarted".into(),
+                    cancel_requested: false,
+                    terminal: false,
+                    verified: false,
+                },
+            ))
+            .unwrap();
+
+        runtime
+            .apply_event(PlanRuntimeEvent::ExecutionStatus(
+                ExecutionStatusProjection {
+                    authority_generation: 8,
+                    execution_id: Some("execution-1".into()),
+                    event_count: 2,
+                    summary: "ApplyFinished".into(),
+                    cancel_requested: true,
+                    terminal: true,
+                    verified: true,
+                },
+            ))
+            .unwrap();
+        assert!(!runtime.execution_active());
+        assert!(runtime.execution_status().unwrap().verified);
     }
 
     #[test]

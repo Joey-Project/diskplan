@@ -31,12 +31,14 @@ const DRY_RUN_CAPABILITY: &str = "dry-run-projection-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BatchProfile {
+    Standard,
     FullAudit,
 }
 
 impl BatchProfile {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::Standard => "standard",
             Self::FullAudit => "full-audit",
         }
     }
@@ -72,7 +74,7 @@ impl PlanningAgentMode {
         }
     }
 
-    const fn wire(self) -> AgentMode {
+    pub(crate) const fn wire(self) -> AgentMode {
         match self {
             Self::Off => AgentMode::Off,
             Self::Ask => AgentMode::Ask,
@@ -591,17 +593,33 @@ fn execute_protocol_batch(
         final_evidence_sha256: scan.summary.evidence.final_evidence_sha256.to_vec(),
     };
 
-    session
-        .send_build_plan_request(BuildPlanRequest {
-            request_id: 2,
-            scan_session_id: Some(opaque(scan.summary.evidence.scan_session_id.as_bytes())),
-            scan_checkpoint_id: Some(opaque(scan.summary.evidence.scan_checkpoint_id.as_bytes())),
-            scan_evidence_sha256: Some(digest(scan.summary.evidence.final_evidence_sha256)),
-            allow_partial_evidence: scan.allow_partial_evidence,
-            agent_mode: request.agent_mode.wire() as i32,
-        })
-        .map_err(map_client_error)?;
-    let plan_receipt = receive_plan(session, 2, &plan_scan_binding).map_err(map_runtime_error)?;
+    let mut next_request_id = 2_u64;
+    let mut agent_mode = request.agent_mode;
+    let plan_receipt = loop {
+        let request_id = next_request_id;
+        next_request_id += 1;
+        session
+            .send_build_plan_request(BuildPlanRequest {
+                request_id,
+                scan_session_id: Some(opaque(scan.summary.evidence.scan_session_id.as_bytes())),
+                scan_checkpoint_id: Some(opaque(
+                    scan.summary.evidence.scan_checkpoint_id.as_bytes(),
+                )),
+                scan_evidence_sha256: Some(digest(scan.summary.evidence.final_evidence_sha256)),
+                allow_partial_evidence: scan.allow_partial_evidence,
+                agent_mode: agent_mode.wire() as i32,
+            })
+            .map_err(map_client_error)?;
+        match receive_plan(session, request_id, &plan_scan_binding) {
+            Ok(receipt) => break receipt,
+            Err(error)
+                if agent_mode != PlanningAgentMode::Off && error.permits_agent_fallback() =>
+            {
+                agent_mode = PlanningAgentMode::Off;
+            }
+            Err(error) => return Err(map_runtime_error(error)),
+        }
+    };
     let plan = summarize_plan(&scan.summary.evidence, plan_receipt.projection())?;
     let projection_id =
         required_opaque(plan_receipt.projection().manifest().projection_id.as_ref())?;
@@ -609,7 +627,7 @@ fn execute_protocol_batch(
 
     let overlay = edit_overlay(
         session,
-        3,
+        next_request_id,
         opaque(&projection_id),
         0,
         vec![DecisionOverlayEdit {
@@ -624,12 +642,13 @@ fn execute_protocol_batch(
         &mut chain,
     )
     .map_err(map_runtime_error)?;
+    next_request_id += 1;
     let overlay_summary = summarize_overlay(&plan, &overlay)?;
 
     let dry_run_receipt = prepare_dry_run(
         session,
         PrepareDryRunRequest {
-            request_id: 4,
+            request_id: next_request_id,
             projection_id: overlay.projection_id.clone(),
             overlay_revision: overlay.revision,
             overlay_sha256: overlay.overlay_sha256.clone(),
@@ -880,6 +899,23 @@ mod tests {
             profile: BatchProfile::FullAudit,
             root: OsString::from("/private/tmp/fixture"),
             agent_mode: PlanningAgentMode::Ask,
+        }
+    }
+
+    #[test]
+    fn both_scan_profiles_are_valid_deterministic_batch_requests() {
+        for profile in [BatchProfile::Standard, BatchProfile::FullAudit] {
+            let request = BatchRequest::from(&BatchOptions {
+                profile,
+                root: OsString::from("/private/tmp/fixture"),
+                agent_mode: PlanningAgentMode::Ask,
+            });
+
+            validate_request(&request).expect("both deterministic scan profiles are supported");
+            assert_eq!(request.profile, profile);
+            assert!(request.dry_run);
+            assert!(!request.history_enabled);
+            assert!(!request.audit_file_enabled);
         }
     }
 
