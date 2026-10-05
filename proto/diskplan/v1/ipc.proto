@@ -507,6 +507,20 @@ enum PlanActionKind {
   PLAN_ACTION_KIND_REPORT_ONLY = 7;
 }
 
+// Closed authorization vocabulary for declared deletion effects. The
+// unspecified value is transport-only and never grants mutation authority.
+enum ActionEffectPermission {
+  ACTION_EFFECT_PERMISSION_UNSPECIFIED = 0;
+  ACTION_EFFECT_PERMISSION_LOCAL_REMOVE_ONLY = 1;
+  ACTION_EFFECT_PERMISSION_MAY_DELETE_ACROSS_DEVICES = 2;
+}
+
+enum ActionEffectOperation {
+  ACTION_EFFECT_OPERATION_UNSPECIFIED = 0;
+  ACTION_EFFECT_OPERATION_ORDINARY_REMOVE = 1;
+  ACTION_EFFECT_OPERATION_PROVIDER_EVICT_LOCAL_COPY = 2;
+}
+
 enum PlanRecommendation {
   PLAN_RECOMMENDATION_UNSPECIFIED = 0;
   PLAN_RECOMMENDATION_SAFE_TO_CLEAN = 1;
@@ -918,6 +932,33 @@ message ActionExecutionPreviewProjection {
   PathRaceProjection path_race = 8;
 }
 
+// Immutable typed requirement for one declared action variant. Its canonical
+// digest excludes action_id to avoid the action/requirement hash cycle.
+message ActionEffectRequirementBindingV2 {
+  uint32 version = 1;
+  optional ActionEffectOperation operation = 2;
+  optional ActionEffectPermission permission = 3;
+  OpaqueIdentifier variant_group_id = 4;
+  Digest256 target_scope_sha256 = 5;
+  Digest256 operation_contract_sha256 = 6;
+}
+
+// Per-action consent. Protobuf serialization is transport only; the Rust
+// verifier independently checks the closed canonical record and references.
+message EffectConsentBindingV2 {
+  uint32 version = 1;
+  optional ActionEffectPermission permission = 2;
+  Digest256 requirement_sha256 = 3;
+  OpaqueIdentifier action_id = 4;
+  OpaqueIdentifier action_lineage_id = 5;
+  Digest256 target_scope_sha256 = 6;
+  Digest256 plan_sha256 = 7;
+  Digest256 evidence_sha256 = 8;
+  string policy_version = 9;
+  string schema_version = 10;
+  bytes consent_event_id = 11;
+}
+
 message PlanActionProjection {
   OpaqueIdentifier action_id = 1;
   OpaqueIdentifier action_lineage_id = 2;
@@ -944,6 +985,10 @@ message PlanActionProjection {
   ActionExecutionPreviewProjection execution_preview = 23;
   PlanRecommendation recommendation = 24;
   PlanSafetyEvidenceProjection safety_evidence = 25;
+  // Protocol 1.7 only; older protocol minors must omit all three fields.
+  ActionEffectRequirementBindingV2 action_effect_requirement = 26;
+  Digest256 action_effect_requirement_sha256 = 27;
+  OpaqueIdentifier action_effect_variant_group_id = 28;
 }
 
 // Target trees are flat records so one large directory cannot create an
@@ -1032,6 +1077,8 @@ message PlanProjectionManifest {
   OpaqueIdentifier plan_id = 26;
   OpaqueIdentifier evidence_id = 27;
   Digest256 scan_checkpoint_evidence_sha256 = 28;
+  // Protocol 1.7 requires the exact closed effect-binding schema version 2.
+  uint32 action_effect_binding_schema_version = 29;
 }
 
 message BuildPlanRequest {
@@ -1072,6 +1119,7 @@ enum DecisionEditKind {
   DECISION_EDIT_KIND_REVOKE_WAIVER = 4;
   DECISION_EDIT_KIND_REPLACE_NOTES = 5;
   DECISION_EDIT_KIND_APPLY_BATCH_SELECTION_PRESET = 6;
+  DECISION_EDIT_KIND_SET_EFFECT_CONSENT = 7;
 }
 
 enum BatchSelectionPreset {
@@ -1106,6 +1154,13 @@ message ApplyBatchSelectionPresetEdit {
   BatchSelectionPreset preset = 1;
 }
 
+message SetEffectConsentEdit {
+  OpaqueIdentifier action_id = 1;
+  optional ActionEffectPermission permission = 2;
+  bytes consent_event_id = 3;
+  Digest256 requirement_sha256 = 4;
+}
+
 message DecisionOverlayEdit {
   DecisionEditKind kind = 1;
   oneof edit {
@@ -1115,6 +1170,7 @@ message DecisionOverlayEdit {
     RevokeWaiverEdit revoke_waiver = 13;
     ReplaceNotesEdit replace_notes = 14;
     ApplyBatchSelectionPresetEdit apply_batch_selection_preset = 15;
+    SetEffectConsentEdit set_effect_consent = 16;
   }
 }
 
@@ -1130,6 +1186,11 @@ message AcknowledgedWaiver {
   OpaqueIdentifier action_id = 1;
   OpaqueIdentifier waiver_id = 2;
   Digest256 consent_sha256 = 3;
+}
+
+message AcknowledgedEffectConsent {
+  EffectConsentBindingV2 binding = 1;
+  Digest256 consent_sha256 = 2;
 }
 
 message DecisionOverlayAcknowledged {
@@ -1155,6 +1216,9 @@ message DecisionOverlayAcknowledged {
   OpaqueIdentifier scan_checkpoint_id = 20;
   Digest256 scan_checkpoint_evidence_sha256 = 21;
   Digest256 projection_sha256 = 22;
+  repeated AcknowledgedEffectConsent acknowledged_effect_consents = 23;
+  uint32 maximum_effect_consents = 24;
+  uint64 effect_consent_count = 25;
 }
 
 enum DecisionOverlayRejectCode {
@@ -1169,6 +1233,8 @@ enum DecisionOverlayRejectCode {
   DECISION_OVERLAY_REJECT_CODE_LIMIT_EXCEEDED = 8;
   DECISION_OVERLAY_REJECT_CODE_INVALID_EDIT = 9;
   DECISION_OVERLAY_REJECT_CODE_INTERNAL_ERROR = 10;
+  DECISION_OVERLAY_REJECT_CODE_INVALID_OR_MISSING_EFFECT_CONSENT = 11;
+  DECISION_OVERLAY_REJECT_CODE_CONFLICTING_EFFECT_VARIANTS = 12;
 }
 
 message DecisionOverlayRejected {
@@ -1340,6 +1406,9 @@ message ApplyReviewActionProjection {
   OpaqueIdentifier action_id = 1;
   bool requires_force = 2;
   ActionExecutionPreviewProjection execution_preview = 3;
+  optional ActionEffectPermission effect_permission = 4;
+  Digest256 effect_requirement_sha256 = 5;
+  Digest256 effect_consent_sha256 = 6;
 }
 
 message ApplyReviewProjection {

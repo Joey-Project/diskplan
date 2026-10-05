@@ -6,10 +6,11 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::diskplan::v1::{
-    AdapterScopeProvenanceKindProjection, CodexCleanupScopeEvidenceProjection,
-    CodexHelperCapabilityKindProjection, ContentBaselineKindProjection,
-    ContentNotApplicableReasonProjection, EvidenceCoverageCompletenessProjection,
-    EvidenceCoverageProjection, EvidenceCoverageReasonProjection, EvidenceObjectIdentityProjection,
+    ActionEffectOperation, ActionEffectPermission, AdapterScopeProvenanceKindProjection,
+    CodexCleanupScopeEvidenceProjection, CodexHelperCapabilityKindProjection,
+    ContentBaselineKindProjection, ContentNotApplicableReasonProjection,
+    EvidenceCoverageCompletenessProjection, EvidenceCoverageProjection,
+    EvidenceCoverageReasonProjection, EvidenceObjectIdentityProjection,
     EvidenceObjectKindProjection, EvidenceObservationProjection, EvidenceStatus,
     EvidenceUnknownReasonProjection, GitFeatureStateProjection, GitLinkageKindProjection,
     GitWorktreeEvidenceProjection, GitWorktreeMarkerKindProjection, PathRaceProjection,
@@ -39,6 +40,10 @@ pub const MAXIMUM_RAW_SELECTOR_TARGET_BYTES: usize = 4_096;
 pub const PROTOCOL14_MINOR: u32 = 4;
 pub const PROTOCOL15_MINOR: u32 = 5;
 pub const PROTOCOL16_MINOR: u32 = 6;
+/// Explicit support point for the additive effect-binding wire contract.
+/// Negotiation defaults remain controlled by the engine handshake.
+pub const PROTOCOL17_MINOR: u32 = 7;
+pub const EFFECT_BINDING_SCHEMA_VERSION_V2: u32 = 2;
 
 const CHUNK_ID_DOMAIN: &[u8] = b"diskplan/plan-projection-chunk-id/v1\0";
 const FINAL_DIGEST_DOMAIN: &[u8] = b"diskplan/plan-projection-final/v1\0";
@@ -171,7 +176,7 @@ pub(crate) fn verify_plan_projection(
     }
 
     let indexes = validate_records(&records, negotiated_protocol_minor)?;
-    validate_manifest_summary(manifest, &indexes)?;
+    validate_manifest_summary(manifest, &indexes, negotiated_protocol_minor)?;
     if final_digest(manifest)? != projection_digest {
         return Err(RuntimeProjectionError::InvalidManifest(
             "projection digest mismatch",
@@ -618,6 +623,101 @@ fn validate_action(
         });
     }
     validate_safety_evidence(index, action.kind, action.safety_evidence.as_ref())?;
+    validate_effect_requirement(index, action, negotiated_protocol_minor)?;
+    Ok(())
+}
+
+fn validate_effect_requirement(
+    index: u64,
+    action: &PlanActionProjection,
+    negotiated_protocol_minor: u32,
+) -> Result<(), RuntimeProjectionError> {
+    let requirement = action.action_effect_requirement.as_ref();
+    let requirement_digest = action.action_effect_requirement_sha256.as_ref();
+    let variant_group = action.action_effect_variant_group_id.as_ref();
+    let field_count = usize::from(requirement.is_some())
+        + usize::from(requirement_digest.is_some())
+        + usize::from(variant_group.is_some());
+    if negotiated_protocol_minor != PROTOCOL17_MINOR {
+        if field_count != 0 {
+            return Err(RuntimeProjectionError::InvalidRecord {
+                index,
+                reason: "effect binding fields are not valid before protocol 1.7",
+            });
+        }
+        return Ok(());
+    }
+    if field_count == 0 {
+        if action
+            .execution_preview
+            .as_ref()
+            .is_some_and(|preview| preview.mutation_supported)
+        {
+            return Err(RuntimeProjectionError::InvalidRecord {
+                index,
+                reason: "protocol 1.7 executable action omits effect binding",
+            });
+        }
+        return Ok(());
+    }
+    if field_count != 3 {
+        return Err(RuntimeProjectionError::InvalidRecord {
+            index,
+            reason: "effect binding fields are incomplete",
+        });
+    }
+    let requirement = requirement.expect("presence count was checked");
+    if requirement.version != 2 {
+        return Err(RuntimeProjectionError::InvalidRecord {
+            index,
+            reason: "effect requirement version is not 2",
+        });
+    }
+    let operation = ActionEffectOperation::try_from(requirement.operation.ok_or(
+        RuntimeProjectionError::InvalidRecord {
+            index,
+            reason: "effect requirement operation is missing",
+        },
+    )?)
+    .map_err(|_| RuntimeProjectionError::InvalidRecord {
+        index,
+        reason: "effect requirement operation is unknown",
+    })?;
+    let permission = ActionEffectPermission::try_from(requirement.permission.ok_or(
+        RuntimeProjectionError::InvalidRecord {
+            index,
+            reason: "effect requirement permission is missing",
+        },
+    )?)
+    .map_err(|_| RuntimeProjectionError::InvalidRecord {
+        index,
+        reason: "effect requirement permission is unknown",
+    })?;
+    if operation == ActionEffectOperation::ProviderEvictLocalCopy
+        && permission != ActionEffectPermission::LocalRemoveOnly
+    {
+        return Err(RuntimeProjectionError::InvalidRecord {
+            index,
+            reason: "provider eviction conflicts with effect permission",
+        });
+    }
+    let group = opaque_value(requirement.variant_group_id.as_ref(), "variant_group_id")?;
+    let action_group = opaque_value(variant_group, "action_effect_variant_group_id")?;
+    if group.len() != 32 || action_group.len() != 32 || group != action_group {
+        return Err(RuntimeProjectionError::InvalidRecord {
+            index,
+            reason: "effect variant group is missing or inconsistent",
+        });
+    }
+    digest_value(
+        requirement.target_scope_sha256.as_ref(),
+        "effect target_scope_sha256",
+    )?;
+    digest_value(
+        requirement.operation_contract_sha256.as_ref(),
+        "effect operation_contract_sha256",
+    )?;
+    digest_value(requirement_digest, "action_effect_requirement_sha256")?;
     Ok(())
 }
 
@@ -626,7 +726,7 @@ pub(crate) fn validate_runtime_protocol_minor(
 ) -> Result<(), RuntimeProjectionError> {
     if matches!(
         negotiated_protocol_minor,
-        PROTOCOL14_MINOR | PROTOCOL15_MINOR | PROTOCOL16_MINOR
+        PROTOCOL14_MINOR | PROTOCOL15_MINOR | PROTOCOL16_MINOR | PROTOCOL17_MINOR
     ) {
         Ok(())
     } else {
@@ -667,7 +767,7 @@ pub(crate) fn validate_execution_preview(
                 ));
             }
         }
-        PROTOCOL15_MINOR | PROTOCOL16_MINOR => {
+        PROTOCOL15_MINOR | PROTOCOL16_MINOR | PROTOCOL17_MINOR => {
             let working_directory = preview.raw_working_directory.as_deref().ok_or(
                 RuntimeProjectionError::InvalidManifest(
                     "protocol 1.5+ preview omits raw working directory",
@@ -1607,7 +1707,17 @@ fn validate_action_dag(
 fn validate_manifest_summary(
     manifest: &PlanProjectionManifest,
     indexes: &ProjectionIndexes,
+    negotiated_protocol_minor: u32,
 ) -> Result<(), RuntimeProjectionError> {
+    if (negotiated_protocol_minor == PROTOCOL17_MINOR
+        && manifest.action_effect_binding_schema_version != EFFECT_BINDING_SCHEMA_VERSION_V2)
+        || (negotiated_protocol_minor != PROTOCOL17_MINOR
+            && manifest.action_effect_binding_schema_version != 0)
+    {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "action effect binding schema version is invalid for protocol minor",
+        ));
+    }
     if manifest.action_count != indexes.actions.len() as u64
         || manifest.target_count != indexes.targets.len() as u64
         || manifest.release_set_count != indexes.release_sets.len() as u64
@@ -1827,6 +1937,92 @@ fn lowercase_hex(value: &[u8]) -> Vec<u8> {
         output.push(DIGITS[(byte & 0x0f) as usize]);
     }
     output
+}
+
+#[cfg(test)]
+mod effect_binding_fixture_tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use prost::Message;
+
+    use super::{
+        PROTOCOL16_MINOR, PROTOCOL17_MINOR, RuntimeProjectionError, validate_effect_requirement,
+    };
+    use crate::diskplan::v1::{
+        ActionEffectRequirementBindingV2, ActionExecutionPreviewProjection, Digest256,
+        OpaqueIdentifier, PlanActionProjection,
+    };
+
+    #[test]
+    fn runtime_v17_requirement_components_enforce_presence_closed_enums_and_conflicts() {
+        let fixture = fixture();
+        assert_eq!(fixture["schema"], "runtime-v1.7");
+        assert_eq!(fixture["protocol_minor"], PROTOCOL17_MINOR);
+        for case in fixture["requirement_cases"].as_array().unwrap() {
+            let requirement = ActionEffectRequirementBindingV2::decode(
+                hex::decode(case["requirement_wire_hex"].as_str().unwrap())
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap();
+            let action = PlanActionProjection {
+                execution_preview: Some(ActionExecutionPreviewProjection {
+                    mutation_supported: true,
+                    ..Default::default()
+                }),
+                action_effect_requirement: Some(requirement),
+                action_effect_requirement_sha256: case["requirement_digest_hex"].as_str().map(
+                    |value| Digest256 {
+                        value: hex::decode(value).unwrap(),
+                    },
+                ),
+                action_effect_variant_group_id: case["action_variant_group_hex"].as_str().map(
+                    |value| OpaqueIdentifier {
+                        value: hex::decode(value).unwrap(),
+                    },
+                ),
+                ..Default::default()
+            };
+            let result = validate_effect_requirement(0, &action, PROTOCOL17_MINOR);
+            assert_eq!(
+                result.is_ok(),
+                case["expected_valid"].as_bool().unwrap(),
+                "fixture case {}: {result:?}",
+                case["name"].as_str().unwrap()
+            );
+            assert!(
+                matches!(
+                    validate_effect_requirement(0, &action, PROTOCOL16_MINOR),
+                    Err(RuntimeProjectionError::InvalidRecord { .. })
+                ),
+                "1.6 must reject 1.7 effect fields in {}",
+                case["name"].as_str().unwrap()
+            );
+        }
+
+        let no_binding = PlanActionProjection {
+            execution_preview: Some(ActionExecutionPreviewProjection::default()),
+            ..Default::default()
+        };
+        assert!(validate_effect_requirement(0, &no_binding, PROTOCOL17_MINOR).is_ok());
+        let executable_without_binding = PlanActionProjection {
+            execution_preview: Some(ActionExecutionPreviewProjection {
+                mutation_supported: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            validate_effect_requirement(0, &executable_without_binding, PROTOCOL17_MINOR).is_err()
+        );
+    }
+
+    fn fixture() -> serde_json::Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../proto/fixtures/runtime-v1.7/fixtures.json");
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
 }
 
 fn action_record(records: &[PlanProjectionRecord], index: usize) -> &PlanActionProjection {

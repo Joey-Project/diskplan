@@ -595,6 +595,84 @@ public nonisolated enum Diskplan_V1_PlanActionKind: SwiftProtobuf.Enum, Swift.Ca
 
 }
 
+/// Closed authorization vocabulary for declared deletion effects. The
+/// unspecified value is transport-only and never grants mutation authority.
+public nonisolated enum Diskplan_V1_ActionEffectPermission: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case localRemoveOnly // = 1
+  case mayDeleteAcrossDevices // = 2
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .localRemoveOnly
+    case 2: self = .mayDeleteAcrossDevices
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .localRemoveOnly: return 1
+    case .mayDeleteAcrossDevices: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ActionEffectPermission] = [
+    .unspecified,
+    .localRemoveOnly,
+    .mayDeleteAcrossDevices,
+  ]
+
+}
+
+public nonisolated enum Diskplan_V1_ActionEffectOperation: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case ordinaryRemove // = 1
+  case providerEvictLocalCopy // = 2
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .ordinaryRemove
+    case 2: self = .providerEvictLocalCopy
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .ordinaryRemove: return 1
+    case .providerEvictLocalCopy: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Diskplan_V1_ActionEffectOperation] = [
+    .unspecified,
+    .ordinaryRemove,
+    .providerEvictLocalCopy,
+  ]
+
+}
+
 public nonisolated enum Diskplan_V1_PlanRecommendation: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -1734,6 +1812,7 @@ public nonisolated enum Diskplan_V1_DecisionEditKind: SwiftProtobuf.Enum, Swift.
   case revokeWaiver // = 4
   case replaceNotes // = 5
   case applyBatchSelectionPreset // = 6
+  case setEffectConsent // = 7
   case UNRECOGNIZED(Int)
 
   public init() {
@@ -1749,6 +1828,7 @@ public nonisolated enum Diskplan_V1_DecisionEditKind: SwiftProtobuf.Enum, Swift.
     case 4: self = .revokeWaiver
     case 5: self = .replaceNotes
     case 6: self = .applyBatchSelectionPreset
+    case 7: self = .setEffectConsent
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -1762,6 +1842,7 @@ public nonisolated enum Diskplan_V1_DecisionEditKind: SwiftProtobuf.Enum, Swift.
     case .revokeWaiver: return 4
     case .replaceNotes: return 5
     case .applyBatchSelectionPreset: return 6
+    case .setEffectConsent: return 7
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -1775,6 +1856,7 @@ public nonisolated enum Diskplan_V1_DecisionEditKind: SwiftProtobuf.Enum, Swift.
     .revokeWaiver,
     .replaceNotes,
     .applyBatchSelectionPreset,
+    .setEffectConsent,
   ]
 
 }
@@ -1829,6 +1911,8 @@ public nonisolated enum Diskplan_V1_DecisionOverlayRejectCode: SwiftProtobuf.Enu
   case limitExceeded // = 8
   case invalidEdit // = 9
   case internalError // = 10
+  case invalidOrMissingEffectConsent // = 11
+  case conflictingEffectVariants // = 12
   case UNRECOGNIZED(Int)
 
   public init() {
@@ -1848,6 +1932,8 @@ public nonisolated enum Diskplan_V1_DecisionOverlayRejectCode: SwiftProtobuf.Enu
     case 8: self = .limitExceeded
     case 9: self = .invalidEdit
     case 10: self = .internalError
+    case 11: self = .invalidOrMissingEffectConsent
+    case 12: self = .conflictingEffectVariants
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -1865,6 +1951,8 @@ public nonisolated enum Diskplan_V1_DecisionOverlayRejectCode: SwiftProtobuf.Enu
     case .limitExceeded: return 8
     case .invalidEdit: return 9
     case .internalError: return 10
+    case .invalidOrMissingEffectConsent: return 11
+    case .conflictingEffectVariants: return 12
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -1882,6 +1970,8 @@ public nonisolated enum Diskplan_V1_DecisionOverlayRejectCode: SwiftProtobuf.Enu
     .limitExceeded,
     .invalidEdit,
     .internalError,
+    .invalidOrMissingEffectConsent,
+    .conflictingEffectVariants,
   ]
 
 }
@@ -5173,6 +5263,162 @@ public nonisolated struct Diskplan_V1_ActionExecutionPreviewProjection: Sendable
   fileprivate var _rawWorkingDirectory: Data? = nil
 }
 
+/// Immutable typed requirement for one declared action variant. Its canonical
+/// digest excludes action_id to avoid the action/requirement hash cycle.
+public nonisolated struct Diskplan_V1_ActionEffectRequirementBindingV2: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var version: UInt32 = 0
+
+  public var operation: Diskplan_V1_ActionEffectOperation {
+    get {_operation ?? .unspecified}
+    set {_operation = newValue}
+  }
+  /// Returns true if `operation` has been explicitly set.
+  public var hasOperation: Bool {self._operation != nil}
+  /// Clears the value of `operation`. Subsequent reads from it will return its default value.
+  public mutating func clearOperation() {self._operation = nil}
+
+  public var permission: Diskplan_V1_ActionEffectPermission {
+    get {_permission ?? .unspecified}
+    set {_permission = newValue}
+  }
+  /// Returns true if `permission` has been explicitly set.
+  public var hasPermission: Bool {self._permission != nil}
+  /// Clears the value of `permission`. Subsequent reads from it will return its default value.
+  public mutating func clearPermission() {self._permission = nil}
+
+  public var variantGroupID: Diskplan_V1_OpaqueIdentifier {
+    get {_variantGroupID ?? Diskplan_V1_OpaqueIdentifier()}
+    set {_variantGroupID = newValue}
+  }
+  /// Returns true if `variantGroupID` has been explicitly set.
+  public var hasVariantGroupID: Bool {self._variantGroupID != nil}
+  /// Clears the value of `variantGroupID`. Subsequent reads from it will return its default value.
+  public mutating func clearVariantGroupID() {self._variantGroupID = nil}
+
+  public var targetScopeSha256: Diskplan_V1_Digest256 {
+    get {_targetScopeSha256 ?? Diskplan_V1_Digest256()}
+    set {_targetScopeSha256 = newValue}
+  }
+  /// Returns true if `targetScopeSha256` has been explicitly set.
+  public var hasTargetScopeSha256: Bool {self._targetScopeSha256 != nil}
+  /// Clears the value of `targetScopeSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearTargetScopeSha256() {self._targetScopeSha256 = nil}
+
+  public var operationContractSha256: Diskplan_V1_Digest256 {
+    get {_operationContractSha256 ?? Diskplan_V1_Digest256()}
+    set {_operationContractSha256 = newValue}
+  }
+  /// Returns true if `operationContractSha256` has been explicitly set.
+  public var hasOperationContractSha256: Bool {self._operationContractSha256 != nil}
+  /// Clears the value of `operationContractSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearOperationContractSha256() {self._operationContractSha256 = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _operation: Diskplan_V1_ActionEffectOperation? = nil
+  fileprivate var _permission: Diskplan_V1_ActionEffectPermission? = nil
+  fileprivate var _variantGroupID: Diskplan_V1_OpaqueIdentifier? = nil
+  fileprivate var _targetScopeSha256: Diskplan_V1_Digest256? = nil
+  fileprivate var _operationContractSha256: Diskplan_V1_Digest256? = nil
+}
+
+/// Per-action consent. Protobuf serialization is transport only; the Rust
+/// verifier independently checks the closed canonical record and references.
+public nonisolated struct Diskplan_V1_EffectConsentBindingV2: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var version: UInt32 = 0
+
+  public var permission: Diskplan_V1_ActionEffectPermission {
+    get {_permission ?? .unspecified}
+    set {_permission = newValue}
+  }
+  /// Returns true if `permission` has been explicitly set.
+  public var hasPermission: Bool {self._permission != nil}
+  /// Clears the value of `permission`. Subsequent reads from it will return its default value.
+  public mutating func clearPermission() {self._permission = nil}
+
+  public var requirementSha256: Diskplan_V1_Digest256 {
+    get {_requirementSha256 ?? Diskplan_V1_Digest256()}
+    set {_requirementSha256 = newValue}
+  }
+  /// Returns true if `requirementSha256` has been explicitly set.
+  public var hasRequirementSha256: Bool {self._requirementSha256 != nil}
+  /// Clears the value of `requirementSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearRequirementSha256() {self._requirementSha256 = nil}
+
+  public var actionID: Diskplan_V1_OpaqueIdentifier {
+    get {_actionID ?? Diskplan_V1_OpaqueIdentifier()}
+    set {_actionID = newValue}
+  }
+  /// Returns true if `actionID` has been explicitly set.
+  public var hasActionID: Bool {self._actionID != nil}
+  /// Clears the value of `actionID`. Subsequent reads from it will return its default value.
+  public mutating func clearActionID() {self._actionID = nil}
+
+  public var actionLineageID: Diskplan_V1_OpaqueIdentifier {
+    get {_actionLineageID ?? Diskplan_V1_OpaqueIdentifier()}
+    set {_actionLineageID = newValue}
+  }
+  /// Returns true if `actionLineageID` has been explicitly set.
+  public var hasActionLineageID: Bool {self._actionLineageID != nil}
+  /// Clears the value of `actionLineageID`. Subsequent reads from it will return its default value.
+  public mutating func clearActionLineageID() {self._actionLineageID = nil}
+
+  public var targetScopeSha256: Diskplan_V1_Digest256 {
+    get {_targetScopeSha256 ?? Diskplan_V1_Digest256()}
+    set {_targetScopeSha256 = newValue}
+  }
+  /// Returns true if `targetScopeSha256` has been explicitly set.
+  public var hasTargetScopeSha256: Bool {self._targetScopeSha256 != nil}
+  /// Clears the value of `targetScopeSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearTargetScopeSha256() {self._targetScopeSha256 = nil}
+
+  public var planSha256: Diskplan_V1_Digest256 {
+    get {_planSha256 ?? Diskplan_V1_Digest256()}
+    set {_planSha256 = newValue}
+  }
+  /// Returns true if `planSha256` has been explicitly set.
+  public var hasPlanSha256: Bool {self._planSha256 != nil}
+  /// Clears the value of `planSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearPlanSha256() {self._planSha256 = nil}
+
+  public var evidenceSha256: Diskplan_V1_Digest256 {
+    get {_evidenceSha256 ?? Diskplan_V1_Digest256()}
+    set {_evidenceSha256 = newValue}
+  }
+  /// Returns true if `evidenceSha256` has been explicitly set.
+  public var hasEvidenceSha256: Bool {self._evidenceSha256 != nil}
+  /// Clears the value of `evidenceSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearEvidenceSha256() {self._evidenceSha256 = nil}
+
+  public var policyVersion: String = String()
+
+  public var schemaVersion: String = String()
+
+  public var consentEventID: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _permission: Diskplan_V1_ActionEffectPermission? = nil
+  fileprivate var _requirementSha256: Diskplan_V1_Digest256? = nil
+  fileprivate var _actionID: Diskplan_V1_OpaqueIdentifier? = nil
+  fileprivate var _actionLineageID: Diskplan_V1_OpaqueIdentifier? = nil
+  fileprivate var _targetScopeSha256: Diskplan_V1_Digest256? = nil
+  fileprivate var _planSha256: Diskplan_V1_Digest256? = nil
+  fileprivate var _evidenceSha256: Diskplan_V1_Digest256? = nil
+}
+
 public nonisolated struct Diskplan_V1_PlanActionProjection: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -5326,6 +5572,34 @@ public nonisolated struct Diskplan_V1_PlanActionProjection: @unchecked Sendable 
   public var hasSafetyEvidence: Bool {_storage._safetyEvidence != nil}
   /// Clears the value of `safetyEvidence`. Subsequent reads from it will return its default value.
   public mutating func clearSafetyEvidence() {_uniqueStorage()._safetyEvidence = nil}
+
+  /// Protocol 1.7 only; older protocol minors must omit all three fields.
+  public var actionEffectRequirement: Diskplan_V1_ActionEffectRequirementBindingV2 {
+    get {_storage._actionEffectRequirement ?? Diskplan_V1_ActionEffectRequirementBindingV2()}
+    set {_uniqueStorage()._actionEffectRequirement = newValue}
+  }
+  /// Returns true if `actionEffectRequirement` has been explicitly set.
+  public var hasActionEffectRequirement: Bool {_storage._actionEffectRequirement != nil}
+  /// Clears the value of `actionEffectRequirement`. Subsequent reads from it will return its default value.
+  public mutating func clearActionEffectRequirement() {_uniqueStorage()._actionEffectRequirement = nil}
+
+  public var actionEffectRequirementSha256: Diskplan_V1_Digest256 {
+    get {_storage._actionEffectRequirementSha256 ?? Diskplan_V1_Digest256()}
+    set {_uniqueStorage()._actionEffectRequirementSha256 = newValue}
+  }
+  /// Returns true if `actionEffectRequirementSha256` has been explicitly set.
+  public var hasActionEffectRequirementSha256: Bool {_storage._actionEffectRequirementSha256 != nil}
+  /// Clears the value of `actionEffectRequirementSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearActionEffectRequirementSha256() {_uniqueStorage()._actionEffectRequirementSha256 = nil}
+
+  public var actionEffectVariantGroupID: Diskplan_V1_OpaqueIdentifier {
+    get {_storage._actionEffectVariantGroupID ?? Diskplan_V1_OpaqueIdentifier()}
+    set {_uniqueStorage()._actionEffectVariantGroupID = newValue}
+  }
+  /// Returns true if `actionEffectVariantGroupID` has been explicitly set.
+  public var hasActionEffectVariantGroupID: Bool {_storage._actionEffectVariantGroupID != nil}
+  /// Clears the value of `actionEffectVariantGroupID`. Subsequent reads from it will return its default value.
+  public mutating func clearActionEffectVariantGroupID() {_uniqueStorage()._actionEffectVariantGroupID = nil}
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -5768,6 +6042,12 @@ public nonisolated struct Diskplan_V1_PlanProjectionManifest: @unchecked Sendabl
   /// Clears the value of `scanCheckpointEvidenceSha256`. Subsequent reads from it will return its default value.
   public mutating func clearScanCheckpointEvidenceSha256() {_uniqueStorage()._scanCheckpointEvidenceSha256 = nil}
 
+  /// Protocol 1.7 requires the exact closed effect-binding schema version 2.
+  public var actionEffectBindingSchemaVersion: UInt32 {
+    get {_storage._actionEffectBindingSchemaVersion}
+    set {_uniqueStorage()._actionEffectBindingSchemaVersion = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -6008,6 +6288,49 @@ public nonisolated struct Diskplan_V1_ApplyBatchSelectionPresetEdit: Sendable {
   public init() {}
 }
 
+public nonisolated struct Diskplan_V1_SetEffectConsentEdit: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var actionID: Diskplan_V1_OpaqueIdentifier {
+    get {_actionID ?? Diskplan_V1_OpaqueIdentifier()}
+    set {_actionID = newValue}
+  }
+  /// Returns true if `actionID` has been explicitly set.
+  public var hasActionID: Bool {self._actionID != nil}
+  /// Clears the value of `actionID`. Subsequent reads from it will return its default value.
+  public mutating func clearActionID() {self._actionID = nil}
+
+  public var permission: Diskplan_V1_ActionEffectPermission {
+    get {_permission ?? .unspecified}
+    set {_permission = newValue}
+  }
+  /// Returns true if `permission` has been explicitly set.
+  public var hasPermission: Bool {self._permission != nil}
+  /// Clears the value of `permission`. Subsequent reads from it will return its default value.
+  public mutating func clearPermission() {self._permission = nil}
+
+  public var consentEventID: Data = Data()
+
+  public var requirementSha256: Diskplan_V1_Digest256 {
+    get {_requirementSha256 ?? Diskplan_V1_Digest256()}
+    set {_requirementSha256 = newValue}
+  }
+  /// Returns true if `requirementSha256` has been explicitly set.
+  public var hasRequirementSha256: Bool {self._requirementSha256 != nil}
+  /// Clears the value of `requirementSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearRequirementSha256() {self._requirementSha256 = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _actionID: Diskplan_V1_OpaqueIdentifier? = nil
+  fileprivate var _permission: Diskplan_V1_ActionEffectPermission? = nil
+  fileprivate var _requirementSha256: Diskplan_V1_Digest256? = nil
+}
+
 public nonisolated struct Diskplan_V1_DecisionOverlayEdit: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -6065,6 +6388,14 @@ public nonisolated struct Diskplan_V1_DecisionOverlayEdit: Sendable {
     set {edit = .applyBatchSelectionPreset(newValue)}
   }
 
+  public var setEffectConsent: Diskplan_V1_SetEffectConsentEdit {
+    get {
+      if case .setEffectConsent(let v)? = edit {return v}
+      return Diskplan_V1_SetEffectConsentEdit()
+    }
+    set {edit = .setEffectConsent(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Edit: Equatable, Sendable {
@@ -6074,6 +6405,7 @@ public nonisolated struct Diskplan_V1_DecisionOverlayEdit: Sendable {
     case revokeWaiver(Diskplan_V1_RevokeWaiverEdit)
     case replaceNotes(Diskplan_V1_ReplaceNotesEdit)
     case applyBatchSelectionPreset(Diskplan_V1_ApplyBatchSelectionPresetEdit)
+    case setEffectConsent(Diskplan_V1_SetEffectConsentEdit)
 
   }
 
@@ -6145,6 +6477,37 @@ public nonisolated struct Diskplan_V1_AcknowledgedWaiver: Sendable {
 
   fileprivate var _actionID: Diskplan_V1_OpaqueIdentifier? = nil
   fileprivate var _waiverID: Diskplan_V1_OpaqueIdentifier? = nil
+  fileprivate var _consentSha256: Diskplan_V1_Digest256? = nil
+}
+
+public nonisolated struct Diskplan_V1_AcknowledgedEffectConsent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var binding: Diskplan_V1_EffectConsentBindingV2 {
+    get {_binding ?? Diskplan_V1_EffectConsentBindingV2()}
+    set {_binding = newValue}
+  }
+  /// Returns true if `binding` has been explicitly set.
+  public var hasBinding: Bool {self._binding != nil}
+  /// Clears the value of `binding`. Subsequent reads from it will return its default value.
+  public mutating func clearBinding() {self._binding = nil}
+
+  public var consentSha256: Diskplan_V1_Digest256 {
+    get {_consentSha256 ?? Diskplan_V1_Digest256()}
+    set {_consentSha256 = newValue}
+  }
+  /// Returns true if `consentSha256` has been explicitly set.
+  public var hasConsentSha256: Bool {self._consentSha256 != nil}
+  /// Clears the value of `consentSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearConsentSha256() {self._consentSha256 = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _binding: Diskplan_V1_EffectConsentBindingV2? = nil
   fileprivate var _consentSha256: Diskplan_V1_Digest256? = nil
 }
 
@@ -6306,6 +6669,21 @@ public nonisolated struct Diskplan_V1_DecisionOverlayAcknowledged: @unchecked Se
   public var hasProjectionSha256: Bool {_storage._projectionSha256 != nil}
   /// Clears the value of `projectionSha256`. Subsequent reads from it will return its default value.
   public mutating func clearProjectionSha256() {_uniqueStorage()._projectionSha256 = nil}
+
+  public var acknowledgedEffectConsents: [Diskplan_V1_AcknowledgedEffectConsent] {
+    get {_storage._acknowledgedEffectConsents}
+    set {_uniqueStorage()._acknowledgedEffectConsents = newValue}
+  }
+
+  public var maximumEffectConsents: UInt32 {
+    get {_storage._maximumEffectConsents}
+    set {_uniqueStorage()._maximumEffectConsents = newValue}
+  }
+
+  public var effectConsentCount: UInt64 {
+    get {_storage._effectConsentCount}
+    set {_uniqueStorage()._effectConsentCount = newValue}
+  }
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -6893,12 +7271,42 @@ public nonisolated struct Diskplan_V1_ApplyReviewActionProjection: Sendable {
   /// Clears the value of `executionPreview`. Subsequent reads from it will return its default value.
   public mutating func clearExecutionPreview() {self._executionPreview = nil}
 
+  public var effectPermission: Diskplan_V1_ActionEffectPermission {
+    get {_effectPermission ?? .unspecified}
+    set {_effectPermission = newValue}
+  }
+  /// Returns true if `effectPermission` has been explicitly set.
+  public var hasEffectPermission: Bool {self._effectPermission != nil}
+  /// Clears the value of `effectPermission`. Subsequent reads from it will return its default value.
+  public mutating func clearEffectPermission() {self._effectPermission = nil}
+
+  public var effectRequirementSha256: Diskplan_V1_Digest256 {
+    get {_effectRequirementSha256 ?? Diskplan_V1_Digest256()}
+    set {_effectRequirementSha256 = newValue}
+  }
+  /// Returns true if `effectRequirementSha256` has been explicitly set.
+  public var hasEffectRequirementSha256: Bool {self._effectRequirementSha256 != nil}
+  /// Clears the value of `effectRequirementSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearEffectRequirementSha256() {self._effectRequirementSha256 = nil}
+
+  public var effectConsentSha256: Diskplan_V1_Digest256 {
+    get {_effectConsentSha256 ?? Diskplan_V1_Digest256()}
+    set {_effectConsentSha256 = newValue}
+  }
+  /// Returns true if `effectConsentSha256` has been explicitly set.
+  public var hasEffectConsentSha256: Bool {self._effectConsentSha256 != nil}
+  /// Clears the value of `effectConsentSha256`. Subsequent reads from it will return its default value.
+  public mutating func clearEffectConsentSha256() {self._effectConsentSha256 = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _actionID: Diskplan_V1_OpaqueIdentifier? = nil
   fileprivate var _executionPreview: Diskplan_V1_ActionExecutionPreviewProjection? = nil
+  fileprivate var _effectPermission: Diskplan_V1_ActionEffectPermission? = nil
+  fileprivate var _effectRequirementSha256: Diskplan_V1_Digest256? = nil
+  fileprivate var _effectConsentSha256: Diskplan_V1_Digest256? = nil
 }
 
 public nonisolated struct Diskplan_V1_ApplyReviewProjection: @unchecked Sendable {
@@ -8530,6 +8938,14 @@ nonisolated extension Diskplan_V1_PlanActionKind: SwiftProtobuf._ProtoNameProvid
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0PLAN_ACTION_KIND_UNSPECIFIED\0\u{1}PLAN_ACTION_KIND_GENERIC_REMOVE\0\u{1}PLAN_ACTION_KIND_GIT_WORKTREE_REMOVE\0\u{1}PLAN_ACTION_KIND_GIT_WORKTREE_DISCARD_LOCAL_CHANGES\0\u{1}PLAN_ACTION_KIND_CODEX_CLEAN_TEMPORARY\0\u{1}PLAN_ACTION_KIND_VERSIONED_ARTIFACT_REMOVE\0\u{1}PLAN_ACTION_KIND_COMPLETE_RELEASE_SET_REMOVE\0\u{1}PLAN_ACTION_KIND_REPORT_ONLY\0")
 }
 
+nonisolated extension Diskplan_V1_ActionEffectPermission: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACTION_EFFECT_PERMISSION_UNSPECIFIED\0\u{1}ACTION_EFFECT_PERMISSION_LOCAL_REMOVE_ONLY\0\u{1}ACTION_EFFECT_PERMISSION_MAY_DELETE_ACROSS_DEVICES\0")
+}
+
+nonisolated extension Diskplan_V1_ActionEffectOperation: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACTION_EFFECT_OPERATION_UNSPECIFIED\0\u{1}ACTION_EFFECT_OPERATION_ORDINARY_REMOVE\0\u{1}ACTION_EFFECT_OPERATION_PROVIDER_EVICT_LOCAL_COPY\0")
+}
+
 nonisolated extension Diskplan_V1_PlanRecommendation: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0PLAN_RECOMMENDATION_UNSPECIFIED\0\u{1}PLAN_RECOMMENDATION_SAFE_TO_CLEAN\0\u{1}PLAN_RECOMMENDATION_SAFE_AFTER_EXIT\0\u{1}PLAN_RECOMMENDATION_LIKELY_REBUILDABLE\0\u{1}PLAN_RECOMMENDATION_NEEDS_SEMANTIC_REVIEW\0\u{1}PLAN_RECOMMENDATION_MANAGED_BY_PROVIDER\0\u{1}PLAN_RECOMMENDATION_KEEP\0\u{1}PLAN_RECOMMENDATION_SCAN_INCOMPLETE\0\u{1}PLAN_RECOMMENDATION_CLASSIFICATION_CONFLICT\0")
 }
@@ -8623,7 +9039,7 @@ nonisolated extension Diskplan_V1_AgentMode: SwiftProtobuf._ProtoNameProviding {
 }
 
 nonisolated extension Diskplan_V1_DecisionEditKind: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DECISION_EDIT_KIND_UNSPECIFIED\0\u{1}DECISION_EDIT_KIND_STAGE_ACTION\0\u{1}DECISION_EDIT_KIND_UNSTAGE_ACTION\0\u{1}DECISION_EDIT_KIND_ALLOW_WAIVER\0\u{1}DECISION_EDIT_KIND_REVOKE_WAIVER\0\u{1}DECISION_EDIT_KIND_REPLACE_NOTES\0\u{1}DECISION_EDIT_KIND_APPLY_BATCH_SELECTION_PRESET\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DECISION_EDIT_KIND_UNSPECIFIED\0\u{1}DECISION_EDIT_KIND_STAGE_ACTION\0\u{1}DECISION_EDIT_KIND_UNSTAGE_ACTION\0\u{1}DECISION_EDIT_KIND_ALLOW_WAIVER\0\u{1}DECISION_EDIT_KIND_REVOKE_WAIVER\0\u{1}DECISION_EDIT_KIND_REPLACE_NOTES\0\u{1}DECISION_EDIT_KIND_APPLY_BATCH_SELECTION_PRESET\0\u{1}DECISION_EDIT_KIND_SET_EFFECT_CONSENT\0")
 }
 
 nonisolated extension Diskplan_V1_BatchSelectionPreset: SwiftProtobuf._ProtoNameProviding {
@@ -8631,7 +9047,7 @@ nonisolated extension Diskplan_V1_BatchSelectionPreset: SwiftProtobuf._ProtoName
 }
 
 nonisolated extension Diskplan_V1_DecisionOverlayRejectCode: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DECISION_OVERLAY_REJECT_CODE_UNSPECIFIED\0\u{1}DECISION_OVERLAY_REJECT_CODE_UNKNOWN_PROJECTION\0\u{1}DECISION_OVERLAY_REJECT_CODE_STALE_REVISION\0\u{1}DECISION_OVERLAY_REJECT_CODE_UNKNOWN_ACTION\0\u{1}DECISION_OVERLAY_REJECT_CODE_ACTION_NOT_STAGEABLE\0\u{1}DECISION_OVERLAY_REJECT_CODE_UNKNOWN_WAIVER\0\u{1}DECISION_OVERLAY_REJECT_CODE_WAIVER_NOT_ALLOWED\0\u{1}DECISION_OVERLAY_REJECT_CODE_INVALID_REASON\0\u{1}DECISION_OVERLAY_REJECT_CODE_LIMIT_EXCEEDED\0\u{1}DECISION_OVERLAY_REJECT_CODE_INVALID_EDIT\0\u{1}DECISION_OVERLAY_REJECT_CODE_INTERNAL_ERROR\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DECISION_OVERLAY_REJECT_CODE_UNSPECIFIED\0\u{1}DECISION_OVERLAY_REJECT_CODE_UNKNOWN_PROJECTION\0\u{1}DECISION_OVERLAY_REJECT_CODE_STALE_REVISION\0\u{1}DECISION_OVERLAY_REJECT_CODE_UNKNOWN_ACTION\0\u{1}DECISION_OVERLAY_REJECT_CODE_ACTION_NOT_STAGEABLE\0\u{1}DECISION_OVERLAY_REJECT_CODE_UNKNOWN_WAIVER\0\u{1}DECISION_OVERLAY_REJECT_CODE_WAIVER_NOT_ALLOWED\0\u{1}DECISION_OVERLAY_REJECT_CODE_INVALID_REASON\0\u{1}DECISION_OVERLAY_REJECT_CODE_LIMIT_EXCEEDED\0\u{1}DECISION_OVERLAY_REJECT_CODE_INVALID_EDIT\0\u{1}DECISION_OVERLAY_REJECT_CODE_INTERNAL_ERROR\0\u{1}DECISION_OVERLAY_REJECT_CODE_INVALID_OR_MISSING_EFFECT_CONSENT\0\u{1}DECISION_OVERLAY_REJECT_CODE_CONFLICTING_EFFECT_VARIANTS\0")
 }
 
 nonisolated extension Diskplan_V1_RevalidationFailureKind: SwiftProtobuf._ProtoNameProviding {
@@ -13053,9 +13469,152 @@ nonisolated extension Diskplan_V1_ActionExecutionPreviewProjection: SwiftProtobu
   }
 }
 
+nonisolated extension Diskplan_V1_ActionEffectRequirementBindingV2: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ActionEffectRequirementBindingV2"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{1}operation\0\u{1}permission\0\u{3}variant_group_id\0\u{3}target_scope_sha256\0\u{3}operation_contract_sha256\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.version) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self._operation) }()
+      case 3: try { try decoder.decodeSingularEnumField(value: &self._permission) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._variantGroupID) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._targetScopeSha256) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._operationContractSha256) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.version != 0 {
+      try visitor.visitSingularUInt32Field(value: self.version, fieldNumber: 1)
+    }
+    try { if let v = self._operation {
+      try visitor.visitSingularEnumField(value: v, fieldNumber: 2)
+    } }()
+    try { if let v = self._permission {
+      try visitor.visitSingularEnumField(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._variantGroupID {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try { if let v = self._targetScopeSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    try { if let v = self._operationContractSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_ActionEffectRequirementBindingV2, rhs: Diskplan_V1_ActionEffectRequirementBindingV2) -> Bool {
+    if lhs.version != rhs.version {return false}
+    if lhs._operation != rhs._operation {return false}
+    if lhs._permission != rhs._permission {return false}
+    if lhs._variantGroupID != rhs._variantGroupID {return false}
+    if lhs._targetScopeSha256 != rhs._targetScopeSha256 {return false}
+    if lhs._operationContractSha256 != rhs._operationContractSha256 {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Diskplan_V1_EffectConsentBindingV2: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".EffectConsentBindingV2"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{1}permission\0\u{3}requirement_sha256\0\u{3}action_id\0\u{3}action_lineage_id\0\u{3}target_scope_sha256\0\u{3}plan_sha256\0\u{3}evidence_sha256\0\u{3}policy_version\0\u{3}schema_version\0\u{3}consent_event_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.version) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self._permission) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._requirementSha256) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._actionID) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._actionLineageID) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._targetScopeSha256) }()
+      case 7: try { try decoder.decodeSingularMessageField(value: &self._planSha256) }()
+      case 8: try { try decoder.decodeSingularMessageField(value: &self._evidenceSha256) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.policyVersion) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.schemaVersion) }()
+      case 11: try { try decoder.decodeSingularBytesField(value: &self.consentEventID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.version != 0 {
+      try visitor.visitSingularUInt32Field(value: self.version, fieldNumber: 1)
+    }
+    try { if let v = self._permission {
+      try visitor.visitSingularEnumField(value: v, fieldNumber: 2)
+    } }()
+    try { if let v = self._requirementSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._actionID {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try { if let v = self._actionLineageID {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    try { if let v = self._targetScopeSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
+    try { if let v = self._planSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    } }()
+    try { if let v = self._evidenceSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    } }()
+    if !self.policyVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.policyVersion, fieldNumber: 9)
+    }
+    if !self.schemaVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.schemaVersion, fieldNumber: 10)
+    }
+    if !self.consentEventID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.consentEventID, fieldNumber: 11)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_EffectConsentBindingV2, rhs: Diskplan_V1_EffectConsentBindingV2) -> Bool {
+    if lhs.version != rhs.version {return false}
+    if lhs._permission != rhs._permission {return false}
+    if lhs._requirementSha256 != rhs._requirementSha256 {return false}
+    if lhs._actionID != rhs._actionID {return false}
+    if lhs._actionLineageID != rhs._actionLineageID {return false}
+    if lhs._targetScopeSha256 != rhs._targetScopeSha256 {return false}
+    if lhs._planSha256 != rhs._planSha256 {return false}
+    if lhs._evidenceSha256 != rhs._evidenceSha256 {return false}
+    if lhs.policyVersion != rhs.policyVersion {return false}
+    if lhs.schemaVersion != rhs.schemaVersion {return false}
+    if lhs.consentEventID != rhs.consentEventID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Diskplan_V1_PlanActionProjection: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PlanActionProjection"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{3}action_lineage_id\0\u{1}disposition\0\u{1}kind\0\u{3}kind_label\0\u{3}kind_order\0\u{1}label\0\u{1}order\0\u{1}stageability\0\u{3}required_waivers\0\u{3}immediate_reclaim\0\u{3}shared_unlock\0\u{1}activity\0\u{1}recoverability\0\u{1}blockers\0\u{1}prerequisites\0\u{3}release_set_ids\0\u{3}requires_force\0\u{3}force_reason\0\u{3}path_race\0\u{3}target_ids\0\u{1}evidence\0\u{3}execution_preview\0\u{1}recommendation\0\u{3}safety_evidence\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{3}action_lineage_id\0\u{1}disposition\0\u{1}kind\0\u{3}kind_label\0\u{3}kind_order\0\u{1}label\0\u{1}order\0\u{1}stageability\0\u{3}required_waivers\0\u{3}immediate_reclaim\0\u{3}shared_unlock\0\u{1}activity\0\u{1}recoverability\0\u{1}blockers\0\u{1}prerequisites\0\u{3}release_set_ids\0\u{3}requires_force\0\u{3}force_reason\0\u{3}path_race\0\u{3}target_ids\0\u{1}evidence\0\u{3}execution_preview\0\u{1}recommendation\0\u{3}safety_evidence\0\u{3}action_effect_requirement\0\u{3}action_effect_requirement_sha256\0\u{3}action_effect_variant_group_id\0")
 
   fileprivate class _StorageClass {
     var _actionID: Diskplan_V1_OpaqueIdentifier? = nil
@@ -13083,6 +13642,9 @@ nonisolated extension Diskplan_V1_PlanActionProjection: SwiftProtobuf.Message, S
     var _executionPreview: Diskplan_V1_ActionExecutionPreviewProjection? = nil
     var _recommendation: Diskplan_V1_PlanRecommendation = .unspecified
     var _safetyEvidence: Diskplan_V1_PlanSafetyEvidenceProjection? = nil
+    var _actionEffectRequirement: Diskplan_V1_ActionEffectRequirementBindingV2? = nil
+    var _actionEffectRequirementSha256: Diskplan_V1_Digest256? = nil
+    var _actionEffectVariantGroupID: Diskplan_V1_OpaqueIdentifier? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -13118,6 +13680,9 @@ nonisolated extension Diskplan_V1_PlanActionProjection: SwiftProtobuf.Message, S
       _executionPreview = source._executionPreview
       _recommendation = source._recommendation
       _safetyEvidence = source._safetyEvidence
+      _actionEffectRequirement = source._actionEffectRequirement
+      _actionEffectRequirementSha256 = source._actionEffectRequirementSha256
+      _actionEffectVariantGroupID = source._actionEffectVariantGroupID
     }
   }
 
@@ -13161,6 +13726,9 @@ nonisolated extension Diskplan_V1_PlanActionProjection: SwiftProtobuf.Message, S
         case 23: try { try decoder.decodeSingularMessageField(value: &_storage._executionPreview) }()
         case 24: try { try decoder.decodeSingularEnumField(value: &_storage._recommendation) }()
         case 25: try { try decoder.decodeSingularMessageField(value: &_storage._safetyEvidence) }()
+        case 26: try { try decoder.decodeSingularMessageField(value: &_storage._actionEffectRequirement) }()
+        case 27: try { try decoder.decodeSingularMessageField(value: &_storage._actionEffectRequirementSha256) }()
+        case 28: try { try decoder.decodeSingularMessageField(value: &_storage._actionEffectVariantGroupID) }()
         default: break
         }
       }
@@ -13248,6 +13816,15 @@ nonisolated extension Diskplan_V1_PlanActionProjection: SwiftProtobuf.Message, S
       try { if let v = _storage._safetyEvidence {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 25)
       } }()
+      try { if let v = _storage._actionEffectRequirement {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 26)
+      } }()
+      try { if let v = _storage._actionEffectRequirementSha256 {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 27)
+      } }()
+      try { if let v = _storage._actionEffectVariantGroupID {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 28)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -13282,6 +13859,9 @@ nonisolated extension Diskplan_V1_PlanActionProjection: SwiftProtobuf.Message, S
         if _storage._executionPreview != rhs_storage._executionPreview {return false}
         if _storage._recommendation != rhs_storage._recommendation {return false}
         if _storage._safetyEvidence != rhs_storage._safetyEvidence {return false}
+        if _storage._actionEffectRequirement != rhs_storage._actionEffectRequirement {return false}
+        if _storage._actionEffectRequirementSha256 != rhs_storage._actionEffectRequirementSha256 {return false}
+        if _storage._actionEffectVariantGroupID != rhs_storage._actionEffectVariantGroupID {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -13678,7 +14258,7 @@ nonisolated extension Diskplan_V1_PlanRecommendationCount: SwiftProtobuf.Message
 
 nonisolated extension Diskplan_V1_PlanProjectionManifest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PlanProjectionManifest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}manifest_version\0\u{3}projection_id\0\u{3}plan_sha256\0\u{3}evidence_sha256\0\u{3}policy_version\0\u{3}schema_version\0\u{3}chunk_count\0\u{3}record_count\0\u{3}action_count\0\u{3}target_count\0\u{3}release_set_count\0\u{3}blocker_count\0\u{3}waiver_count\0\u{3}record_payload_bytes\0\u{3}maximum_record_count\0\u{3}maximum_record_payload_bytes\0\u{3}maximum_chunk_payload_bytes\0\u{3}maximum_manifest_encoded_bytes\0\u{1}chunks\0\u{3}projection_sha256\0\u{3}disposition_counts\0\u{3}recommendation_counts\0\u{3}cleanup_candidate_count\0\u{3}scan_session_id\0\u{3}scan_checkpoint_id\0\u{3}plan_id\0\u{3}evidence_id\0\u{3}scan_checkpoint_evidence_sha256\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}manifest_version\0\u{3}projection_id\0\u{3}plan_sha256\0\u{3}evidence_sha256\0\u{3}policy_version\0\u{3}schema_version\0\u{3}chunk_count\0\u{3}record_count\0\u{3}action_count\0\u{3}target_count\0\u{3}release_set_count\0\u{3}blocker_count\0\u{3}waiver_count\0\u{3}record_payload_bytes\0\u{3}maximum_record_count\0\u{3}maximum_record_payload_bytes\0\u{3}maximum_chunk_payload_bytes\0\u{3}maximum_manifest_encoded_bytes\0\u{1}chunks\0\u{3}projection_sha256\0\u{3}disposition_counts\0\u{3}recommendation_counts\0\u{3}cleanup_candidate_count\0\u{3}scan_session_id\0\u{3}scan_checkpoint_id\0\u{3}plan_id\0\u{3}evidence_id\0\u{3}scan_checkpoint_evidence_sha256\0\u{3}action_effect_binding_schema_version\0")
 
   fileprivate class _StorageClass {
     var _manifestVersion: UInt32 = 0
@@ -13709,6 +14289,7 @@ nonisolated extension Diskplan_V1_PlanProjectionManifest: SwiftProtobuf.Message,
     var _planID: Diskplan_V1_OpaqueIdentifier? = nil
     var _evidenceID: Diskplan_V1_OpaqueIdentifier? = nil
     var _scanCheckpointEvidenceSha256: Diskplan_V1_Digest256? = nil
+    var _actionEffectBindingSchemaVersion: UInt32 = 0
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -13747,6 +14328,7 @@ nonisolated extension Diskplan_V1_PlanProjectionManifest: SwiftProtobuf.Message,
       _planID = source._planID
       _evidenceID = source._evidenceID
       _scanCheckpointEvidenceSha256 = source._scanCheckpointEvidenceSha256
+      _actionEffectBindingSchemaVersion = source._actionEffectBindingSchemaVersion
     }
   }
 
@@ -13793,6 +14375,7 @@ nonisolated extension Diskplan_V1_PlanProjectionManifest: SwiftProtobuf.Message,
         case 26: try { try decoder.decodeSingularMessageField(value: &_storage._planID) }()
         case 27: try { try decoder.decodeSingularMessageField(value: &_storage._evidenceID) }()
         case 28: try { try decoder.decodeSingularMessageField(value: &_storage._scanCheckpointEvidenceSha256) }()
+        case 29: try { try decoder.decodeSingularUInt32Field(value: &_storage._actionEffectBindingSchemaVersion) }()
         default: break
         }
       }
@@ -13889,6 +14472,9 @@ nonisolated extension Diskplan_V1_PlanProjectionManifest: SwiftProtobuf.Message,
       try { if let v = _storage._scanCheckpointEvidenceSha256 {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 28)
       } }()
+      if _storage._actionEffectBindingSchemaVersion != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._actionEffectBindingSchemaVersion, fieldNumber: 29)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -13926,6 +14512,7 @@ nonisolated extension Diskplan_V1_PlanProjectionManifest: SwiftProtobuf.Message,
         if _storage._planID != rhs_storage._planID {return false}
         if _storage._evidenceID != rhs_storage._evidenceID {return false}
         if _storage._scanCheckpointEvidenceSha256 != rhs_storage._scanCheckpointEvidenceSha256 {return false}
+        if _storage._actionEffectBindingSchemaVersion != rhs_storage._actionEffectBindingSchemaVersion {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -14288,9 +14875,58 @@ nonisolated extension Diskplan_V1_ApplyBatchSelectionPresetEdit: SwiftProtobuf.M
   }
 }
 
+nonisolated extension Diskplan_V1_SetEffectConsentEdit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SetEffectConsentEdit"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{1}permission\0\u{3}consent_event_id\0\u{3}requirement_sha256\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._actionID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self._permission) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.consentEventID) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._requirementSha256) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._actionID {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._permission {
+      try visitor.visitSingularEnumField(value: v, fieldNumber: 2)
+    } }()
+    if !self.consentEventID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.consentEventID, fieldNumber: 3)
+    }
+    try { if let v = self._requirementSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_SetEffectConsentEdit, rhs: Diskplan_V1_SetEffectConsentEdit) -> Bool {
+    if lhs._actionID != rhs._actionID {return false}
+    if lhs._permission != rhs._permission {return false}
+    if lhs.consentEventID != rhs.consentEventID {return false}
+    if lhs._requirementSha256 != rhs._requirementSha256 {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Diskplan_V1_DecisionOverlayEdit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DecisionOverlayEdit"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{4}\u{9}stage_action\0\u{3}unstage_action\0\u{3}allow_waiver\0\u{3}revoke_waiver\0\u{3}replace_notes\0\u{3}apply_batch_selection_preset\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{4}\u{9}stage_action\0\u{3}unstage_action\0\u{3}allow_waiver\0\u{3}revoke_waiver\0\u{3}replace_notes\0\u{3}apply_batch_selection_preset\0\u{3}set_effect_consent\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -14377,6 +15013,19 @@ nonisolated extension Diskplan_V1_DecisionOverlayEdit: SwiftProtobuf.Message, Sw
           self.edit = .applyBatchSelectionPreset(v)
         }
       }()
+      case 16: try {
+        var v: Diskplan_V1_SetEffectConsentEdit?
+        var hadOneofValue = false
+        if let current = self.edit {
+          hadOneofValue = true
+          if case .setEffectConsent(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.edit = .setEffectConsent(v)
+        }
+      }()
       default: break
       }
     }
@@ -14414,6 +15063,10 @@ nonisolated extension Diskplan_V1_DecisionOverlayEdit: SwiftProtobuf.Message, Sw
     case .applyBatchSelectionPreset?: try {
       guard case .applyBatchSelectionPreset(let v)? = self.edit else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
+    }()
+    case .setEffectConsent?: try {
+      guard case .setEffectConsent(let v)? = self.edit else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
     }()
     case nil: break
     }
@@ -14521,9 +15174,48 @@ nonisolated extension Diskplan_V1_AcknowledgedWaiver: SwiftProtobuf.Message, Swi
   }
 }
 
+nonisolated extension Diskplan_V1_AcknowledgedEffectConsent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AcknowledgedEffectConsent"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}binding\0\u{3}consent_sha256\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._binding) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._consentSha256) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._binding {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._consentSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Diskplan_V1_AcknowledgedEffectConsent, rhs: Diskplan_V1_AcknowledgedEffectConsent) -> Bool {
+    if lhs._binding != rhs._binding {return false}
+    if lhs._consentSha256 != rhs._consentSha256 {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Diskplan_V1_DecisionOverlayAcknowledged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DecisionOverlayAcknowledged"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}projection_id\0\u{1}revision\0\u{3}overlay_sha256\0\u{3}selected_action_ids\0\u{3}acknowledged_waivers\0\u{3}user_notes\0\u{3}force_warning_action_ids\0\u{3}maximum_selected_actions\0\u{3}maximum_waiver_consents\0\u{3}maximum_user_notes\0\u{3}selected_action_count\0\u{3}overlay_id\0\u{3}plan_id\0\u{3}plan_sha256\0\u{3}evidence_id\0\u{3}evidence_sha256\0\u{3}maximum_encoded_bytes\0\u{3}maximum_note_bytes\0\u{3}scan_session_id\0\u{3}scan_checkpoint_id\0\u{3}scan_checkpoint_evidence_sha256\0\u{3}projection_sha256\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}projection_id\0\u{1}revision\0\u{3}overlay_sha256\0\u{3}selected_action_ids\0\u{3}acknowledged_waivers\0\u{3}user_notes\0\u{3}force_warning_action_ids\0\u{3}maximum_selected_actions\0\u{3}maximum_waiver_consents\0\u{3}maximum_user_notes\0\u{3}selected_action_count\0\u{3}overlay_id\0\u{3}plan_id\0\u{3}plan_sha256\0\u{3}evidence_id\0\u{3}evidence_sha256\0\u{3}maximum_encoded_bytes\0\u{3}maximum_note_bytes\0\u{3}scan_session_id\0\u{3}scan_checkpoint_id\0\u{3}scan_checkpoint_evidence_sha256\0\u{3}projection_sha256\0\u{3}acknowledged_effect_consents\0\u{3}maximum_effect_consents\0\u{3}effect_consent_count\0")
 
   fileprivate class _StorageClass {
     var _projectionID: Diskplan_V1_OpaqueIdentifier? = nil
@@ -14548,6 +15240,9 @@ nonisolated extension Diskplan_V1_DecisionOverlayAcknowledged: SwiftProtobuf.Mes
     var _scanCheckpointID: Diskplan_V1_OpaqueIdentifier? = nil
     var _scanCheckpointEvidenceSha256: Diskplan_V1_Digest256? = nil
     var _projectionSha256: Diskplan_V1_Digest256? = nil
+    var _acknowledgedEffectConsents: [Diskplan_V1_AcknowledgedEffectConsent] = []
+    var _maximumEffectConsents: UInt32 = 0
+    var _effectConsentCount: UInt64 = 0
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -14580,6 +15275,9 @@ nonisolated extension Diskplan_V1_DecisionOverlayAcknowledged: SwiftProtobuf.Mes
       _scanCheckpointID = source._scanCheckpointID
       _scanCheckpointEvidenceSha256 = source._scanCheckpointEvidenceSha256
       _projectionSha256 = source._projectionSha256
+      _acknowledgedEffectConsents = source._acknowledgedEffectConsents
+      _maximumEffectConsents = source._maximumEffectConsents
+      _effectConsentCount = source._effectConsentCount
     }
   }
 
@@ -14620,6 +15318,9 @@ nonisolated extension Diskplan_V1_DecisionOverlayAcknowledged: SwiftProtobuf.Mes
         case 20: try { try decoder.decodeSingularMessageField(value: &_storage._scanCheckpointID) }()
         case 21: try { try decoder.decodeSingularMessageField(value: &_storage._scanCheckpointEvidenceSha256) }()
         case 22: try { try decoder.decodeSingularMessageField(value: &_storage._projectionSha256) }()
+        case 23: try { try decoder.decodeRepeatedMessageField(value: &_storage._acknowledgedEffectConsents) }()
+        case 24: try { try decoder.decodeSingularUInt32Field(value: &_storage._maximumEffectConsents) }()
+        case 25: try { try decoder.decodeSingularUInt64Field(value: &_storage._effectConsentCount) }()
         default: break
         }
       }
@@ -14698,6 +15399,15 @@ nonisolated extension Diskplan_V1_DecisionOverlayAcknowledged: SwiftProtobuf.Mes
       try { if let v = _storage._projectionSha256 {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
       } }()
+      if !_storage._acknowledgedEffectConsents.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._acknowledgedEffectConsents, fieldNumber: 23)
+      }
+      if _storage._maximumEffectConsents != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._maximumEffectConsents, fieldNumber: 24)
+      }
+      if _storage._effectConsentCount != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._effectConsentCount, fieldNumber: 25)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -14729,6 +15439,9 @@ nonisolated extension Diskplan_V1_DecisionOverlayAcknowledged: SwiftProtobuf.Mes
         if _storage._scanCheckpointID != rhs_storage._scanCheckpointID {return false}
         if _storage._scanCheckpointEvidenceSha256 != rhs_storage._scanCheckpointEvidenceSha256 {return false}
         if _storage._projectionSha256 != rhs_storage._projectionSha256 {return false}
+        if _storage._acknowledgedEffectConsents != rhs_storage._acknowledgedEffectConsents {return false}
+        if _storage._maximumEffectConsents != rhs_storage._maximumEffectConsents {return false}
+        if _storage._effectConsentCount != rhs_storage._effectConsentCount {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -15527,7 +16240,7 @@ nonisolated extension Diskplan_V1_PrepareApplyReviewRequest: SwiftProtobuf.Messa
 
 nonisolated extension Diskplan_V1_ApplyReviewActionProjection: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ApplyReviewActionProjection"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{3}requires_force\0\u{3}execution_preview\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{3}requires_force\0\u{3}execution_preview\0\u{3}effect_permission\0\u{3}effect_requirement_sha256\0\u{3}effect_consent_sha256\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -15538,6 +16251,9 @@ nonisolated extension Diskplan_V1_ApplyReviewActionProjection: SwiftProtobuf.Mes
       case 1: try { try decoder.decodeSingularMessageField(value: &self._actionID) }()
       case 2: try { try decoder.decodeSingularBoolField(value: &self.requiresForce) }()
       case 3: try { try decoder.decodeSingularMessageField(value: &self._executionPreview) }()
+      case 4: try { try decoder.decodeSingularEnumField(value: &self._effectPermission) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._effectRequirementSha256) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._effectConsentSha256) }()
       default: break
       }
     }
@@ -15557,6 +16273,15 @@ nonisolated extension Diskplan_V1_ApplyReviewActionProjection: SwiftProtobuf.Mes
     try { if let v = self._executionPreview {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     } }()
+    try { if let v = self._effectPermission {
+      try visitor.visitSingularEnumField(value: v, fieldNumber: 4)
+    } }()
+    try { if let v = self._effectRequirementSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    try { if let v = self._effectConsentSha256 {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -15564,6 +16289,9 @@ nonisolated extension Diskplan_V1_ApplyReviewActionProjection: SwiftProtobuf.Mes
     if lhs._actionID != rhs._actionID {return false}
     if lhs.requiresForce != rhs.requiresForce {return false}
     if lhs._executionPreview != rhs._executionPreview {return false}
+    if lhs._effectPermission != rhs._effectPermission {return false}
+    if lhs._effectRequirementSha256 != rhs._effectRequirementSha256 {return false}
+    if lhs._effectConsentSha256 != rhs._effectConsentSha256 {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

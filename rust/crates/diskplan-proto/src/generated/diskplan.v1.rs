@@ -985,6 +985,50 @@ pub struct ActionExecutionPreviewProjection {
     #[prost(enumeration = "PathRaceProjection", tag = "8")]
     pub path_race: i32,
 }
+/// Immutable typed requirement for one declared action variant. Its canonical
+/// digest excludes action_id to avoid the action/requirement hash cycle.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ActionEffectRequirementBindingV2 {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(enumeration = "ActionEffectOperation", optional, tag = "2")]
+    pub operation: ::core::option::Option<i32>,
+    #[prost(enumeration = "ActionEffectPermission", optional, tag = "3")]
+    pub permission: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "4")]
+    pub variant_group_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "5")]
+    pub target_scope_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "6")]
+    pub operation_contract_sha256: ::core::option::Option<Digest256>,
+}
+/// Per-action consent. Protobuf serialization is transport only; the Rust
+/// verifier independently checks the closed canonical record and references.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EffectConsentBindingV2 {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(enumeration = "ActionEffectPermission", optional, tag = "2")]
+    pub permission: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "3")]
+    pub requirement_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "4")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "5")]
+    pub action_lineage_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(message, optional, tag = "6")]
+    pub target_scope_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "7")]
+    pub plan_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "8")]
+    pub evidence_sha256: ::core::option::Option<Digest256>,
+    #[prost(string, tag = "9")]
+    pub policy_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub schema_version: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "11")]
+    pub consent_event_id: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PlanActionProjection {
     #[prost(message, optional, tag = "1")]
@@ -1037,6 +1081,15 @@ pub struct PlanActionProjection {
     pub recommendation: i32,
     #[prost(message, optional, tag = "25")]
     pub safety_evidence: ::core::option::Option<PlanSafetyEvidenceProjection>,
+    /// Protocol 1.7 only; older protocol minors must omit all three fields.
+    #[prost(message, optional, tag = "26")]
+    pub action_effect_requirement: ::core::option::Option<
+        ActionEffectRequirementBindingV2,
+    >,
+    #[prost(message, optional, tag = "27")]
+    pub action_effect_requirement_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "28")]
+    pub action_effect_variant_group_id: ::core::option::Option<OpaqueIdentifier>,
 }
 /// Target trees are flat records so one large directory cannot create an
 /// unbounded recursive protobuf object. parent_target_id is absent at a root.
@@ -1190,6 +1243,9 @@ pub struct PlanProjectionManifest {
     pub evidence_id: ::core::option::Option<OpaqueIdentifier>,
     #[prost(message, optional, tag = "28")]
     pub scan_checkpoint_evidence_sha256: ::core::option::Option<Digest256>,
+    /// Protocol 1.7 requires the exact closed effect-binding schema version 2.
+    #[prost(uint32, tag = "29")]
+    pub action_effect_binding_schema_version: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BuildPlanRequest {
@@ -1259,10 +1315,21 @@ pub struct ApplyBatchSelectionPresetEdit {
     pub preset: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetEffectConsentEdit {
+    #[prost(message, optional, tag = "1")]
+    pub action_id: ::core::option::Option<OpaqueIdentifier>,
+    #[prost(enumeration = "ActionEffectPermission", optional, tag = "2")]
+    pub permission: ::core::option::Option<i32>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub consent_event_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    pub requirement_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DecisionOverlayEdit {
     #[prost(enumeration = "DecisionEditKind", tag = "1")]
     pub kind: i32,
-    #[prost(oneof = "decision_overlay_edit::Edit", tags = "10, 11, 12, 13, 14, 15")]
+    #[prost(oneof = "decision_overlay_edit::Edit", tags = "10, 11, 12, 13, 14, 15, 16")]
     pub edit: ::core::option::Option<decision_overlay_edit::Edit>,
 }
 /// Nested message and enum types in `DecisionOverlayEdit`.
@@ -1281,6 +1348,8 @@ pub mod decision_overlay_edit {
         ReplaceNotes(super::ReplaceNotesEdit),
         #[prost(message, tag = "15")]
         ApplyBatchSelectionPreset(super::ApplyBatchSelectionPresetEdit),
+        #[prost(message, tag = "16")]
+        SetEffectConsent(super::SetEffectConsentEdit),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1301,6 +1370,13 @@ pub struct AcknowledgedWaiver {
     #[prost(message, optional, tag = "2")]
     pub waiver_id: ::core::option::Option<OpaqueIdentifier>,
     #[prost(message, optional, tag = "3")]
+    pub consent_sha256: ::core::option::Option<Digest256>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AcknowledgedEffectConsent {
+    #[prost(message, optional, tag = "1")]
+    pub binding: ::core::option::Option<EffectConsentBindingV2>,
+    #[prost(message, optional, tag = "2")]
     pub consent_sha256: ::core::option::Option<Digest256>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1349,6 +1425,14 @@ pub struct DecisionOverlayAcknowledged {
     pub scan_checkpoint_evidence_sha256: ::core::option::Option<Digest256>,
     #[prost(message, optional, tag = "22")]
     pub projection_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, repeated, tag = "23")]
+    pub acknowledged_effect_consents: ::prost::alloc::vec::Vec<
+        AcknowledgedEffectConsent,
+    >,
+    #[prost(uint32, tag = "24")]
+    pub maximum_effect_consents: u32,
+    #[prost(uint64, tag = "25")]
+    pub effect_consent_count: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DecisionOverlayRejected {
@@ -1538,6 +1622,12 @@ pub struct ApplyReviewActionProjection {
     pub requires_force: bool,
     #[prost(message, optional, tag = "3")]
     pub execution_preview: ::core::option::Option<ActionExecutionPreviewProjection>,
+    #[prost(enumeration = "ActionEffectPermission", optional, tag = "4")]
+    pub effect_permission: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "5")]
+    pub effect_requirement_sha256: ::core::option::Option<Digest256>,
+    #[prost(message, optional, tag = "6")]
+    pub effect_consent_sha256: ::core::option::Option<Digest256>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ApplyReviewProjection {
@@ -2520,6 +2610,74 @@ impl PlanActionKind {
                 Some(Self::CompleteReleaseSetRemove)
             }
             "PLAN_ACTION_KIND_REPORT_ONLY" => Some(Self::ReportOnly),
+            _ => None,
+        }
+    }
+}
+/// Closed authorization vocabulary for declared deletion effects. The
+/// unspecified value is transport-only and never grants mutation authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ActionEffectPermission {
+    Unspecified = 0,
+    LocalRemoveOnly = 1,
+    MayDeleteAcrossDevices = 2,
+}
+impl ActionEffectPermission {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ACTION_EFFECT_PERMISSION_UNSPECIFIED",
+            Self::LocalRemoveOnly => "ACTION_EFFECT_PERMISSION_LOCAL_REMOVE_ONLY",
+            Self::MayDeleteAcrossDevices => {
+                "ACTION_EFFECT_PERMISSION_MAY_DELETE_ACROSS_DEVICES"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ACTION_EFFECT_PERMISSION_UNSPECIFIED" => Some(Self::Unspecified),
+            "ACTION_EFFECT_PERMISSION_LOCAL_REMOVE_ONLY" => Some(Self::LocalRemoveOnly),
+            "ACTION_EFFECT_PERMISSION_MAY_DELETE_ACROSS_DEVICES" => {
+                Some(Self::MayDeleteAcrossDevices)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ActionEffectOperation {
+    Unspecified = 0,
+    OrdinaryRemove = 1,
+    ProviderEvictLocalCopy = 2,
+}
+impl ActionEffectOperation {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ACTION_EFFECT_OPERATION_UNSPECIFIED",
+            Self::OrdinaryRemove => "ACTION_EFFECT_OPERATION_ORDINARY_REMOVE",
+            Self::ProviderEvictLocalCopy => {
+                "ACTION_EFFECT_OPERATION_PROVIDER_EVICT_LOCAL_COPY"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ACTION_EFFECT_OPERATION_UNSPECIFIED" => Some(Self::Unspecified),
+            "ACTION_EFFECT_OPERATION_ORDINARY_REMOVE" => Some(Self::OrdinaryRemove),
+            "ACTION_EFFECT_OPERATION_PROVIDER_EVICT_LOCAL_COPY" => {
+                Some(Self::ProviderEvictLocalCopy)
+            }
             _ => None,
         }
     }
@@ -3553,6 +3711,7 @@ pub enum DecisionEditKind {
     RevokeWaiver = 4,
     ReplaceNotes = 5,
     ApplyBatchSelectionPreset = 6,
+    SetEffectConsent = 7,
 }
 impl DecisionEditKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -3570,6 +3729,7 @@ impl DecisionEditKind {
             Self::ApplyBatchSelectionPreset => {
                 "DECISION_EDIT_KIND_APPLY_BATCH_SELECTION_PRESET"
             }
+            Self::SetEffectConsent => "DECISION_EDIT_KIND_SET_EFFECT_CONSENT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -3584,6 +3744,7 @@ impl DecisionEditKind {
             "DECISION_EDIT_KIND_APPLY_BATCH_SELECTION_PRESET" => {
                 Some(Self::ApplyBatchSelectionPreset)
             }
+            "DECISION_EDIT_KIND_SET_EFFECT_CONSENT" => Some(Self::SetEffectConsent),
             _ => None,
         }
     }
@@ -3634,6 +3795,8 @@ pub enum DecisionOverlayRejectCode {
     LimitExceeded = 8,
     InvalidEdit = 9,
     InternalError = 10,
+    InvalidOrMissingEffectConsent = 11,
+    ConflictingEffectVariants = 12,
 }
 impl DecisionOverlayRejectCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -3655,6 +3818,12 @@ impl DecisionOverlayRejectCode {
             Self::LimitExceeded => "DECISION_OVERLAY_REJECT_CODE_LIMIT_EXCEEDED",
             Self::InvalidEdit => "DECISION_OVERLAY_REJECT_CODE_INVALID_EDIT",
             Self::InternalError => "DECISION_OVERLAY_REJECT_CODE_INTERNAL_ERROR",
+            Self::InvalidOrMissingEffectConsent => {
+                "DECISION_OVERLAY_REJECT_CODE_INVALID_OR_MISSING_EFFECT_CONSENT"
+            }
+            Self::ConflictingEffectVariants => {
+                "DECISION_OVERLAY_REJECT_CODE_CONFLICTING_EFFECT_VARIANTS"
+            }
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -3677,6 +3846,12 @@ impl DecisionOverlayRejectCode {
             "DECISION_OVERLAY_REJECT_CODE_LIMIT_EXCEEDED" => Some(Self::LimitExceeded),
             "DECISION_OVERLAY_REJECT_CODE_INVALID_EDIT" => Some(Self::InvalidEdit),
             "DECISION_OVERLAY_REJECT_CODE_INTERNAL_ERROR" => Some(Self::InternalError),
+            "DECISION_OVERLAY_REJECT_CODE_INVALID_OR_MISSING_EFFECT_CONSENT" => {
+                Some(Self::InvalidOrMissingEffectConsent)
+            }
+            "DECISION_OVERLAY_REJECT_CODE_CONFLICTING_EFFECT_VARIANTS" => {
+                Some(Self::ConflictingEffectVariants)
+            }
             _ => None,
         }
     }

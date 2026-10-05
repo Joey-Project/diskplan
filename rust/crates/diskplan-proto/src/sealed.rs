@@ -5,19 +5,19 @@ use sha2::{Digest, Sha256};
 
 use crate::CanonicalEnvelopeReceipt;
 use crate::diskplan::v1::{
-    ActionExecutionPreviewProjection, AdapterOutcomeKind, ApplyReviewProjection,
-    ApplyStartFailureKind, DecisionOverlayAcknowledged, Digest256, DryRunProjection,
-    DryRunProjectionManifest, DryRunProjectionPayload, ExecutionStepStatus, ExecutionStreamEvent,
-    ExecutionStreamFailureKind, ExecutionUnitProjection, ExecutionUnitStatus, OpaqueIdentifier,
-    PlanActionProjection, PlanProjectionManifest, PlanStageability, PostVerificationKind,
-    RevalidationFailureKind, RevalidationProjectionPayload, RevalidationSubject, RuntimeRejectCode,
-    adapter_outcome_projection, envelope, execution_stream_event, execution_unit_projection,
-    plan_projection_record, post_verification_projection, revalidation_finding_projection,
-    runtime_event,
+    ActionExecutionPreviewProjection, AdapterOutcomeKind, ApplyReviewActionProjection,
+    ApplyReviewProjection, ApplyStartFailureKind, DecisionOverlayAcknowledged, Digest256,
+    DryRunProjection, DryRunProjectionManifest, DryRunProjectionPayload, EffectConsentBindingV2,
+    ExecutionStepStatus, ExecutionStreamEvent, ExecutionStreamFailureKind, ExecutionUnitProjection,
+    ExecutionUnitStatus, OpaqueIdentifier, PlanActionProjection, PlanProjectionManifest,
+    PlanStageability, PostVerificationKind, RevalidationFailureKind, RevalidationProjectionPayload,
+    RevalidationSubject, RuntimeRejectCode, adapter_outcome_projection, envelope,
+    execution_stream_event, execution_unit_projection, plan_projection_record,
+    post_verification_projection, revalidation_finding_projection, runtime_event,
 };
 use crate::runtime::{
-    RuntimeProjectionError, VerifiedPlanProjection, validate_execution_preview,
-    validate_runtime_protocol_minor,
+    EFFECT_BINDING_SCHEMA_VERSION_V2, PROTOCOL17_MINOR, RuntimeProjectionError,
+    VerifiedPlanProjection, validate_execution_preview, validate_runtime_protocol_minor,
 };
 
 pub const RUNTIME_MANIFEST_VERSION: u32 = 1;
@@ -27,6 +27,7 @@ pub const MAXIMUM_RUNTIME_PROJECTION_BYTES: u32 = 12 * 1024 * 1024;
 pub const MAXIMUM_OVERLAY_WAIVER_COUNT: u32 = 100_000;
 pub const MAXIMUM_OVERLAY_NOTE_COUNT: u32 = 10_000;
 pub const MAXIMUM_OVERLAY_NOTE_BYTES: u32 = 1024 * 1024;
+pub const MAXIMUM_OVERLAY_EFFECT_CONSENT_COUNT: u32 = MAXIMUM_RUNTIME_ACTION_COUNT;
 pub const MAXIMUM_EXECUTION_EVENT_COUNT: u64 = 1_000_000;
 pub const MAXIMUM_EXECUTION_ENCODED_BYTES: u64 = 768 * 1024 * 1024;
 pub const MAXIMUM_OPAQUE_IDENTIFIER_BYTES: usize = 256;
@@ -102,6 +103,7 @@ impl RuntimeChainVerifier {
             overlay.scan_checkpoint_id.as_ref(),
             overlay.scan_checkpoint_evidence_sha256.as_ref(),
         )?;
+        validate_overlay_effect_bindings(&self.plan, &overlay, self.negotiated_protocol_minor)?;
 
         let actions = plan_actions(&self.plan);
         let selected = opaque_digest_set(&overlay.selected_action_ids, "selected action_id")?;
@@ -300,6 +302,7 @@ impl RuntimeChainVerifier {
                 )
             }),
         )?;
+        validate_apply_review_effect_bindings(&self.plan, overlay, &review.actions)?;
         let review_force =
             opaque_digest_set(&review.force_warning_action_ids, "review force action_id")?;
         let overlay_force =
@@ -526,6 +529,275 @@ fn validate_exact_overlay_reference(
         return Err(RuntimeProjectionError::InvalidManifest(
             "runtime overlay predecessor differs from accepted overlay",
         ));
+    }
+    Ok(())
+}
+
+fn validate_overlay_effect_bindings(
+    plan: &VerifiedPlanProjection,
+    overlay: &DecisionOverlayAcknowledged,
+    negotiated_protocol_minor: u32,
+) -> Result<(), RuntimeProjectionError> {
+    let effect_records = &overlay.acknowledged_effect_consents;
+    if negotiated_protocol_minor != PROTOCOL17_MINOR {
+        if !effect_records.is_empty()
+            || overlay.maximum_effect_consents != 0
+            || overlay.effect_consent_count != 0
+        {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "effect consent fields are not valid before protocol 1.7",
+            ));
+        }
+        return Ok(());
+    }
+    if plan.manifest.action_effect_binding_schema_version != EFFECT_BINDING_SCHEMA_VERSION_V2
+        || overlay.maximum_effect_consents != MAXIMUM_OVERLAY_EFFECT_CONSENT_COUNT
+        || overlay.effect_consent_count != effect_records.len() as u64
+        || effect_records.len() > MAXIMUM_OVERLAY_EFFECT_CONSENT_COUNT as usize
+    {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "protocol 1.7 effect consent budget or schema is invalid",
+        ));
+    }
+
+    let actions = plan_actions(plan);
+    let selected = opaque_digest_set(&overlay.selected_action_ids, "selected action_id")?;
+    let mut consent_by_action: BTreeMap<Vec<u8>, &crate::diskplan::v1::AcknowledgedEffectConsent> =
+        BTreeMap::new();
+    for acknowledged in effect_records {
+        let binding =
+            acknowledged
+                .binding
+                .as_ref()
+                .ok_or(RuntimeProjectionError::InvalidManifest(
+                    "effect consent binding is missing",
+                ))?;
+        validate_effect_consent_shape(binding)?;
+        digest_value(
+            acknowledged.consent_sha256.as_ref(),
+            "effect consent_sha256",
+        )?;
+        let action_id = digest_opaque(binding.action_id.as_ref(), "effect consent action_id")?;
+        if !selected.contains(action_id) {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "effect consent belongs to an unselected action",
+            ));
+        }
+        if consent_by_action
+            .insert(action_id.to_vec(), acknowledged)
+            .is_some()
+        {
+            return Err(RuntimeProjectionError::DuplicateIdentifier(
+                "effect consent action_id",
+            ));
+        }
+        let action = actions
+            .get(action_id)
+            .ok_or(RuntimeProjectionError::UnknownReference(
+                "effect consent action_id",
+            ))?;
+        let preview =
+            action
+                .execution_preview
+                .as_ref()
+                .ok_or(RuntimeProjectionError::InvalidManifest(
+                    "effect consent action has no preview",
+                ))?;
+        if !preview.mutation_supported {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "effect consent belongs to a non-executable action",
+            ));
+        }
+        validate_effect_consent_references(binding, action, &plan.manifest)?;
+    }
+
+    let mut selected_variant_groups = BTreeSet::new();
+    for action_id in &selected {
+        let action = actions
+            .get(action_id)
+            .expect("selected action membership was checked");
+        let preview =
+            action
+                .execution_preview
+                .as_ref()
+                .ok_or(RuntimeProjectionError::InvalidManifest(
+                    "selected action has no preview",
+                ))?;
+        if !preview.mutation_supported {
+            continue;
+        }
+        if !consent_by_action.contains_key(action_id) {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "selected executable action has no effect consent",
+            ));
+        }
+        let group = opaque_value(
+            action.action_effect_variant_group_id.as_ref(),
+            "action_effect_variant_group_id",
+        )?;
+        if !selected_variant_groups.insert(group.to_vec()) {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "overlay selects conflicting effect variants",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_effect_consent_shape(
+    binding: &EffectConsentBindingV2,
+) -> Result<(), RuntimeProjectionError> {
+    if binding.version != 2
+        || !matches!(binding.permission, Some(1 | 2))
+        || binding.policy_version.is_empty()
+        || binding.policy_version.len() > 256
+        || binding.schema_version.is_empty()
+        || binding.schema_version.len() > 256
+        || !(1..=256).contains(&binding.consent_event_id.len())
+    {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "effect consent version, permission, text, or event is invalid",
+        ));
+    }
+    for (value, field) in [
+        (binding.requirement_sha256.as_ref(), "requirement_sha256"),
+        (binding.target_scope_sha256.as_ref(), "target_scope_sha256"),
+        (binding.plan_sha256.as_ref(), "plan_sha256"),
+        (binding.evidence_sha256.as_ref(), "evidence_sha256"),
+    ] {
+        digest_value(value, field)?;
+    }
+    digest_opaque(binding.action_id.as_ref(), "action_id")?;
+    digest_opaque(binding.action_lineage_id.as_ref(), "action_lineage_id")?;
+    Ok(())
+}
+
+fn validate_effect_consent_references(
+    binding: &EffectConsentBindingV2,
+    action: &crate::diskplan::v1::PlanActionProjection,
+    manifest: &crate::diskplan::v1::PlanProjectionManifest,
+) -> Result<(), RuntimeProjectionError> {
+    let requirement = action.action_effect_requirement.as_ref().ok_or(
+        RuntimeProjectionError::InvalidManifest("executable action omits effect requirement"),
+    )?;
+    if binding.permission != requirement.permission
+        || digest_value(
+            binding.requirement_sha256.as_ref(),
+            "effect consent requirement_sha256",
+        )? != digest_value(
+            action.action_effect_requirement_sha256.as_ref(),
+            "action_effect_requirement_sha256",
+        )?
+        || digest_opaque(binding.action_id.as_ref(), "effect consent action_id")?
+            != digest_opaque(action.action_id.as_ref(), "action_id")?
+        || digest_opaque(
+            binding.action_lineage_id.as_ref(),
+            "effect consent action_lineage_id",
+        )? != digest_opaque(action.action_lineage_id.as_ref(), "action_lineage_id")?
+        || digest_value(
+            binding.target_scope_sha256.as_ref(),
+            "effect consent target_scope_sha256",
+        )? != digest_value(
+            requirement.target_scope_sha256.as_ref(),
+            "effect requirement target_scope_sha256",
+        )?
+        || digest_value(binding.plan_sha256.as_ref(), "effect consent plan_sha256")?
+            != digest_value(manifest.plan_sha256.as_ref(), "plan_sha256")?
+        || digest_value(
+            binding.evidence_sha256.as_ref(),
+            "effect consent evidence_sha256",
+        )? != digest_value(manifest.evidence_sha256.as_ref(), "evidence_sha256")?
+        || binding.policy_version != manifest.policy_version
+        || binding.schema_version != manifest.schema_version
+    {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "effect consent references differ from action or manifest",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_apply_review_effect_bindings(
+    plan: &VerifiedPlanProjection,
+    overlay: &DecisionOverlayAcknowledged,
+    review_actions: &[ApplyReviewActionProjection],
+) -> Result<(), RuntimeProjectionError> {
+    if plan.negotiated_protocol_minor() != PROTOCOL17_MINOR {
+        if review_actions.iter().any(|action| {
+            action.effect_permission.is_some()
+                || action.effect_requirement_sha256.is_some()
+                || action.effect_consent_sha256.is_some()
+        }) {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "apply-review effect fields are not valid before protocol 1.7",
+            ));
+        }
+        return Ok(());
+    }
+    let actions = plan_actions(plan);
+    for projected in review_actions {
+        let action_id = digest_opaque(projected.action_id.as_ref(), "review effect action_id")?;
+        let action = actions
+            .get(action_id)
+            .ok_or(RuntimeProjectionError::UnknownReference(
+                "review effect action_id",
+            ))?;
+        let preview =
+            action
+                .execution_preview
+                .as_ref()
+                .ok_or(RuntimeProjectionError::InvalidManifest(
+                    "review action has no preview",
+                ))?;
+        if !preview.mutation_supported {
+            if projected.effect_permission.is_some()
+                || projected.effect_requirement_sha256.is_some()
+                || projected.effect_consent_sha256.is_some()
+            {
+                return Err(RuntimeProjectionError::InvalidManifest(
+                    "non-executable review action carries effect binding",
+                ));
+            }
+            continue;
+        }
+        let requirement = action.action_effect_requirement.as_ref().ok_or(
+            RuntimeProjectionError::InvalidManifest("review action omits effect requirement"),
+        )?;
+        if projected.effect_permission != requirement.permission
+            || digest_value(
+                projected.effect_requirement_sha256.as_ref(),
+                "review effect_requirement_sha256",
+            )? != digest_value(
+                action.action_effect_requirement_sha256.as_ref(),
+                "action_effect_requirement_sha256",
+            )?
+        {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "apply-review effect requirement differs from plan",
+            ));
+        }
+        let consent = overlay
+            .acknowledged_effect_consents
+            .iter()
+            .find(|acknowledged| {
+                acknowledged
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.action_id.as_ref())
+                    .is_some_and(|id| id.value.as_slice() == action_id)
+            })
+            .ok_or(RuntimeProjectionError::InvalidManifest(
+                "apply-review action has no accepted effect consent",
+            ))?;
+        if digest_value(
+            projected.effect_consent_sha256.as_ref(),
+            "review effect_consent_sha256",
+        )? != digest_value(consent.consent_sha256.as_ref(), "effect consent_sha256")?
+        {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "apply-review effect consent differs from overlay",
+            ));
+        }
     }
     Ok(())
 }
@@ -918,6 +1190,16 @@ fn verify_decision_overlay_acknowledged(
         || overlay.selected_action_count != overlay.selected_action_ids.len() as u64
         || overlay.selected_action_ids.len() > MAXIMUM_RUNTIME_ACTION_COUNT as usize
         || overlay.acknowledged_waivers.len() > MAXIMUM_OVERLAY_WAIVER_COUNT as usize
+        || overlay.effect_consent_count != overlay.acknowledged_effect_consents.len() as u64
+        || overlay.acknowledged_effect_consents.len()
+            > MAXIMUM_OVERLAY_EFFECT_CONSENT_COUNT as usize
+        || (overlay.maximum_effect_consents != 0
+            && overlay.maximum_effect_consents != MAXIMUM_OVERLAY_EFFECT_CONSENT_COUNT)
+        || (overlay.maximum_effect_consents == 0
+            && !overlay.acknowledged_effect_consents.is_empty())
+        || (overlay.maximum_effect_consents != 0
+            && overlay.acknowledged_effect_consents.len()
+                > overlay.maximum_effect_consents as usize)
         || overlay.user_notes.len() > MAXIMUM_OVERLAY_NOTE_COUNT as usize
         || overlay.encode_to_vec().len() > MAXIMUM_RUNTIME_PROJECTION_BYTES as usize
     {
@@ -968,6 +1250,27 @@ fn verify_decision_overlay_acknowledged(
         {
             return Err(RuntimeProjectionError::InvalidManifest(
                 "acknowledged waiver binding is invalid",
+            ));
+        }
+    }
+    let mut effect_action_ids = BTreeSet::new();
+    for acknowledged in &overlay.acknowledged_effect_consents {
+        let binding =
+            acknowledged
+                .binding
+                .as_ref()
+                .ok_or(RuntimeProjectionError::InvalidManifest(
+                    "effect consent binding is missing",
+                ))?;
+        validate_effect_consent_shape(binding)?;
+        digest_value(
+            acknowledged.consent_sha256.as_ref(),
+            "effect consent_sha256",
+        )?;
+        let action_id = digest_opaque(binding.action_id.as_ref(), "effect consent action_id")?;
+        if !effect_action_ids.insert(action_id.to_vec()) {
+            return Err(RuntimeProjectionError::DuplicateIdentifier(
+                "effect consent action_id",
             ));
         }
     }
@@ -1584,6 +1887,7 @@ fn validate_apply_review(
     validate_unique(&action_ids, "apply-review action_id")?;
     for action in &projection.actions {
         validate_preview(negotiated_protocol_minor, action.execution_preview.as_ref())?;
+        validate_apply_review_effect_shape(negotiated_protocol_minor, action)?;
     }
     let revalidation =
         projection
@@ -1633,6 +1937,49 @@ fn validate_apply_review(
             "apply-review revalidation digest mismatch",
         ));
     }
+    Ok(())
+}
+
+fn validate_apply_review_effect_shape(
+    negotiated_protocol_minor: u32,
+    action: &ApplyReviewActionProjection,
+) -> Result<(), RuntimeProjectionError> {
+    let has_effect_fields = action.effect_permission.is_some()
+        || action.effect_requirement_sha256.is_some()
+        || action.effect_consent_sha256.is_some();
+    if negotiated_protocol_minor != PROTOCOL17_MINOR {
+        if has_effect_fields {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "apply-review effect fields are not valid before protocol 1.7",
+            ));
+        }
+        return Ok(());
+    }
+    let executable = action
+        .execution_preview
+        .as_ref()
+        .is_some_and(|preview| preview.mutation_supported);
+    if !executable {
+        if has_effect_fields {
+            return Err(RuntimeProjectionError::InvalidManifest(
+                "non-executable review action carries effect binding",
+            ));
+        }
+        return Ok(());
+    }
+    if !matches!(action.effect_permission, Some(1 | 2)) {
+        return Err(RuntimeProjectionError::InvalidManifest(
+            "apply-review effect permission is missing or unknown",
+        ));
+    }
+    digest_value(
+        action.effect_requirement_sha256.as_ref(),
+        "review effect_requirement_sha256",
+    )?;
+    digest_value(
+        action.effect_consent_sha256.as_ref(),
+        "review effect_consent_sha256",
+    )?;
     Ok(())
 }
 
@@ -2471,5 +2818,76 @@ mod tests {
 
     fn digest(value: Vec<u8>) -> Digest256 {
         Digest256 { value }
+    }
+}
+
+#[cfg(test)]
+mod effect_consent_fixture_tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use prost::Message;
+
+    use super::{validate_apply_review_effect_shape, validate_effect_consent_shape};
+    use crate::diskplan::v1::{
+        ActionExecutionPreviewProjection, ApplyReviewActionProjection, EffectConsentBindingV2,
+    };
+    use crate::runtime::{PROTOCOL16_MINOR, PROTOCOL17_MINOR};
+
+    #[test]
+    fn runtime_v17_consent_and_apply_review_components_fail_closed() {
+        let fixture = fixture();
+        assert_eq!(fixture["schema"], "runtime-v1.7");
+        for case in fixture["consent_cases"].as_array().unwrap() {
+            let consent = EffectConsentBindingV2::decode(
+                hex::decode(case["consent_wire_hex"].as_str().unwrap())
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap();
+            let result = validate_effect_consent_shape(&consent);
+            assert_eq!(
+                result.is_ok(),
+                case["expected_valid"].as_bool().unwrap(),
+                "fixture case {}: {result:?}",
+                case["name"].as_str().unwrap()
+            );
+        }
+        for case in fixture["review_action_cases"].as_array().unwrap() {
+            let mut action = ApplyReviewActionProjection::decode(
+                hex::decode(case["action_wire_hex"].as_str().unwrap())
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap();
+            action.execution_preview = Some(ActionExecutionPreviewProjection {
+                mutation_supported: true,
+                ..Default::default()
+            });
+            let result = validate_apply_review_effect_shape(PROTOCOL17_MINOR, &action);
+            assert_eq!(
+                result.is_ok(),
+                case["expected_valid"].as_bool().unwrap(),
+                "fixture case {}: {result:?}",
+                case["name"].as_str().unwrap()
+            );
+            assert!(validate_apply_review_effect_shape(PROTOCOL16_MINOR, &action).is_err());
+        }
+        let unbound_informational = ApplyReviewActionProjection {
+            execution_preview: Some(ActionExecutionPreviewProjection::default()),
+            ..Default::default()
+        };
+        assert!(
+            validate_apply_review_effect_shape(PROTOCOL17_MINOR, &unbound_informational).is_ok()
+        );
+        assert!(
+            validate_apply_review_effect_shape(PROTOCOL16_MINOR, &unbound_informational).is_ok()
+        );
+    }
+
+    fn fixture() -> serde_json::Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../proto/fixtures/runtime-v1.7/fixtures.json");
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 }
