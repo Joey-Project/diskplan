@@ -219,6 +219,8 @@ public struct RuntimeBusinessEmission: Sendable {
         break
       case .unspecified, .UNRECOGNIZED:
         throw SealedRuntimeWireError.invalid(field: "decision overlay rejection")
+      case .invalidOrMissingEffectConsent, .conflictingEffectVariants:
+        throw SealedRuntimeWireError.invalid(field: "uninstalled effect rejection consumer")
       }
       guard !rejection.summary.isEmpty else {
         throw SealedRuntimeWireError.invalid(field: "decision overlay rejection")
@@ -1433,6 +1435,8 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
         editedWaivers.insert(
           RuntimeWaiverKey(actionID: waiver.actionID.value, waiverID: waiver.waiverID.value)
         )
+      case .setEffectConsent(let consent):
+        editedActions.insert(consent.actionID.value)
       case .replaceNotes, .applyBatchSelectionPreset, nil:
         break
       }
@@ -1510,6 +1514,8 @@ final class RuntimeBusinessAuthorityState: @unchecked Sendable {
       }
     case .unspecified, .UNRECOGNIZED:
       throw SealedRuntimeWireError.invalid(field: "overlay rejection code")
+    case .invalidOrMissingEffectConsent, .conflictingEffectVariants:
+      throw SealedRuntimeWireError.invalid(field: "uninstalled effect rejection consumer")
     }
   }
 

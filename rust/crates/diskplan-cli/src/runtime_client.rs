@@ -264,6 +264,9 @@ fn verify_overlay_transition(
             Some(decision_overlay_edit::Edit::ApplyBatchSelectionPreset(_)) => {
                 DecisionEditKind::ApplyBatchSelectionPreset
             }
+            Some(decision_overlay_edit::Edit::SetEffectConsent(_)) => {
+                DecisionEditKind::SetEffectConsent
+            }
             None => return Err(RuntimeClientError::Binding("overlay edit body is missing")),
         };
         if edit.kind != expected_kind as i32 {
@@ -308,6 +311,11 @@ fn verify_overlay_transition(
                 }
                 engine_owned_preset = true;
                 waivers.clear();
+            }
+            Some(decision_overlay_edit::Edit::SetEffectConsent(_)) => {
+                return Err(RuntimeClientError::Binding(
+                    "effect consent edits require an installed live permission consumer",
+                ));
             }
             None => unreachable!("overlay edit body was checked above"),
         }
@@ -416,7 +424,7 @@ fn overlay_rejected(rejected: DecisionOverlayRejected) -> RuntimeClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diskplan_proto::diskplan::v1::StageActionEdit;
+    use diskplan_proto::diskplan::v1::{SetEffectConsentEdit, StageActionEdit};
 
     fn opaque(value: impl AsRef<[u8]>) -> OpaqueIdentifier {
         OpaqueIdentifier {
@@ -520,6 +528,31 @@ mod tests {
         assert!(matches!(
             verify_overlay_transition(0, &[edit], None, &acknowledged),
             Err(RuntimeClientError::Binding(_))
+        ));
+    }
+
+    #[test]
+    fn effect_consent_edits_do_not_gain_authority_from_additive_schema() {
+        let edit = DecisionOverlayEdit {
+            kind: DecisionEditKind::SetEffectConsent as i32,
+            edit: Some(decision_overlay_edit::Edit::SetEffectConsent(
+                SetEffectConsentEdit {
+                    action_id: Some(opaque([0x41; 32])),
+                    permission: Some(1),
+                    consent_event_id: b"explicit-event".to_vec(),
+                    requirement_sha256: Some(digest([0x42; 32])),
+                },
+            )),
+        };
+        let acknowledged = DecisionOverlayAcknowledged {
+            revision: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            verify_overlay_transition(0, &[edit], None, &acknowledged),
+            Err(RuntimeClientError::Binding(
+                "effect consent edits require an installed live permission consumer"
+            ))
         ));
     }
 }

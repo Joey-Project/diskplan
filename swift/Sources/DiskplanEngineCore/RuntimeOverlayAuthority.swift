@@ -164,6 +164,12 @@ enum RuntimeOverlayEditor {
         selected = safeStageableSelection(plan.actions)
         consents.removeAll(keepingCapacity: true)
 
+      case .setEffectConsent:
+        throw RuntimeOverlayEditRejection(
+          code: .invalidEdit,
+          summary: "effect consent edits require an installed live permission consumer"
+        )
+
       case nil:
         throw RuntimeOverlayEditRejection(
           code: .invalidEdit,
@@ -216,6 +222,11 @@ enum RuntimeOverlayEditor {
       case .applyBatchSelectionPreset:
         key = .preset
         containsPreset = true
+      case .setEffectConsent:
+        throw RuntimeOverlayEditRejection(
+          code: .invalidEdit,
+          summary: "effect consent edits require an installed live permission consumer"
+        )
       case nil:
         throw RuntimeOverlayEditRejection(
           code: .invalidEdit,
@@ -305,6 +316,7 @@ enum RuntimeOverlayEditor {
     case .revokeWaiver: matches = edit.kind == .revokeWaiver
     case .replaceNotes: matches = edit.kind == .replaceNotes
     case .applyBatchSelectionPreset: matches = edit.kind == .applyBatchSelectionPreset
+    case .setEffectConsent: matches = edit.kind == .setEffectConsent
     case nil: matches = false
     }
     guard matches else {

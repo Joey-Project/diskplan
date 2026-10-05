@@ -61,12 +61,14 @@ with bounded source audits and separately owned implementation slices.
 - [x] Freeze the typed permission, per-action consent and canonical binding
   implementation interface in
   [effect-permission-bindings-v2.md](../../../design/effect-permission-bindings-v2.md).
+- [x] Integrate checked Swift raw binding records, additive IPC 1.7 schema,
+  generated sides/canonical fixtures, and frozen Rules input-state records.
 - [ ] Separate scan permission from mutation authority and preserve unknown
   Provider ownership without promoting missing markers to confirmed-local.
 - [ ] Wire canonical built-in/optional user rules into production cache planning.
 - [ ] Implement whole-plan/JIT effect-consent validation without changing other
   vetoes, force consent, adapter scope or path-slot trust.
-- [ ] Update Protobuf, both generated sides, compatibility and binding fixtures.
+- [ ] Complete live IPC 1.7 consumers and cross-language semantic references.
 - [ ] Integrate plan-first frontend consent/warnings and installed-product paths.
 - [ ] Complete fixture-only apply/post-verification and installed India acceptance.
 - [ ] Complete exact-head review and affected PR gates; land reviewable layers.
@@ -158,6 +160,100 @@ gzip vector's synthetic macOS 14 metadata and pinned bytes are unchanged.
 These are targeted repair receipts, not a full-suite result or a claim that
 later integration heads have passed the required release gates. The remote
 task root is owner-private; existing user data was not mutated.
+
+### Additive Interface Checkpoints
+
+Signed Swift checkpoint `2d42fc5495c6e50df08efe48aa79907e79320f9a` is retained in
+published merge `c97fe4a1a5fcb00e36925a9ea8c9850461740e28`, alongside CI repair
+`fd5edad939ee304f5198a17af8c2973f3d400d15`. Its India receipt covers seven new
+codec tests and strict formatting; a separate internal fixed-commit audit found
+no concrete codec mismatch. Raw records are not authorization. The completed
+clean domain worktree was removed after checking published ancestry, no local
+untracked/ignored files and no active reader; its branch remains recoverable.
+
+The published `c97fe4a1a5fcb00e36925a9ea8c9850461740e28` pull-request head then
+passed Foundation CI run `37315149444` and Release CI run `37315149542`.
+The exact job results were success for required macOS 26 Apple Silicon,
+best-effort macOS 15 deployment, required macOS 26 release, and best-effort
+macOS 15 release compatibility. These results apply only to that checkpoint,
+not the subsequent additive wire/Rules merges or production permission work.
+
+Signed additive wire checkpoint `5cd933dc5100eab5f44bc0cb196b2472711bfe14`
+and Rules checkpoint `2d20d4177d6329bc35db869a179942570132af23` are now integrated.
+Their exact scoped source/test/generation receipts remain in their individual
+journals. The wire worker explicitly reported its workspace check as failed:
+the new generated `SetEffectConsent` case required CLI consumers outside its
+file ownership. Swift had the corresponding exhaustive-match integration gap.
+The integration layer adds explicit rejection of the uninstalled edit in both
+consumers, with negative tests. Live protocol defaults remain unchanged until
+the real permission consumers, frontend and execution authority are complete.
+
+Rules absence is a valid state; a requested invalid overlay remains bound as
+unverified and blocks mutation while retaining safe baseline planning. Exact
+JSON bytes are compiled into Swift so descriptor-bound private engine launches
+do not depend on sibling resources or the current directory. This model does
+not itself install production callers or issue deletion consent. The worker's
+India build root was reclaimed only after bounded test completion and a scoped
+process check. Cross-language integration and fixed-head review remain pending.
+
+The wire slice's fixed-commit internal audit identified two follow-up defects:
+prost's `TryFrom(0)` admitted the explicitly defined `UNSPECIFIED` requirement
+enum, and the public Rust canonical consent codec accepted non-32-byte action
+and lineage identifiers unlike Swift. The owning wire lane is repairing both
+with negative tests. The higher-level frontend must also invoke the core
+canonical verifier; proto-only shape/reference validation is not complete
+binding admission. None of these unfinished 1.7 paths is enabled as a live
+permission consumer.
+
+### Additive Consumer Integration Validation
+
+The integration shims reject unsupported effect edits explicitly rather than
+granting permission from the new generated cases. Swift rejection-code switches
+likewise refuse uninstalled effect consumers, and an atomic mixed edit batch
+cannot hide an unsupported consent. Added Swift checks read the shared canonical
+fixture used by Rust and compare every requirement/consent field and digest.
+
+- Rust source tree: `26bcb3395a6b9d58e14e7499e6d7462e0d0276d7`; archive SHA-256
+  `b8e04b272c08e8df20f0faa333246a191f64d00e4f4268de810dfa31138ffc3d`.
+  India `cargo fmt --all -- --check` passed, as did bounded
+  `cargo check --locked --workspace --all-targets --jobs 4` and the selected
+  `diskplan` crate negative test
+  `effect_consent_edits_do_not_gain_authority_from_additive_schema` (one test
+  executed and passed). Workspace log SHA-256:
+  `4c360d98ac8af147d9e57d57c1e044bdba6d6f598722e27948c0554cc7baa9c1`;
+  test log SHA-256:
+  `5441f72c2d80efe38b3652ef390942ddeb5a91dfdbb3c14eb436ca51ccb13924`.
+- Swift source tree: `cb470f2dcbf71344b5a1d44ba5d7f4d0894cea1c`; archive SHA-256
+  `88955edbc44f9a2facc96a5cca5de3da6dfad49c5345ae9cd3331cff93b191d3`.
+  India strict formatting passed on all four affected Swift files; generated
+  Rules assets were current. Package-lock-guarded Swift compilation and the
+  selected codec, Rules, unsupported-edit and shared-fixture tests passed:
+  18 Swift Testing tests executed. Its 900-second / 1-MiB supervisor exited 0
+  after 46,929 ms; log SHA-256:
+  `d78d6072c4ddf0ef06c1e555cc79dc764531b7b4566643263ee83e8dbda7eb3d`.
+  A separate skip-build command against the same compiled source executed and
+  passed the remaining effect-rejection-code test (one test, 3,963 ms, exit 0,
+  quiescent); log SHA-256:
+  `db9169c11fd1dc0aeffac03d802564e00aac9f6ac5a98a7f5a9dc20f55c794f3`.
+- Each successful supervised command reported a verified quiescent process
+  group. Earlier attempts caught long diagnostics in strict formatting, a
+  wrong Cargo package selector, and remaining generated enum cases in the Swift
+  business handler; those failed attempts are not passing test receipts.
+
+The final Swift-specific repairs do not change the previously tested Rust
+source, lockfile or fixture bytes. These are additive checkpoint receipts only:
+real 1.7 permission/epoch consumers, production Rules wiring, current/JIT
+collection and final complete-range review remain unfinished.
+
+The required Foundation CI job now explicitly checks compiled Rules assets,
+the canonical effect fixture, and protocol 1.7 runtime fixtures. These checks
+do not change live negotiation or grant permission; they prevent generated
+data drift from bypassing the normal required integration checkpoint.
+India actionlint passed on the updated workflow, the compiled Rules asset
+check passed, and both newly wired fixture check commands passed under a
+180-second / 1-MiB supervisor (13,097 ms, exit 0, verified quiescence, log
+SHA-256 `7bb7bded95db6e0ca0e927ddf6e9c1ad7a6b496c2c3618a4613ce005be128344`).
+The workstream journal validator also passed on India after the receipt update.
 
 The checkpoint is published in draft PR #30. The clean cache worktree was
 removed only after confirming no retained untracked/ignored files, complete
