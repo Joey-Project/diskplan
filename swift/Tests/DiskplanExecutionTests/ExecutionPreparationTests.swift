@@ -150,6 +150,117 @@ func forceWarningsRequireAnExactlyBoundApplyReviewConfirmation() async throws {
 }
 
 @Test
+func dryRunCarriesEngineIssuedRawCommandPreview() async throws {
+  let fixture = try Fixture(
+    path: "cache",
+    content: .explicitlyNotApplicable(.metadataOnlyObject),
+    forceRequirement: .requiresForceWithWarning
+  )
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([fixture.currentSnapshot()]),
+    randomBytes: deterministicEntropy
+  )
+  let result = try await engine.prepare(
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    mode: .dryRun,
+    issuedAtSeconds: 200,
+    lifetimeSeconds: 30
+  )
+  guard case .dryRun(let report) = result,
+    let preview = report.commandPreviews.first
+  else {
+    Issue.record("expected an engine-issued dry-run command preview")
+    return
+  }
+
+  #expect(report.commandPreviews.count == 1)
+  #expect(preview.actionID == fixture.action.id)
+  #expect(preview.kind == .command)
+  #expect(preview.adapter == .genericRemove)
+  #expect(preview.executableRawPath == Data("/bin/rm".utf8))
+  #expect(
+    preview.arguments == [
+      Data("rm".utf8), Data("-Rfx".utf8), Data("--".utf8), Data("./cache".utf8),
+    ])
+  #expect(preview.workingDirectoryRawPath == Data("/root".utf8))
+  #expect(preview.requiresForceWarning)
+  #expect(preview.pathRaceResidual)
+  #expect(report.forceWarningActionIDs == [fixture.action.id])
+}
+
+@Test
+func contentStableGenericActionRemainsReportOnly() async throws {
+  let fixture = try Fixture(
+    content: .requiredDigest(digest(92)),
+    forceRequirement: .requiresForceWithWarning
+  )
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([fixture.currentSnapshot(), fixture.currentSnapshot()]),
+    randomBytes: deterministicEntropy
+  )
+
+  let dryRun = try await engine.prepare(
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    mode: .dryRun,
+    issuedAtSeconds: 200,
+    lifetimeSeconds: 30
+  )
+  guard case .dryRun(let dryRunReport) = dryRun,
+    let preview = dryRunReport.commandPreviews.first
+  else {
+    Issue.record("expected a report-only dry-run preview")
+    return
+  }
+  #expect(preview.kind == .reportOnly)
+  #expect(preview.executableRawPath == nil)
+  #expect(preview.arguments.isEmpty)
+  #expect(preview.workingDirectoryRawPath == nil)
+  #expect(preview.requiresForceWarning)
+  #expect(preview.detailCode == "content-stability-native-adapter-required")
+
+  let apply = try await engine.prepare(
+    plan: fixture.plan,
+    overlay: fixture.overlay,
+    mode: .apply,
+    issuedAtSeconds: 200,
+    lifetimeSeconds: 30
+  )
+  guard case .reportOnly(let applyReport) = apply else {
+    Issue.record("a report-only action must not mint an apply capability")
+    return
+  }
+  #expect(applyReport.commandPreviews == dryRunReport.commandPreviews)
+}
+
+@Test
+func applyAuthorizationRejectsAFrontendEditedCommandPreview() async throws {
+  let fixture = try Fixture(content: .explicitlyNotApplicable(.metadataOnlyObject))
+  let engine = ExecutionPreparationEngine(
+    evidenceSource: SequenceSource([fixture.currentSnapshot()]),
+    randomBytes: deterministicEntropy
+  )
+  let (ready, capability) = try await prepareApply(engine, fixture: fixture)
+  let edited = ApplyReadyReport(
+    revalidation: ready.revalidation,
+    forceWarningActionIDs: ready.forceWarningActionIDs,
+    commandPreviews: [],
+    reviewBindingHash: ready.reviewBindingHash
+  )
+
+  await #expect(throws: ExecutionPreparationError.capabilityBindingMismatch) {
+    try await engine.authorizeApply(
+      capability,
+      ready: edited,
+      plan: fixture.plan,
+      overlay: fixture.overlay,
+      nowSeconds: 205
+    )
+  }
+}
+
+@Test
 func newerPreparationRevokesAnUnclaimedMintedAuthorization() async throws {
   let fixture = try Fixture()
   let engine = ExecutionPreparationEngine(
@@ -557,7 +668,7 @@ func missingUnreadableAndFailedRemainDistinct(
 
 @Test
 func identityContentAndAccessMismatchesRemainDistinct() async throws {
-  let fixture = try Fixture()
+  let fixture = try Fixture(content: .requiredDigest(digest(92)))
   let wrongIdentity = ObjectIdentity(
     device: 1, object: 998, generation: .known(1), type: .directory)
   let wrongAccess = RequiredAccessPolicyBaseline(
@@ -1348,6 +1459,20 @@ func completeReleaseUnitRevalidatesEveryOwnerAndTopology() async throws {
     return
   }
   #expect(unit.ownerActionIDs == release.ownerActions.map(\.id).sorted())
+  let releasePreviews = report.commandPreviews.filter {
+    $0.compoundReleaseGroupIDs == [release.releaseSet.allocationGroupID]
+  }
+  #expect(Set(releasePreviews.map(\.actionID)) == Set(currentActions.map(\.actionID)))
+  #expect(
+    releasePreviews.allSatisfy {
+      $0.compoundOwnerActionIDs == release.ownerActions.map(\.id).sorted()
+    })
+  #expect(
+    releasePreviews.contains {
+      $0.actionID == release.releaseAction.id
+        && $0.kind == .compoundReleaseVerification
+        && $0.adapter == .completeReleaseSetRemove
+    })
 
   let badSnapshot = CurrentRevalidationSnapshot(
     captureID: digest(90),
@@ -1498,7 +1623,7 @@ struct Fixture {
     candidateID: String = "a",
     path: String = "a",
     object: UInt64 = 1,
-    content: ContentProtectionBaseline = .requiredDigest(digest(92)),
+    content: ContentProtectionBaseline = .explicitlyNotApplicable(.metadataOnlyObject),
     forceRequirement: ForceRequirement = .notRequired
   ) throws {
     facts = globalFacts()
@@ -1819,6 +1944,18 @@ func snapshot(
     providerBoundary: .known(.local),
     mountIdentity: .known("mount-1")
   )
+  let parentChain = components.dropLast().indices.map { index in
+    ParentNamespaceBinding(
+      relativePath: try! RawTargetPath(components: Array(components.prefix(index + 1))),
+      identity: ObjectIdentity(
+        device: 1,
+        object: UInt64(800 + index),
+        generation: .known(1),
+        type: .directory
+      ),
+      seal: seal
+    )
+  }
   let namespace = try! ProtectedNamespaceBinding(
     rawRoot: try! RawRootPath(absoluteBytes: Data("/root".utf8)),
     rootIdentity: ObjectIdentity(
@@ -1826,7 +1963,7 @@ func snapshot(
     rootSeal: seal,
     targetPath: try! RawTargetPath(components: components),
     targetIdentity: identity,
-    parentChain: []
+    parentChain: parentChain
   )
   return try! FrozenEvidenceSnapshot(
     captureID: facts.captureID,

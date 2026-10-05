@@ -32,6 +32,8 @@ package final class DiskplanRuntimeExecutionBackend: RuntimeExecutionBackend, @u
     switch result {
     case .dryRun(let value):
       report = value
+    case .reportOnly(let value):
+      report = value
     case .rejected(let revalidation):
       report = DryRunReport(revalidation: revalidation)
     case .applyReady:

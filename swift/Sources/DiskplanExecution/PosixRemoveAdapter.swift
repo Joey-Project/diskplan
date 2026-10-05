@@ -7,6 +7,12 @@ import Foundation
 /// before spawn; the policy contract still records that the spawn pathname itself can race.
 @_spi(DiskplanEngine)
 public final class PosixRemoveAdapter: ExecutionMutationAdapter, @unchecked Sendable {
+  private struct RemovalContract {
+    let target: BoundMutationTarget
+    let kind: ObjectKind
+    let force: ForceRequirement
+  }
+
   private enum Inspection {
     case present
     case missing
@@ -36,22 +42,9 @@ public final class PosixRemoveAdapter: ExecutionMutationAdapter, @unchecked Send
     _ operation: ExecutionAdapterOperation,
     context: MutationExecutionContext
   ) async -> AdapterOperationOutcome {
-    guard case .genericRemove(let target, let contract) = operation else {
-      return .failed(ExecutionAdapterFailure(code: "unsupported-action-adapter"))
-    }
-    guard contract.pathRaceResidual,
-      contract.removalPathSlot == .prototypeRawTargetPath,
-      contract.targetKind == target.expectedIdentity.type,
-      contract.trustedNamespace == target.expectedRootSeal.trustedNamespace,
-      target.expectedParentSeals.allSatisfy({
-        $0.trustedNamespace == contract.trustedNamespace
-      }),
-      Self.hasBoundLocalNamespaceSeals(target),
-      case .explicitlyNotApplicable = target.expectedContent
-    else {
-      return .failed(ExecutionAdapterFailure(code: "invalid-generic-remove-contract"))
-    }
     do {
+      let removal = try Self.removalContract(operation)
+      let target = removal.target
       if Task.isCancelled { return .cancelled }
       if context.isExpired { return .timedOut }
       guard try inspect(target) == .present else {
@@ -93,8 +86,8 @@ public final class PosixRemoveAdapter: ExecutionMutationAdapter, @unchecked Send
         processID = try Self.spawnRM(
           arguments: Self.relativeArguments(
             leaf: binding.leaf,
-            kind: contract.targetKind,
-            force: contract.forceRequirement
+            kind: removal.kind,
+            force: removal.force
           ),
           workingDirectoryDescriptor: binding.parentDescriptor
         )
@@ -117,10 +110,8 @@ public final class PosixRemoveAdapter: ExecutionMutationAdapter, @unchecked Send
   public func postverify(_ operation: ExecutionAdapterOperation) async
     -> PostVerificationOutcome
   {
-    guard case .genericRemove(let target, _) = operation else {
-      return .unknown(.unsupported)
-    }
     do {
+      let target = try Self.removalContract(operation).target
       switch try inspect(target, allowMissingTarget: true) {
       case .missing: return .satisfied
       case .present: return .notSatisfied(code: "target-still-present")
@@ -149,6 +140,59 @@ public final class PosixRemoveAdapter: ExecutionMutationAdapter, @unchecked Send
       kind: contract.targetKind,
       force: contract.forceRequirement
     )
+  }
+
+  private static func removalContract(
+    _ operation: ExecutionAdapterOperation
+  ) throws -> RemovalContract {
+    switch operation {
+    case .genericRemove(let target, let contract):
+      guard contract.pathRaceResidual,
+        contract.removalPathSlot == .prototypeRawTargetPath,
+        contract.targetKind == target.expectedIdentity.type,
+        contract.trustedNamespace == target.expectedRootSeal.trustedNamespace,
+        target.expectedParentSeals.allSatisfy({
+          $0.trustedNamespace == contract.trustedNamespace
+        }),
+        hasBoundLocalNamespaceSeals(target),
+        case .explicitlyNotApplicable = target.expectedContent
+      else {
+        throw ExecutionAdapterFailure(code: "invalid-generic-remove-contract")
+      }
+      return RemovalContract(
+        target: target,
+        kind: contract.targetKind,
+        force: contract.forceRequirement
+      )
+    case .codexCleanTemporary(let target, let contract):
+      guard hasBoundLocalNamespaceSeals(target),
+        target.expectedRootSeal.trustedNamespace != .unverified,
+        contract.matches(targetPath: target.targetPath),
+        case .explicitlyNotApplicable = target.expectedContent
+      else {
+        throw ExecutionAdapterFailure(code: "invalid-codex-temporary-contract")
+      }
+      return RemovalContract(
+        target: target,
+        kind: target.expectedIdentity.type,
+        force: contract.forceRequirement
+      )
+    case .versionedArtifactRemove(let target, let contract):
+      guard hasBoundLocalNamespaceSeals(target),
+        target.expectedRootSeal.trustedNamespace != .unverified,
+        contract.matches(targetPath: target.targetPath),
+        case .explicitlyNotApplicable = target.expectedContent
+      else {
+        throw ExecutionAdapterFailure(code: "invalid-versioned-artifact-contract")
+      }
+      return RemovalContract(
+        target: target,
+        kind: target.expectedIdentity.type,
+        force: contract.forceRequirement
+      )
+    case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges:
+      throw ExecutionAdapterFailure(code: "unsupported-action-adapter")
+    }
   }
 
   static func relativeArguments(

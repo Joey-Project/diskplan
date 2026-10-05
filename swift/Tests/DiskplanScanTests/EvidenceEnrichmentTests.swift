@@ -123,6 +123,106 @@ private final class LockedCounter: @unchecked Sendable {
   var value: Int { lock.withLock { stored } }
 }
 
+private final class OneShotSelectedSlotReplacement: @unchecked Sendable {
+  private let lock = NSLock()
+  private let targetPath: String
+  private let displacedPath: String
+  private var attempted = false
+  private var didSucceed = false
+
+  init(targetPath: String, displacedPath: String) {
+    self.targetPath = targetPath
+    self.displacedPath = displacedPath
+  }
+
+  var succeeded: Bool { lock.withLock { didSucceed } }
+
+  func replaceOnce() {
+    let shouldRun = lock.withLock { () -> Bool in
+      guard !attempted else { return false }
+      attempted = true
+      return true
+    }
+    guard shouldRun else { return }
+
+    let succeeded: Bool
+    do {
+      try FileManager.default.moveItem(
+        atPath: targetPath,
+        toPath: displacedPath
+      )
+      try Data("replacement object".utf8).write(
+        to: URL(fileURLWithPath: targetPath),
+        options: .withoutOverwriting
+      )
+      succeeded = true
+    } catch {
+      succeeded = false
+    }
+    lock.withLock { didSucceed = succeeded }
+  }
+}
+
+private final class SelectedSlotDescriptorProbe: @unchecked Sendable {
+  private let parentDescriptor: Int32
+  private let rawName: String
+  private let policy: NoMaterializationPolicy
+
+  init(parentDescriptor: Int32, rawName: String, policy: NoMaterializationPolicy) {
+    self.parentDescriptor = parentDescriptor
+    self.rawName = rawName
+    self.policy = policy
+  }
+
+  func seal() -> DescriptorContentSeal? {
+    let descriptor = Darwin.openat(
+      parentDescriptor,
+      rawName,
+      O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+    )
+    guard descriptor >= 0 else { return nil }
+    defer { Darwin.close(descriptor) }
+    return descriptorSeal(fileDescriptor: descriptor, policy: policy)
+  }
+}
+
+private final class OneShotMetadataAndSiblingChurn: @unchecked Sendable {
+  private let lock = NSLock()
+  private let parentPath: String
+  private var attempted = false
+  private var didSucceed = false
+
+  init(parentPath: String) { self.parentPath = parentPath }
+
+  var succeeded: Bool { lock.withLock { didSucceed } }
+
+  func apply(to descriptor: Int32) {
+    let shouldRun = lock.withLock { () -> Bool in
+      guard !attempted else { return false }
+      attempted = true
+      return true
+    }
+    guard shouldRun else { return }
+
+    let timestamps = [
+      timeval(tv_sec: 1, tv_usec: 0),
+      timeval(tv_sec: 1, tv_usec: 0),
+    ]
+    let timestampResult = timestamps.withUnsafeBufferPointer {
+      Darwin.futimes(descriptor, $0.baseAddress)
+    }
+    let childPath = parentPath + "/transient-child"
+    let childDescriptor = open(
+      childPath, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode_t(0o600))
+    let childCreated = childDescriptor >= 0
+    let childClosed = childDescriptor >= 0 ? Darwin.close(childDescriptor) == 0 : false
+    let childRemoved = childCreated && unlink(childPath) == 0
+    lock.withLock {
+      didSucceed = timestampResult == 0 && childCreated && childClosed && childRemoved
+    }
+  }
+}
+
 private final class LockedProviderSequence: @unchecked Sendable {
   private let lock = NSLock()
   private let values: [Observation<ProviderBoundary>]
@@ -307,6 +407,236 @@ private func registerContentRequest(
   errno = 0
   #expect(fcntl(secondOwnedDescriptor, F_GETFD) == -1)
   #expect(errno == EBADF)
+}
+
+@Test func contentAuthorityPreservesUnreadableProviderFailureClassification() throws {
+  let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-provider-failure-content-\(UUID().uuidString)")
+  try Data("selected content".utf8).write(to: temporaryURL, options: .withoutOverwriting)
+  defer { try? FileManager.default.removeItem(at: temporaryURL) }
+  let fileDescriptor = open(temporaryURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+  let ownedDescriptor = try #require(fileDescriptor >= 0 ? fileDescriptor : nil)
+  let noMaterializationPolicy = try #require(
+    MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let seal = try #require(
+    descriptorSeal(fileDescriptor: ownedDescriptor, policy: noMaterializationPolicy))
+  let authority = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(maximumFiles: 1),
+    monotonicNow: { 1 }
+  )
+  let target = RawPath(rootID: "root", components: [RawPathComponent(Data("candidate".utf8))])
+
+  let registration = registerContentRequest(
+    authority: authority,
+    transferring: ownedDescriptor,
+    seal: seal,
+    target: target,
+    providerObservation: {
+      .unreadable(reason: "provider denied", errorCode: EACCES)
+    }
+  )
+  #expect(
+    registration
+      == .unreadable(reason: "provider denied", errorCode: EACCES)
+  )
+  errno = 0
+  #expect(fcntl(ownedDescriptor, F_GETFD) == -1)
+  #expect(errno == EBADF)
+}
+
+@Test func contentDigestIgnoresBenignMetadataAndSiblingChurnButTracksContent() throws {
+  let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-content-property-closure-\(UUID().uuidString)",
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: parent) }
+  let targetURL = parent.appendingPathComponent("target")
+  let original = Data(repeating: 0x5a, count: 128 * 1_024)
+  try original.write(to: targetURL, options: .withoutOverwriting)
+
+  let descriptor = open(targetURL.path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+  let fileDescriptor = try #require(descriptor >= 0 ? descriptor : nil)
+  defer { Darwin.close(fileDescriptor) }
+  let noMaterializationPolicy = try #require(
+    MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let initialSeal = try #require(
+    descriptorSeal(fileDescriptor: fileDescriptor, policy: noMaterializationPolicy))
+  let target = RawPath(rootID: "root", components: [RawPathComponent(Data("target".utf8))])
+  let churn = OneShotMetadataAndSiblingChurn(parentPath: parent.path)
+  let authority = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(maximumFiles: 1),
+    monotonicNow: { 1 },
+    descriptorReader: { descriptor, buffer, count, offset in
+      churn.apply(to: descriptor)
+      return Darwin.pread(descriptor, buffer, count, offset)
+    }
+  )
+  let initialOwnedDescriptor = Darwin.dup(fileDescriptor)
+  #expect(initialOwnedDescriptor >= 0)
+  guard initialOwnedDescriptor >= 0 else { return }
+  let requestID = try #require(
+    registerContentRequest(
+      authority: authority,
+      transferring: initialOwnedDescriptor,
+      seal: initialSeal,
+      target: target,
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value
+  )
+
+  guard case .collected(let initialBaseline) = authority.evidenceConsumer.collect(requestID) else {
+    Issue.record("benign metadata and sibling churn must preserve selected content evidence")
+    return
+  }
+  let afterMetadataSeal = try #require(
+    descriptorSeal(fileDescriptor: fileDescriptor, policy: noMaterializationPolicy))
+  #expect(churn.succeeded)
+  #expect(afterMetadataSeal.identity == initialSeal.identity)
+  #expect(afterMetadataSeal.accessPolicy == initialSeal.accessPolicy)
+  #expect(afterMetadataSeal.logicalBytes == initialSeal.logicalBytes)
+  #expect(
+    afterMetadataSeal.modificationTime.tv_sec != initialSeal.modificationTime.tv_sec
+      || afterMetadataSeal.modificationTime.tv_nsec != initialSeal.modificationTime.tv_nsec
+  )
+  #expect(initialBaseline.logicalBytes == UInt64(original.count))
+  #expect(initialBaseline.digest == evidenceDigest(original))
+
+  let changed = Data(repeating: 0xa5, count: original.count)
+  let writeCount = changed.withUnsafeBytes { raw in
+    Darwin.pwrite(fileDescriptor, raw.baseAddress, raw.count, 0)
+  }
+  #expect(writeCount == changed.count)
+  let changedSeal = try #require(
+    descriptorSeal(fileDescriptor: fileDescriptor, policy: noMaterializationPolicy))
+  #expect(changedSeal.identity == initialSeal.identity)
+  #expect(changedSeal.accessPolicy == initialSeal.accessPolicy)
+  #expect(changedSeal.logicalBytes == initialSeal.logicalBytes)
+
+  let changedAuthority = ScannerContentCollectionAuthority(
+    policy: noMaterializationPolicy,
+    budget: try contentBudget(maximumFiles: 1),
+    monotonicNow: { 1 }
+  )
+  let changedOwnedDescriptor = Darwin.dup(fileDescriptor)
+  #expect(changedOwnedDescriptor >= 0)
+  guard changedOwnedDescriptor >= 0 else { return }
+  let changedRequestID = try #require(
+    registerContentRequest(
+      authority: changedAuthority,
+      transferring: changedOwnedDescriptor,
+      seal: changedSeal,
+      target: target,
+      providerObservation: { .known(.localOrUnindicated) }
+    ).value
+  )
+  guard case .collected(let changedBaseline) = changedAuthority.evidenceConsumer.collect(
+    changedRequestID)
+  else {
+    Issue.record("same-identity content mutation must remain observable")
+    return
+  }
+  #expect(changedBaseline.logicalBytes == initialBaseline.logicalBytes)
+  #expect(changedBaseline.digest == evidenceDigest(changed))
+  #expect(changedBaseline.digest != initialBaseline.digest)
+}
+
+@Test func contentAuthorityRejectsReplacementOfTheSelectedSlot() throws {
+  let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-content-selected-slot-replacement-\(UUID().uuidString)",
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: parent) }
+  let targetURL = parent.appendingPathComponent("target")
+  let displacedURL = parent.appendingPathComponent("displaced")
+  try Data("selected object".utf8).write(to: targetURL, options: .withoutOverwriting)
+
+  let policy = try #require(MaterializationPolicyInstaller().installBeforePathAccess().value)
+  let parentDescriptor = Darwin.open(
+    parent.path,
+    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+  )
+  let rootFD = try #require(parentDescriptor >= 0 ? parentDescriptor : nil)
+  defer { Darwin.close(rootFD) }
+  let rootSeal = try #require(descriptorSeal(fileDescriptor: rootFD, policy: policy))
+
+  let targetDescriptor = Darwin.openat(
+    rootFD,
+    "target",
+    O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+  )
+  let selectedFD = try #require(targetDescriptor >= 0 ? targetDescriptor : nil)
+  let selectedSeal = try #require(descriptorSeal(fileDescriptor: selectedFD, policy: policy))
+  let target = RawPath(rootID: "root", components: [RawPathComponent(Data("target".utf8))])
+  let slotProbe = SelectedSlotDescriptorProbe(
+    parentDescriptor: rootFD,
+    rawName: "target",
+    policy: policy
+  )
+  let replacement = OneShotSelectedSlotReplacement(
+    targetPath: targetURL.path,
+    displacedPath: displacedURL.path
+  )
+  let reads = LockedCounter()
+  let authority = ScannerContentCollectionAuthority(
+    policy: policy,
+    budget: try contentBudget(maximumFiles: 1),
+    monotonicNow: { 1 },
+    descriptorReader: { descriptor, buffer, count, offset in
+      reads.increment()
+      return Darwin.pread(descriptor, buffer, count, offset)
+    }
+  )
+  let registration = authority.bindScannerDescriptor(
+    transferring: selectedFD,
+    target: target,
+    rootIdentity: rootSeal.identity,
+    rootAccessPolicy: rootSeal.accessPolicy,
+    expectedIdentity: selectedSeal.identity,
+    expectedAccessPolicy: selectedSeal.accessPolicy,
+    rootIdentityObservation: {
+      guard let current = descriptorSeal(fileDescriptor: rootFD, policy: policy) else {
+        return .failed(reason: "test root descriptor became unreadable", errorCode: errno)
+      }
+      return .known(current.identity)
+    },
+    rootAccessPolicyObservation: {
+      guard let current = descriptorSeal(fileDescriptor: rootFD, policy: policy) else {
+        return .failed(reason: "test root policy became unreadable", errorCode: errno)
+      }
+      return .known(current.accessPolicy)
+    },
+    slotPathObservation: { .known(target) },
+    slotIdentityObservation: {
+      guard let current = slotProbe.seal() else {
+        return .failed(reason: "selected test slot became unreadable", errorCode: errno)
+      }
+      return .known(current.identity)
+    },
+    slotAccessPolicyObservation: {
+      guard let current = slotProbe.seal() else {
+        return .failed(reason: "selected test slot policy became unreadable", errorCode: errno)
+      }
+      return .known(current.accessPolicy)
+    },
+    providerObservation: {
+      replacement.replaceOnce()
+      return .known(.localOrUnindicated)
+    }
+  )
+
+  let requestID = try #require(registration.value)
+  let evidence = authority.evidenceConsumer.collect(requestID)
+  #expect(replacement.succeeded)
+  #expect(slotProbe.seal()?.identity != selectedSeal.identity)
+  #expect(evidence == .failed(
+    reason: "bound content root or slot receipt changed",
+    errorCode: ESTALE
+  ))
+  #expect(reads.value == 0)
 }
 
 @Test func providerUncertaintyAfterRegistrationPreventsAnyContentRead() throws {

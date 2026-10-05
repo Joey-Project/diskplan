@@ -15,6 +15,84 @@ package struct RuntimeEvidenceCaptureID: Equatable, Hashable, Sendable {
   fileprivate init(bytes: Data) { self.bytes = bytes }
 }
 
+/// Opaque one-shot authority for a fresh policy/global/activity collection bound to a capture.
+/// Only DiskplanScan can mint this value; the concrete EngineCore collector consumes it.
+package final class RuntimeEvidenceCaptureAuthorization: @unchecked Sendable {
+  package let captureID: RuntimeEvidenceCaptureID
+  package let kind: RuntimeEvidenceCaptureKind
+  private let state: RuntimeEvidenceLeaseState
+  private let session: RuntimeEvidenceSession
+
+  fileprivate init(
+    captureID: RuntimeEvidenceCaptureID,
+    kind: RuntimeEvidenceCaptureKind,
+    state: RuntimeEvidenceLeaseState,
+    session: RuntimeEvidenceSession
+  ) {
+    self.captureID = captureID
+    self.kind = kind
+    self.state = state
+    self.session = session
+  }
+
+  package func beginFreshPolicyCollection() throws -> RuntimeFreshPolicyCollectionPermit {
+    try state.claimPolicyCollection()
+    do {
+      try session.requireActivePolicyCollection(state)
+      return RuntimeFreshPolicyCollectionPermit(state: state, session: session)
+    } catch {
+      state.abortPolicyCollection()
+      session.collectionEnded(state)
+      throw error
+    }
+  }
+}
+
+package final class RuntimeFreshPolicyCollectionPermit: @unchecked Sendable {
+  private let lock = NSLock()
+  private let state: RuntimeEvidenceLeaseState
+  private let session: RuntimeEvidenceSession
+  private var finished = false
+
+  fileprivate init(state: RuntimeEvidenceLeaseState, session: RuntimeEvidenceSession) {
+    self.state = state
+    self.session = session
+  }
+
+  deinit { abort() }
+
+  package func complete() throws {
+    try lock.withLock {
+      guard !finished else { throw RuntimeEvidenceSessionError.captureRetired }
+      do {
+        try session.publishPolicyCollection(state)
+        finished = true
+      } catch {
+        state.abortPolicyCollection()
+        session.collectionEnded(state)
+        finished = true
+        throw error
+      }
+    }
+  }
+
+  package func checkActive() throws {
+    try lock.withLock {
+      guard !finished else { throw RuntimeEvidenceSessionError.captureRetired }
+      try session.requireActivePolicyCollection(state)
+    }
+  }
+
+  package func abort() {
+    lock.withLock {
+      guard !finished else { return }
+      state.abortPolicyCollection()
+      session.collectionEnded(state)
+      finished = true
+    }
+  }
+}
+
 /// Ownership of `fileDescriptor` transfers to DiskplanScan when collection starts.
 package struct RuntimeFreshRootDescriptor: Sendable {
   package let rootID: String
@@ -198,13 +276,133 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
   private let collectionGroup = DispatchGroup()
   private var lifecycle = Lifecycle.ready
   private var collectionInFlight = false
+  private var descriptorCollectionInFlight = false
+  private var descriptorCollectionClaimed = false
+  private var policyCollectionClaimed = false
+  private var policyCollectionInFlight = false
   private var cancellationRequested = false
   private var collectionCancellation: (@Sendable () -> Void)?
   private var receiptConsumed = false
 
+  func claimPolicyCollection() throws {
+    try condition.withLock {
+      guard case .ready = lifecycle, !policyCollectionClaimed,
+        !collectionInFlight, !descriptorCollectionInFlight, !descriptorCollectionClaimed
+      else { throw RuntimeEvidenceSessionError.captureRetired }
+      policyCollectionClaimed = true
+      policyCollectionInFlight = true
+      collectionGroup.enter()
+    }
+  }
+
+  func completePolicyPublication() -> Bool {
+    let result = condition.withLock { () -> (finished: Bool, published: Bool) in
+      guard policyCollectionInFlight else { return (false, false) }
+      policyCollectionInFlight = false
+      defer { condition.broadcast() }
+      let active: Bool
+      if case .ready = lifecycle { active = true }
+      else { active = false }
+      return (true, active && !cancellationRequested)
+    }
+    if result.finished { collectionGroup.leave() }
+    return result.published
+  }
+
+  func abortPolicyCollection() {
+    let aborted = condition.withLock { () -> Bool in
+      guard policyCollectionInFlight else { return false }
+      policyCollectionInFlight = false
+      condition.broadcast()
+      return true
+    }
+    if aborted { collectionGroup.leave() }
+  }
+
+  func beginDescriptorCollection(requiresPolicyCollection: Bool) throws {
+    try condition.withLock {
+      let receiptConsumedAndPublished: Bool
+      if case .published = lifecycle { receiptConsumedAndPublished = receiptConsumed }
+      else { receiptConsumedAndPublished = false }
+      let lifecycleAllowsCollection: Bool
+      switch lifecycle {
+      case .ready: lifecycleAllowsCollection = true
+      case .published: lifecycleAllowsCollection = receiptConsumedAndPublished
+      case .collecting, .retired: lifecycleAllowsCollection = false
+      }
+      guard lifecycleAllowsCollection, !collectionInFlight,
+        !descriptorCollectionInFlight, !descriptorCollectionClaimed,
+        !policyCollectionInFlight,
+        (!requiresPolicyCollection || policyCollectionClaimed)
+      else { throw RuntimeEvidenceSessionError.captureRetired }
+      descriptorCollectionInFlight = true
+      descriptorCollectionClaimed = true
+      collectionGroup.enter()
+    }
+  }
+
+  func checkDescriptorCollection() -> Bool {
+    condition.withLock {
+      guard descriptorCollectionInFlight, !cancellationRequested else { return false }
+      switch lifecycle {
+      case .ready: return true
+      case .published: return receiptConsumed
+      case .collecting, .retired: return false
+      }
+    }
+  }
+
+  func endDescriptorCollection() {
+    let ended = condition.withLock { () -> Bool in
+      guard descriptorCollectionInFlight else { return false }
+      descriptorCollectionInFlight = false
+      condition.broadcast()
+      return true
+    }
+    if ended { collectionGroup.leave() }
+  }
+
+  func completeDescriptorPublication() -> Bool {
+    let result = condition.withLock { () -> (finished: Bool, published: Bool) in
+      guard descriptorCollectionInFlight else { return (false, false) }
+      descriptorCollectionInFlight = false
+      defer { condition.broadcast() }
+      let active: Bool
+      switch lifecycle {
+      case .ready: active = true
+      case .published: active = receiptConsumed
+      case .collecting, .retired: active = false
+      }
+      return (true, active && !cancellationRequested)
+    }
+    if result.finished { collectionGroup.leave() }
+    return result.published
+  }
+
+  var policyCollectionIsInFlight: Bool {
+    condition.withLock {
+      guard policyCollectionInFlight, !cancellationRequested else { return false }
+      if case .ready = lifecycle { return true }
+      return false
+    }
+  }
+
+  var descriptorCollectionIsActive: Bool {
+    condition.withLock {
+      guard descriptorCollectionInFlight, !cancellationRequested else { return false }
+      switch lifecycle {
+      case .ready: return true
+      case .published: return receiptConsumed
+      case .collecting, .retired: return false
+      }
+    }
+  }
+
   func beginCollection() throws {
     try condition.withLock {
-      guard case .ready = lifecycle else { throw RuntimeFreshScanError.captureRetired }
+      guard case .ready = lifecycle, !policyCollectionInFlight,
+        !descriptorCollectionInFlight
+      else { throw RuntimeFreshScanError.captureRetired }
       lifecycle = .collecting
       collectionInFlight = true
       collectionGroup.enter()
@@ -294,15 +492,24 @@ private final class RuntimeEvidenceLeaseState: @unchecked Sendable {
 
   var isRetiredAndDrained: Bool {
     condition.withLock {
-      guard !collectionInFlight, case .retired = lifecycle else { return false }
+      guard !collectionInFlight, !descriptorCollectionInFlight,
+        !policyCollectionInFlight, case .retired = lifecycle
+      else { return false }
       return true
     }
   }
 }
 
+private func runtimeDefaultContentBudget() -> ContentCollectionBudget {
+  let deadline = DispatchTime.now().uptimeNanoseconds.addingReportingOverflow(30_000_000_000)
+  return .standard(deadlineMonotonicNanoseconds: deadline.overflow ? UInt64.max : deadline.partialValue)
+}
+
 /// One Scan-owned session has at most one live capture lease. Every fresh scan uses the concrete
 /// Darwin filesystem and production collector bundle selected by this module.
 package final class RuntimeEvidenceSession: @unchecked Sendable {
+  typealias DescriptorCloser = @Sendable (Int32) -> Void
+
   private static let maximumDrainNanoseconds: UInt64 = 250_000_000
   private static let maximumCollectorDurationNanoseconds: UInt64 = 30_000_000_000
 
@@ -312,18 +519,59 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
   private let scanProfile: ScanProfile
   private let testingStructuralBudget: StructuralBudget?
   private let transferredDescriptorObserver: @Sendable ([Int32]) -> Void
+  private let pathEvidence: RuntimePathEvidenceCollector
   private let sessionNonce: Data
   private var issuedCaptureIDs = Set<RuntimeEvidenceCaptureID>()
   private var sequence: UInt64 = 0
   private var activeLease: RuntimeEvidenceLeaseState?
   private var closed = false
 
-  package init(policy: NoMaterializationPolicy) {
+  package convenience init(policy: NoMaterializationPolicy) {
+    self.init(policy: policy, contentBudget: runtimeDefaultContentBudget())
+  }
+
+  package convenience init(
+    policy: NoMaterializationPolicy,
+    contentBudget: ContentCollectionBudget
+  ) {
+    self.init(
+      policy: policy,
+      contentBudget: contentBudget,
+      pathEvidence: RuntimePathEvidenceCollector(
+        policy: policy,
+        contentBudget: contentBudget
+      )
+    )
+  }
+
+  /// Test-only seam for descriptor ownership tests; provider admission remains concrete.
+  convenience init(
+    policy: NoMaterializationPolicy,
+    contentBudget: ContentCollectionBudget,
+    testingDescriptorCloser: @escaping DescriptorCloser
+  ) {
+    self.init(
+      policy: policy,
+      contentBudget: contentBudget,
+      pathEvidence: RuntimePathEvidenceCollector(
+        policy: policy,
+        contentBudget: contentBudget,
+        testingDescriptorCloser: testingDescriptorCloser
+      )
+    )
+  }
+
+  private init(
+    policy: NoMaterializationPolicy,
+    contentBudget: ContentCollectionBudget,
+    pathEvidence: RuntimePathEvidenceCollector
+  ) {
     self.policy = policy
     collectorBundle = ProductionScanCollectorBundle()
     scanProfile = .deep
     testingStructuralBudget = nil
     transferredDescriptorObserver = { _ in }
+    self.pathEvidence = pathEvidence
     var nonce = Data(count: 32)
     nonce.withUnsafeMutableBytes { raw in
       arc4random_buf(raw.baseAddress, raw.count)
@@ -345,6 +593,10 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
     scanProfile = testingScanProfile
     self.testingStructuralBudget = testingStructuralBudget
     transferredDescriptorObserver = testingTransferredDescriptorObserver
+    pathEvidence = RuntimePathEvidenceCollector(
+      policy: policy,
+      contentBudget: runtimeDefaultContentBudget()
+    )
     var nonce = Data(count: 32)
     nonce.withUnsafeMutableBytes { raw in
       arc4random_buf(raw.baseAddress, raw.count)
@@ -360,9 +612,12 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
   ) throws -> RuntimeEvidenceCaptureLease {
     let state = RuntimeEvidenceLeaseState()
     let captureID = try lock.withLock { () throws -> RuntimeEvidenceCaptureID in
-      guard !closed else { throw RuntimeFreshScanError.closed }
-      guard activeLease == nil else { throw RuntimeFreshScanError.captureAlreadyActive }
+      guard !closed else { throw RuntimeEvidenceSessionError.closed }
+      guard activeLease == nil else {
+        throw RuntimeEvidenceSessionError.captureAlreadyActive
+      }
       let captureID = try nextCaptureID(kind: kind, excluding: forbidden)
+      guard pathEvidence.advanceEpoch() else { throw RuntimeEvidenceSessionError.closed }
       activeLease = state
       return captureID
     }
@@ -374,6 +629,13 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
     )
   }
 
+  package func advanceEpoch() -> Bool {
+    lock.withLock {
+      guard !closed, activeLease == nil else { return false }
+      return pathEvidence.advanceEpoch()
+    }
+  }
+
   package func close() {
     let state = lock.withLock { () -> RuntimeEvidenceLeaseState? in
       guard !closed else { return nil }
@@ -382,6 +644,7 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
     }
     let drained =
       state?.retireAndDrain(maximumWaitNanoseconds: Self.maximumDrainNanoseconds) ?? true
+    pathEvidence.close()
     if drained {
       lock.withLock {
         if activeLease === state { activeLease = nil }
@@ -391,18 +654,81 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
 
   fileprivate func finish(_ state: RuntimeEvidenceLeaseState) {
     let drained = state.retireAndDrain(maximumWaitNanoseconds: Self.maximumDrainNanoseconds)
-    if drained {
-      lock.withLock {
-        if activeLease === state { activeLease = nil }
-      }
+    guard drained else { return }
+    lock.withLock {
+      guard activeLease === state else { return }
+      if !closed { _ = pathEvidence.advanceEpoch() }
+      activeLease = nil
     }
   }
 
   fileprivate func collectionEnded(_ state: RuntimeEvidenceLeaseState) {
     guard state.isRetiredAndDrained else { return }
     lock.withLock {
-      if activeLease === state { activeLease = nil }
+      guard activeLease === state else { return }
+      if !closed { _ = pathEvidence.advanceEpoch() }
+      activeLease = nil
     }
+  }
+
+  fileprivate func descriptorCollectionEnded(_ state: RuntimeEvidenceLeaseState) {
+    state.endDescriptorCollection()
+    collectionEnded(state)
+  }
+
+  fileprivate func publishDescriptorCollection(_ state: RuntimeEvidenceLeaseState) throws {
+    let published = lock.withLock {
+      !closed && activeLease === state && state.completeDescriptorPublication()
+    }
+    guard published else {
+      collectionEnded(state)
+      throw RuntimeEvidenceSessionError.captureRetired
+    }
+  }
+
+  fileprivate func requireActivePolicyCollection(_ state: RuntimeEvidenceLeaseState) throws {
+    let active = lock.withLock {
+      !closed && activeLease === state && state.policyCollectionIsInFlight
+    }
+    guard active else { throw RuntimeEvidenceSessionError.captureRetired }
+    try Task.checkCancellation()
+  }
+
+  fileprivate func publishPolicyCollection(_ state: RuntimeEvidenceLeaseState) throws {
+    let published = lock.withLock {
+      !closed && activeLease === state && state.completePolicyPublication()
+    }
+    guard published else {
+      collectionEnded(state)
+      throw RuntimeEvidenceSessionError.captureRetired
+    }
+    try Task.checkCancellation()
+  }
+
+  fileprivate func collectPaths(
+    _ requests: [RuntimePathEvidenceRequest],
+    lease state: RuntimeEvidenceLeaseState
+  ) throws -> [RuntimePathEvidence] {
+    try pathEvidence.collectPaths(requests) {
+      try requireActiveDescriptorCollection(state)
+    }
+  }
+
+  fileprivate func collectTransferredDescriptors(
+    _ request: RuntimeTransferredDescriptorRequest,
+    lease state: RuntimeEvidenceLeaseState
+  ) throws -> RuntimePathEvidence {
+    try pathEvidence.collectTransferredDescriptors(request) {
+      try requireActiveDescriptorCollection(state)
+    }
+  }
+
+  private func requireActiveDescriptorCollection(_ state: RuntimeEvidenceLeaseState) throws {
+    let active = lock.withLock {
+      !closed && activeLease === state && state.descriptorCollectionIsActive
+    }
+    guard active else { throw RuntimeEvidenceSessionError.captureRetired }
+    try Task.checkCancellation()
   }
 
   fileprivate func collectFreshScan(
@@ -548,7 +874,7 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
   ) throws -> RuntimeEvidenceCaptureID {
     while true {
       let next = sequence.addingReportingOverflow(1)
-      guard !next.overflow else { throw RuntimeFreshScanError.captureSequenceExhausted }
+      guard !next.overflow else { throw RuntimeEvidenceSessionError.captureSequenceExhausted }
       sequence = next.partialValue
       var input = Data("diskplan/runtime-fresh-scan-capture/v1\0".utf8)
       input.append(sessionNonce)
@@ -567,6 +893,7 @@ package final class RuntimeEvidenceSession: @unchecked Sendable {
 package final class RuntimeEvidenceCaptureLease: @unchecked Sendable {
   package let captureID: RuntimeEvidenceCaptureID
   package let kind: RuntimeEvidenceCaptureKind
+  package let authorization: RuntimeEvidenceCaptureAuthorization
   private let state: RuntimeEvidenceLeaseState
   private let session: RuntimeEvidenceSession
 
@@ -580,6 +907,12 @@ package final class RuntimeEvidenceCaptureLease: @unchecked Sendable {
     self.kind = kind
     self.state = state
     self.session = session
+    authorization = RuntimeEvidenceCaptureAuthorization(
+      captureID: captureID,
+      kind: kind,
+      state: state,
+      session: session
+    )
   }
 
   deinit { finish() }
@@ -625,6 +958,32 @@ package final class RuntimeEvidenceCaptureLease: @unchecked Sendable {
       volumes: expectedVolumes,
       captureID: expectedCaptureID
     )
+  }
+
+  package func collectPaths(
+    _ requests: [RuntimePathEvidenceRequest]
+  ) throws -> [RuntimePathEvidence] {
+    guard kind == .wholePlan || kind == .jitUnit else {
+      throw RuntimeEvidenceSessionError.captureRetired
+    }
+    try state.beginDescriptorCollection(requiresPolicyCollection: false)
+    defer { session.descriptorCollectionEnded(state) }
+    let evidence = try session.collectPaths(requests, lease: state)
+    try session.publishDescriptorCollection(state)
+    return evidence
+  }
+
+  package func collectTransferredDescriptors(
+    _ request: RuntimeTransferredDescriptorRequest
+  ) throws -> RuntimePathEvidence {
+    guard kind == .finalDescriptor else {
+      throw RuntimeEvidenceSessionError.captureRetired
+    }
+    try state.beginDescriptorCollection(requiresPolicyCollection: false)
+    defer { session.descriptorCollectionEnded(state) }
+    let evidence = try session.collectTransferredDescriptors(request, lease: state)
+    try session.publishDescriptorCollection(state)
+    return evidence
   }
 
   package func finish() { session.finish(state) }

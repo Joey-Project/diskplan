@@ -2507,8 +2507,14 @@ private func adapterScope(
   case .codexTemporary:
     return .genericRemove
   case .versionedArtifact:
-    let version = String(data: node.path.components.last!.bytes, encoding: .utf8) ?? "raw-version"
-    return .versionedArtifactRemove(artifactKind: "versioned-artifact", version: version)
+    guard node.path.components.count >= 2,
+      let artifactKind = String(
+        data: node.path.components[node.path.components.count - 2].bytes,
+        encoding: .utf8
+      ),
+      let version = String(data: node.path.components.last!.bytes, encoding: .utf8)
+    else { return .genericRemove }
+    return .versionedArtifactRemove(artifactKind: artifactKind, version: version)
   case .gitLinkedWorktree, .buildOutput, .cache, .temporary, .providerReportOnly:
     return .genericRemove
   }
@@ -2827,13 +2833,30 @@ private func mapMountIdentity(
   observationToPolicy(observation) { "real-device:\($0.device)" }
 }
 
-private func mapContentProtection(
+func mapContentProtection(
   _ node: ScannedNode
 ) -> DiskplanPolicy.Observation<ContentProtectionBaseline> {
-  switch node.identity.value?.objectType {
-  case .directory, .symbolicLink:
+  switch (node.identity.value?.objectType, node.content) {
+  case (.directory, _), (.symbolicLink, _):
     return .known(.explicitlyNotApplicable(.metadataOnlyObject))
-  case .regular, .other, nil:
+  case (.regular, .collected(let baseline)) where baseline.algorithm == "sha256":
+    guard let digest = try? PolicyDigest(bytes: baseline.protectionDigest.bytes) else {
+      return .failed(
+        ObservationFailure(code: "invalid-content-digest", collector: "scanner.content"))
+    }
+    return .known(.requiredDigest(digest))
+  case (.regular, .absent):
+    return .absent
+  case (.regular, .unknown):
+    return .unknown(.unavailableViaPublicAPI)
+  case (.regular, .unreadable(_, let code)):
+    return .unreadable(
+      ObservationFailure(code: errorCode(code), collector: "scanner.content"))
+  case (.regular, .failed(_, let code)):
+    return .failed(
+      ObservationFailure(code: errorCode(code), collector: "scanner.content"))
+  case (.regular, .collected), (.regular, .notRequested), (.regular, .notApplicable),
+    (.other, _), (nil, _):
     return .unknown(.unavailableViaPublicAPI)
   }
 }

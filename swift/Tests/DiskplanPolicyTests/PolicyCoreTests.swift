@@ -918,6 +918,51 @@ func genericRemoveContractRequiresExplicitPathRaceResidualAndForceState() throws
 }
 
 @Test
+func specializedForceContractsAlwaysRequireReviewTier() throws {
+  let facts = globalFacts()
+  let evidence = snapshot(
+    candidateID: "codex-force",
+    path: ".codex-tmp/stale",
+    object: 13,
+    forceRequirement: .requiresForceWithWarning,
+    adapterScope: .codexCleanTemporary(cleanupScopeID: "stale"),
+    contentProtection: .known(.explicitlyNotApplicable(.metadataOnlyObject))
+  )
+  let action = try makeAction(
+    evidence: evidence,
+    facts: facts,
+    request: .codexCleanTemporary(cleanupScopeID: "stale")
+  )
+
+  #expect(action.displayMetrics.tier == .review)
+
+  let consentEvidence = snapshot(
+    candidateID: "codex-force-consent",
+    path: ".codex-tmp/retained",
+    object: 14,
+    forceRequirement: .requiresForceWithWarning,
+    adapterScope: .codexCleanTemporary(cleanupScopeID: "retained"),
+    recoverability: .known(.reviewRequired),
+    recoverabilityReviewFacts: [
+      .staticOnlyRebuildEvidence(artifactKind: "cache", evidenceHash: digest(15))
+    ],
+    contentProtection: .known(.explicitlyNotApplicable(.metadataOnlyObject))
+  )
+  let consentAction = try makeAction(
+    evidence: consentEvidence,
+    facts: facts,
+    request: .codexCleanTemporary(cleanupScopeID: "retained")
+  )
+  guard case .requiresConsents(let predicates) = consentAction.evaluation.stageability else {
+    Issue.record("expected forced rebuild evidence to require consent")
+    return
+  }
+  #expect(!predicates.isEmpty)
+  #expect(consentAction.evaluation.recommendation == .likelyRebuildable)
+  #expect(consentAction.displayMetrics.tier == .review)
+}
+
+@Test
 func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
   let worktree = gitWorktreeEvidence(
     localChanges: .present(changeSetDigest: digest(60))
@@ -978,8 +1023,13 @@ func dirtyGitWorktreeContractsRemainBoundButCannotBeStagedOrWaived() throws {
     waiverConsents: [],
     userNotes: []
   )
-  #expect(throws: PolicyModelError.actionNotStageable(remove.id)) {
-    try DecisionOverlayValidator.validate(overlay, against: plan)
+  do {
+    _ = try DecisionOverlayValidator.validate(overlay, against: plan)
+    Issue.record("a dirty worktree chain must not be stageable")
+  } catch PolicyModelError.actionNotStageable(let actionID) {
+    #expect(actionID == discard.id || actionID == remove.id)
+  } catch {
+    Issue.record("expected a blocked dirty worktree action, got \(error)")
   }
 
   let mismatchedWorktree = gitWorktreeEvidence(
@@ -1280,10 +1330,12 @@ func frozenEvidenceRejectsInvalidClaimsAndCanonicalizesAdapterScopes() throws {
 
 @Test
 func overlayRejectsAliasAndAncestorTerminalMutations() throws {
-  let genericEvidence = snapshot(candidateID: "generic", path: "same", object: 1)
+  let genericEvidence = snapshot(
+    candidateID: "generic", path: ".codex-tmp/scope", object: 1)
   let codexEvidence = snapshot(
-    candidateID: "codex", path: "same", object: 1,
-    adapterScope: .codexCleanTemporary(cleanupScopeID: "scope")
+    candidateID: "codex", path: ".codex-tmp/scope", object: 1,
+    adapterScope: .codexCleanTemporary(cleanupScopeID: "scope"),
+    contentProtection: .known(.explicitlyNotApplicable(.metadataOnlyObject))
   )
   let generic = try makeAction(evidence: genericEvidence)
   let codex = try makeAction(

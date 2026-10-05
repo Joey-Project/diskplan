@@ -99,6 +99,17 @@ public struct ContentDigestBaseline: Equatable, Sendable {
     self.logicalBytes = logicalBytes
     self.digest = digest
   }
+
+  /// Binds both exact logical size and the content digest selected by the scan authority.
+  package var protectionDigest: EvidenceDigest {
+    var input = Data("diskplan/content-protection/v1\0".utf8)
+    input.append(Data(algorithm.utf8))
+    input.append(0)
+    var size = logicalBytes.bigEndian
+    withUnsafeBytes(of: &size) { input.append(contentsOf: $0) }
+    input.append(digest.bytes)
+    return EvidenceDigest(unchecked: Data(SHA256.hash(data: input)))
+  }
 }
 
 public enum ContentNotCollectedReason: String, Equatable, Sendable {
@@ -112,7 +123,21 @@ public enum ContentEvidence: Equatable, Sendable {
   case notRequested
   case notApplicable(ContentNotCollectedReason)
   case collected(ContentDigestBaseline)
-  case unavailable(reason: String, errorCode: Int32?)
+  case absent(reason: String)
+  case unknown(reason: String)
+  case unreadable(reason: String, errorCode: Int32?)
+  case failed(reason: String, errorCode: Int32?)
+
+  /// Compatibility constructor for existing collector call sites. The stored case preserves the
+  /// failure class so downstream policy mapping never has to infer it from a nullable errno.
+  public static func unavailable(reason: String, errorCode: Int32?) -> Self {
+    guard let errorCode else { return .unknown(reason: reason) }
+    switch errorCode {
+    case ENOENT: return .absent(reason: reason)
+    case EACCES, EPERM: return .unreadable(reason: reason, errorCode: errorCode)
+    default: return .failed(reason: reason, errorCode: errorCode)
+    }
+  }
 }
 
 public struct ContentCollectionBudget: Equatable, Sendable {
@@ -559,12 +584,6 @@ final class DarwinBoundedContentEvidenceCollector: ContentEvidenceCollecting,
     guard after.logicalBytes == before.logicalBytes else {
       return .unavailable(reason: "content target size changed during digest", errorCode: EBUSY)
     }
-    guard sameTime(before.modificationTime, after.modificationTime),
-      sameTime(before.statusChangeTime, after.statusChangeTime)
-    else {
-      return .unavailable(
-        reason: "content metadata changed; a fresh digest pass is required", errorCode: EAGAIN)
-    }
     if let failure = validateTrustedReceipt(request, fileDescriptor: fileDescriptor) {
       return failure
     }
@@ -739,8 +758,10 @@ final class ScannerContentCollectionAuthority: @unchecked Sendable {
       break
     case .known(.metadataOnly), .known(.rejected):
       return .failed(reason: "provider-managed content cannot be bound", errorCode: EREMOTE)
-    case .known(.unverified), .absent, .unknown, .unreadable, .failed:
+    case .known(.unverified):
       return .unknown(reason: "provider state is not authoritative for content binding")
+    case .absent, .unknown, .unreadable, .failed:
+      return providerBoundary.erasingValue()
     }
     guard let descriptor = descriptorSeal(fileDescriptor: fileDescriptor, policy: policy) else {
       return .failed(reason: "scanner content descriptor seal unavailable", errorCode: errno)
@@ -1102,7 +1123,7 @@ final class GitEvidenceSessionBudget: @unchecked Sendable {
   }
 
   func finish(_ reservation: TargetReservation) {
-    lock.withLock { perTargetUsage.removeValue(forKey: reservation) }
+    _ = lock.withLock { perTargetUsage.removeValue(forKey: reservation) }
   }
 }
 
@@ -1878,10 +1899,6 @@ struct DescriptorContentSeal {
   let logicalBytes: UInt64
   let modificationTime: timespec
   let statusChangeTime: timespec
-}
-
-private func sameTime(_ lhs: timespec, _ rhs: timespec) -> Bool {
-  lhs.tv_sec == rhs.tv_sec && lhs.tv_nsec == rhs.tv_nsec
 }
 
 func descriptorSeal(
