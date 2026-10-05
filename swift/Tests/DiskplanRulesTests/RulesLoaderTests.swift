@@ -22,7 +22,7 @@ func shippedRuleAssetsAreCanonicalAndUseConservativeDefaults() throws {
   #expect(rules.rules.allSatisfy { $0.handling == .reportOnly })
   #expect(userPolicy.agent.mode == .ask)
   #expect(userPolicy.protections.isEmpty)
-  #expect(userPolicy.enabledAdapters.isEmpty)
+  #expect(userPolicy.enabledAdapters == [.genericRemove])
   #expect(RulesConfiguration(bundled: rules, user: userPolicy).effectiveDigest.bytes.count == 32)
 }
 

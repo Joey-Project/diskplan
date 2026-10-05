@@ -8,9 +8,32 @@ duplicate or unsorted keys before constructing an object, and rejects floats, no
 unknown fields, over-limit values, and noncanonical escapes.
 
 Each digest purpose has a separate `diskplan/<binding-kind>/v1\0` domain. Bundled assets, user
-policy assets, effective configuration, candidate hints, disclosed agent metadata, agent
-invocations, and agent cache keys cannot alias merely because their framed field bytes happen to
-have the same shape.
+policy assets, effective configuration, frozen Rules inputs, candidate hints, disclosed agent
+metadata, agent invocations, and agent cache keys cannot alias merely because their framed field
+bytes happen to have the same shape.
+
+The shipped default policy enables only `generic-remove`. This makes an ordinary-removal adapter
+available for independently admitted engine actions; it does not make declarative hints stageable,
+grant arbitrary path or command authority, or permit deletion to propagate across devices. The
+Swift engine still applies each action's evidence gates and explicit effect consent.
+
+`scripts/generate-rule-assets.py` compiles the exact canonical bytes of both shipped JSON assets
+into `DiskplanRules`. Runtime code consumes these embedded bytes and does not locate files beside
+the executable or in a resource bundle. Run the generator in write mode after changing either JSON
+asset; `--check` compares the exact generated Swift source. The Python generator only converts
+bounded bytes to literals; the Swift canonical loaders and shipped-asset tests validate their
+format and schema.
+
+`FrozenRulesPolicyInputs` freezes the verified built-in and shipped-default baseline together with
+explicit overlay intent. An unrequested overlay is a valid `none` state. A requested missing,
+unreadable, malformed, or oversized overlay is `policy-unverified`: read-only planning may use the
+validated baseline, while mutation configuration is unavailable. This state remains distinct from
+no overlay. Disabling a broken overlay creates a new input snapshot and binding, so it cannot
+upgrade an existing plan or review. The digest binds the baseline asset and input digests, overlay
+intent, bounded raw source identity, closed failure state or verified overlay digest, and effective
+configuration digest. The source identity is provenance data, not permission to read a path. Each
+canonical input is limited to one MiB before parsing or hashing; oversized content is represented
+by a fixed failure code and byte count, without claiming a content digest.
 
 The built-in schema version is `diskplan.rules.v1`. Its root contains `rules` and
 `schema_version`. Each rule contains `candidate_kind`, `handling`, `id`, `managed_action`, and
