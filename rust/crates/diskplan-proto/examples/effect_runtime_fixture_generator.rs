@@ -44,8 +44,22 @@ fn main() {
             false,
         ),
         requirement_case(
+            "unspecified-operation",
+            requirement(Some(0), Some(1)),
+            true,
+            true,
+            false,
+        ),
+        requirement_case(
             "unknown-permission",
             requirement(Some(1), Some(9)),
+            true,
+            true,
+            false,
+        ),
+        requirement_case(
+            "unspecified-permission",
+            requirement(Some(1), Some(0)),
             true,
             true,
             false,

@@ -232,6 +232,18 @@ fn canonical_decoders_reject_missing_unknown_conflicting_trailing_and_overlong_v
         verify_consent_v2(&short_requirement_digest),
         Err(EffectCanonicalError::InvalidField("requirement_sha256"))
     );
+    for invalid_length in [31, 33] {
+        for (field, length_offset) in [("action_id", 49), ("action_lineage_id", 89)] {
+            let mut invalid = encoded_consent.clone();
+            invalid[length_offset..length_offset + 8]
+                .copy_from_slice(&(invalid_length as u64).to_be_bytes());
+            assert_eq!(
+                verify_consent_v2(&invalid),
+                Err(EffectCanonicalError::InvalidField(field)),
+                "decoder must reject {field} with length {invalid_length}"
+            );
+        }
+    }
     let mut invalid_utf8 = encoded_consent;
     let policy_start = invalid_utf8
         .windows(b"policy-test-v1".len())
@@ -255,6 +267,22 @@ fn canonical_decoders_reject_missing_unknown_conflicting_trailing_and_overlong_v
         encode_consent_v2(&invalid),
         Err(EffectCanonicalError::InvalidField("action_id"))
     );
+    for invalid_length in [31, 33] {
+        let mut invalid = consent.clone();
+        invalid.action_id.resize(invalid_length, 0);
+        assert_eq!(
+            encode_consent_v2(&invalid),
+            Err(EffectCanonicalError::InvalidField("action_id")),
+            "encoder must reject action_id with length {invalid_length}"
+        );
+        let mut invalid = consent.clone();
+        invalid.action_lineage_id.resize(invalid_length, 0);
+        assert_eq!(
+            encode_consent_v2(&invalid),
+            Err(EffectCanonicalError::InvalidField("action_lineage_id")),
+            "encoder must reject action_lineage_id with length {invalid_length}"
+        );
+    }
     let mut invalid = consent.clone();
     invalid.policy_version.clear();
     assert_eq!(
@@ -334,6 +362,40 @@ fn acknowledged_binding_verifies_all_plan_action_and_consent_references() {
             .0,
         consent_digest
     );
+
+    for invalid_length in [31, 33] {
+        acknowledged
+            .binding
+            .as_mut()
+            .unwrap()
+            .action_id
+            .as_mut()
+            .unwrap()
+            .value
+            .resize(invalid_length, 0);
+        assert_eq!(
+            verify_acknowledged_effect_consent_v2(&action, &manifest, &acknowledged),
+            Err(EffectCanonicalError::InvalidField("action_id")),
+            "public verifier must reject action_id with length {invalid_length}"
+        );
+        acknowledged.binding.as_mut().unwrap().action_id = Some(opaque(consent.action_id.clone()));
+        acknowledged
+            .binding
+            .as_mut()
+            .unwrap()
+            .action_lineage_id
+            .as_mut()
+            .unwrap()
+            .value
+            .resize(invalid_length, 0);
+        assert_eq!(
+            verify_acknowledged_effect_consent_v2(&action, &manifest, &acknowledged),
+            Err(EffectCanonicalError::InvalidField("action_lineage_id")),
+            "public verifier must reject action_lineage_id with length {invalid_length}"
+        );
+        acknowledged.binding.as_mut().unwrap().action_lineage_id =
+            Some(opaque(consent.action_lineage_id.clone()));
+    }
 
     acknowledged
         .binding
