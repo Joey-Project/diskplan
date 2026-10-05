@@ -219,7 +219,7 @@ build_identity_binary() {
         '  }' \
         '  return 64;' \
         '}' > "${source}"
-    /usr/bin/xcrun clang -arch arm64 -mmacosx-version-min=14.0 -Os "${source}" -o "${output}"
+    /usr/bin/xcrun clang -arch arm64 -mmacosx-version-min=15.0 -Os "${source}" -o "${output}"
 }
 
 build_fs_helper() {
@@ -229,7 +229,7 @@ build_fs_helper() {
     local minor="$4"
     /usr/bin/xcrun clang \
         -arch arm64 \
-        -mmacosx-version-min=14.0 \
+        -mmacosx-version-min=15.0 \
         -std=c11 \
         -Os \
         -Wall \
@@ -246,7 +246,7 @@ build_fs_helper_tests() {
     local output="$1"
     /usr/bin/xcrun clang \
         -arch arm64 \
-        -mmacosx-version-min=14.0 \
+        -mmacosx-version-min=15.0 \
         -std=c11 \
         -Os \
         -Wall \

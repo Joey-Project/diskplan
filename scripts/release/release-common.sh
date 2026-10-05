@@ -242,7 +242,7 @@ diskplan_verify_bundle() {
     [[ "${manifest_version}" == "${version}" ]] || diskplan_die "manifest and VERSION disagree"
     [[ "${manifest_schema}" == "diskplan.bundle-manifest.v2" ]] || diskplan_die "manifest schema is unsupported"
     [[ "${protocol_major}" == "1" ]] || diskplan_die "unsupported protocol major: ${protocol_major}"
-    [[ "${deployment_target}" == "14.0" && "${release_gate}" == "26.0" && "${manifest_capability}" == "framing-v1" ]] || diskplan_die "manifest platform or capability contract is unsupported"
+    [[ "${deployment_target}" == "15.0" && "${release_gate}" == "26.0" && "${manifest_capability}" == "framing-v1" ]] || diskplan_die "manifest platform or capability contract is unsupported"
     if diskplan_plist_value "${bundle}/manifest.json" required_capabilities.1 >/dev/null; then
         diskplan_die "manifest contains unsupported additional required capabilities"
     fi

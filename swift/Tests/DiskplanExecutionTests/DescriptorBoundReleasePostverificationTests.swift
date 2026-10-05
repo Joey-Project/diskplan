@@ -1521,7 +1521,20 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
     else {
       throw POSIXError(.init(rawValue: errno) ?? .EIO)
     }
-    try Data("payload".utf8).write(to: owner)
+    let usesDirectoryOwner = allocationGroupIDs.count > 1
+    if usesDirectoryOwner {
+      try FileManager.default.createDirectory(at: owner, withIntermediateDirectories: false)
+      guard Darwin.chmod(owner.path, 0o700) == 0 else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+      }
+      for index in allocationGroupIDs.indices {
+        try Data("payload-\(index)".utf8).write(
+          to: owner.appendingPathComponent("member-\(index + 1)")
+        )
+      }
+    } else {
+      try Data("payload".utf8).write(to: owner)
+    }
     rootDescriptor = root.path.withCString {
       Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
     }
@@ -1555,6 +1568,26 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
     )
     let rootPolicySeal = Self.policySeal(authorizedRootSeal.access)
     let parentPolicySeal = Self.policySeal(authorizedParentSeal.access)
+    var ownerDescriptor: Int32 = -1
+    let directoryOwnerSeal: ReleaseDescriptorNamespaceSeal?
+    if usesDirectoryOwner {
+      ownerDescriptor = owner.path.withCString {
+        Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+      }
+      guard ownerDescriptor >= 0 else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+      }
+      guard case .known(let seal) = probe.namespaceSeal(descriptor: ownerDescriptor) else {
+        _ = Darwin.close(ownerDescriptor)
+        throw POSIXError(.EIO)
+      }
+      directoryOwnerSeal = seal
+    } else {
+      directoryOwnerSeal = nil
+    }
+    defer {
+      if ownerDescriptor >= 0 { _ = Darwin.close(ownerDescriptor) }
+    }
     let namespaceBinding = try ProtectedNamespaceBinding(
       rawRoot: rawRoot,
       rootIdentity: authorizedRootSeal.identity,
@@ -1597,9 +1630,10 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       semanticReviewFacts: [],
       accessPolicy: .known("owner-private"),
       contentProtection: .known(.explicitlyNotApplicable(.metadataOnlyObject)),
-      aclDigest: .known(testDigest(93)),
+      aclDigest: .known(directoryOwnerSeal?.access.aclDigest ?? testDigest(93)),
       targetMountIdentity: .known(
-        authorizedRootSeal.access.mountIdentity.base64EncodedString()
+        (directoryOwnerSeal?.access.mountIdentity ?? authorizedRootSeal.access.mountIdentity)
+          .base64EncodedString()
       ),
       removalForceRequirement: .known(.notRequired),
       quarantineCapability: .known(true),
@@ -1620,20 +1654,51 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       id: fixtureCandidateID, evidence: evidence, immediatePrivateBytes: .known(1)
     )
     let provenance = GraphObservationProvenance(globalFacts: facts)
-    let fileObjects = try allocationGroupIDs.enumerated().map { index, _ in
-      let ownerPath =
-        index == 0
-        ? targetPath
-        : try RawTargetPath(
-          components: [
-            Data(namespaceName.utf8), Data("owner".utf8), Data("member-\(index + 1)".utf8),
-          ])
-      return FileObjectNode(
-        provenance: provenance,
-        id: index == 0 ? fileObjectID : "file-object-\(index + 1)",
-        observedOwners: [FileOwnerLink(candidateID: fixtureCandidateID, path: ownerPath)],
-        linkCount: .known(1)
-      )
+    let fileObjects: [FileObjectNode]
+    if let directoryOwnerSeal {
+      let ownerPolicySeal = Self.policySeal(directoryOwnerSeal.access)
+      fileObjects = try allocationGroupIDs.indices.map { index in
+        let rawMember = Data("member-\(index + 1)".utf8)
+        let memberPath = try RawTargetPath(components: targetPath.components + [rawMember])
+        let link = FileOwnerLink(candidateID: fixtureCandidateID, path: memberPath)
+        let memberBinding = try ProtectedNamespaceBinding(
+          rawRoot: rawRoot,
+          rootIdentity: rootSeal.identity,
+          rootSeal: rootPolicySeal,
+          targetPath: memberPath,
+          targetIdentity: try Self.identity(parentDescriptor: ownerDescriptor, leaf: rawMember),
+          parentChain: [
+            ParentNamespaceBinding(
+              relativePath: try RawTargetPath(components: [Data(namespaceName.utf8)]),
+              identity: parentSeal.identity,
+              seal: parentPolicySeal
+            ),
+            ParentNamespaceBinding(
+              relativePath: targetPath,
+              identity: directoryOwnerSeal.identity,
+              seal: ownerPolicySeal
+            ),
+          ]
+        )
+        return FileObjectNode(
+          provenance: provenance,
+          id: index == 0 ? fileObjectID : "file-object-\(index + 1)",
+          observedOwners: [link],
+          ownerNamespaces: [
+            FileOwnerNamespaceExpectation(link: link, namespaceBinding: memberBinding)
+          ],
+          linkCount: .known(1)
+        )
+      }
+    } else {
+      fileObjects = [
+        FileObjectNode(
+          provenance: provenance,
+          id: fileObjectID,
+          observedOwners: [FileOwnerLink(candidateID: fixtureCandidateID, path: targetPath)],
+          linkCount: .known(1)
+        )
+      ]
     }
     let graph = try StorageReleaseGraph(
       globalFacts: facts,
@@ -2114,11 +2179,19 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
       )
     }
     guard result == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+    let kind: ObjectKind? =
+      switch value.st_mode & S_IFMT {
+      case S_IFREG: .regularFile
+      case S_IFDIR: .directory
+      case S_IFLNK: .symbolicLink
+      default: nil
+      }
+    guard let kind else { throw POSIXError(.EINVAL) }
     return ObjectIdentity(
       device: UInt64(UInt32(bitPattern: value.st_dev)),
       object: UInt64(value.st_ino),
       generation: .known(UInt64(value.st_gen)),
-      type: .regularFile
+      type: kind
     )
   }
 

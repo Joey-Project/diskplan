@@ -5,7 +5,7 @@ status: active
 created: 2026-10-05
 updated: 2026-10-05
 branch: wip/effect-permission-integration
-pr:
+pr: https://github.com/Joey-Project/diskplan/pull/30
 supersedes: []
 superseded_by:
 ---
@@ -52,7 +52,11 @@ with bounded source audits and separately owned implementation slices.
 - [x] Create an isolated linked worktree; begin append-only baseline integration.
 - [x] Validate the integrated cache/revalidation baseline on India; record exact
   staged source-tree and command evidence.
-- [ ] Form the signed integration checkpoint and complete its independent gates.
+- [x] Form and signature-verify integration checkpoint `368ba199a3b8b7e8eecff160f39cf0ea80df23e4`.
+- [x] Repair the exact-checkpoint release baseline mismatch and two APFS
+  post-verification fixture construction failures; validate the affected paths
+  on India without relaxing production gates or historical golden bytes.
+- [ ] Complete the independent exact-head review and release gates.
 - [ ] Integrate concrete current/JIT collection and preserve fresh-policy capture.
 - [x] Freeze the typed permission, per-action consent and canonical binding
   implementation interface in
@@ -108,6 +112,60 @@ Baseline/source verification uses one new owner-private task root and bounded
 command logs. Existing user data is scan/dry-run only; mutations belong only to
 test-created fixture roots. Build outputs are reclaimed after their users finish.
 Generic Luna internal audits are not formal named/release review receipts.
+
+### Exact Checkpoint CI Repairs
+
+PR #30's `368ba199a3b8b7e8eecff160f39cf0ea80df23e4` pull-request runs exposed
+two distinct failures. Foundation run `37309734071` ran 751 Swift tests and
+reported two issues in `ownerReplacementStillRequiresTopologyCapture` and
+`connectedComponentPublishesNoPartialRelease`. Their multi-group fixture used
+a regular-file owner and invented child paths without owner-namespace
+bindings, so the complete-graph gate correctly refused construction. The
+fixture now creates a real owner directory and real member files, binds their
+actual identities and descriptor-derived ACL/mount seals, and retains the
+single-group regular-file case. All original assertions and the production
+complete-graph requirement remain intact. The adjacent race test remains
+selected as well. A separate Luna read-only internal audit found no concrete
+candidate/owner namespace inconsistency; this was not a formal review receipt.
+
+Release run `37309733962` failed its strict Mach-O minimum-version check:
+release metadata still declared macOS 14 although the accepted Swift/Rust
+baseline was macOS 15. Release metadata, strict installer verification,
+synthetic helper binaries and the best-effort compatibility runner now agree
+on macOS 15. Required macOS 26 acceptance is unchanged. Added regression tests
+reject both older and newer mismatched minima. The historical deterministic
+gzip vector's synthetic macOS 14 metadata and pinned bytes are unchanged.
+
+- Release-only source tree: `96cc719ed4726331dc1ceaa6da68c4894d7d21e5`;
+  archive SHA-256:
+  `f0b12f605d4a26321c24296228cdc1b44a960b7b0fa20476af35c128f4dc2899`.
+  India passed `bash -n`, shellcheck, actionlint on the changed workflow,
+  all 71 packaging unit tests, and the journal validator. Its 180-second /
+  1-MiB bounded runner exited 0 and verified process-group quiescence; log
+  SHA-256:
+  `9cd5726319b74d54389b17fad5da6e582bc56a8bbc86178830f8c41aa674f251`.
+- Fixture source tree: `7c8ae870525430643e5c6afa18e46bead2c3c2a9`;
+  archive SHA-256:
+  `1d936cecb1157daee5b7fd1c56db93a8bab2675217f0f2c8fb0263dfea0775bd`.
+  India ran `swift test --disable-automatic-resolution --scratch-path
+  /private/tmp/diskplan-release-baseline-20261005.NlIPngd0/swift-build --jobs 4
+  --filter 'ownerReplacementStillRequiresTopologyCapture|connectedComponentPublishesNoPartialRelease|topologyCaptureCannotRaceOwnerReappearance'`
+  through the package-lock guard. All three selected Swift Testing tests passed.
+  The 900-second / 1-MiB supervisor exited 0 after 51,370 ms, verified
+  process-group quiescence, and recorded log SHA-256
+  `a7e25c2b6c4b518425192eddd7573d76639b81d9410f4d0531af9119d7074dd3`.
+
+These are targeted repair receipts, not a full-suite result or a claim that
+later integration heads have passed the required release gates. The remote
+task root is owner-private; existing user data was not mutated.
+
+The checkpoint is published in draft PR #30. The clean cache worktree was
+removed only after confirming no retained untracked/ignored files, complete
+`5ab8ee0` ancestry in the published checkpoint, and no active worker reader.
+Its branch and commits remain recoverable; original dirty worktrees remain
+untouched. Separate worktrees own runtime capture, additive IPC 1.7, Swift
+canonical effect bindings and frozen Rules input state, with no overlapping
+file ownership.
 
 ## Known Integration Gaps
 

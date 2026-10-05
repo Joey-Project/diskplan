@@ -96,6 +96,7 @@ def make_test_bundle(parent: Path, reverse: bool = False, width: int = 0) -> Pat
         "architecture": "arm64",
         "artifacts": artifacts,
         "bundle_format": 1,
+        # Historical gzip vector metadata, not the current release baseline.
         "deployment_target_macos": "14.0",
         "excluded_inputs": [],
         "manifest_schema_version": packager.MANIFEST_SCHEMA_VERSION,
@@ -1218,6 +1219,20 @@ class StagedFileTests(unittest.TestCase):
 
 
 class MachOContractTests(unittest.TestCase):
+    def test_release_metadata_matches_supported_deployment_baseline(self) -> None:
+        repository = SCRIPT_DIR.parent.parent
+        protocol = json.loads((repository / "release/protocol.json").read_bytes())
+        self.assertEqual(protocol["deployment_target_macos"], "15.0")
+        self.assertEqual(protocol["release_gate_macos"], "26.0")
+        self.assertIn(
+            "platforms: [.macOS(.v15)]",
+            (repository / "Package.swift").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            'readonly EXPECTED_MINIMUM="15.0"',
+            (repository / "scripts/test-deployment-target.sh").read_text(encoding="utf-8"),
+        )
+
     def test_all_three_components_are_mandatory(self) -> None:
         staged = {
             "diskplan": object(),
@@ -1225,13 +1240,13 @@ class MachOContractTests(unittest.TestCase):
             "diskplan-fs-helper": object(),
         }
         with mock.patch.object(packager, "require_macho_contract") as require:
-            packager.validate_macho_components(staged, "14.0")
+            packager.validate_macho_components(staged, "15.0")
         self.assertEqual(
             require.call_args_list,
             [
-                mock.call(staged["diskplan"], "14.0"),
-                mock.call(staged["diskplan-engine"], "14.0"),
-                mock.call(staged["diskplan-fs-helper"], "14.0"),
+                mock.call(staged["diskplan"], "15.0"),
+                mock.call(staged["diskplan-engine"], "15.0"),
+                mock.call(staged["diskplan-fs-helper"], "15.0"),
             ],
         )
 
@@ -1250,7 +1265,24 @@ Load command 1
         ]
         with mock.patch.object(packager, "run_staged", side_effect=results):
             with self.assertRaisesRegex(ValueError, "wrong platform or minimum"):
-                packager.require_macho_contract(file, "14.0")
+                packager.require_macho_contract(file, "15.0")
+
+    def test_old_and_newer_minimums_do_not_match_release_baseline(self) -> None:
+        file = SimpleNamespace(path=Path("/private/test/diskplan"))
+        for minimum in ("14.0", "16.0"):
+            with self.subTest(minimum=minimum):
+                vtool = (
+                    "diskplan (architecture arm64):\nLoad command 1\n"
+                    "      cmd LC_BUILD_VERSION\n platform MACOS\n"
+                    f"    minos {minimum}\n      sdk 26.0\n"
+                ).encode("ascii")
+                results = [
+                    packager.ProbeResult(stdout=b"arm64\n", returncode=0),
+                    packager.ProbeResult(stdout=vtool, returncode=0),
+                ]
+                with mock.patch.object(packager, "run_staged", side_effect=results):
+                    with self.assertRaisesRegex(ValueError, "wrong platform or minimum"):
+                        packager.require_macho_contract(file, "15.0")
 
 
 class PublicationTests(unittest.TestCase):
