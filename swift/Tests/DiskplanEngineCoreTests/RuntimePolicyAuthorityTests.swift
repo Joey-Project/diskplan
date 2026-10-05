@@ -278,6 +278,81 @@ import Testing
   #expect(repeated.result.items == repeatedAgain.result.items)
 }
 
+@Test func regularContentMapsExactSizeAndSHA256IntoPolicyBaseline() throws {
+  let baseline = ContentDigestBaseline(
+    logicalBytes: 4_096,
+    digest: try EvidenceDigest(bytes: Data(repeating: 0x5a, count: 32))
+  )
+  let node = authorityNode(
+    path: ["regular-content"],
+    object: 2,
+    type: .regular,
+    content: .collected(baseline)
+  )
+
+  #expect(
+    mapContentProtection(node)
+      == .known(
+        .requiredDigest(try PolicyDigest(bytes: baseline.protectionDigest.bytes))))
+}
+
+@Test func regularContentUnavailableStaysDistinctFromMetadataOnlyNotApplicable() {
+  let regular = authorityNode(
+    path: ["regular-content"],
+    object: 2,
+    type: .regular,
+    content: .unavailable(reason: "read failed", errorCode: EIO)
+  )
+  let absent = authorityNode(
+    path: ["missing-content"],
+    object: 4,
+    type: .regular,
+    content: .absent(reason: "missing")
+  )
+  let unknown = authorityNode(
+    path: ["unknown-content"],
+    object: 5,
+    type: .regular,
+    content: .unknown(reason: "not collected")
+  )
+  let unreadable = authorityNode(
+    path: ["unreadable-content"],
+    object: 6,
+    type: .regular,
+    content: .unreadable(reason: "permission denied", errorCode: EACCES)
+  )
+  let failed = authorityNode(
+    path: ["failed-content"],
+    object: 7,
+    type: .regular,
+    content: .failed(reason: "I/O error", errorCode: EIO)
+  )
+  let directory = authorityNode(
+    path: ["directory"],
+    object: 3,
+    type: .directory,
+    content: .notApplicable(.notRegularFile)
+  )
+
+  #expect(
+    mapContentProtection(absent)
+      == .absent)
+  #expect(mapContentProtection(unknown) == .unknown(.unavailableViaPublicAPI))
+  #expect(
+    mapContentProtection(unreadable)
+      == .unreadable(
+        ObservationFailure(code: "errno:\(EACCES)", collector: "scanner.content")))
+  #expect(
+    mapContentProtection(regular)
+      == .failed(ObservationFailure(code: "errno:\(EIO)", collector: "scanner.content")))
+  #expect(
+    mapContentProtection(failed)
+      == .failed(ObservationFailure(code: "errno:\(EIO)", collector: "scanner.content")))
+  #expect(
+    mapContentProtection(directory)
+      == .known(.explicitlyNotApplicable(.metadataOnlyObject)))
+}
+
 @Test func boundedEvidenceReplacesOnlyDirectoryProvisionalEvidence() {
   let accumulator = BoundedAuthorityEvidenceAccumulator(
     budget: AuthorityRetentionBudget(
@@ -5226,6 +5301,7 @@ private func authorityNode(
   type: ScannedObjectType,
   immediatePrivateReclaim: UInt64 = 4_096,
   identity: DiskplanScan.Observation<DiskplanScan.ObjectIdentity>? = nil,
+  content: ContentEvidence = .notRequested,
   coverage: Coverage = .complete,
   providerBoundary: ProviderBoundary = .localOrUnindicated,
   accessPolicy: DiskplanScan.Observation<AccessPolicyEvidence>? = nil,
@@ -5265,6 +5341,7 @@ private func authorityNode(
       ?? .known(
         AccessPolicyEvidence(ownerUserID: 501, ownerGroupID: 20, mode: 0o700, flags: 0)
       ),
+    content: content,
     coverage: coverage,
     providerBoundary: providerBoundary,
     providerEvidence: .absent(reason: "local object"),

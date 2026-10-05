@@ -234,13 +234,11 @@ public actor BestEffortApplyCoordinator {
       await emit(
         .unitStarted(unit.id), index: &eventIndex, auditFailures: &auditFailures)
       for mutationStep in unit.mutationSteps {
-        let action = mutationStep.action
-        guard
-          case .genericRemove(let contract) = action.prototype.adapterContract,
-          contract.forceRequirement == .requiresForceWithWarning
-        else { continue }
+        guard mutationStep.operation.forceRequirement == .requiresForceWithWarning else {
+          continue
+        }
         await emit(
-          .forceRequiredWarning(action.id),
+          .forceRequiredWarning(mutationStep.action.id),
           index: &eventIndex,
           auditFailures: &auditFailures
         )
@@ -353,6 +351,7 @@ public actor BestEffortApplyCoordinator {
         )
         continue
       }
+      let currentJITCaptureID = jitReport.captureID
       let jitExecutionClaim: EngineJITExecutionClaim
       do {
         jitExecutionClaim = try EngineJITExecutionClaim.issue(
@@ -455,7 +454,6 @@ public actor BestEffortApplyCoordinator {
           continue
         }
       }
-
       var stepOutcomes: [ExecutionStepOutcome] = []
       var stepStatusByActionID: [ActionID: ExecutionStepStatus] = [:]
       for mutationStep in unit.mutationSteps {
@@ -533,7 +531,16 @@ public actor BestEffortApplyCoordinator {
             deadlineSeconds: manifest.epoch.deadlineSeconds,
             nowSeconds: clock,
             finalDescriptorPreflight: { request in
-              await claimed.collector.finalDescriptorPreflight(for: request)
+              var priorCaptureIDs = [
+                plan.globalFacts.captureID,
+                manifest.currentCaptureID,
+              ]
+              if let jitCaptureID = currentJITCaptureID {
+                priorCaptureIDs.append(jitCaptureID)
+              }
+              return await claimed.collector.finalDescriptorPreflight(
+                for: request.bindingPriorCaptureIDs(priorCaptureIDs)
+              )
             }
           )
         )

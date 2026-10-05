@@ -48,6 +48,20 @@ rebuilds the action prototype and reruns all seven
 one-vote policy dimensions at the new execution reference time; a blocked vote, changed
 predicate, changed value bucket, or mismatched current typed observation rejects preparation.
 
+`DiskplanScan` owns the descriptor evidence session and strongly retains its content authority.
+Each whole-plan, JIT, and final-descriptor capture receives one non-replayable outer lease and
+session capture ID. For whole-plan and JIT, that lease mints an opaque, one-shot fresh-policy
+permit; the concrete policy authority consumes it before the lease's Scan-private path/content
+collector runs. The helper cannot mint capture IDs or independently authorize production
+revalidation. Finishing, epoch advance, cancellation, session close, a new scan, or plan
+invalidation retires the outer lease, enters its bounded drain, and drains pending owned
+descriptors. Fresh policy still carries the plan/global-facts capture ID produced by its scanner;
+the collector checks that it differs from the immutable plan and the active session capture. It
+never copies immutable scan evidence forward as current evidence. Regular-file content protection
+binds exact logical size and SHA-256 into one domain-separated policy digest. Non-regular
+not-applicable evidence stays distinct from not-requested, absent, unknown, unreadable, and failed
+evidence.
+
 Release sets are joined into connected compound units by shared owner ActionIDs or raw UTF-8
 file-object IDs. Allocation-group and file-object identifiers are keyed by their raw UTF-8 bytes;
 Swift canonical-equivalent strings are distinct graph identities. Selecting any complete-release action selects the entire connected unit. Every owner
@@ -87,11 +101,24 @@ Dry-run returns `DryRunReport`, which structurally has no capability field and h
 on an execution adapter. The dry-run preparation path never constructs or invokes an adapter,
 final-descriptor verifier, authorization, or mutation context.
 
-Dirty Git worktree discard is report-only in v1. The plan retains the observed change-set and
-successor evidence for explanation, but the discard action and any dependent remove chain are
-blocked rather than waiver-stageable. They cannot mint an apply capability, and production
-execution rejects them before invoking Git. Clean worktree quarantine removal remains a typed
-native action.
+Both dry-run and apply review carry the same engine-issued `AuthoritativeCommandPreview` list.
+For command-backed actions it contains the exact raw executable, argv, descriptor-derived working
+directory, force-warning bit, and path-race residual that the Swift adapter will use. Native Git
+and compound release operations remain typed native previews rather than invented shell commands.
+The frontend renders these values verbatim; an edited preview cannot authorize apply because the
+engine registry binds and rechecks the complete preview set.
+
+An action whose selected protected properties cannot be preserved by an installed mutation
+adapter receives a `reportOnly` preview with no executable, argv, or working directory. Dry-run
+still returns that evidence and any force warning. An apply preparation containing any such action
+returns a capability-free `reportOnly` result rather than advertising a command or minting an
+authorization that Phase 5 cannot execute.
+
+Dirty Git worktree discard is one such v1 report-only boundary. The plan retains the observed
+change-set and successor evidence for explanation, but the discard action and any dependent remove
+chain are blocked rather than waiver-stageable. They cannot mint an apply capability, and
+production execution rejects them before invoking Git. Their previews contain no executable,
+argv, or working directory. Clean worktree quarantine removal remains a typed native action.
 
 Apply preparation returns a separate `ApplyReadyReport` plus `ApplyCapability`. The public engine
 API obtains issue and authorization times from its private wall clock; the frontend cannot extend

@@ -982,15 +982,50 @@ public struct GitWorktreeDiscardLocalChangesContract: Equatable, Sendable {
 
 public struct CodexTemporaryRemoveContract: Equatable, Sendable {
   public let cleanupScopeID: String
-  fileprivate init(cleanupScopeID: String) { self.cleanupScopeID = cleanupScopeID }
+  public let forceRequirement: ForceRequirement
+
+  fileprivate init(cleanupScopeID: String, forceRequirement: ForceRequirement) {
+    self.cleanupScopeID = cleanupScopeID
+    self.forceRequirement = forceRequirement
+  }
+
+  public func matches(targetPath: RawTargetPath) -> Bool {
+    let scratch = Data(".codex-tmp".utf8)
+    let scratchIndices = targetPath.components.indices.filter {
+      targetPath.components[$0] == scratch
+    }
+    guard scratchIndices.count == 1, let scratchIndex = scratchIndices.first else { return false }
+    let suffix = targetPath.components.dropFirst(scratchIndex + 1)
+    if cleanupScopeID == "all" { return suffix.isEmpty }
+    guard !suffix.isEmpty else { return false }
+    var expected = Data()
+    for component in suffix {
+      if !expected.isEmpty { expected.append(UInt8(ascii: "/")) }
+      expected.append(component)
+    }
+    return expected == Data(cleanupScopeID.utf8)
+  }
 }
 
 public struct VersionedArtifactRemoveContract: Equatable, Sendable {
   public let artifactKind: String
   public let version: String
-  fileprivate init(artifactKind: String, version: String) {
+  public let forceRequirement: ForceRequirement
+
+  fileprivate init(
+    artifactKind: String,
+    version: String,
+    forceRequirement: ForceRequirement
+  ) {
     self.artifactKind = artifactKind
     self.version = version
+    self.forceRequirement = forceRequirement
+  }
+
+  public func matches(targetPath: RawTargetPath) -> Bool {
+    guard targetPath.components.count >= 2 else { return false }
+    return targetPath.components[targetPath.components.count - 2] == Data(artifactKind.utf8)
+      && targetPath.components[targetPath.components.count - 1] == Data(version.utf8)
   }
 }
 
@@ -1265,11 +1300,18 @@ public struct ActionPrototype: Equatable, Sendable {
     case .codexCleanTemporary(let cleanupScopeID):
       guard hasNonWhitespace(cleanupScopeID),
         evidenceSupportsAdapterScope(
-          evidence, .codexCleanTemporary(cleanupScopeID: cleanupScopeID))
+          evidence, .codexCleanTemporary(cleanupScopeID: cleanupScopeID)),
+        case .known(let forceRequirement) = evidence.removalForceRequirement,
+        case .explicitlyNotApplicable = contentBaseline
       else { throw PolicyModelError.invalidActionContract }
-      adapter = .codexCleanTemporary(
-        CodexTemporaryRemoveContract(cleanupScopeID: cleanupScopeID)
+      let contract = CodexTemporaryRemoveContract(
+        cleanupScopeID: cleanupScopeID,
+        forceRequirement: forceRequirement
       )
+      guard contract.matches(targetPath: evidence.namespaceBinding.targetPath) else {
+        throw PolicyModelError.invalidActionContract
+      }
+      adapter = .codexCleanTemporary(contract)
       postcondition = .cleanupScopeAbsent(cleanupScopeID)
     case .versionedArtifactRemove(let artifactKind, let version):
       guard hasNonWhitespace(artifactKind), hasNonWhitespace(version) else {
@@ -1279,11 +1321,19 @@ public struct ActionPrototype: Equatable, Sendable {
         evidenceSupportsAdapterScope(
           evidence,
           .versionedArtifactRemove(artifactKind: artifactKind, version: version)
-        )
+        ),
+        case .known(let forceRequirement) = evidence.removalForceRequirement,
+        case .explicitlyNotApplicable = contentBaseline
       else { throw PolicyModelError.invalidActionContract }
-      adapter = .versionedArtifactRemove(
-        VersionedArtifactRemoveContract(artifactKind: artifactKind, version: version)
+      let contract = VersionedArtifactRemoveContract(
+        artifactKind: artifactKind,
+        version: version,
+        forceRequirement: forceRequirement
       )
+      guard contract.matches(targetPath: evidence.namespaceBinding.targetPath) else {
+        throw PolicyModelError.invalidActionContract
+      }
+      adapter = .versionedArtifactRemove(contract)
       postcondition = .artifactVersionAbsent(kind: artifactKind, version: version)
     case .completeReleaseSetRemove(let binding):
       guard hasNonWhitespace(binding.allocationGroupID),
@@ -1517,6 +1567,9 @@ public struct ActionDefinition: Equatable, Sendable {
         evidenceSupportsAdapterScope(
           evidence,
           .codexCleanTemporary(cleanupScopeID: contract.cleanupScopeID)),
+        evidence.removalForceRequirement == .known(contract.forceRequirement),
+        contract.matches(targetPath: evidence.namespaceBinding.targetPath),
+        case .explicitlyNotApplicable = prototype.protectedProperties.content.expectedBaseline,
         postconditionMatches(
           prototype.postcondition, .cleanupScopeAbsent(contract.cleanupScopeID))
       else { throw PolicyModelError.invalidActionContract }
@@ -1526,6 +1579,9 @@ public struct ActionDefinition: Equatable, Sendable {
           evidence,
           .versionedArtifactRemove(
             artifactKind: contract.artifactKind, version: contract.version)),
+        evidence.removalForceRequirement == .known(contract.forceRequirement),
+        contract.matches(targetPath: evidence.namespaceBinding.targetPath),
+        case .explicitlyNotApplicable = prototype.protectedProperties.content.expectedBaseline,
         postconditionMatches(
           prototype.postcondition,
           .artifactVersionAbsent(kind: contract.artifactKind, version: contract.version))
@@ -1627,30 +1683,35 @@ public struct ActionDefinition: Equatable, Sendable {
     evaluation: PolicyEvaluation,
     prototype: ActionPrototype
   ) -> RecommendationTier {
-    switch evaluation.stageability {
-    case .blocked:
-      return .blocked
-    case .requiresConsents:
-      return evaluation.recommendation == .likelyRebuildable ? .rebuildable : .review
-    case .stageable:
-      break
-    }
-    if case .genericRemove(let contract) = prototype.adapterContract,
-      contract.forceRequirement == .requiresForceWithWarning
-    {
-      return .review
-    }
-    switch evaluation.recommendation {
-    case .safeToClean:
-      return .safe
-    case .likelyRebuildable:
-      return .rebuildable
-    case .needsSemanticReview:
-      return .review
-    case .safeAfterExit, .managedByProvider, .keep, .scanIncomplete,
-      .classificationConflict:
-      return .blocked
-    }
+    let forceRequirement: ForceRequirement =
+      switch prototype.adapterContract {
+      case .genericRemove(let contract): contract.forceRequirement
+      case .codexCleanTemporary(let contract): contract.forceRequirement
+      case .versionedArtifactRemove(let contract): contract.forceRequirement
+      case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges, .completeReleaseSetRemove:
+        .notRequired
+      }
+    let baseTier: RecommendationTier =
+      switch evaluation.stageability {
+      case .blocked:
+        .blocked
+      case .requiresConsents:
+        evaluation.recommendation == .likelyRebuildable ? .rebuildable : .review
+      case .stageable:
+        switch evaluation.recommendation {
+        case .safeToClean:
+          .safe
+        case .likelyRebuildable:
+          .rebuildable
+        case .needsSemanticReview:
+          .review
+        case .safeAfterExit, .managedByProvider, .keep, .scanIncomplete,
+          .classificationConflict:
+          .blocked
+        }
+      }
+    return forceRequirement == .requiresForceWithWarning && baseTier < .review
+      ? .review : baseTier
   }
 
   private static func encodePrototype(
@@ -1692,10 +1753,12 @@ public struct ActionDefinition: Equatable, Sendable {
     case .codexCleanTemporary(let contract):
       encoder.uint8(3)
       encoder.string(contract.cleanupScopeID)
+      encoder.string(contract.forceRequirement.rawValue)
     case .versionedArtifactRemove(let contract):
       encoder.uint8(4)
       encoder.string(contract.artifactKind)
       encoder.string(contract.version)
+      encoder.string(contract.forceRequirement.rawValue)
     case .completeReleaseSetRemove(let contract):
       encoder.uint8(5)
       encoder.data(contract.binding.bindingBytes)

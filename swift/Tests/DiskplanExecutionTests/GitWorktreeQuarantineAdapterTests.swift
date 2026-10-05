@@ -796,7 +796,7 @@ func gitWorktreeCancellationAfterRootDeletionLeavesTypedAdministrativeResidual()
 }
 
 @Test
-func dirtyGitWorktreeOperationsAreReportOnlyAndNeverInvokeGit() async throws {
+func dirtyGitWorktreeOperationsRemainReportOnly() async throws {
   let fixture = try GitQuarantineFixture(discardLocalChanges: true)
   defer { fixture.cleanup() }
   let adapter = GitWorktreeQuarantineAdapter(hooks: .init())
@@ -821,6 +821,14 @@ func dirtyGitWorktreeOperationsAreReportOnlyAndNeverInvokeGit() async throws {
   }
   #expect(try Data(contentsOf: fixture.payload) == Data("dirty".utf8))
   #expect(slotExists(fixture.worktree))
+  let discardPreview = AuthoritativeCommandPreviewBuilder.preview(for: fixture.action)
+  let removePreview = AuthoritativeCommandPreviewBuilder.preview(for: fixture.removeAction)
+  #expect(discardPreview.kind == .reportOnly)
+  #expect(removePreview.kind == .reportOnly)
+  #expect(discardPreview.detailCode == "git-worktree-dirty-report-only")
+  #expect(removePreview.detailCode == "git-worktree-dirty-report-only")
+  #expect(discardPreview.executableRawPath == nil)
+  #expect(removePreview.executableRawPath == nil)
 }
 
 @Test
@@ -1679,6 +1687,7 @@ private struct GitQuarantineFixture: @unchecked Sendable {
   let administrative: URL
   let registration: GitWorktreeRegistrationEvidence
   let action: ActionDefinition
+  let removeAction: ActionDefinition
   let removeOperation: ExecutionAdapterOperation
   let discardOperation: ExecutionAdapterOperation
 
@@ -1889,6 +1898,7 @@ private struct GitQuarantineFixture: @unchecked Sendable {
     )
     switch action.prototype.adapterContract {
     case .gitWorktreeRemove(let contract):
+      removeAction = action
       removeOperation = .gitWorktreeRemove(BoundMutationTarget(action: action), contract)
       discardOperation = removeOperation
     case .gitWorktreeDiscardLocalChanges(let contract):
@@ -1900,7 +1910,7 @@ private struct GitQuarantineFixture: @unchecked Sendable {
         request: .gitWorktreeRemove,
         evidence: evidence
       )
-      let removeAction = try ActionDefinition.build(
+      removeAction = try ActionDefinition.build(
         prototype: removePrototype,
         evidence: evidence,
         globalFacts: facts,

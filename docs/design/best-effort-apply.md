@@ -58,6 +58,15 @@ Every action in that snapshot must also bind the same global-facts hash. Absent,
 mixed-global-facts, or reused captures and nonces fail closed. A newer preparation also
 revokes any older authorization that has not yet been claimed.
 
+Whole-plan, each unit's JIT pass, and every final-descriptor pass use separate leases from the
+same Scan-owned authority session. Their capture IDs cannot equal the immutable scan or an earlier
+phase and cannot be replayed. Final preflight transfers only `dup`-owned root, parent, and target
+descriptors to the Scan authority; it never re-resolves the target through an absolute path.
+Identity is device, inode/file ID, type, and generation. Selected content is size-bound SHA-256.
+Access evidence is owner, group, mode, masked access-control flags, canonical ACL digest, File
+Provider state, and mount identity. Directory child-entry churn is not a content or replacement
+signal, and File Provider metadata transitions remain isolated to the provider dimension.
+
 ## Typed adapters and generic remove
 
 All mutations use an `ExecutionAdapterOperation` derived from the immutable action contract.
@@ -157,15 +166,26 @@ property mismatch remain typed separately.
 
 `EngineExecutionComposition` is the production Phase 4/5 factory. It binds one sealed collector
 to the preparation engine, final descriptor verification, JIT/release verification, and a typed
-adapter router. Codex-temporary and versioned-artifact operations remain explicitly
-unconfigured in this slice and return a typed unsupported failure; they never fall back to
-generic removal.
+adapter router. Codex-temporary and versioned-artifact operations have explicit typed routes. In
+v1 both routes use the accepted ordinary `/bin/rm` process contract after descriptor-bound final
+revalidation; they cannot arrive through a generic action contract. The Codex route requires the
+target to be exactly the named scope beneath a `.codex-tmp` component (`all` names the scratch
+root). The versioned-artifact route requires the final two raw path components to be the bound
+artifact namespace kind and version. Runtime policy derives both values from those exact parent
+and leaf components; it does not substitute a display classification label. A contract/path
+mismatch fails before any process starts.
 
-`requiresForceWithWarning` is the only source of `-f`. `ApplyReadyReport` lists every such
-action and binds the exact list into an apply-review hash. Authorization requires an explicit
-frontend confirmation of that hash and list. The coordinator publishes a second runtime
-warning before JIT and mutation. An ordinary failure is never retried with force, privilege,
-or a different adapter.
+`requiresForceWithWarning` is the only source of `-f` for generic, Codex-temporary, and
+versioned-artifact removal. `DryRunReport` and `ApplyReadyReport` list every such action and carry
+the engine-issued raw command preview. The apply registry binds the exact warning and preview
+lists; authorization requires explicit frontend confirmation of the review hash and warning list.
+The coordinator publishes a second runtime warning before JIT and mutation. An ordinary failure
+is never retried with force, privilege, or a different adapter.
+
+Every force-backed generic, Codex-temporary, or versioned-artifact action is displayed at least at
+the review tier. A generic action requiring content stability remains report-only in v1: its
+preview contains no command, and apply preparation cannot mint a capability until a native adapter
+can preserve that selected property through mutation.
 
 ## Outcomes, post-verification, and recovery
 

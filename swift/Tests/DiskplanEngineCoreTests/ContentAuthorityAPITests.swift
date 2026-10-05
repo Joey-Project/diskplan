@@ -600,6 +600,22 @@ private let forbiddenSurfaceExpectations = [
     expectedFailure: .inaccessible
   ),
   CompileFailExpectation(
+    fixtureName: "ForgeRuntimeCaptureAuthorization.swift",
+    packageContext: .currentPackage,
+    markerFile: "DiskplanCompileFail-ForgeRuntimeCaptureAuthorization.swift",
+    markerLine: 1005,
+    expectedSymbol: "RuntimeEvidenceCaptureAuthorization",
+    expectedFailure: .inaccessible
+  ),
+  CompileFailExpectation(
+    fixtureName: "ForgeRuntimeFreshPolicyCapture.swift",
+    packageContext: .currentPackage,
+    markerFile: "DiskplanCompileFail-ForgeRuntimeFreshPolicyCapture.swift",
+    markerLine: 1006,
+    expectedSymbol: "RuntimeFreshPolicyCapture",
+    expectedFailure: .inaccessible
+  ),
+  CompileFailExpectation(
     fixtureName: "AccessRuntimeFreshScanReceipt.swift",
     packageContext: .external("external_runtime_scan_client"),
     markerFile: "DiskplanCompileFail-AccessRuntimeFreshScanReceipt.swift",

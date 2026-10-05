@@ -479,8 +479,12 @@ public enum ExecutionAdapterOperation: Equatable, Sendable {
   }
 
   public var forceRequirement: ForceRequirement {
-    if case .genericRemove(_, let contract) = self { return contract.forceRequirement }
-    return .notRequired
+    switch self {
+    case .genericRemove(_, let contract): return contract.forceRequirement
+    case .codexCleanTemporary(_, let contract): return contract.forceRequirement
+    case .versionedArtifactRemove(_, let contract): return contract.forceRequirement
+    case .gitWorktreeRemove, .gitWorktreeDiscardLocalChanges: return .notRequired
+    }
   }
 }
 
@@ -576,9 +580,38 @@ struct FinalDescriptorPreflightRequest: Sendable {
   let parentDescriptors: [Int32]
   let targetDescriptor: Int32
   let rawLeafName: Data
+  let priorCaptureIDs: [PolicyDigest]
+
+  init(
+    target: BoundMutationTarget,
+    rootDescriptor: Int32,
+    parentDescriptors: [Int32],
+    targetDescriptor: Int32,
+    rawLeafName: Data,
+    priorCaptureIDs: [PolicyDigest] = []
+  ) {
+    self.target = target
+    self.rootDescriptor = rootDescriptor
+    self.parentDescriptors = parentDescriptors
+    self.targetDescriptor = targetDescriptor
+    self.rawLeafName = rawLeafName
+    self.priorCaptureIDs = priorCaptureIDs
+  }
+
+  func bindingPriorCaptureIDs(_ identifiers: [PolicyDigest]) -> Self {
+    Self(
+      target: target,
+      rootDescriptor: rootDescriptor,
+      parentDescriptors: parentDescriptors,
+      targetDescriptor: targetDescriptor,
+      rawLeafName: rawLeafName,
+      priorCaptureIDs: identifiers
+    )
+  }
 }
 
 struct FinalDescriptorEvidenceSnapshot: Equatable, Sendable {
+  let captureID: PolicyDigest
   let targetIdentity: Observation<ObjectIdentity>
   let targetAccessPolicy: Observation<RequiredAccessPolicyBaseline>
   let targetContent: Observation<ContentProtectionBaseline>

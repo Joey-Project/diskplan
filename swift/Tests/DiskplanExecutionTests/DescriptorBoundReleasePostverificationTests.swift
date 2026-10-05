@@ -1101,6 +1101,7 @@ private func productionCompositionApply(
       guard !mutationPreflightFails else {
         let target = request.target
         return FinalDescriptorEvidenceSnapshot(
+          captureID: testDigest(0xfa),
           targetIdentity: .absent,
           targetAccessPolicy: .known(target.expectedTargetAccessPolicy),
           targetContent: .known(target.expectedContent),
@@ -1944,6 +1945,7 @@ private final class ReleasePostverificationFixture: @unchecked Sendable {
   ) -> FinalDescriptorEvidenceSnapshot {
     let target = request.target
     return FinalDescriptorEvidenceSnapshot(
+      captureID: testDigest(0xfb),
       targetIdentity: .known(target.expectedIdentity),
       targetAccessPolicy: .known(target.expectedTargetAccessPolicy),
       targetContent: .known(target.expectedContent),
