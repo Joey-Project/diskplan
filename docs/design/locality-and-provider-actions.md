@@ -2,7 +2,8 @@
 
 ## Scope And Status
 
-These refinements were accepted on 2026-10-04. They specify the first R1 capability
+The initial refinements were accepted on 2026-10-04; deletion effect permissions
+were accepted on 2026-10-05. They specify the mode-specific R1 capability
 gate and the provider local-copy action contract; they do not assert that a
 production implementation or universal provider API has already passed it.
 The [accepted plan](accepted-plan.md) remains authoritative for complete scope,
@@ -11,15 +12,51 @@ read-only admission, one-vote rejects, immutable consent, and APFS groups.
 ## 1. Ordinary Removal Authority
 
 Local allocation answers whether storage is resident on this host, not whether
-removal propagates cloud deletion. A concrete scoped platform contract must
-support the latter action decision. An abstract interface, a fixture oracle,
-optional API absence, or a cache-looking basename does not establish it.
+removal propagates cloud deletion. The user may permit that possible effect
+without changing the factual ownership evidence. Under the default local-only
+permission, a concrete scoped no-propagation contract is still required for
+ordinary removal. An abstract interface, a fixture oracle, optional API absence,
+or a cache-looking basename does not establish it.
+
+### Deletion Effect Permissions
+
+| Permission | Admitted operation | Missing capability / failure |
+| --- | --- | --- |
+| `local-remove-only` (default) | Independently admitted provider/iCloud dehydration, or ordinary removal with independent reliable no-propagation evidence | Retain and report; no automatic `rm` after a failed, unsupported, timed-out, partial, or uncertain dehydration |
+| `may-delete-across-devices` (explicit) | A declared ordinary removal action, without first dehydrating, when all remaining action-specific gates pass | Ownership may remain unknown; failure does not authorize force, elevation, retry, or another operation |
+
+Cross-device permission explicitly accepts that ordinary deletion may propagate
+to cloud storage and other devices and may be irreversible. It is not a promise
+of remote deletion and does not establish `confirmed-local`. It addresses only
+the ownership/propagation barrier: protection, semantic/recoverability, activity,
+coverage, identity/content/access, mount, APFS, and dedicated-adapter restrictions
+remain independent gates. In particular, the existing generic-remove path-slot
+trust contract and Git worktree namespace restrictions are unchanged.
+
+Bind consent to the exact declared action variant, targets/subtree scope,
+plan/evidence/policy versions, and execution credential. The immutable plan
+declares mutually exclusive eviction/removal variants; the overlay selects them
+and records per-action effect permission, never arbitrary paths or argv. New-plan
+UI intent defaults to local-only; missing required execution bindings or
+incompatible/unsupported variants cannot authorize a mutation. Never reinterpret
+an older overlay as cross-device consent, persist a
+global deletion grant, or automatically upgrade local-only permission. Changed
+permission/operation requires explicit fresh consent under the existing binding
+and epoch rules. Force permission remains separate and visible at selection.
+
+No dehydration result currently audited proves that an arbitrary existing URL
+is outside every provider. A later delete after a failed/partial/uncertain
+dehydration requires rescan/replan and explicit selection of a separate removal
+variant; higher effect permission never creates an automatic fallback chain.
+Provider-specific remote-delete APIs, unpin/reset, hidden backing cleanup, and
+implicit materialization remain out of scope.
 
 Maintain one capability matrix for every proposed production scope:
 
 | Field | Required contract |
 | --- | --- |
 | Scope | Root class, volume/filesystem, bound root/ancestry, candidate types, OS/capability versions |
+| Effect permission | Default local-only or explicit cross-device variant; plan/target/consent binding and allowed operation |
 | Source | System API or filesystem signal, documented caller/domain scope, meaning of positive and negative results |
 | Preconditions | Required probes, namespace/access assumptions, coverage, provider boundaries, non-materialization |
 | Conclusion | Exact supported action decision; no stronger global ownership claim |
@@ -28,22 +65,29 @@ Maintain one capability matrix for every proposed production scope:
 | Acceptance | India host/OS, revision, command, positive/counterexample fixtures, real-engine reachability, observed outcome |
 
 The first experiment targets ordinary cache/temp and declared build-root use
-cases without making pathname conventions authoritative. The same production
-contract must admit a legitimate ordinary candidate and reject managed,
-dataless, remote, replaced, and unreadable counterexamples. Tests may create
+cases without making pathname conventions authoritative. Local-only fixtures
+must reject unknown/managed propagation without an independent no-propagation
+contract; cross-device fixtures must retain the same unknown/managed facts and
+admit an otherwise eligible declared removal only after explicit bound consent.
+Remote, replaced, unreadable, protected, active, incomplete, and adapter-specific
+counterexamples retain their existing rejections in both modes. Tests may create
 temporary roots, but cannot inject a fixture-only non-provider answer into the
-production path and call that platform acceptance.
+production path and call that platform acceptance. Existing user data remains
+scan/dry-run-only; actual mutation is limited to test-created roots.
 
-If no supported contract establishes a scope, keep it report-only and report the
-missing capability. Scanning remains useful. Bring bounded evidence and any
-proposed residual-risk change to Joey before changing authority policy. Do not
-manufacture a global negative oracle or silently relax the deletion gate. The
-first cache flow does not reduce the remaining first-version adapter scope.
+If no supported no-propagation contract establishes a local-only scope, keep
+that operation report-only and report the missing capability. Cross-device
+permission is the accepted alternative, not a negative ownership oracle or an
+implicit waiver of the remaining gates. Its production consent/variant path
+still needs real-host acceptance before execution. Scanning remains useful and
+the first cache flow does not reduce the remaining first-version adapter scope.
 
 ### Initial Source And Interface Matrix
 
-This matrix records conclusions supported on 2026-10-04, not completed India
-validation. The ordinary-removal positive capability is still open.
+This matrix records source conclusions collected on 2026-10-04 and the accepted
+permission refinement on 2026-10-05, not completed production acceptance.
+Local-only ordinary-removal capability is still open; explicit cross-device
+permission no longer requires a global non-provider certificate.
 
 | Source / interface | Supported conclusion | Unsupported conclusion / next gate |
 | --- | --- | --- |
@@ -54,7 +98,8 @@ validation. The ordinary-removal positive capability is still open.
 | `FileManager.getFileProviderServicesForItem` | Services exposed for the item | An empty successful dictionary does not establish non-provider ownership |
 | `localOrUnindicated` scan boundary | No indicated managed boundary in this scan observation | Cannot be promoted to confirmed-local without the missing scoped capability |
 | `identifierAbsent` topology observation | No identifier under the queried API contract | Dataless=false and sync-root=false do not strengthen it into global local-ownership authority |
-| Proposed scoped ordinary-removal authority | Not yet supported by the collected sources/interfaces | Keep report-only; identify a supported source/assumption contract or obtain a new risk decision before granting authority |
+| Proposed local-only ordinary-removal authority | Not yet supported by the collected sources/interfaces | Keep local-only ordinary removal report-only until an independent no-propagation contract passes acceptance |
+| Explicit cross-device ordinary-removal permission | The user accepts possible deletion propagation for a declared target/action | Bind fresh per-action consent in the real engine; preserve unknown ownership and every remaining hard gate |
 
 The code audit covered the existing `revalidation-release-postverify` and
 `runtime-revalidation-adapters` worktrees. `RuntimePolicyAuthority.mapProviderState`
@@ -83,6 +128,16 @@ Primary sources:
   even metadata/path operations may materialize intermediate directories. Use
   the supported no-materialization I/O policy, preserve its scope/lifecycle, and
   report blocked accesses distinctly; a flags-only precheck is insufficient.
+- [Provider eviction](https://developer.apple.com/documentation/fileprovider/nsfileprovidermanager/evictitem(identifier:completionhandler:)):
+  the call takes an item identifier on a domain manager, not an arbitrary URL.
+  Managed items may fail for unsynced edits, non-evictable restrictions, open
+  descriptors, hardlinks, or access failures; a directory may be partly evicted
+  before an error. The audited contract does not supply a global not-managed
+  result that authorizes local-only removal.
+- [iCloud eviction](https://developer.apple.com/documentation/foundation/filemanager/evictubiquitousitem(at:)):
+  this URL-based API removes the local copy of an iCloud item. Its scope does
+  not provide universal third-party File Provider eviction or a negative
+  cross-provider certificate.
 
 ## 2. Eviction Identity And State Transitions
 
@@ -113,7 +168,9 @@ must not themselves invalidate an otherwise legitimate eviction. Closing one
 must not be presented as retaining an atomic object-use guarantee. Keep the
 namespace/provider binding the actual API supports, declare the check-to-use
 residual, and remain report-only when the protected property cannot be met. No
-quarantine, unlink, force, unpin, or ordinary-remove fallback is allowed.
+quarantine, unlink, force, unpin, or ordinary-remove fallback is allowed inside
+the eviction adapter. A separately consented cross-device removal has its own
+operation, protected properties, and revalidation; it is never an eviction retry.
 
 Prefer independently observable targets over undocumented recursive behavior.
 An admitted recursive operation needs per-target partial results, non-materializing
@@ -132,7 +189,7 @@ every other eviction API has the same contract.
 ## 3. Invocation, Post-Verification, And Space Reporting
 
 Preserve three independent typed results through Swift authority, IPC, shell/TUI,
-and optional audit:
+and optional audit, alongside the selected effect permission and operation:
 
 | Result | Meaning |
 | --- | --- |
@@ -146,7 +203,9 @@ returning without an error. Respect APIs that explicitly document completion,
 without making their callback prove stronger identity or allocation properties.
 Allocation decrease is not automatically exact physical free-space reclaim;
 clone/hardlink/snapshot and incomplete-owner limits remain. Unknown bytes are not
-zero.
+zero. Ordinary-removal target absence proves only the declared local deletion
+postcondition, not propagation to a remote service or another device. Keep any
+independently available remote outcome separate; unknown is not success.
 
 An accepted or possibly started operation with unknown completion/post-verification
 is an uncertain attempt. Do not automatically retry, synthesize release credit,
@@ -162,12 +221,17 @@ in-memory outcomes.
 ## 4. Validation Order
 
 1. Collect primary platform sources and map existing production interfaces.
-2. Fill the removal matrix before adding positive authority paths.
+2. Fill the mode-specific removal matrix before adding positive authority paths;
+   freeze default permission, declared variants, consent, and failure behavior.
 3. Run minimal non-mutating capability checks on India; distinguish platform
    conclusions from fixtures and assumptions.
 4. Define each eviction adapter's transition/result contract before mutation
    tests on test-created roots.
-5. Where existing fields are insufficient, update typed bindings/schema, both
+5. Add the closed effect-permission/variant/consent bindings with a new binding
+   version. Update typed bindings/schema, both
    generated consumers, compatibility fixtures, and event presentation together.
    Do not duplicate safety policy in Rust.
-6. Validate the installed product and report unsupported cases explicitly.
+6. Validate the installed product and report unsupported cases explicitly. Cover
+   both modes, unknown/managed ownership preservation, mutually exclusive
+   operations, old/missing/unsupported consent, independent force warnings, and
+   no removal fallback for every eviction failure/partial/uncertain result.

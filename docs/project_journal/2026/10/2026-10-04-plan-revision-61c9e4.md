@@ -3,7 +3,7 @@ id: 20261004-61c9e4
 title: Full Plan Revision And Product Acceptance Recovery
 status: active
 created: 2026-10-04
-updated: 2026-10-04
+updated: 2026-10-05
 branch: wip/plan-revision-pr
 pr: https://github.com/Joey-Project/diskplan/pull/29
 supersedes: []
@@ -28,11 +28,20 @@ and state transitions, and separate invocation/post-verification/allocation
 results. Their stable specification is
 [locality and provider action contracts](../../../design/locality-and-provider-actions.md).
 
-Use GPT-6 Luna subagents for bounded, token-heavy inventories, fixture matrices,
-mechanical wiring, and targeted implementation/testing. The primary agent owns
-architecture, protected-property contracts, integration decisions, and final
-evidence-backed acceptance. Formal independent review still follows the adopted
-delivery/review gates.
+On 2026-10-05, Joey accepted two action-effect permission tiers for ordinary
+removal. This supersedes the earlier blanket requirement that every ordinary
+removal have independent scoped non-provider/no-propagation authority. The
+immutable plan/action binding,
+consent freshness, failure behavior, and preserved safety gates are specified in
+the [accepted architecture](../../../design/accepted-plan.md) and
+[locality and provider action contracts](../../../design/locality-and-provider-actions.md).
+This is a design acceptance, not evidence that implementation or validation is
+complete.
+
+Primary authorship of this plan revision is OpenAI Codex (GPT-6.1 Sol Extra
+High). GPT-6 Luna is recorded separately for bounded inventories, API audits,
+and the current journal update; it is not the primary author attribution. Formal
+independent review still follows the adopted delivery/review gates.
 
 ## Current State
 
@@ -63,11 +72,11 @@ delivery/review gates.
   policy, revalidation, best-effort execution, packaging, scanner/IPC, and TUI.
   Several production-wiring and real-host tasks remain open. Their historical
   test records were inspected; no new builds or tests were run for this audit.
-- The old post-verification journal blocks ordinary local-directory apply on a
-  non-provider authority contract. The revised design keeps action-specific
-  ownership gates, but does not require that authority to admit read-only scans
-  or treat local residency as ownership. Positive ordinary removal still needs
-  the accepted scoped capability contract to pass its production gate.
+- Earlier post-verification notes required a scoped non-provider authority contract
+  for every ordinary local-directory removal. Joey's 2026-10-05 acceptance
+  replaces that blanket prerequisite with two explicit action-effect permission
+  tiers. The exact gates and limits are in the linked design documents; this
+  journal records no implementation or validation completion.
 
 ### Code Preservation Inventory
 
@@ -94,10 +103,20 @@ existing worktree was judged safely disposable from this inventory alone.
 - Metadata-only reads are permitted by default subject to non-materialization,
   TCC, mount, and resource boundaries. Missing mutation evidence blocks the
   affected action, not independently valid scan/reporting work.
-- Confirmed provider-owned resident content is a local-copy eviction candidate,
-  never an ordinary `rm` candidate. Only verified standalone eviction adapters
-  can be stageable; unsupported cases are guided/report-only. No automatic
-  unpin, cloud deletion, or deletion fallback is admitted.
+- Ordinary removal now uses one of two explicit action-effect permissions:
+  `local-remove-only` is the default. It permits dehydrate only when independently
+  accepted, or local-only ordinary removal with a reliable scoped
+  no-propagation basis; failed, timed-out, unknown, or partial dehydrate never
+  falls through to `rm`. `may-delete-across-devices` records the user's acceptance
+  that ordinary removal may propagate and allows its declared action subject to
+  the remaining gates; known or unknown Provider ownership alone does not veto
+  it. This does not claim confirmed-local ownership or guarantee remote deletion.
+  Exact semantics, disallowed inferences, and immutable binding are in the linked
+  design documents.
+- Provider-specific remote deletion, unpin/reset, and hidden-backing actions
+  remain outside v1. Local-copy eviction still requires its separately accepted
+  adapter and allocation-release postcondition; it is not an ordinary-removal
+  fallback.
 - Keep complete APFS owner dependencies and private-versus-conditional reclaim
   separate. A provider eviction needs its own allocation-release postcondition.
 - Built-in policy is always present; an optional overlay may be absent. An
@@ -124,10 +143,11 @@ worktree or intermediate merged PR.
 
 ### R1: Land The Revised Evidence And Policy Contract
 
-First close the ordinary-removal capability matrix: actual platform sources,
-supported scope/assumptions, bound lifetime/invalidation, typed failure, and India
-production-path counterexamples. Do not add a positive authority implementation
-merely to make the first cache fixture executable.
+Reconcile the ordinary-removal matrix with the accepted two-tier action-effect
+permission contract: retain relevant platform evidence, scoped assumptions,
+binding/invalidation, typed failures, and India production-path counterexamples.
+Do not infer either permission from residency or uncertain provider ownership,
+or add an unrelated positive system capability merely to make a fixture pass.
 
 Split read-only collection from mutation eligibility, then integrate local
 residency/ownership and built-in/optional-overlay Rules semantics. Freeze the
@@ -136,8 +156,9 @@ compatibility fixtures together, and project classifications only from Swift.
 
 Exit: the real engine produces useful deterministic plans with typed per-root
 and per-candidate uncertainty; ordinary scan is not globally denied by missing
-mutation authority. Provider metadata-only/non-materialization and the scoped
-local-removal capability are validated separately on India.
+mutation authority. Validate provider metadata-only/non-materialization and both
+permission admission paths separately on India; unsupported local-only
+no-propagation capabilities remain typed report-only outcomes.
 
 ### R2: Prove One Complete Production Execution Flow
 
@@ -208,9 +229,9 @@ from historical or intermediate-branch evidence alone.
 - Reclaim worktrees promptly after their work is integrated or explicitly
   superseded, preserving unique work first. Remove unneeded, exactly identified
   `.build`/build outputs after use; do not run broad cleanup during inventory.
-- Keep goals and this task list aligned. The existing full-delivery goal was
-  observed paused during the revision; this draft does not claim to resume it or
-  mark the full objective achieved. Do not use an unsupported goal transition.
+- Keep goals and this task list aligned. The full-delivery goal is currently
+  recorded as blocked. No active goal-transition API is available in this task;
+  this journal update does not claim that the goal was resumed or completed.
 - Ask uncertain product/safety choices in plain conversation, not timed input
   tools. Block a goal only according to the goal tool's repeated-blocker contract.
 
@@ -222,14 +243,24 @@ from historical or intermediate-branch evidence alone.
 - [x] Record accepted contract corrections and the authorized recovery sequence.
 - [x] Align and record the three additional authority/eviction/result contracts.
 - [x] Record the initial R1 primary-source and production-interface matrix,
-  including the unresolved ordinary-removal positive authority.
+  including the ordinary-removal authority gap as assessed before the
+  2026-10-05 product decision.
 - [x] Validate the three documentation files and journal frontmatter on India.
 - [x] Run the minimal read-only India capability probe on a test-created root.
 - [x] Submit the signed documentation commit as PR #29.
 - [ ] Complete the applicable formal delivery gate; independent internal
   document review is not a substitute for a formal release/readiness lane.
 - [x] Freeze the retained implementation DAG and dirty-overlap map.
-- [ ] Close the ordinary-removal authority contract before changing eligibility.
+- [x] Record Joey's 2026-10-05 acceptance of the two action-effect permission
+  tiers and link their stable specification.
+- [x] Revise the design-level removal matrix, plan/overlay consent, TUI warnings,
+  result semantics, and first-version scope for both permission tiers.
+- [ ] Reconcile the R1 ordinary-removal matrix, implementation seams, and India
+  fixtures with the accepted permission tiers.
+- [x] Validate the revised documentation links, permission-contract fragments,
+  Phase/platform baseline, and all seven journal entries on India.
+- [ ] Complete the R1 action/effect matrix and encode the accepted binding
+  before changing eligibility.
 - [ ] R0: reconcile and land reviewable delivery layers.
 - [ ] R1: integrate revised evidence and Rules contracts.
 - [ ] R2: pass the first complete installed production flow.
@@ -240,8 +271,8 @@ from historical or intermediate-branch evidence alone.
 
 - This revision used three explicitly requested GPT-6 Luna read-only audit lanes:
   phase/acceptance coverage, branch/PR state, and residency/Rules code seams.
-- Follow-up Luna audits collected primary platform sources and concrete ownership
-  interfaces. The interface audit found that `mapProviderState` promotes
+- Follow-up GPT-6 Luna audits collected primary platform sources and concrete
+  ownership interfaces. The interface audit found that `mapProviderState` promotes
   `localOrUnindicated` to known-local, while release topology also accepts an
   identifier-absent path in some conditions. These are implementation findings,
   not validated non-provider capabilities; reconcile them before release.
@@ -257,7 +288,8 @@ from historical or intermediate-branch evidence alone.
   The authorized delivery follow-up fetched and fast-forwarded canonical main,
   created a docs-only linked worktree, and ran the targeted India checks below.
   It did not merge any implementation branch or mutate existing user data.
-- Recorded contract acceptance is not ordinary-removal capability acceptance,
+- The 2026-10-05 action-effect permission decision is a product-contract
+  acceptance. It is not proof of implemented ordinary-removal gates,
   installed-product acceptance, or completion of the full goal.
 
 ### Minimal India Validation
@@ -290,11 +322,13 @@ ownership=unknown authority=report_only
 cleanup=removed_task_root
 ```
 
-Interpretation: the test file occupies local space, and process/thread
-non-materialization policy setup/readback succeeded. The provider API outcomes
+Historical interpretation at the time: the test file occupies local space, and
+process/thread non-materialization policy setup/readback succeeded. The provider API outcomes
 do not establish non-provider ownership. No real-provider positive/dataless
 case, eviction, or ordinary-removal authority was proved. Keep R1's positive
-ordinary-removal capability gate open.
+ordinary-removal capability gate open. The 2026-10-05 accepted permission tiers
+supersede the blanket non-provider-authority prerequisite; they do not change what this
+probe established or claim that the revised R1 matrix has been validated.
 
 Probe source SHA-256:
 `091a977d910f4a58c5f3143fc12062f5f9f93516c2bc750b0342acde6262874b`.
@@ -348,26 +382,50 @@ the documented extension-specific scope into a system-wide registry.
 
 The source audit also checked allocation/volume locality, `SF_DATALESS`,
 `EF_IS_SYNC_ROOT`, optional services, provider storage roots, and known-folder
-support. None of the collected public contracts establishes the required
-cross-provider negative certificate for existing user cache/build roots. This
-does not claim that no unexamined or private platform mechanism exists.
+support. None of the collected public contracts establishes the formerly
+required cross-provider negative certificate for existing user cache/build
+roots. This does not claim that no unexamined or private platform mechanism
+exists.
 
-Safe independent implementation work is possible: retain `localOrUnindicated`
-and `identifierAbsent` as unknown, and separate read-only collection from
-mutation capture authorization. Existing unknown observations can express the
-smallest correction without inventing a new positive capability or changing
-the IPC schema. Test object identity, content, and access-policy signals must
-remain constant when testing ownership uncertainty.
-
-Authorizing ordinary removal despite this evidence gap requires a new explicit
-product-risk decision, such as a separately typed user-declared local scope. No
-such decision is accepted here. Until then, missing ownership authority remains
-report-only and provider eviction never falls back to removal. Test-created
-roots remain governed by the test-only mutation authorization, not a production
-non-provider oracle.
+The source findings above remain evidence about the inspected public APIs: they
+do not prove non-provider ownership. The 2026-10-05 product decision accepts
+action-effect permission as the ordinary-removal authority boundary, replacing
+the prior requirement for scoped non-provider authority for all
+ordinary removals. Keep `localOrUnindicated` and `identifierAbsent` unknown, and
+keep read-only collection separate from mutation authorization. Implement the
+accepted binding and independent gates from the linked design documents; do not
+reinterpret these historical API findings as evidence for either permission.
+Test-created roots remain governed by test-only mutation authorization, and the
+existing object identity, content, and access-policy test constraints remain.
 
 At frozen docs head `30c939b`, the India scratch clone's adopted seven journals
-all passed the bundled journal validator. This follow-up read SDK metadata and
-public source material; it did not compile or test product code, delete existing
-user data, or exercise eviction. Temporary clone/helper copies are disposable
+all passed the bundled journal validator. Its conclusion that a new product-risk
+decision was still pending is historical and was superseded by Joey's
+2026-10-05 acceptance above. This follow-up read SDK metadata and public source
+material; it did not compile or test product code, delete existing user data, or
+exercise eviction. Temporary clone/helper copies are disposable
 after validation; the small original R1 probe sources remain intentionally local.
+
+### Effect-Permission Revision Validation
+
+The 2026-10-05 revision changes only the three plan/journal documents. The
+bounded document checker and bundled journal helper ran on
+`India-mac-mini-m4-hoteng`, macOS 26.5.1 / arm64, using
+`/opt/homebrew/bin/python3`. Validation used an isolated clone of the existing
+documentation head with only these three updated files staged into its index.
+
+- `project_journal.py adoption-status --repo <scratch-repo>` confirmed the seven
+  valid tracked journal entries; `validate --repo <scratch-repo>` passed.
+- `validate-plan-docs.py <scratch-repo>` passed: three documents, seven relative
+  file links, Phase 0-6, the macOS 15 deployment baseline, both effect-permission
+  tiers, fresh-consent/old-overlay constraints, and no eviction/removal fallback.
+  This is a text/link consistency check, not a policy-engine or IPC test.
+- Local `git diff --check` passed. No product build, runtime permission test,
+  actual provider eviction, or existing-user-data mutation ran for this revision.
+- The small checker source is an ignored task-local artifact, not product code.
+  The remote clone/helper copies and review worktree are disposable after their
+  processes terminate; no `.build` output is needed for this documentation task.
+
+The accepted effect-permission decision resolves the prior product-choice
+frontier. Both production admission paths, binding/schema changes, and full
+installed acceptance remain implementation work, not claims of this PR.
