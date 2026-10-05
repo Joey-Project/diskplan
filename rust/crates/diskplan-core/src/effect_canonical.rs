@@ -426,7 +426,7 @@ fn validate_consent(value: &EffectConsentV2) -> Result<(), EffectCanonicalError>
 }
 
 fn validate_identifier(value: &[u8], field: &'static str) -> Result<(), EffectCanonicalError> {
-    if value.is_empty() || value.len() > MAXIMUM_EFFECT_IDENTIFIER_BYTES {
+    if value.len() != 32 {
         return Err(EffectCanonicalError::InvalidField(field));
     }
     Ok(())

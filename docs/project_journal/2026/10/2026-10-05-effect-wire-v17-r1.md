@@ -33,12 +33,15 @@ not proof that the live engine or frontend supports effect-authorized mutation.
   with the pinned Protobuf toolchain.
 - Added pure Rust v2 canonical requirement/consent encoders, strict decoders,
   domain-separated SHA-256 digests, and verification of exact action/manifest
-  references in `diskplan-core`.
+  references in `diskplan-core`; consent action and lineage identifiers are
+  exactly 32 bytes.
 - Added explicit `PROTOCOL17_MINOR` structural validators in `diskplan-proto`:
   old minors reject the additive fields, protocol 1.7 requires schema v2 and
   complete executable-action bindings, and consent/apply-review records check
   closed permissions, limits, exact references, selected-action coverage, and
-  conflicting variant groups. The live negotiation default was not changed.
+  conflicting variant groups. Requirement operation and permission accept
+  only explicit values 1 or 2; present zero is rejected. The live negotiation
+  default was not changed.
 - Added shared `canonical-effect-v2` byte/digest vectors and separate
   `runtime-v1.7` component-level protobuf vectors, with independent
   generator/check scripts. Historical runtime 1.4-1.6 fixture files were not
@@ -61,6 +64,25 @@ All generation, formatting, build, shell lint, and test commands ran on
   golden tests, and doc tests. Existing protocol 1.4-1.6 golden compatibility
   checks passed unchanged.
 - `bash -n` and `shellcheck` passed for both new fixture scripts.
+- Review corrections were rerun on India from source commit
+  `5cd933dc5100eab5f44bc0cb196b2472711bfe14`: the component fixture generator
+  now includes `Some(0)` operation and permission cases, and canonical tests
+  reject 31- and 33-byte action/lineage IDs through encode, decode, and public
+  acknowledged-consent verification. The bounded runner terminated with
+  `result: passed`, `exit_code: 0`, `leader_exit_code: 0`,
+  `process_group_verified: true`, and `cleanup.quiescent: true` after 25,495 ms.
+  Its captured child output was 4,445 bytes with SHA-256
+  `a5d9dcb56c37d16895d1e84a3ddf77c8490b5e71c1872e786fd8fc4cace349d6`; the
+  regenerated `runtime-v1.7/fixtures.json` SHA-256 is
+  `50130ca40277239d881ac914d256d7557f432b727c49b2769c08b1fff6a64cdf`.
+  India source snapshots under that task root matched these SHA-256 values:
+  `runtime.rs` `a1be7a67d0564800e289a53a51b2fe1b8c386a4ffa82dd8d67cd4b2d223e11d8`,
+  `effect_canonical.rs` `444fc80bc08a6c0ef23898e2ef66fbf2c825dfba9954d18491d1dba135497b22`,
+  `effect_canonical_golden.rs` `1ec43b56dc0563f12f014434e63e31688b3c1022e92b8aa3a65ef2de49b32c0f`,
+  and `effect_runtime_fixture_generator.rs`
+  `8e8e654d510b09db478d528fc757b524847daab7ca754e8201eafbb0d83f9388`.
+  Git reports no changes under the historical runtime 1.4, 1.5, or 1.6 fixture
+  directories.
 - `cargo check --locked --workspace` is blocked by two unowned exhaustive
   matches in `rust/crates/diskplan-cli/src/runtime_client.rs` (lines 258 and
   274) that do not yet handle `SetEffectConsent`. The CLI was not modified in
@@ -80,6 +102,11 @@ workspace-check failure output SHA-256 was
   `setEffectConsent` exhaustive-case bridge; `RuntimeOverlayAuthority.swift`
   was not modified here.
 - Rust CLI `SetEffectConsent` exhaustive matches still block workspace builds.
+- The high-level `RuntimeChainVerifier` still performs only shape/reference
+  admission. `verify_acknowledged_effect_consent_v2` has no production caller
+  and is exercised only by core tests; connecting canonical verification to a
+  production 1.7 consumer remains required work. Do not infer complete runtime
+  chain validation from the component validators or fixtures.
 - No protocol 1.7 live default/negotiation bump was made. These component-level
   validators do not establish complete 1.7 runtime-chain or production
   execution support.

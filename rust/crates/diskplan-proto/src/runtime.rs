@@ -673,26 +673,38 @@ fn validate_effect_requirement(
             reason: "effect requirement version is not 2",
         });
     }
-    let operation = ActionEffectOperation::try_from(requirement.operation.ok_or(
-        RuntimeProjectionError::InvalidRecord {
-            index,
-            reason: "effect requirement operation is missing",
-        },
-    )?)
-    .map_err(|_| RuntimeProjectionError::InvalidRecord {
-        index,
-        reason: "effect requirement operation is unknown",
-    })?;
-    let permission = ActionEffectPermission::try_from(requirement.permission.ok_or(
-        RuntimeProjectionError::InvalidRecord {
-            index,
-            reason: "effect requirement permission is missing",
-        },
-    )?)
-    .map_err(|_| RuntimeProjectionError::InvalidRecord {
-        index,
-        reason: "effect requirement permission is unknown",
-    })?;
+    let operation = match requirement.operation {
+        Some(1) => ActionEffectOperation::OrdinaryRemove,
+        Some(2) => ActionEffectOperation::ProviderEvictLocalCopy,
+        Some(_) => {
+            return Err(RuntimeProjectionError::InvalidRecord {
+                index,
+                reason: "effect requirement operation is unknown",
+            });
+        }
+        None => {
+            return Err(RuntimeProjectionError::InvalidRecord {
+                index,
+                reason: "effect requirement operation is missing",
+            });
+        }
+    };
+    let permission = match requirement.permission {
+        Some(1) => ActionEffectPermission::LocalRemoveOnly,
+        Some(2) => ActionEffectPermission::MayDeleteAcrossDevices,
+        Some(_) => {
+            return Err(RuntimeProjectionError::InvalidRecord {
+                index,
+                reason: "effect requirement permission is unknown",
+            });
+        }
+        None => {
+            return Err(RuntimeProjectionError::InvalidRecord {
+                index,
+                reason: "effect requirement permission is missing",
+            });
+        }
+    };
     if operation == ActionEffectOperation::ProviderEvictLocalCopy
         && permission != ActionEffectPermission::LocalRemoveOnly
     {
