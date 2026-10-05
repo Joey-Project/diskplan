@@ -17,7 +17,8 @@ pub use model::{
     PlanSearchField, RowKey, RowLevel, SortMode, TargetRowKey, TargetViewRow, ViewRow,
 };
 pub use runtime::{
-    DecisionOverlay, EngineOverlaySnapshot, EnginePlanSnapshot, ExecutionPreviewProjection,
+    DecisionOverlay, EngineApplyReviewSnapshot, EngineOverlaySnapshot, EnginePlanSnapshot,
+    ExecutionCancelBinding, ExecutionPreviewProjection, ExecutionStatusProjection,
     ExecutionUnitProjection, ExecutionWarningProjection, OverlayStageEdit, OverlayStageResult,
     PlanIntent, PlanIntentKind, PlanProjectionAdapter, PlanRuntime, PlanRuntimeError,
     PlanRuntimeEvent, PlanView,

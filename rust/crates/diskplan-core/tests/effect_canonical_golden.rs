@@ -5,7 +5,7 @@ use diskplan_core::effect_canonical::{
     ActionEffectOperation, ActionEffectPermission, ActionEffectRequirementV2, EffectCanonicalError,
     EffectConsentV2, consent_digest_v2, encode_consent_v2, encode_requirement_v2,
     requirement_digest_v2, verify_acknowledged_effect_consent_v2, verify_consent_v2,
-    verify_requirement_v2,
+    verify_projected_effect_requirement_v2, verify_requirement_v2,
 };
 use diskplan_proto::diskplan::v1::{
     AcknowledgedEffectConsent, ActionEffectRequirementBindingV2, Digest256, EffectConsentBindingV2,
@@ -159,9 +159,8 @@ fn every_requirement_and_consent_field_changes_canonical_digest() {
     value.consent_event_id[0] ^= 1;
     variants.push(value);
     for tampered in variants {
-        match consent_digest_v2(&tampered) {
-            Ok(digest) => assert_ne!(digest, original_consent_digest),
-            Err(_) => {}
+        if let Ok(digest) = consent_digest_v2(&tampered) {
+            assert_ne!(digest, original_consent_digest);
         }
     }
     assert_eq!(fixture.consent_tamper_fields.len(), 11);
@@ -340,6 +339,10 @@ fn acknowledged_binding_verifies_all_plan_action_and_consent_references() {
         schema_version: consent.schema_version.clone(),
         ..Default::default()
     };
+    assert_eq!(
+        verify_projected_effect_requirement_v2(&action, &manifest).unwrap(),
+        (requirement_digest, requirement.clone())
+    );
     let mut acknowledged = AcknowledgedEffectConsent {
         binding: Some(EffectConsentBindingV2 {
             version: 2,
@@ -361,6 +364,41 @@ fn acknowledged_binding_verifies_all_plan_action_and_consent_references() {
             .unwrap()
             .0,
         consent_digest
+    );
+
+    let mut internally_consistent_random_consent = consent.clone();
+    internally_consistent_random_consent.requirement_sha256 = [0x77; 32];
+    let random_consent_digest = consent_digest_v2(&internally_consistent_random_consent).unwrap();
+    let original_acknowledged = acknowledged.clone();
+    let binding = acknowledged.binding.as_mut().unwrap();
+    binding.requirement_sha256 = Some(digest(vec![0x77; 32]));
+    acknowledged.consent_sha256 = Some(digest(random_consent_digest.to_vec()));
+    assert_eq!(
+        verify_acknowledged_effect_consent_v2(&action, &manifest, &acknowledged),
+        Err(EffectCanonicalError::ReferenceMismatch(
+            "requirement_sha256"
+        )),
+        "a canonical random consent digest cannot repair a mismatched requirement reference"
+    );
+    acknowledged = original_acknowledged;
+
+    let mut invalid_requirement_reference = action.clone();
+    invalid_requirement_reference
+        .action_effect_requirement_sha256
+        .as_mut()
+        .unwrap()
+        .value[0] ^= 1;
+    assert!(
+        verify_projected_effect_requirement_v2(&invalid_requirement_reference, &manifest).is_err()
+    );
+    invalid_requirement_reference = action.clone();
+    invalid_requirement_reference
+        .action_effect_variant_group_id
+        .as_mut()
+        .unwrap()
+        .value[0] ^= 1;
+    assert!(
+        verify_projected_effect_requirement_v2(&invalid_requirement_reference, &manifest).is_err()
     );
 
     for invalid_length in [31, 33] {
