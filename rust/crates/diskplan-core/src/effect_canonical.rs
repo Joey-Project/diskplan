@@ -205,13 +205,12 @@ pub fn consent_digest_v2(consent: &EffectConsentV2) -> Result<[u8; 32], EffectCa
     Ok(domain_digest(EFFECT_CONSENT_DOMAIN_V2, &canonical))
 }
 
-/// Re-encodes both v2 bindings and verifies all action and manifest references.
-/// Callers must first admit the enclosing protobuf records canonically.
-pub fn verify_acknowledged_effect_consent_v2(
+/// Verifies the immutable projected effect requirement and its action/manifest references.
+/// This deliberately checks only the closed binding; it does not infer policy or safety.
+pub fn verify_projected_effect_requirement_v2(
     action: &PlanActionProjection,
     manifest: &PlanProjectionManifest,
-    acknowledged: &AcknowledgedEffectConsent,
-) -> Result<([u8; 32], EffectConsentV2), EffectCanonicalError> {
+) -> Result<([u8; 32], ActionEffectRequirementV2), EffectCanonicalError> {
     if manifest.action_effect_binding_schema_version != 2 {
         return Err(EffectCanonicalError::ReferenceMismatch(
             "action_effect_binding_schema_version",
@@ -244,6 +243,18 @@ pub fn verify_acknowledged_effect_consent_v2(
             "action_effect_variant_group_id",
         ));
     }
+    Ok((requirement_digest, requirement))
+}
+
+/// Re-encodes both v2 bindings and verifies all action and manifest references.
+/// Callers must first admit the enclosing protobuf records canonically.
+pub fn verify_acknowledged_effect_consent_v2(
+    action: &PlanActionProjection,
+    manifest: &PlanProjectionManifest,
+    acknowledged: &AcknowledgedEffectConsent,
+) -> Result<([u8; 32], EffectConsentV2), EffectCanonicalError> {
+    let (requirement_digest, requirement) =
+        verify_projected_effect_requirement_v2(action, manifest)?;
 
     let consent_wire = acknowledged
         .binding
