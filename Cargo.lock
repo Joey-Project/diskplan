@@ -311,6 +311,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "prost",
+ "serde_json",
  "sha2",
 ]
 
