@@ -199,8 +199,10 @@ process check. Cross-language integration and fixed-head review remain pending.
 The wire slice's fixed-commit internal audit identified two follow-up defects:
 prost's `TryFrom(0)` admitted the explicitly defined `UNSPECIFIED` requirement
 enum, and the public Rust canonical consent codec accepted non-32-byte action
-and lineage identifiers unlike Swift. The owning wire lane is repairing both
-with negative tests. The higher-level frontend must also invoke the core
+and lineage identifiers unlike Swift. Signed append-only wire checkpoint
+`c5a95b645c5abfa22290ac6496786d2e0aac4392` fixes both with negative tests;
+integration merge `6515c6199267da39d9c2ffd479b5bba6f8b80d88` preserves that
+checkpoint and its India receipt. The higher-level frontend must still invoke the core
 canonical verifier; proto-only shape/reference validation is not complete
 binding admission. None of these unfinished 1.7 paths is enabled as a live
 permission consumer.
@@ -255,13 +257,14 @@ check passed, and both newly wired fixture check commands passed under a
 SHA-256 `7bb7bded95db6e0ca0e927ddf6e9c1ad7a6b496c2c3618a4613ce005be128344`).
 The workstream journal validator also passed on India after the receipt update.
 
-The checkpoint is published in draft PR #30. The clean cache worktree was
+Draft PR #30 owns this workstream. The clean cache worktree was
 removed only after confirming no retained untracked/ignored files, complete
 `5ab8ee0` ancestry in the published checkpoint, and no active worker reader.
 Its branch and commits remain recoverable; original dirty worktrees remain
-untouched. Separate worktrees own runtime capture, additive IPC 1.7, Swift
-canonical effect bindings and frozen Rules input state, with no overlapping
-file ownership.
+untouched. Active, disjoint worktrees now own runtime capture, frontend
+effect consumers, and the India acceptance harness. Completed additive
+domain/wire/Rules slices retain their signed branches and precise source
+receipts; those receipts do not transfer to the subsequent combined head.
 
 ## Known Integration Gaps
 
