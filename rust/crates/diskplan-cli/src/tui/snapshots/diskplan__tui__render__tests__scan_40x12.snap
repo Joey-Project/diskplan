@@ -8,8 +8,8 @@ expression: "snapshot(&state, 40, 12)"
 ┌ Engine facts ────────────────────────┐
 │standard • 1:23                       │
 │825431 entries • 9945/s               │
-│37602 dirs • 148 candidates           │
-│23.0 GiB observed • 4.5 GiB estimate  │
+│37602 dirs • 148 retained             │
+│23.0 GiB observed • evidence only     │
 └──────────────────────────────────────┘
 ────────────────────────────────────────
 q cancel  Space pause/resume  p provisio

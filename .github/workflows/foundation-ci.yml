@@ -100,6 +100,8 @@ jobs:
           python3 scripts/ci/validate_journals.py
 
       - name: Build and test Swift foundation
+        env:
+          LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
         run: |
           scripts/ci/package-resolved-guard.sh run Package.resolved -- swift build --disable-automatic-resolution
           scripts/ci/package-resolved-guard.sh run Package.resolved -- swift test --disable-automatic-resolution
@@ -113,6 +115,15 @@ jobs:
 
       - name: Check generated Protobuf sources
         run: scripts/proto-codegen.sh check
+
+      - name: Check compiled Rules assets
+        run: python3 scripts/generate-rule-assets.py --check
+
+      - name: Check action effect canonical fixture
+        run: scripts/effect-canonical-fixture.sh check
+
+      - name: Check protocol 1.7 runtime fixtures
+        run: scripts/protocol17-fixtures.sh check
 
       - name: Check canonical fixture
         run: scripts/ci/package-resolved-guard.sh run Package.resolved -- scripts/canonical-fixture.sh check

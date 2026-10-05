@@ -1,0 +1,784 @@
+import Darwin
+import DiskplanFileProviderFixtureSupport
+import DiskplanMacOS
+@preconcurrency import FileProvider
+import Foundation
+
+@main
+enum FixtureHost {
+  static func main() async {
+    let installed = MaterializationPolicyInstaller().installBeforePathAccess()
+    guard let policy = installed.value else {
+      fail("materialization_policy", detail: installed.detail ?? installed.status.rawValue)
+    }
+    do {
+      try await run(arguments: Array(CommandLine.arguments.dropFirst()), policy: policy)
+    } catch let error as ExternalMutationJournalError {
+      if case .unresolvedExternalMutation(let kind, let bootGeneration) = error {
+        fail(
+          "unresolved_external_mutation",
+          detail: "kind=\(kind.rawValue),boot_generation=\(bootGeneration)",
+          exitCode: 75
+        )
+      }
+      fail("external_mutation_journal", detail: String(describing: error))
+    } catch {
+      fail("fixture_host", detail: String(describing: error))
+    }
+  }
+
+  private static func run(arguments: [String], policy: NoMaterializationPolicy) async throws {
+    guard let command = arguments.first else { throw HostError.usage }
+    let options = try Options(arguments: Array(arguments.dropFirst()))
+    switch command {
+    case "prepare":
+      let appPath = try options.required("app-path")
+      let extensionPath = try options.required("extension-path")
+      let runID = try options.requiredUUID("run-id")
+      try prepare(runID: runID, appPath: appPath, extensionPath: extensionPath)
+    case "recover-unpublished":
+      let runID = try options.requiredUUID("run-id")
+      let log = try OracleLog.appGroup(runID: runID)
+      try SecureFixtureStorage.recoverUnpublishedRun(expectedRunDirectory: log.runDirectory)
+      printJSON(["status": "unpublished-run-removed", "run_id": runID.uuidString.lowercased()])
+    case "setup":
+      let loaded = try loadManifest(try options.requiredURL("manifest"))
+      try await setup(manifest: loaded.manifest)
+    case "probe":
+      let loaded = try loadManifest(try options.requiredURL("manifest"))
+      try probe(manifest: loaded.manifest, policy: policy)
+    case "oracle-begin":
+      let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
+      try OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath)).writeWindow(
+        OracleWindow(
+          beginNanoseconds: monotonicNow(),
+          bootGeneration: try ExternalMutationBootSession.currentGeneration()
+        )
+      )
+      printJSON(["status": "oracle-open", "run_id": manifest.runID.uuidString.lowercased()])
+    case "oracle-end":
+      let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
+      let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
+      let quietMilliseconds = try options.optionalInt("quiet-ms", default: 2_000)
+      let timeoutMilliseconds = try options.optionalInt("timeout-ms", default: 30_000)
+      let quiescence = try log.closeWindowAfterQuiescence(
+        quietMilliseconds: quietMilliseconds,
+        timeoutMilliseconds: timeoutMilliseconds
+      )
+      printJSON([
+        "status": "oracle-closed",
+        "run_id": manifest.runID.uuidString.lowercased(),
+        "event_count": String(quiescence.eventCount),
+        "last_sequence": String(quiescence.lastSequence),
+        "quiet_ms": String(quiescence.quietMilliseconds),
+      ])
+    case "oracle-health":
+      let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
+      try await assertOracleHealth(manifest: manifest)
+    case "assert":
+      let manifest = try loadManifest(try options.requiredURL("manifest")).manifest
+      try assertAcceptance(manifest: manifest)
+    case "status":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      try await status(manifest: loaded.manifest)
+    case "teardown":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      try await teardown(loaded: loaded)
+    case "cleanup":
+      let manifestURL = try options.requiredURL("manifest")
+      let loaded = try loadManifest(manifestURL, allowCleanupRecovery: true)
+      try cleanup(loaded: loaded, manifestURL: manifestURL)
+    case "mutation-begin":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      let journal = try mutationJournal(loaded.manifest)
+      if kind.isAdd {
+        try journal.begin(kind)
+      } else {
+        try journal.beginRemovalAttempt(kind)
+      }
+      printJSON(["status": "mutation-in-flight", "kind": kind.rawValue])
+    case "mutation-dispatched":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      try mutationJournal(loaded.manifest).markDispatched(kind)
+      printJSON(["status": "mutation-dispatched", "kind": kind.rawValue])
+    case "mutation-complete":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      let completion = try options.requiredMutationCompletion("outcome")
+      try mutationJournal(loaded.manifest).recordOriginalCompletion(
+        kind,
+        completion: completion
+      )
+      printJSON([
+        "status": "mutation-completed",
+        "kind": kind.rawValue,
+        "outcome": completion.rawValue,
+      ])
+    case "mutation-confirm":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      let presence = try options.requiredMutationPresence("state")
+      try mutationJournal(loaded.manifest).confirmFinished(kind, observed: presence)
+      printJSON(["status": "mutation-confirmed", "kind": kind.rawValue])
+    case "mutation-resolve-after-boot":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      let kind = try options.requiredMutationKind("kind")
+      let presence = try options.requiredMutationPresence("state")
+      let resolved = try mutationJournal(loaded.manifest).resolveAfterBootIfTerminal(
+        kind,
+        observed: presence
+      )
+      printJSON([
+        "status": resolved ? "mutation-resolved" : "mutation-still-pending",
+        "kind": kind.rawValue,
+      ])
+    case "extension-path":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      print(loaded.manifest.extensionPath)
+    case "app-path":
+      let loaded = try loadManifest(
+        try options.requiredURL("manifest"),
+        allowCleanupRecovery: true
+      )
+      print(loaded.manifest.appPath)
+    case "manifest-path":
+      let runID = try options.requiredUUID("run-id")
+      let log = try OracleLog.appGroup(runID: runID)
+      print(log.runDirectory.appendingPathComponent("manifest.json").path)
+    default:
+      throw HostError.usage
+    }
+  }
+
+  private static func prepare(runID: UUID, appPath: String, extensionPath: String) throws {
+    let log = try OracleLog.appGroup(runID: runID)
+    let taskRoot = log.runDirectory
+    let manifestURL = taskRoot.appendingPathComponent("manifest.json")
+    let manifest = FixtureManifest(
+      runID: runID,
+      taskRoot: taskRoot.path,
+      appPath: appPath,
+      extensionPath: extensionPath,
+      appGroupRunPath: log.runDirectory.path
+    )
+    try manifest.validate(expectedTaskRoot: taskRoot)
+    var manifestPublished = false
+    do {
+      try log.createInitialRunDirectory()
+      try SecureFixtureStorage.publishInitialManifest(
+        try JSONEncoder().encode(manifest),
+        in: taskRoot
+      )
+      manifestPublished = true
+      try log.initializeRecorder()
+    } catch {
+      if !manifestPublished {
+        do {
+          try SecureFixtureStorage.recoverUnpublishedRun(expectedRunDirectory: taskRoot)
+        } catch {
+          throw FixtureCleanupError.retained(taskRoot.path)
+        }
+      }
+      throw error
+    }
+    printJSON(["status": "prepared", "manifest": manifestURL.path])
+  }
+
+  private static func setup(manifest: FixtureManifest) async throws {
+    let deadline = ContinuousClock.now + .seconds(20)
+    let runID = manifest.runID
+    let taskRoot = URL(fileURLWithPath: manifest.taskRoot)
+    let domainIdentifier = manifest.domainIdentifier
+    let domain = NSFileProviderDomain(
+      identifier: NSFileProviderDomainIdentifier(domainIdentifier),
+      displayName: FixtureContract.displayName
+    )
+    domain.isHidden = true
+    domain.testingModes = []
+    let journal = try mutationJournal(manifest)
+    let operationID = try journal.begin(.domainAdd)
+    try journal.markDispatched(.domainAdd, operationID: operationID)
+    try await addDomain(
+      domain,
+      deadline: deadline,
+      journal: journal,
+      operationID: operationID
+    )
+    let identifiers = try await registeredDomainIdentifiers(deadline: deadline)
+    guard identifiers.filter({ $0 == domainIdentifier }).count == 1 else {
+      throw HostError.domainAdditionNotConfirmed
+    }
+    try journal.confirmFinished(.domainAdd, observed: .present)
+    guard let manager = NSFileProviderManager(for: domain) else {
+      throw HostError.managerUnavailable
+    }
+    try await signal(manager: manager, identifier: .rootContainer, deadline: deadline)
+    let visibleSentinel = try await waitForURL(
+      manager: manager,
+      identifier: NSFileProviderItemIdentifier(FixtureContract.sentinelIdentifier),
+      deadline: deadline
+    )
+    let visibleSealed = try await waitForURL(
+      manager: manager,
+      identifier: NSFileProviderItemIdentifier(FixtureContract.sealedDirectoryIdentifier),
+      deadline: deadline
+    )
+    let ready = FixtureReadyState(
+      runID: runID,
+      sentinelPath: visibleSentinel.path,
+      sealedDirectoryPath: visibleSealed.path
+    )
+    try ready.validate(manifest: manifest)
+    try secureWrite(
+      try JSONEncoder().encode(ready),
+      to: taskRoot.appendingPathComponent("ready.json")
+    )
+    printJSON([
+      "status": "ready",
+      "manifest": taskRoot.appendingPathComponent("manifest.json").path,
+      "domain": domainIdentifier,
+    ])
+  }
+
+  private static func probe(manifest: FixtureManifest, policy: NoMaterializationPolicy) throws {
+    let ready = try loadReady(manifest)
+    let sentinel = URL(fileURLWithPath: ready.sentinelPath)
+    let sealed = URL(fileURLWithPath: ready.sealedDirectoryPath)
+    try requireDataless(sentinel)
+    try requireDataless(sealed)
+    let parent = sentinel.deletingLastPathComponent()
+    guard sealed.deletingLastPathComponent().standardizedFileURL == parent.standardizedFileURL
+    else {
+      throw FixtureContractError.invalidManifest
+    }
+    let parentFD = open(parent.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard parentFD >= 0 else { throw makePOSIXError(code: errno) }
+    defer { close(parentFD) }
+    let probe = FileProviderBoundaryProbe()
+    for (url, expectsDatalessDirectory) in [(sentinel, false), (sealed, true)] {
+      let outcome = probe.probe(
+        parentFileDescriptor: parentFD,
+        rawName: Data(url.lastPathComponent.utf8),
+        policy: policy,
+        timeout: .seconds(5)
+      )
+      guard case .evidence(let evidence) = outcome,
+        evidence.identityDisposition == .confirmedProvider,
+        evidence.identity.value?.domainIdentifier == manifest.domainIdentifier,
+        evidence.handling == .reportOnly
+      else { throw HostError.providerEvidenceRejected(String(describing: outcome)) }
+      if expectsDatalessDirectory {
+        guard evidence.traversal == .doNotDescendDataless else {
+          throw HostError.providerEvidenceRejected("dataless directory traversal was not rejected")
+        }
+      }
+    }
+    printJSON(["status": "provider-evidence-accepted", "domain": manifest.domainIdentifier])
+  }
+
+  private static func assertAcceptance(manifest: FixtureManifest) throws {
+    let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
+    let snapshot = try log.sealedSnapshot()
+    try snapshot.validate(
+      runID: manifest.runID,
+      domainIdentifier: manifest.domainIdentifier,
+      expectedBootGeneration: try ExternalMutationBootSession.currentGeneration()
+    )
+    let window = snapshot.window
+    let events = snapshot.events
+    let observed = events.filter { window.contains($0) }
+    let forbidden = observed.filter(FixtureContract.isForbiddenEvent)
+    let liveness = observed.filter { !FixtureContract.isForbiddenEvent($0) }
+    guard !liveness.isEmpty else { throw HostError.oracleSilent }
+    guard forbidden.isEmpty else {
+      throw HostError.forbiddenCallbacks(forbidden.map { "\($0.sequence):\($0.kind.rawValue)" })
+    }
+    printJSON([
+      "status": "accepted",
+      "domain": manifest.domainIdentifier,
+      "forbidden_callbacks": "0",
+      "oracle_liveness_events": String(liveness.count),
+      "window_events": String(observed.count),
+      "sf_dataless": "sentinel,sealed-dir",
+      "provider_identity": "matched",
+      "plan_handling": "report-only",
+    ])
+  }
+
+  private static func status(manifest: FixtureManifest) async throws {
+    let deadline = ContinuousClock.now + .seconds(20)
+    let domains = try await registeredDomainIdentifiers(deadline: deadline)
+    let present = domains.contains(manifest.domainIdentifier)
+    printJSON(["status": present ? "present" : "absent", "domain": manifest.domainIdentifier])
+  }
+
+  private static func teardown(loaded: LoadedFixtureManifest) async throws {
+    let deadline = ContinuousClock.now + .seconds(20)
+    let manifest = loaded.manifest
+    try await reconcileDomainRemoval(loaded: loaded, deadline: deadline)
+    printJSON(["status": "removed", "domain": manifest.domainIdentifier])
+  }
+
+  private static func assertOracleHealth(manifest: FixtureManifest) async throws {
+    let deadline = ContinuousClock.now + .seconds(20)
+    let log = OracleLog(runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath))
+    let window = try log.window()
+    guard window.endNanoseconds == nil else { throw HostError.oracleWindowClosed }
+    guard try log.recorderState() == .healthy else { throw HostError.oracleRecorderUnhealthy }
+    let baseline = try log.events().last?.sequence ?? 0
+    let domain = NSFileProviderDomain(
+      identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
+      displayName: FixtureContract.displayName
+    )
+    guard let manager = NSFileProviderManager(for: domain) else {
+      throw HostError.managerUnavailable
+    }
+    try await signal(manager: manager, identifier: .rootContainer, deadline: deadline)
+    while ContinuousClock.now < deadline {
+      let healthy = try log.events().contains {
+        $0.sequence > baseline && $0.runID == manifest.runID
+          && $0.domainIdentifier == manifest.domainIdentifier && window.contains($0)
+          && !FixtureContract.isForbiddenEvent($0)
+      }
+      if healthy, try log.recorderState() == .healthy {
+        printJSON(["status": "oracle-healthy", "domain": manifest.domainIdentifier])
+        return
+      }
+      try await sleepForPolling(.milliseconds(100), until: deadline)
+    }
+    throw HostError.oracleHealthTimedOut
+  }
+
+  private static func cleanup(loaded: LoadedFixtureManifest, manifestURL: URL) throws {
+    let manifest = loaded.manifest
+    let expectedLog = try OracleLog.appGroup(runID: manifest.runID)
+    let expectedTaskRoot = expectedLog.runDirectory.standardizedFileURL
+    try manifest.validate(expectedTaskRoot: expectedTaskRoot)
+    try mutationJournal(manifest).requireClear()
+    switch loaded.location {
+    case .canonical:
+      try SecureFixtureStorage.cleanupRun(
+        manifestURL: manifestURL,
+        expectedRunDirectory: expectedTaskRoot
+      )
+    case .cleanupRecovery:
+      try SecureFixtureStorage.recoverCleanup(
+        recoveryManifestURL: manifestURL,
+        expectedRunDirectory: expectedTaskRoot
+      )
+    }
+    printJSON(["status": "cleaned", "run_id": manifest.runID.uuidString.lowercased()])
+  }
+
+  private static func reconcileDomainRemoval(
+    loaded: LoadedFixtureManifest,
+    deadline: ContinuousClock.Instant
+  ) async throws {
+    let manifest = loaded.manifest
+    let journal = try mutationJournal(manifest)
+    let domain = NSFileProviderDomain(
+      identifier: NSFileProviderDomainIdentifier(manifest.domainIdentifier),
+      displayName: FixtureContract.displayName
+    )
+    var matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
+      $0 == manifest.domainIdentifier
+    }
+    guard matches.count <= 1 else { throw HostError.duplicateExactDomain }
+
+    if matches.isEmpty {
+      if try journal.state(.domainRemove)?.phase == .originalSucceeded {
+        try journal.confirmFinished(.domainRemove, observed: .absent)
+      }
+      _ = try journal.resolveAfterBootIfTerminal(.domainAdd, observed: .absent)
+      _ = try journal.resolveAfterBootIfTerminal(.domainRemove, observed: .absent)
+      try journal.requireNoSameBootAmbiguousAdd()
+      if let removal = try journal.state(.domainRemove) {
+        throw ExternalMutationJournalError.unresolvedExternalMutation(
+          .domainRemove,
+          bootGeneration: removal.bootGeneration
+        )
+      }
+      return
+    }
+
+    switch loaded.location {
+    case .canonical(let runDirectory):
+      try OracleLog(runDirectory: runDirectory).sealRecorder()
+    case .cleanupRecovery(let stagingDirectory):
+      try OracleLog(runDirectory: stagingDirectory).sealRecorder()
+    }
+    let operationID = try journal.beginRemovalAttempt(.domainRemove)
+    try journal.markDispatched(.domainRemove, operationID: operationID)
+    try await removeExactDomain(
+      domain,
+      deadline: deadline,
+      journal: journal,
+      operationID: operationID
+    )
+
+    while ContinuousClock.now < deadline {
+      matches = try await registeredDomainIdentifiers(deadline: deadline).filter {
+        $0 == manifest.domainIdentifier
+      }
+      guard matches.count <= 1 else { throw HostError.duplicateExactDomain }
+      if matches.isEmpty {
+        try journal.confirmFinished(.domainRemove, observed: .absent)
+        try journal.requireNoSameBootAmbiguousAdd()
+        return
+      }
+      try await sleepForPolling(.milliseconds(200), until: deadline)
+    }
+    throw HostError.domainRemovalTimedOut
+  }
+
+  private static func requireDataless(_ url: URL) throws {
+    var info = stat()
+    guard lstat(url.path, &info) == 0 else { throw makePOSIXError(code: errno) }
+    guard UInt32(info.st_flags) & UInt32(SF_DATALESS) != 0 else {
+      throw HostError.notDataless(url.lastPathComponent)
+    }
+  }
+
+  private static func loadManifest(
+    _ url: URL,
+    allowCleanupRecovery: Bool = false
+  ) throws -> LoadedFixtureManifest {
+    let parent = url.deletingLastPathComponent()
+    let name = url.lastPathComponent
+    let runID: UUID
+    let isRecovery: Bool
+    if name == "manifest.json", let parsed = UUID(uuidString: parent.lastPathComponent) {
+      runID = parsed
+      isRecovery = false
+    } else if allowCleanupRecovery,
+      name.hasPrefix(".manifest-recovery-"), name.hasSuffix(".json")
+    {
+      let start = name.index(name.startIndex, offsetBy: ".manifest-recovery-".count)
+      let end = name.index(name.endIndex, offsetBy: -".json".count)
+      guard let parsed = UUID(uuidString: String(name[start..<end])) else {
+        throw FixtureControlReadError.mismatch(.manifest, .semantic)
+      }
+      runID = parsed
+      isRecovery = true
+    } else {
+      throw FixtureControlReadError.mismatch(.manifest, .semantic)
+    }
+    let expectedTaskRoot = try OracleLog.appGroup(runID: runID).runDirectory
+    if isRecovery {
+      let manifest = try SecureFixtureStorage.readCleanupRecoveryManifest(
+        at: url,
+        expectedRunDirectory: expectedTaskRoot
+      )
+      return LoadedFixtureManifest(
+        manifest: manifest,
+        location: .cleanupRecovery(
+          stagingDirectory: SecureFixtureStorage.cleanupStagingDirectoryURL(
+            for: expectedTaskRoot
+          )
+        )
+      )
+    }
+    return LoadedFixtureManifest(
+      manifest: try SecureFixtureStorage.readManifest(
+        at: url,
+        expectedRunDirectory: expectedTaskRoot
+      ),
+      location: .canonical(runDirectory: expectedTaskRoot)
+    )
+  }
+
+  private static func loadReady(_ manifest: FixtureManifest) throws -> FixtureReadyState {
+    try SecureFixtureStorage.readReady(manifest)
+  }
+}
+
+private func mutationJournal(_ manifest: FixtureManifest) throws -> ExternalMutationJournal {
+  try ExternalMutationJournal(
+    runDirectory: URL(fileURLWithPath: manifest.appGroupRunPath),
+    binding: ExternalMutationRunBinding(manifest: manifest),
+    currentBootGeneration: ExternalMutationBootSession.currentGeneration()
+  )
+}
+
+private struct Options {
+  private let values: [String: String]
+
+  init(arguments: [String]) throws {
+    guard arguments.count.isMultiple(of: 2) else { throw HostError.usage }
+    var parsed: [String: String] = [:]
+    for index in stride(from: 0, to: arguments.count, by: 2) {
+      let key = arguments[index]
+      guard key.hasPrefix("--"), parsed[String(key.dropFirst(2))] == nil else {
+        throw HostError.usage
+      }
+      parsed[String(key.dropFirst(2))] = arguments[index + 1]
+    }
+    values = parsed
+  }
+
+  func required(_ key: String) throws -> String {
+    guard let value = values[key], !value.isEmpty else { throw HostError.usage }
+    return value
+  }
+
+  func requiredURL(_ key: String) throws -> URL {
+    let value = try required(key)
+    let components = value.split(separator: "/", omittingEmptySubsequences: false)
+    guard value.hasPrefix("/"), !components.contains("."), !components.contains("..") else {
+      throw FixtureContractError.unsafePath
+    }
+    let url = URL(fileURLWithPath: value)
+    guard url.path == value else { throw FixtureContractError.unsafePath }
+    return url
+  }
+
+  func requiredUUID(_ key: String) throws -> UUID {
+    guard let value = UUID(uuidString: try required(key)) else { throw HostError.usage }
+    return value
+  }
+
+  func requiredMutationKind(_ key: String) throws -> ExternalMutationKind {
+    guard let value = ExternalMutationKind(rawValue: try required(key)) else {
+      throw HostError.usage
+    }
+    return value
+  }
+
+  func requiredMutationPresence(_ key: String) throws -> ExternalMutationPresence {
+    guard let value = ExternalMutationPresence(rawValue: try required(key)) else {
+      throw HostError.usage
+    }
+    return value
+  }
+
+  func requiredMutationCompletion(_ key: String) throws -> ExternalMutationCompletion {
+    guard let value = ExternalMutationCompletion(rawValue: try required(key)) else {
+      throw HostError.usage
+    }
+    return value
+  }
+
+  func optionalInt(_ key: String, default defaultValue: Int) throws -> Int {
+    guard let value = values[key] else { return defaultValue }
+    guard let parsed = Int(value) else { throw HostError.usage }
+    return parsed
+  }
+}
+
+private enum HostError: Error {
+  case usage
+  case managerUnavailable
+  case userVisibleURLTimedOut
+  case providerEvidenceRejected(String)
+  case notDataless(String)
+  case oracleWindowOpen
+  case oracleWindowClosed
+  case oracleWindowMismatch
+  case oracleSilent
+  case oracleHealthTimedOut
+  case oracleRecorderUnhealthy
+  case callbackTimedOut
+  case forbiddenCallbacks([String])
+  case duplicateExactDomain
+  case domainAdditionNotConfirmed
+  case domainRemovalTimedOut
+}
+
+private struct LoadedFixtureManifest {
+  let manifest: FixtureManifest
+  let location: FixtureManifestLocation
+}
+
+private enum FixtureManifestLocation {
+  case canonical(runDirectory: URL)
+  case cleanupRecovery(stagingDirectory: URL)
+}
+
+private func addDomain(
+  _ domain: NSFileProviderDomain,
+  deadline: ContinuousClock.Instant,
+  journal: ExternalMutationJournal,
+  operationID: UUID
+) async throws {
+  try await boundedCallback(deadline: deadline) { completion in
+    NSFileProviderManager.add(domain) { error in
+      let result: Result<Void, Error> = error.map(Result.failure) ?? .success(())
+      do {
+        try journal.recordOriginalCompletion(
+          .domainAdd,
+          operationID: operationID,
+          completion: error == nil ? .succeeded : .failed
+        )
+        completion(result)
+      } catch {
+        completion(.failure(error))
+      }
+    }
+  }
+}
+
+private func registeredDomainIdentifiers(
+  deadline: ContinuousClock.Instant
+) async throws -> [String] {
+  try await boundedCallback(deadline: deadline) { completion in
+    NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
+      if let error {
+        completion(.failure(error))
+      } else {
+        completion(.success(domains.map { $0.identifier.rawValue }))
+      }
+    }
+  }
+}
+
+private func removeExactDomain(
+  _ domain: NSFileProviderDomain,
+  deadline: ContinuousClock.Instant,
+  journal: ExternalMutationJournal,
+  operationID: UUID
+) async throws {
+  try await boundedCallback(deadline: deadline) { completion in
+    NSFileProviderManager.remove(domain, mode: .removeAll) { _, error in
+      let result: Result<Void, Error> = error.map(Result.failure) ?? .success(())
+      do {
+        try journal.recordOriginalCompletion(
+          .domainRemove,
+          operationID: operationID,
+          completion: error == nil ? .succeeded : .failed
+        )
+        completion(result)
+      } catch {
+        completion(.failure(error))
+      }
+    }
+  }
+}
+
+private func signal(
+  manager: NSFileProviderManager,
+  identifier: NSFileProviderItemIdentifier,
+  deadline: ContinuousClock.Instant
+) async throws {
+  try await boundedCallback(deadline: deadline) { completion in
+    manager.signalEnumerator(for: identifier) { error in
+      completion(error.map(Result.failure) ?? .success(()))
+    }
+  }
+}
+
+private func waitForURL(
+  manager: NSFileProviderManager,
+  identifier: NSFileProviderItemIdentifier,
+  deadline: ContinuousClock.Instant
+) async throws -> URL {
+  while ContinuousClock.now < deadline {
+    do {
+      return try await boundedCallback(deadline: deadline) { completion in
+        manager.getUserVisibleURL(for: identifier) { url, error in
+          if let url {
+            completion(.success(url))
+          } else {
+            completion(.failure(error ?? HostError.managerUnavailable))
+          }
+        }
+      }
+    } catch {
+      try await sleepForPolling(.milliseconds(200), until: deadline)
+    }
+  }
+  throw HostError.userVisibleURLTimedOut
+}
+
+private func sleepForPolling(
+  _ interval: Duration,
+  until deadline: ContinuousClock.Instant
+) async throws {
+  let clock = ContinuousClock()
+  let next = min(clock.now + interval, deadline)
+  try await clock.sleep(until: next)
+}
+
+private func boundedCallback<Value: Sendable>(
+  deadline: ContinuousClock.Instant,
+  start: (@escaping @Sendable (Result<Value, Error>) -> Void) -> Void
+) async throws -> Value {
+  let gate = OneShotCallbackGate(deadline: deadline)
+  return try await withCheckedThrowingContinuation { continuation in
+    Task {
+      try? await ContinuousClock().sleep(until: deadline)
+      if gate.claimDeadline() {
+        continuation.resume(throwing: HostError.callbackTimedOut)
+      }
+    }
+    start { result in
+      guard let source = gate.claimCallback() else { return }
+      switch source {
+      case .callback: continuation.resume(with: result)
+      case .deadline: continuation.resume(throwing: HostError.callbackTimedOut)
+      }
+    }
+  }
+}
+
+private func secureWrite(_ data: Data, to url: URL) throws {
+  let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
+  guard descriptor >= 0 else { throw makePOSIXError(code: errno) }
+  defer { close(descriptor) }
+  try data.withUnsafeBytes { bytes in
+    var remaining = bytes.count
+    var pointer = bytes.baseAddress!
+    while remaining > 0 {
+      let written = Darwin.write(descriptor, pointer, remaining)
+      if written < 0, errno == EINTR { continue }
+      guard written > 0 else { throw makePOSIXError(code: errno == 0 ? EIO : errno) }
+      remaining -= written
+      pointer = pointer.advanced(by: written)
+    }
+  }
+}
+
+private func monotonicNow() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) }
+
+private func printJSON(_ values: [String: String]) {
+  let data = try! JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
+  print(String(decoding: data, as: UTF8.self))
+}
+
+private func fail(_ reason: String, detail: String, exitCode: Int32 = 1) -> Never {
+  let data = try! JSONSerialization.data(
+    withJSONObject: ["status": "failed", "reason": reason, "detail": detail],
+    options: [.sortedKeys]
+  )
+  FileHandle.standardError.write(data + Data([0x0a]))
+  exit(exitCode)
+}
+
+private func makePOSIXError(code: Int32) -> POSIXError {
+  POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+}

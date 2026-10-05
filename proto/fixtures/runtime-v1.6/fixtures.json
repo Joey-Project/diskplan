@@ -1,0 +1,42 @@
+{
+  "schema": "runtime-v1.6",
+  "cases": [
+    {
+      "name": "empty-batch-dry-run",
+      "include_action": false,
+      "requires_force": false,
+      "action_kind": "generic_remove"
+    },
+    {
+      "name": "force-action-execution",
+      "include_action": true,
+      "requires_force": true,
+      "action_kind": "generic_remove"
+    },
+    {
+      "name": "git-evidence-action",
+      "include_action": true,
+      "requires_force": false,
+      "action_kind": "git_worktree_remove"
+    },
+    {
+      "name": "codex-scope-action",
+      "include_action": true,
+      "requires_force": false,
+      "action_kind": "codex_clean_temporary"
+    },
+    {
+      "name": "version-survivor-action",
+      "include_action": true,
+      "requires_force": false,
+      "action_kind": "versioned_artifact_remove"
+    },
+    {
+      "name": "execution-stream-failure",
+      "include_action": true,
+      "requires_force": true,
+      "action_kind": "generic_remove",
+      "execution_failure_kind": "backend_contract_violation"
+    }
+  ]
+}

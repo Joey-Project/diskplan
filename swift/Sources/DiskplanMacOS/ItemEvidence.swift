@@ -278,3 +278,43 @@ public struct ItemProbe: Sendable {
     return .known(string)
   }
 }
+
+/// Reads descriptor identity in the same real-device namespace as `ItemProbe`.
+public struct FileDescriptorIdentityProbe: Sendable {
+  public init() {}
+
+  public func probe(
+    fileDescriptor: Int32,
+    policy: NoMaterializationPolicy
+  ) -> Capability<FileObjectIdentity> {
+    let livePolicy = policy.revalidateLive()
+    guard livePolicy.value != nil else {
+      return Capability(
+        status: livePolicy.status,
+        detail: livePolicy.detail,
+        errorCode: livePolicy.errorCode
+      )
+    }
+    var raw = dp_fd_identity_v1()
+    guard dp_probe_fd_identity(fileDescriptor, &raw) == 0 else {
+      return POSIXFailure.capability(errno, operation: "probe file descriptor identity")
+    }
+    let common = raw.returned_common
+    guard common & dp_attr_common_device() != 0 else {
+      return .unavailable("real device identity was not returned")
+    }
+    guard common & dp_attr_common_file_id() != 0 else {
+      return .unavailable("file ID was not returned")
+    }
+    guard common & dp_attr_common_object_type() != 0 else {
+      return .unavailable("object type was not returned")
+    }
+    return .known(
+      FileObjectIdentity(
+        device: raw.real_device,
+        fileID: raw.file_id,
+        objectType: FileSystemObjectType(rawKernelValue: raw.object_type)
+      )
+    )
+  }
+}

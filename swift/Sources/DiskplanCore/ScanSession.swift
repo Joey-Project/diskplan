@@ -122,7 +122,8 @@ public struct ScanSession {
             state = .cancelled
             return events
 
-        case .unspecified, .startScan, .UNRECOGNIZED:
+        case .unspecified, .startScan, .checkpointScan, .finalizePartialScan,
+            .checkpointProvisionalEvidence, .UNRECOGNIZED:
             return reject(
                 requestID: requestID,
                 control: request.control,

@@ -52,6 +52,10 @@ superseded_by:
 - `cargo clippy --locked --workspace --all-targets -- -D warnings`.
 - `scripts/proto-codegen.sh check` and `scripts/canonical-fixture.sh check`.
 - `scripts/test-cross-language.sh` (2 real Swift/Rust process tests plus canonical drift check).
+- The combined Phase 0–6 integration made the SwiftProtobuf manifest-pin check
+  insensitive to formatting whitespace while still requiring the exact package
+  identity and version. Generated-source, canonical binary, protocol 1.3
+  fixture, and all ten current cross-language process checks passed afterward.
 - `scripts/test-deployment-target.sh` (`aarch64-apple-darwin`, Mach-O `minos 14.0`).
 - `bash -n`, ShellCheck 0.11.0, and `git diff --check`.
 - Frozen review of `0ee3ed5555fec42ffc5e9b8e718024fcbb686d71..dfd1561513755d836bda945a6f71badefebac1ca` found four issues: unbounded stdout queueing, unbounded post-`SIGKILL` wait, unbound rejection sequence, and insufficient rollback-backup validation. The subsequent fix set adds bounded backpressure/reaping and descriptor-held identity/content/access seals with adversarial tests.

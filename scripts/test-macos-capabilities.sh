@@ -14,14 +14,10 @@ swift run diskplan-macos-probe --self-test
 
 fixture_hook_present=0
 
-if [[ ${DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT:-} == "" ]]; then
-  echo "file-provider-fixture: not-available (set DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT on India-mac-mini-m4-hoteng)"
-elif [[ ! -d ${DISKPLAN_FILE_PROVIDER_FIXTURE_ROOT} ]]; then
-  echo "file-provider-fixture: configured root is not a directory" >&2
-  exit 1
+if [[ ${DISKPLAN_RUN_FILE_PROVIDER_FIXTURE:-0} == 1 ]]; then
+  scripts/fileprovider-fixture.sh accept
 else
-  echo "file-provider-fixture: hook-present, controlled extension callback oracle not implemented"
-  fixture_hook_present=1
+  echo "file-provider-fixture: not-available (set DISKPLAN_RUN_FILE_PROVIDER_FIXTURE=1 on India-mac-mini-m4-hoteng)"
 fi
 
 if [[ ${DISKPLAN_APFS_VOLUME_GROUP_FIXTURE_ROOT:-} == "" ]]; then

@@ -1,0 +1,63 @@
+{
+  "consent": {
+    "action_id_hex": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "action_lineage_id_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "canonical_hex": "00000000000000020100000000000000208c4be6db748e64af3949bee715afdedb7a3346199778ec45f832dde425469b360000000000000020606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f0000000000000020808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f0000000000000020202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0000000000000020a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf0000000000000020c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf000000000000000e706f6c6963792d746573742d7631000000000000000e736368656d612d746573742d76310000000000000010617070726f76652dc3a92d6576656e74",
+    "consent_event_id_hex": "617070726f76652dc3a92d6576656e74",
+    "evidence_sha256_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "permission": 1,
+    "plan_sha256_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "policy_version": "policy-test-v1",
+    "requirement_sha256_hex": "8c4be6db748e64af3949bee715afdedb7a3346199778ec45f832dde425469b36",
+    "schema_version": "schema-test-v1",
+    "sha256_hex": "58c72a09dcf85db1d710317da47913782ea582477d8eb99efd85245aa3127da6",
+    "target_scope_sha256_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "version": 2
+  },
+  "consent_tamper_fields": [
+    "version",
+    "permission",
+    "requirement_sha256",
+    "action_id",
+    "action_lineage_id",
+    "target_scope_sha256",
+    "plan_sha256",
+    "evidence_sha256",
+    "policy_version",
+    "schema_version",
+    "consent_event_id"
+  ],
+  "rejection_cases": [
+    "unknown_operation",
+    "unknown_permission",
+    "missing_operation",
+    "missing_permission",
+    "provider_evict_cross_device_permission",
+    "missing_digest",
+    "missing_identifier",
+    "missing_text",
+    "empty_event",
+    "invalid_utf8",
+    "trailing_bytes",
+    "overlong_record"
+  ],
+  "requirement": {
+    "canonical_hex": "000000000000000201010000000000000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000000020202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0000000000000020404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "operation": 1,
+    "operation_contract_sha256_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "permission": 1,
+    "sha256_hex": "8c4be6db748e64af3949bee715afdedb7a3346199778ec45f832dde425469b36",
+    "target_scope_sha256_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "variant_group_id_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "version": 2
+  },
+  "requirement_tamper_fields": [
+    "version",
+    "operation",
+    "permission",
+    "variant_group_id",
+    "target_scope_sha256",
+    "operation_contract_sha256"
+  ],
+  "schema": "canonical-effect-v2"
+}

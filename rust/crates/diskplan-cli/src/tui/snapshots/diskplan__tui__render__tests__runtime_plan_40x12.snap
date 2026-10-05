@@ -1,0 +1,16 @@
+---
+source: rust/crates/diskplan-cli/src/tui/render.rs
+expression: "snapshot(&state, 40, 12)"
+---
+┌──────────────────────────────────────┐
+│ diskplan Immutable plan  •  Paused   │
+└──────────────────────────────────────┘
+┌ Plan-first • Summary ────────────────┐
+│▾ Ready                               │
+│▾ Generic remove                      │
+│>[x] staged • path race residual: the…│
+│                                      │
+└──────────────────────────────────────┘
+────────────────────────────────────────
+j/k move  Enter/l expand  h collapse  Sp
+immutable engine plan ready

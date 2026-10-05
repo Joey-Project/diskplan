@@ -19,6 +19,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = prost_build::Config::new();
     config.protoc_executable(protoc);
     config.out_dir(out_dir);
+    // These generated oneofs intentionally keep their semantic payloads inline
+    // so the public prost API remains stable across protocol additions.
+    for path in [
+        ".diskplan.v1.Envelope.body",
+        ".diskplan.v1.RuntimeEvent.body",
+        ".diskplan.v1.PlanProjectionRecord.body",
+        ".diskplan.v1.ExecutionStreamEvent.body",
+    ] {
+        config.enum_attribute(path, "#[allow(clippy::large_enum_variant)]");
+    }
     config.compile_protos(&["proto/diskplan/v1/ipc.proto"], &["proto"])?;
     Ok(())
 }

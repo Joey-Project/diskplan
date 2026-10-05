@@ -2,6 +2,7 @@ mod app;
 mod driver;
 mod event;
 mod model;
+pub mod plan;
 mod reducer;
 mod render;
 
@@ -17,6 +18,9 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use thiserror::Error;
 
+use crate::BoundEngine;
+use crate::batch::{BatchProfile, PlanningAgentMode};
+
 use self::app::run_application;
 use self::driver::EngineDriver;
 use self::event::TerminalEventSource;
@@ -27,8 +31,35 @@ pub enum TuiError {
     Io(#[from] io::Error),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InteractiveRuntimeOptions {
+    pub profile: BatchProfile,
+    pub agent_mode: PlanningAgentMode,
+}
+
+impl Default for InteractiveRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            profile: BatchProfile::Standard,
+            agent_mode: PlanningAgentMode::Ask,
+        }
+    }
+}
+
 pub async fn run(engine: &Path) -> Result<(), TuiError> {
-    let (mut driver, engine_events) = EngineDriver::spawn(engine)?;
+    let engine = BoundEngine::open(engine)?;
+    run_bound(&engine).await
+}
+
+pub async fn run_bound(engine: &BoundEngine) -> Result<(), TuiError> {
+    run_bound_with_options(engine, InteractiveRuntimeOptions::default()).await
+}
+
+pub async fn run_bound_with_options(
+    engine: &BoundEngine,
+    options: InteractiveRuntimeOptions,
+) -> Result<(), TuiError> {
+    let (mut driver, engine_events) = EngineDriver::spawn(engine, options)?;
     let mut guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut source = TerminalEventSource::new(engine_events);
@@ -124,7 +155,7 @@ impl<W: Write, M: RawMode> Drop for TerminalGuard<W, M> {
     }
 }
 
-pub use model::{AppState, ControlCommand, Screen, TerminalState};
+pub use model::{AppState, ControlCommand, PlanCommand, Screen, TerminalState};
 pub use reducer::reduce;
 pub use render::render;
 

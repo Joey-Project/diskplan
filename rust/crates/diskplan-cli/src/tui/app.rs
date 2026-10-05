@@ -4,12 +4,13 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 
 use super::event::EventSource;
-use super::model::{AppState, ControlCommand, Effect, TerminalState, UiEvent};
+use super::model::{AppState, ControlCommand, Effect, PlanCommand, TerminalState, UiEvent};
 use super::reducer::reduce;
 use super::render::render;
 
 pub trait ControlSink {
     fn send(&mut self, command: ControlCommand) -> io::Result<()>;
+    fn send_plan(&mut self, command: PlanCommand) -> io::Result<()>;
     fn stop(&mut self) -> io::Result<()>;
 }
 
@@ -27,7 +28,10 @@ where
     let mut state = AppState::default();
     loop {
         terminal
-            .draw(|frame| render(frame, &state))
+            .draw(|frame| {
+                state.resize_plan_layout(frame.area().width, frame.area().height);
+                render(frame, &state);
+            })
             .map_err(io::Error::other)?;
         if state.should_exit() {
             return Ok(state);
@@ -39,6 +43,9 @@ where
                 Effect::SendControl(command) => controls
                     .send(command)
                     .map_err(|error| format!("failed to send engine control: {error}")),
+                Effect::SendPlan(command) => controls
+                    .send_plan(command)
+                    .map_err(|error| format!("failed to send plan command: {error}")),
                 Effect::StopDriver => controls
                     .stop()
                     .map_err(|error| format!("failed to stop engine driver: {error}")),
@@ -55,8 +62,8 @@ where
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use diskplan_proto::diskplan::v1::{
-        ControlAccepted, EngineEvent, ScanCancelled, ScanControlKind, ScanProgress, ScanState,
-        ScanStateChanged, engine_event,
+        ControlAccepted, EngineEvent, ScanCancelled, ScanCheckpointEvidence, ScanControlKind,
+        ScanFinalized, ScanMachineState, ScanProgress, ScanState, ScanStateChanged, engine_event,
     };
     use ratatui::backend::TestBackend;
 
@@ -126,11 +133,25 @@ mod tests {
             engine(11, 4, state_changed(ScanState::Cancelled, "scan cancelled")),
             engine(
                 12,
-                4,
+                0,
+                engine_event::Body::ScanFinalized(ScanFinalized {
+                    checkpoint: Some(ScanCheckpointEvidence {
+                        profile: "standard".into(),
+                        machine_state: ScanMachineState::Cancelled as i32,
+                        ..Default::default()
+                    }),
+                    reason: "scan cancelled".into(),
+                    ..Default::default()
+                }),
+            ),
+            engine(
+                13,
+                0,
                 engine_event::Body::ScanCancelled(ScanCancelled {
                     reason: "script complete".into(),
                 }),
             ),
+            key('q'),
             UiEvent::DriverExited(Ok(())),
         ];
         let mut source = ScriptedEventSource::new(events);
@@ -163,6 +184,7 @@ mod tests {
                 event_sequence: 1,
                 request_id: 99,
                 body: None,
+                ..Default::default()
             })),
             UiEvent::DriverExited(Ok(())),
         ];
@@ -191,6 +213,10 @@ mod tests {
             Ok(())
         }
 
+        fn send_plan(&mut self, _command: PlanCommand) -> io::Result<()> {
+            Ok(())
+        }
+
         fn stop(&mut self) -> io::Result<()> {
             self.stopped = true;
             Ok(())
@@ -211,6 +237,7 @@ mod tests {
             event_sequence: sequence,
             request_id,
             body: Some(body),
+            ..Default::default()
         }))
     }
 

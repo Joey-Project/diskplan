@@ -1,0 +1,165 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* main.swift */; };
+		100000000000000000000002 /* FileProviderExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* FileProviderExtension.swift */; };
+		100000000000000000000003 /* FixtureItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* FixtureItem.swift */; };
+		100000000000000000000004 /* FixtureEnumerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* FixtureEnumerator.swift */; };
+		100000000000000000000005 /* DiskplanFileProviderFixtureExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* DiskplanFileProviderFixtureExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		100000000000000000000006 /* DiskplanMacOS in Frameworks */ = {isa = PBXBuildFile; productRef = 900000000000000000000001 /* DiskplanMacOS */; };
+		100000000000000000000007 /* DiskplanFileProviderFixtureSupport in Host Frameworks */ = {isa = PBXBuildFile; productRef = 900000000000000000000002 /* DiskplanFileProviderFixtureSupport */; };
+		100000000000000000000008 /* DiskplanFileProviderFixtureSupport in Extension Frameworks */ = {isa = PBXBuildFile; productRef = 900000000000000000000003 /* DiskplanFileProviderFixtureSupport */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		300000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 700000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 800000000000000000000002;
+			remoteInfo = DiskplanFileProviderFixtureExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		400000000000000000000001 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (100000000000000000000005 /* DiskplanFileProviderFixtureExtension.appex in Embed App Extensions */, );
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		200000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		200000000000000000000002 /* FileProviderExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderExtension.swift; sourceTree = "<group>"; };
+		200000000000000000000003 /* FixtureItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureItem.swift; sourceTree = "<group>"; };
+		200000000000000000000004 /* FixtureEnumerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureEnumerator.swift; sourceTree = "<group>"; };
+		200000000000000000000005 /* DiskplanFileProviderFixture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DiskplanFileProviderFixture.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000006 /* DiskplanFileProviderFixtureExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DiskplanFileProviderFixtureExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000007 /* Host Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		200000000000000000000008 /* Host.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Host.entitlements; sourceTree = "<group>"; };
+		200000000000000000000009 /* Extension Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		20000000000000000000000A /* Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Extension.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		500000000000000000000001 /* Host Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000006, 100000000000000000000007, ); runOnlyForDeploymentPostprocessing = 0; };
+		500000000000000000000002 /* Extension Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000008, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		600000000000000000000001 = {
+			isa = PBXGroup;
+			children = (600000000000000000000002 /* Host */, 600000000000000000000003 /* Extension */, 600000000000000000000004 /* Products */, );
+			sourceTree = "<group>";
+		};
+		600000000000000000000002 /* Host */ = {
+			isa = PBXGroup;
+			children = (200000000000000000000001 /* main.swift */, 200000000000000000000007 /* Host Info.plist */, 200000000000000000000008 /* Host.entitlements */, );
+			path = Host;
+			sourceTree = "<group>";
+		};
+		600000000000000000000003 /* Extension */ = {
+			isa = PBXGroup;
+			children = (200000000000000000000002 /* FileProviderExtension.swift */, 200000000000000000000003 /* FixtureItem.swift */, 200000000000000000000004 /* FixtureEnumerator.swift */, 200000000000000000000009 /* Extension Info.plist */, 20000000000000000000000A /* Extension.entitlements */, );
+			path = Extension;
+			sourceTree = "<group>";
+		};
+		600000000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (200000000000000000000005 /* DiskplanFileProviderFixture.app */, 200000000000000000000006 /* DiskplanFileProviderFixtureExtension.appex */, );
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		800000000000000000000001 /* DiskplanFileProviderFixture */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000001 /* Build configuration list for PBXNativeTarget */;
+			buildPhases = (B00000000000000000000001 /* Sources */, 500000000000000000000001 /* Host Frameworks */, 400000000000000000000001 /* Embed App Extensions */, );
+			buildRules = ();
+			dependencies = (C00000000000000000000001 /* Extension dependency */, );
+			name = DiskplanFileProviderFixture;
+			packageProductDependencies = (900000000000000000000001 /* DiskplanMacOS */, 900000000000000000000002 /* DiskplanFileProviderFixtureSupport */, );
+			productName = DiskplanFileProviderFixture;
+			productReference = 200000000000000000000005 /* DiskplanFileProviderFixture.app */;
+			productType = "com.apple.product-type.application";
+		};
+		800000000000000000000002 /* DiskplanFileProviderFixtureExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000002 /* Build configuration list for PBXNativeTarget */;
+			buildPhases = (B00000000000000000000002 /* Sources */, 500000000000000000000002 /* Extension Frameworks */, );
+			buildRules = ();
+			dependencies = ();
+			name = DiskplanFileProviderFixtureExtension;
+			packageProductDependencies = (900000000000000000000003 /* DiskplanFileProviderFixtureSupport */, );
+			productName = DiskplanFileProviderFixtureExtension;
+			productReference = 200000000000000000000006 /* DiskplanFileProviderFixtureExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		700000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2660; LastUpgradeCheck = 2660; TargetAttributes = {800000000000000000000001 = {CreatedOnToolsVersion = 26.6; }; 800000000000000000000002 = {CreatedOnToolsVersion = 26.6; }; }; };
+			buildConfigurationList = A00000000000000000000003 /* Build configuration list for PBXProject */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base, );
+			mainGroup = 600000000000000000000001;
+			packageReferences = (D00000000000000000000001 /* XCLocalSwiftPackageReference "../.." */, );
+			productRefGroup = 600000000000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (800000000000000000000001, 800000000000000000000002, );
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B00000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, ); runOnlyForDeploymentPostprocessing = 0; };
+		B00000000000000000000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000002, 100000000000000000000003, 100000000000000000000004, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C00000000000000000000001 /* Extension dependency */ = {isa = PBXTargetDependency; target = 800000000000000000000002 /* DiskplanFileProviderFixtureExtension */; targetProxy = 300000000000000000000001 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		E00000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = Host/Host.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = XCTTZ89923; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Host/Info.plist; MACOSX_DEPLOYMENT_TARGET = 14.0; OTHER_SWIFT_FLAGS = "-parse-as-library"; PRODUCT_BUNDLE_IDENTIFIER = com.joeyteng.diskplan.fileprovider-fixture; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = Debug; };
+		E00000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = Host/Host.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = XCTTZ89923; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Host/Info.plist; MACOSX_DEPLOYMENT_TARGET = 14.0; OTHER_SWIFT_FLAGS = "-parse-as-library"; PRODUCT_BUNDLE_IDENTIFIER = com.joeyteng.diskplan.fileprovider-fixture; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = Release; };
+		E00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = Extension/Extension.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = XCTTZ89923; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Extension/Info.plist; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.joeyteng.diskplan.fileprovider-fixture.extension; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = Debug; };
+		E00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = Extension/Extension.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = XCTTZ89923; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Extension/Info.plist; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.joeyteng.diskplan.fileprovider-fixture.extension; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = Release; };
+		E00000000000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Debug; };
+		E00000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (E00000000000000000000001, E00000000000000000000002, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A00000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (E00000000000000000000003, E00000000000000000000004, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A00000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (E00000000000000000000005, E00000000000000000000006, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D00000000000000000000001 /* XCLocalSwiftPackageReference "../.." */ = {isa = XCLocalSwiftPackageReference; relativePath = ../..; };
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		900000000000000000000001 /* DiskplanMacOS */ = {isa = XCSwiftPackageProductDependency; package = D00000000000000000000001; productName = DiskplanMacOS; };
+		900000000000000000000002 /* DiskplanFileProviderFixtureSupport */ = {isa = XCSwiftPackageProductDependency; package = D00000000000000000000001; productName = DiskplanFileProviderFixtureSupport; };
+		900000000000000000000003 /* DiskplanFileProviderFixtureSupport */ = {isa = XCSwiftPackageProductDependency; package = D00000000000000000000001; productName = DiskplanFileProviderFixtureSupport; };
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 700000000000000000000001 /* Project object */;
+}
