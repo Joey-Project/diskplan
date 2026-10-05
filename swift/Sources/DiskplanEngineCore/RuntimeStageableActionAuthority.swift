@@ -7,6 +7,7 @@ import Foundation
 
 enum RuntimeStageableActionConfigurationState: Sendable {
   case unavailable(RuntimeAuthorityReason)
+  case policyUnavailable(RuntimeAuthorityReason, FrozenRulesPolicyInputsDigest)
   case ready(RuntimeStageableActionAuthority)
 
   var bindingBytes: Data {
@@ -15,6 +16,13 @@ enum RuntimeStageableActionConfigurationState: Sendable {
       return runtimeStageableBinding(
         domain: "diskplan/runtime-stageable-configuration/v1\0",
         parts: [Data("unavailable".utf8), Data(reason.rawValue.utf8)]
+      )
+    case .policyUnavailable(let reason, let inputBinding):
+      return runtimeStageableBinding(
+        domain: "diskplan/runtime-stageable-configuration/v2\0",
+        parts: [
+          Data("policy-unavailable".utf8), Data(reason.rawValue.utf8), inputBinding.bytes,
+        ]
       )
     case .ready(let authority):
       return authority.bindingBytes
@@ -30,17 +38,23 @@ struct RuntimeStageableActionAuthority: Sendable {
   let cacheRootIdentity: DiskplanScan.ObjectIdentity
   let effectiveUserID: UInt32
   let rootBinding: PolicyDigest
+  let rulesInputsBinding: FrozenRulesPolicyInputsDigest?
+  let mutationEligible: Bool
 
   init(
     rules: RulesConfiguration,
     rawCacheRoot: Data,
     cacheRootIdentity: DiskplanScan.ObjectIdentity,
-    effectiveUserID: UInt32
+    effectiveUserID: UInt32,
+    rulesInputsBinding: FrozenRulesPolicyInputsDigest? = nil,
+    mutationEligible: Bool = true
   ) {
     self.rules = rules
     self.rawCacheRoot = rawCacheRoot
     self.cacheRootIdentity = cacheRootIdentity
     self.effectiveUserID = effectiveUserID
+    self.rulesInputsBinding = rulesInputsBinding
+    self.mutationEligible = mutationEligible
     rootBinding = runtimeStageablePolicyDigest(
       domain: "diskplan/system-user-cache-root/v1\0",
       parts: [
@@ -54,7 +68,18 @@ struct RuntimeStageableActionAuthority: Sendable {
   }
 
   var bindingBytes: Data {
-    runtimeStageableBinding(
+    if rulesInputsBinding != nil || !mutationEligible {
+      return runtimeStageableBinding(
+        domain: "diskplan/runtime-stageable-configuration/v2\0",
+        parts: [
+          Data("ready".utf8), Data(Self.adapterID.utf8), rawCacheRoot,
+          rootBinding.bytes, rules.effectiveDigest.bytes,
+          runtimeStageableUInt64(UInt64(effectiveUserID)), rulesInputsBinding?.bytes ?? Data(),
+          Data([mutationEligible ? 1 : 0]),
+        ]
+      )
+    }
+    return runtimeStageableBinding(
       domain: "diskplan/runtime-stageable-configuration/v1\0",
       parts: [
         Data("ready".utf8), Data(Self.adapterID.utf8), rawCacheRoot,
@@ -65,7 +90,7 @@ struct RuntimeStageableActionAuthority: Sendable {
   }
 
   var genericRemoveEnabled: Bool {
-    rules.user.enabledAdapters.contains(.genericRemove)
+    mutationEligible && rules.user.enabledAdapters.contains(.genericRemove)
   }
 
   func isExactCacheRoot(_ root: RootScanResult) -> Bool {
@@ -80,6 +105,29 @@ struct RuntimeStageableActionAuthority: Sendable {
       return rawComponents($0.components, prefix: target)
         || rawComponents(target, prefix: $0.components)
     }
+  }
+
+  static func production(
+    policyInputs: FrozenRulesPolicyInputs
+  ) -> RuntimeStageableActionConfigurationState {
+    // Keep recognition available for a rejected overlay, but never infer mutation
+    // eligibility from its planning fallback. Bind the complete input snapshot.
+    guard let rules = policyInputs.planningConfiguration else {
+      return .policyUnavailable(.rulesConfigurationUnavailable, policyInputs.bindingDigest)
+    }
+    guard let discovery = discoverSystemUserCacheRoot() else {
+      return .policyUnavailable(.systemCacheRootUnavailable, policyInputs.bindingDigest)
+    }
+    return .ready(
+      Self(
+        rules: rules,
+        rawCacheRoot: discovery.rawPath,
+        cacheRootIdentity: discovery.identity,
+        effectiveUserID: geteuid(),
+        rulesInputsBinding: policyInputs.bindingDigest,
+        mutationEligible: policyInputs.mutationConfiguration != nil
+      )
+    )
   }
 
   static func production(

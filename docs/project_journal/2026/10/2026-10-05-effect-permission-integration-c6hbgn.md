@@ -268,6 +268,21 @@ receipts; those receipts do not transfer to the subsequent combined head.
 
 ## Known Integration Gaps
 
+The next published additive head `91d64fd7fc5b526a12b648dcc2ab3621c4fe4c62`
+passed Swift tests and Rust tests in required Foundation job `111801640281`
+(run `37321562135`), then failed strict Clippy at the new canonical consent
+negative test's single-arm `match`. Later fixture/process steps were skipped,
+not successful. The frontend/core owner is correcting that lint error without
+changing the negative assertions. The bounded exact-job log fetch exited 0,
+was quiescent and has SHA-256
+`44d2a194ce91cf79de85b177332bbe35f680b01a086f904f91815743cb609ebd`.
+Earlier escape-sequence-rejected fetch attempts are not valid CI-log receipts.
+
+The separate [runtime frozen Rules configuration slice](2026-10-05-runtime-frozen-rules-5732ba.md)
+binds complete input intent and separates planning from mutation eligibility.
+Its six India configuration-mechanism tests pass; production session callers
+and private installed-engine acceptance remain pending.
+
 The committed production session currently constructs an unconfigured cache
 authority; fixture positive paths do not prove installed production wiring.
 Provider traversal decisions are also conflated with ownership facts in current
