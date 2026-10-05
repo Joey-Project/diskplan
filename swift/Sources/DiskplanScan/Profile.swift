@@ -30,13 +30,27 @@ public struct StructuralBudget: Equatable, Sendable {
   }
 }
 
+package enum ScanRootOrigin: String, Equatable, Sendable {
+  case explicitRequest = "explicit-request"
+  case foundationUserCache = "foundation-user-cache"
+  case systemDiscoveredOther = "system-discovered-other"
+}
+
 public struct ScanRootRequest: Equatable, Sendable {
   public let rootID: String
   public let rawAbsolutePath: Data
+  package let origin: ScanRootOrigin
 
   public init(rootID: String, rawAbsolutePath: Data) {
     self.rootID = rootID
     self.rawAbsolutePath = rawAbsolutePath
+    origin = .explicitRequest
+  }
+
+  package init(rootID: String, rawAbsolutePath: Data, origin: ScanRootOrigin) {
+    self.rootID = rootID
+    self.rawAbsolutePath = rawAbsolutePath
+    self.origin = origin
   }
 }
 

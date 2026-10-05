@@ -1,5 +1,6 @@
 import CryptoKit
 import DiskplanPolicy
+import DiskplanRules
 import DiskplanScan
 import Foundation
 
@@ -23,6 +24,8 @@ public enum RuntimeCandidateKind: String, CaseIterable, Equatable, Sendable {
 public enum RuntimeRecognizerAuthority: String, Equatable, Sendable {
   case structural
   case nameOnlyTypeHint
+  case rootRelativeCandidate
+  case systemUserCache = "system_user_cache"
 }
 
 public struct AuthorityRetentionBudget: Equatable, Sendable {
@@ -181,10 +184,12 @@ private struct AuthorityScanResult: Sendable {
 public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked Sendable {
   private let lock = NSLock()
   private let budget: AuthorityRetentionBudget
+  private let retainedRootDirectChildRootIDs: Set<String>
   private let namespaceByteBudget: Int
   private let sharedKeyByteBudget: Int
   private let ownerByteBudget: Int
   private var openDirectories: [RawPath: ScannedNode] = [:]
+  private var gitRepositoryRootIDs = Set<String>()
   private var openDirectoryBytes = 0
   private var candidates: [RawPath: AuthorityCandidateRecord] = [:]
   private var candidateHeap: [RawPath] = []
@@ -203,8 +208,12 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
   private var corpusIssuesOmitted: UInt64 = 0
   private var topologyCoverageIncomplete = false
 
-  public init(budget: AuthorityRetentionBudget) {
+  public init(
+    budget: AuthorityRetentionBudget,
+    retainedRootDirectChildRootIDs: Set<String> = []
+  ) {
     self.budget = budget
+    self.retainedRootDirectChildRootIDs = retainedRootDirectChildRootIDs
     let retainedBudget = budget.maximumRetainedEvidenceBytes
     namespaceByteBudget = retainedBudget / 3
     sharedKeyByteBudget = retainedBudget / 6
@@ -222,6 +231,18 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
     )
   }
 
+  public convenience init(retainedRootDirectChildRootIDs: Set<String>) {
+    self.init(
+      budget: AuthorityRetentionBudget(
+        maximumCandidateSummaries: 250_000,
+        maximumSharedObjectKeys: 2_000_000,
+        maximumOwnerReferences: 5_000_000,
+        maximumEstimatedBytes: AuthorityRetentionBudget.maximumAcceptedBytes
+      ),
+      retainedRootDirectChildRootIDs: retainedRootDirectChildRootIDs
+    )
+  }
+
   public convenience init(scope: ResolvedScanScope) {
     self.init(budget: .accepted(for: scope))
   }
@@ -234,30 +255,18 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
       if node.identity.value == nil { topologyCoverageIncomplete = true }
       if node.identity.value?.objectType == .directory || node.identity.value == nil {
         retainOpenDirectory(node)
-        if let kind = nameOnlyKind(for: node) {
+        if let (kind, authority) = candidateRouteForRetention(node) {
           upsertCandidate(
             node: node,
             isClosed: false,
             kind: kind,
-            authority: .nameOnlyTypeHint
+            authority: authority
           )
         }
+        retainGitWorktreeCandidateIfNeeded(node)
       } else if node.identity.value?.objectType == .regular {
         retainSharedObservationIfNeeded(node)
-        if asciiLowercased(node.path.components.last?.bytes ?? Data()) == Data(".git".utf8) {
-          let parentPath = RawPath(
-            rootID: node.path.rootID,
-            components: Array(node.path.components.dropLast())
-          )
-          if let parent = openDirectories[parentPath] ?? candidates[parentPath]?.node {
-            upsertCandidate(
-              node: parent,
-              isClosed: candidates[parentPath]?.isClosed ?? false,
-              kind: .gitLinkedWorktree,
-              authority: .structural
-            )
-          }
-        }
+        retainGitWorktreeCandidateIfNeeded(node)
       }
     case .directoryClosed(let node):
       guard node.identity.value?.objectType == .directory else {
@@ -266,12 +275,12 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
       }
       guard let previous = openDirectories[node.path] else {
         retainIssue(.directoryCloseWithoutObservation(node.path))
-        if let kind = nameOnlyKind(for: node) {
+        if let (kind, authority) = candidateRouteForRetention(node) {
           upsertCandidate(
             node: node,
             isClosed: false,
             kind: kind,
-            authority: .nameOnlyTypeHint
+            authority: authority
           )
         }
         return
@@ -293,12 +302,12 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
           kind: retained.kind,
           authority: retained.recognizerAuthority
         )
-      } else if let kind = nameOnlyKind(for: node) {
+      } else if let (kind, authority) = candidateRouteForRetention(node) {
         upsertCandidate(
           node: node,
           isClosed: true,
           kind: kind,
-          authority: .nameOnlyTypeHint
+          authority: authority
         )
       }
     }
@@ -640,6 +649,52 @@ public final class BoundedAuthorityEvidenceAccumulator: ScanNodeSink, @unchecked
     retainedIssues.append(issue)
     issueBytes += estimate
   }
+
+  private func retainGitWorktreeCandidateIfNeeded(_ node: ScannedNode) {
+    guard asciiLowercased(node.path.components.last?.bytes ?? Data()) == Data(".git".utf8)
+    else { return }
+    let parentPath = RawPath(
+      rootID: node.path.rootID,
+      components: Array(node.path.components.dropLast())
+    )
+    if parentPath.components.isEmpty {
+      gitRepositoryRootIDs.insert(node.path.rootID)
+      let rootRecords = candidates.values.filter {
+        $0.node.path.rootID == node.path.rootID
+          && $0.node.path.components.count == 1
+      }
+      for record in rootRecords {
+        upsertCandidate(
+          node: record.node,
+          isClosed: record.isClosed,
+          kind: .gitLinkedWorktree,
+          authority: .structural
+        )
+      }
+      return
+    }
+    guard let parent = openDirectories[parentPath] ?? candidates[parentPath]?.node else { return }
+    upsertCandidate(
+      node: parent,
+      isClosed: candidates[parentPath]?.isClosed ?? false,
+      kind: .gitLinkedWorktree,
+      authority: .structural
+    )
+  }
+
+  private func candidateRouteForRetention(
+    _ node: ScannedNode
+  ) -> (RuntimeCandidateKind, RuntimeRecognizerAuthority)? {
+    if gitRepositoryRootIDs.contains(node.path.rootID), node.path.components.count == 1,
+      node.identity.value?.objectType == .directory
+    {
+      return (.gitLinkedWorktree, .structural)
+    }
+    return candidateRoute(
+      for: node,
+      retainedRootDirectChildRootIDs: retainedRootDirectChildRootIDs
+    )
+  }
 }
 
 private func nameOnlyKind(for node: ScannedNode) -> RuntimeCandidateKind? {
@@ -658,6 +713,20 @@ private func nameOnlyKind(for node: ScannedNode) -> RuntimeCandidateKind? {
   if cacheNames.contains(folded) { return .cache }
   if temporaryNames.contains(folded) { return .temporary }
   return nil
+}
+
+private func candidateRoute(
+  for node: ScannedNode,
+  retainedRootDirectChildRootIDs: Set<String>
+) -> (RuntimeCandidateKind, RuntimeRecognizerAuthority)? {
+  if let kind = nameOnlyKind(for: node) { return (kind, .nameOnlyTypeHint) }
+  guard retainedRootDirectChildRootIDs.contains(node.path.rootID),
+    node.identity.value?.objectType == .directory,
+    node.path.components.count == 1
+  else {
+    return nil
+  }
+  return (.cache, .rootRelativeCandidate)
 }
 
 private func candidateRetentionPrecedes(
@@ -1160,6 +1229,12 @@ public enum RuntimeAuthorityReason: String, CaseIterable, Equatable, Hashable, S
   case providerManaged = "provider_managed"
   case providerStateUnavailable = "provider_state_unavailable"
   case recoverabilityProvenanceUnavailable = "recoverability_provenance_unavailable"
+  case rulesConfigurationUnavailable = "rules_configuration_unavailable"
+  case genericRemoveDisabled = "generic_remove_disabled"
+  case protectedByRule = "protected_by_rule"
+  case systemCacheRootUnavailable = "system_cache_root_unavailable"
+  case subtreePreflightUnavailable = "subtree_preflight_unavailable"
+  case subtreeAccessUnsafe = "subtree_access_unsafe"
   case rootCoverageIncomplete = "root_coverage_incomplete"
   case rootNamespaceSealUnavailable = "root_namespace_seal_unavailable"
   case releaseGraphIncomplete = "release_graph_incomplete"
@@ -1353,11 +1428,21 @@ enum RuntimePolicyAuthoritySessionError: Error, Equatable {
 final class RuntimePolicyAuthoritySession: ScanNodeSink, @unchecked Sendable {
   private let lock = NSLock()
   private let accumulator: BoundedAuthorityEvidenceAccumulator
+  private let policyAuthority: RuntimePolicyAuthority
   private var finalized: BoundedAuthorityFinalization?
 
-  init(scope: ResolvedScanScope, budget: AuthorityRetentionBudget? = nil) {
+  init(
+    scope: ResolvedScanScope,
+    budget: AuthorityRetentionBudget? = nil,
+    policyAuthority: RuntimePolicyAuthority = RuntimePolicyAuthority()
+  ) {
+    self.policyAuthority = policyAuthority
+    let retainedRootDirectChildRootIDs = Set(
+      scope.roots.filter(policyAuthority.retainsRootDirectChildren).map(\.rootID)
+    )
     accumulator = BoundedAuthorityEvidenceAccumulator(
-      budget: budget ?? .accepted(for: scope)
+      budget: budget ?? .accepted(for: scope),
+      retainedRootDirectChildRootIDs: retainedRootDirectChildRootIDs
     )
   }
 
@@ -1390,7 +1475,7 @@ final class RuntimePolicyAuthoritySession: ScanNodeSink, @unchecked Sendable {
     let finalized = self.finalized
     lock.unlock()
     guard let finalized else { throw RuntimePolicyAuthoritySessionError.scanNotFinalized }
-    return try RuntimePolicyAuthority().makePlan(
+    return try policyAuthority.makePlan(
       scanResult: finalized.result,
       evidence: finalized.evidence,
       authorityConfiguration: finalized.authorityConfiguration
@@ -1403,8 +1488,29 @@ public struct RuntimePolicyAuthority: Sendable {
   public static let schemaVersion = "schema-1"
 
   private let adapter = ProductionPolicyEvidenceAdapter()
+  private let stageableActionConfiguration: RuntimeStageableActionConfigurationState
 
-  public init() {}
+  func retainsRootDirectChildren(_ root: ScanRootRequest) -> Bool {
+    guard case .ready(let authority) = stageableActionConfiguration else { return false }
+    return root.origin == .foundationUserCache && root.rawAbsolutePath == authority.rawCacheRoot
+  }
+
+  public init() {
+    stageableActionConfiguration = .unavailable(.rulesConfigurationUnavailable)
+  }
+
+  /// Loads only canonical rule bytes. System cache-root discovery remains Engine-owned and cannot
+  /// be supplied by a client root ID or path claim.
+  public init(bundledRulesData: Data?, userPolicyData: Data?) {
+    stageableActionConfiguration = RuntimeStageableActionAuthority.production(
+      bundledRulesData: bundledRulesData,
+      userPolicyData: userPolicyData
+    )
+  }
+
+  init(testingStageableActionAuthority authority: RuntimeStageableActionAuthority) {
+    stageableActionConfiguration = .ready(authority)
+  }
 
   public func makePlan(
     scanResult: ScanResult,
@@ -1426,7 +1532,10 @@ public struct RuntimePolicyAuthority: Sendable {
     let globalFacts = try freezeGlobalFacts(
       scanResult: scanResult,
       evidence: evidence,
-      authorityConfiguration: authorityConfiguration
+      authorityConfiguration: runtimeStageableAuthorityConfigurationBinding(
+        scanConfiguration: authorityConfiguration,
+        stageableConfiguration: stageableActionConfiguration
+      )
     )
     let context = EvidenceFreezeContext(globalFacts: globalFacts)
     let rootResultByID = Dictionary(
@@ -1437,9 +1546,15 @@ public struct RuntimePolicyAuthority: Sendable {
         ($0.rootID, $0.rawAbsolutePath)
       }
     )
+    let rootOriginByID = Dictionary(
+      uniqueKeysWithValues: scanResult.reference.resolvedScope.roots.map {
+        ($0.rootID, $0.origin)
+      }
+    )
     let candidates = recognizeCandidates(
       rootResultByID: rootResultByID,
       rawRootByID: rawRootByID,
+      rootOriginByID: rootOriginByID,
       evidence: evidence
     )
     var candidateByID: [Data: RecognizedRuntimeCandidate] = [:]
@@ -1502,7 +1617,32 @@ public struct RuntimePolicyAuthority: Sendable {
       }
       if candidate.kind == .providerReportOnly
         || candidate.recognizerAuthority == .nameOnlyTypeHint
+        || candidate.recognizerAuthority == .rootRelativeCandidate
       {
+        continue
+      }
+      guard candidate.recognizerAuthority == .systemUserCache,
+        case .ready(let stageableAuthority) = stageableActionConfiguration
+      else { continue }
+      guard stageableAuthority.genericRemoveEnabled else {
+        reasonsByCandidate[key, default: []].append(.genericRemoveDisabled)
+        continue
+      }
+      guard !stageableAuthority.protects(candidate) else {
+        reasonsByCandidate[key, default: []].append(.protectedByRule)
+        continue
+      }
+      switch removalPreflightDecision(
+        candidate.node.removalPreflight,
+        effectiveUserID: stageableAuthority.effectiveUserID
+      ) {
+      case .safe:
+        break
+      case .unsafe:
+        reasonsByCandidate[key, default: []].append(.subtreeAccessUnsafe)
+        continue
+      case .unavailable:
+        reasonsByCandidate[key, default: []].append(.subtreePreflightUnavailable)
         continue
       }
       do {
@@ -1676,26 +1816,49 @@ public struct RuntimePolicyAuthority: Sendable {
   private func recognizeCandidates(
     rootResultByID: [String: RootScanResult],
     rawRootByID: [String: Data],
+    rootOriginByID: [String: ScanRootOrigin],
     evidence: AuthorityEvidenceSnapshot
   ) -> [RecognizedRuntimeCandidate] {
     let paths = evidence.candidatesByPath.keys.sorted()
-    let recognized = paths.map { path -> RecognizedRuntimeCandidate in
+    let recognized = paths.compactMap { path -> RecognizedRuntimeCandidate? in
       let record = evidence.candidatesByPath[path]!
       let node = record.node
-      let kind = record.kind
+      let rootResult = rootResultByID[node.path.rootID]
+      if isExactSystemCacheRootAlias(
+        node,
+        rawRootByID: rawRootByID,
+        rootOriginByID: rootOriginByID
+      ) {
+        return nil
+      }
+      let hasSystemCacheAuthority: Bool = {
+        guard case .ready(let authority) = stageableActionConfiguration,
+          let rootResult,
+          authority.isExactCacheRoot(rootResult),
+          rootOriginByID[node.path.rootID] == .foundationUserCache,
+          node.path.components.count == 1,
+          node.identity.value?.objectType == .directory,
+          record.kind != .gitLinkedWorktree,
+          record.kind != .codexTemporary
+        else { return false }
+        return true
+      }()
+      let kind: RuntimeCandidateKind = hasSystemCacheAuthority ? .cache : record.kind
       let rootBoundary = rootResultByID[node.path.rootID]?.providerBoundary
       let ancestorBoundaries = record.ancestors.map(\.providerBoundary)
       var boundaries = ancestorBoundaries + [node.providerBoundary]
       if let rootBoundary { boundaries.append(rootBoundary) }
       let providerReportOnly = boundaries.contains(where: isProviderManaged)
       let effectiveKind: RuntimeCandidateKind = providerReportOnly ? .providerReportOnly : kind
+      let effectiveAuthority: RuntimeRecognizerAuthority =
+        hasSystemCacheAuthority ? .systemUserCache : record.recognizerAuthority
       let scope = adapterScope(
         kind: effectiveKind,
         node: node,
-        authority: record.recognizerAuthority
+        authority: effectiveAuthority
       )
       var reasons: [RuntimeAuthorityReason] = providerReportOnly ? [.providerManaged] : []
-      if record.recognizerAuthority == .nameOnlyTypeHint {
+      if record.recognizerAuthority == .nameOnlyTypeHint && !hasSystemCacheAuthority {
         reasons.append(.nameOnlyTypeHint)
         reasons.append(.recoverabilityProvenanceUnavailable)
       }
@@ -1707,15 +1870,31 @@ public struct RuntimePolicyAuthority: Sendable {
         adapterScope: scope,
         classificationClaims: classificationClaims(
           kind: effectiveKind,
-          authority: record.recognizerAuthority
+          authority: effectiveAuthority,
+          stageableActionConfiguration: stageableActionConfiguration
         ),
         reasons: reasons,
         ancestors: record.ancestors,
         isClosed: record.isClosed,
-        recognizerAuthority: record.recognizerAuthority
+        recognizerAuthority: effectiveAuthority
       )
     }
     return recognized.sorted(by: recognizedCandidatePrecedes)
+  }
+
+  private func isExactSystemCacheRootAlias(
+    _ node: ScannedNode,
+    rawRootByID: [String: Data],
+    rootOriginByID: [String: ScanRootOrigin]
+  ) -> Bool {
+    guard case .ready(let authority) = stageableActionConfiguration,
+      rootOriginByID[node.path.rootID] != .foundationUserCache,
+      let rawRoot = rawRootByID[node.path.rootID],
+      joinAbsolutePath(root: rawRoot, components: node.path.components.map(\.bytes))
+        == authority.rawCacheRoot,
+      node.identity.value == authority.cacheRootIdentity
+    else { return false }
+    return true
   }
 
   private func makeCandidateEvidence(
@@ -1725,9 +1904,17 @@ public struct RuntimePolicyAuthority: Sendable {
     evidence: AuthorityEvidenceSnapshot,
     ownerIndex: RuntimeReleaseOwnerIndex
   ) throws -> ScannerPolicyCandidateEvidence {
+    let stageableAuthority: RuntimeStageableActionAuthority? = {
+      guard candidate.recognizerAuthority == .systemUserCache,
+        case .ready(let authority) = stageableActionConfiguration,
+        authority.isExactCacheRoot(rootResult)
+      else { return nil }
+      return authority
+    }()
     let namespace = try makeNamespaceBinding(
       candidate: candidate,
-      root: rootResult
+      root: rootResult,
+      effectiveUserID: stageableAuthority?.effectiveUserID
     )
     var reasons = candidate.reasons
     if !evidence.issues.isEmpty { reasons.append(.corpusIntegrityFailure) }
@@ -1791,6 +1978,23 @@ public struct RuntimePolicyAuthority: Sendable {
     if recoverability.knownValue == nil {
       reasons.append(.recoverabilityProvenanceUnavailable)
     }
+    let preflight = stageableAuthority.map {
+      removalPreflightDecision(
+        candidate.node.removalPreflight,
+        effectiveUserID: $0.effectiveUserID
+      )
+    }
+    if preflight == .unsafe { reasons.append(.subtreeAccessUnsafe) }
+    if preflight == .unavailable { reasons.append(.subtreePreflightUnavailable) }
+    if case .unavailable(let reason) = stageableActionConfiguration,
+      candidate.recognizerAuthority != .systemUserCache
+    {
+      reasons.append(reason)
+    }
+    if let stageableAuthority {
+      if !stageableAuthority.genericRemoveEnabled { reasons.append(.genericRemoveDisabled) }
+      if stageableAuthority.protects(candidate) { reasons.append(.protectedByRule) }
+    }
     return ScannerPolicyCandidateEvidence(
       candidate: candidate,
       namespaceBinding: namespace,
@@ -1799,9 +2003,11 @@ public struct RuntimePolicyAuthority: Sendable {
       collectorStatus: collectorComplete
         ? .known(.complete) : .unknown(.incompleteCoverage),
       activity: activity,
-      explicitProtection: mapProtection(candidate.node.accessPolicy),
+      explicitProtection: stageableAuthority?.protects(candidate) == true
+        ? .known(.protected) : mapProtection(candidate.node.accessPolicy),
       providerState: provider,
-      recoverability: recoverability,
+      recoverability: candidate.recognizerAuthority == .systemUserCache
+        ? .known(.recoverable) : recoverability,
       recoverabilityReviewFacts: recoveryFacts,
       dependencyState: dependencyComplete
         ? .known(.complete) : .unknown(.incompleteCoverage),
@@ -1809,22 +2015,30 @@ public struct RuntimePolicyAuthority: Sendable {
       contentProtection: mapContentProtection(candidate.node),
       aclDigest: aclDigest,
       targetMountIdentity: mapMountIdentity(candidate.node.identity),
-      removalForceRequirement: mapForceRequirement(candidate.node.accessPolicy),
+      removalForceRequirement: preflight?.forceRequirement
+        ?? mapForceRequirement(candidate.node.accessPolicy),
       authorityReasons: Array(Set(reasons)).sorted { $0.rawValue < $1.rawValue }
     )
   }
 
   private func makeNamespaceBinding(
     candidate: RecognizedRuntimeCandidate,
-    root: RootScanResult
+    root: RootScanResult,
+    effectiveUserID: UInt32?
   ) throws -> ProtectedNamespaceBinding {
-    try makeNamespaceBinding(node: candidate.node, ancestors: candidate.ancestors, root: root)
+    try makeNamespaceBinding(
+      node: candidate.node,
+      ancestors: candidate.ancestors,
+      root: root,
+      effectiveUserID: effectiveUserID
+    )
   }
 
   private func makeNamespaceBinding(
     node: ScannedNode,
     ancestors: [ScannedNode],
-    root: RootScanResult
+    root: RootScanResult,
+    effectiveUserID: UInt32? = nil
   ) throws -> ProtectedNamespaceBinding {
     guard let rootIdentity = mapIdentity(.known(root.binding.identity)).knownValue else {
       throw RuntimePolicyAuthorityError.invalidObjectIdentity(node.path)
@@ -1833,8 +2047,19 @@ public struct RuntimePolicyAuthority: Sendable {
     guard let targetIdentity = mapIdentity(node.identity).knownValue else {
       throw RuntimePolicyAuthorityError.invalidObjectIdentity(node.path)
     }
+    let trustedNamespace: TrustedNamespace = {
+      guard let effectiveUserID,
+        namespaceAccessIsOwnerPrivate(
+          root: root,
+          node: node,
+          ancestors: ancestors,
+          effectiveUserID: effectiveUserID
+        )
+      else { return .unverified }
+      return .ownerPrivate
+    }()
     let rootSeal = NamespaceSealEvidence(
-      trustedNamespace: .unverified,
+      trustedNamespace: trustedNamespace,
       accessPolicy: mapAccessPolicy(root.rootAccessPolicy),
       aclDigest: mapACLDigest(root.rootAccessPolicy),
       providerBoundary: mapProviderBoundary(root.providerBoundary),
@@ -1850,7 +2075,7 @@ public struct RuntimePolicyAuthority: Sendable {
           relativePath: try RawTargetPath(components: components.map(\.bytes)),
           identity: identity,
           seal: NamespaceSealEvidence(
-            trustedNamespace: .unverified,
+            trustedNamespace: trustedNamespace,
             accessPolicy: mapAccessPolicy(ancestor.accessPolicy),
             aclDigest: mapACLDigest(ancestor.accessPolicy),
             providerBoundary: mapProviderBoundary(ancestor.providerBoundary),
@@ -1993,7 +2218,18 @@ public struct RuntimePolicyAuthority: Sendable {
         let ancestors = evidence.sharedFileAncestorsByPath[node.path]
       else { continue }
       let canonicalOwnerPath = try RawTargetPath(components: candidateRelativePath)
-      let candidateNamespace = try makeNamespaceBinding(candidate: candidate, root: root)
+      let effectiveUserID: UInt32? = {
+        guard candidate.recognizerAuthority == .systemUserCache,
+          case .ready(let authority) = stageableActionConfiguration,
+          authority.isExactCacheRoot(root)
+        else { return nil }
+        return authority.effectiveUserID
+      }()
+      let candidateNamespace = try makeNamespaceBinding(
+        candidate: candidate,
+        root: root,
+        effectiveUserID: effectiveUserID
+      )
       let namespaceBinding: ProtectedNamespaceBinding
       do {
         namespaceBinding = try makeOwnerNamespaceBinding(
@@ -2264,7 +2500,9 @@ private func adapterScope(
 ) -> AdapterScopeEvidence {
   // A type hint never selects a specialized mutation adapter. In particular,
   // `.codex-tmp` requires configured cleanup-scope evidence not collected here.
-  if authority == .nameOnlyTypeHint { return .genericRemove }
+  if authority == .nameOnlyTypeHint || authority == .rootRelativeCandidate {
+    return .genericRemove
+  }
   switch kind {
   case .codexTemporary:
     return .genericRemove
@@ -2278,11 +2516,35 @@ private func adapterScope(
 
 private func classificationClaims(
   kind: RuntimeCandidateKind,
-  authority: RuntimeRecognizerAuthority
+  authority: RuntimeRecognizerAuthority,
+  stageableActionConfiguration: RuntimeStageableActionConfigurationState
 ) -> [ClassificationClaim] {
   // Path names only select a report-only recognizer route. They do not establish
   // any semantic classification facet, including purpose or recoverability.
-  if authority == .nameOnlyTypeHint || kind == .codexTemporary { return [] }
+  if authority == .nameOnlyTypeHint || authority == .rootRelativeCandidate
+    || kind == .codexTemporary
+  {
+    return []
+  }
+  if authority == .systemUserCache {
+    guard case .ready(let stageable) = stageableActionConfiguration else { return [] }
+    let values: [(ClassificationFacet, String)] = [
+      (.purpose, "ordinary-user-cache"),
+      (.lifecycle, "os-cache-contract"),
+      (.ownership, "effective-user-owned"),
+      (.recoverability, "os-cache-recoverable"),
+    ]
+    return values.map { facet, value in
+      ClassificationClaim(
+        facet: facet,
+        value: value,
+        source: .authoritativeAdapter(RuntimeStageableActionAuthority.adapterID),
+        evidenceKey:
+          "\(RuntimeStageableActionAuthority.adapterID):\(stageable.rootBinding.hex):"
+          + "\(stageable.rules.effectiveDigest.description):\(facet.rawValue)"
+      )
+    }
+  }
   let source: ClassificationSource
   switch kind {
   case .codexTemporary, .gitLinkedWorktree:
@@ -2488,6 +2750,77 @@ private func mapForceRequirement(
   }
 }
 
+private enum RuntimeRemovalPreflightDecision: Equatable {
+  case safe(ForceRequirement)
+  case unsafe
+  case unavailable
+
+  var forceRequirement: DiskplanPolicy.Observation<ForceRequirement> {
+    switch self {
+    case .safe(let value): .known(value)
+    case .unsafe, .unavailable: .unknown(.incompleteCoverage)
+    }
+  }
+}
+
+private func removalPreflightDecision(
+  _ observation: DiskplanScan.Observation<SubtreeRemovalPreflightEvidence>,
+  effectiveUserID: UInt32
+) -> RuntimeRemovalPreflightDecision {
+  guard case .known(let preflight) = observation,
+    case .known(let ownerScope) = preflight.ownerScope,
+    case .known(let groupOrOtherWritable) = preflight.groupOrOtherWritablePresent,
+    case .known(let unsafeACLGrant) = preflight.unsafeACLGrantPresent,
+    case .known(let restrictedFlags) = preflight.restrictedFlagsPresent,
+    case .known(let parentAccessInsufficient) = preflight.parentAccessInsufficient,
+    case .known(let promptStyleUnwritable) = preflight.promptStyleUnwritableEntryPresent
+  else { return .unavailable }
+  guard case .uniform(let ownerUserID) = ownerScope,
+    ownerUserID == effectiveUserID,
+    !groupOrOtherWritable,
+    !unsafeACLGrant,
+    !restrictedFlags,
+    !parentAccessInsufficient
+  else { return .unsafe }
+  return .safe(promptStyleUnwritable ? .requiresForceWithWarning : .notRequired)
+}
+
+private func namespaceAccessIsOwnerPrivate(
+  root: RootScanResult,
+  node: ScannedNode,
+  ancestors: [ScannedNode],
+  effectiveUserID: UInt32
+) -> Bool {
+  guard root.providerBoundary == .localOrUnindicated,
+    node.providerBoundary == .localOrUnindicated,
+    ancestors.allSatisfy({ $0.providerBoundary == .localOrUnindicated }),
+    node.identity.value?.device == root.binding.identity.device,
+    ancestors.allSatisfy({ $0.identity.value?.device == root.binding.identity.device }),
+    ownerPrivateDirectoryAccess(root.rootAccessPolicy, effectiveUserID: effectiveUserID),
+    ownerPrivateDirectoryAccess(node.accessPolicy, effectiveUserID: effectiveUserID),
+    ancestors.allSatisfy({
+      ownerPrivateDirectoryAccess($0.accessPolicy, effectiveUserID: effectiveUserID)
+    })
+  else { return false }
+  return true
+}
+
+private func ownerPrivateDirectoryAccess(
+  _ observation: DiskplanScan.Observation<AccessPolicyEvidence>,
+  effectiveUserID: UInt32
+) -> Bool {
+  guard case .known(let access) = observation,
+    access.ownerUserID == effectiveUserID,
+    access.mode & 0o022 == 0,
+    access.mode & 0o300 == 0o300,
+    access.flags == 0,
+    case .known = access.aclDigest,
+    case .known(let aclGrantSafety) = access.aclGrantSafety,
+    aclGrantSafety == .noExtendedEntries || aclGrantSafety == .denyOnly
+  else { return false }
+  return true
+}
+
 private func mapMountIdentity(
   _ observation: DiskplanScan.Observation<DiskplanScan.ObjectIdentity>
 ) -> DiskplanPolicy.Observation<String> {
@@ -2611,6 +2944,7 @@ private func encodeScanConfiguration(_ reference: ScanReference) -> Data {
   encoder.array(scope.roots) { encoder, root in
     encoder.data(Data(root.rootID.utf8))
     encoder.data(root.rawAbsolutePath)
+    encoder.data(Data(root.origin.rawValue.utf8))
   }
   encoder.data(Data(reference.collectorConfiguration.processActivityCollectorID.utf8))
   encoder.optionalUInt64(reference.collectorConfiguration.processActivityDeadlineNanoseconds)
@@ -2741,6 +3075,32 @@ private func encodeNode(_ node: ScannedNode, into encoder: inout RuntimeAuthorit
     encoder.uint32(policy.ownerGroupID)
     encoder.uint32(policy.mode)
     encoder.uint32(policy.flags)
+    encodeScanObservation(policy.aclDigest, into: &encoder) { encoder, digest in
+      encoder.data(digest.bytes)
+    }
+    encodeScanObservation(policy.aclGrantSafety, into: &encoder) { encoder, safety in
+      encoder.data(Data(safety.rawValue.utf8))
+    }
+  }
+  encodeScanObservation(node.removalPreflight, into: &encoder) { encoder, preflight in
+    encodeScanObservation(preflight.ownerScope, into: &encoder) { encoder, scope in
+      switch scope {
+      case .uniform(let userID):
+        encoder.uint32(0)
+        encoder.uint32(userID)
+      case .multipleOwners:
+        encoder.uint32(1)
+      }
+    }
+    encodeScanObservation(preflight.groupOrOtherWritablePresent, into: &encoder) {
+      $0.bool($1)
+    }
+    encodeScanObservation(preflight.unsafeACLGrantPresent, into: &encoder) { $0.bool($1) }
+    encodeScanObservation(preflight.restrictedFlagsPresent, into: &encoder) { $0.bool($1) }
+    encodeScanObservation(preflight.parentAccessInsufficient, into: &encoder) { $0.bool($1) }
+    encodeScanObservation(preflight.promptStyleUnwritableEntryPresent, into: &encoder) {
+      $0.bool($1)
+    }
   }
   encoder.data(Data(node.coverage.completeness == .complete ? "complete".utf8 : "partial".utf8))
   encoder.array(node.coverage.reasons) { encoder, reason in

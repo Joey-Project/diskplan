@@ -1,6 +1,7 @@
 import DiskplanCore
 import DiskplanPolicy
 import DiskplanProto
+import DiskplanRules
 import Foundation
 import SwiftProtobuf
 import Testing
@@ -8,8 +9,284 @@ import Testing
 @testable import DiskplanEngineCore
 @testable import DiskplanScan
 
+@Test func systemUserCacheDirectChildIsTheOnlyExecutableGenericCacheClassification() throws {
+  let fixture = try stageableCachePlan(candidateName: "com.vendor.ArbitraryData")
+  let item = try #require(fixture.result.items.first)
+  #expect(item.kind == .cache)
+  #expect(item.actionID != nil)
+  #expect(item.evaluation.stageability == .stageable)
+  #expect(fixture.result.plan.actions.count == 1)
+  #expect(
+    fixture.result.plan.evidenceSnapshots[0].classificationClaims.allSatisfy {
+      $0.source == .authoritativeAdapter(RuntimeStageableActionAuthority.adapterID)
+    }
+  )
+  #expect(
+    fixture.result.plan.evidenceSnapshots[0].namespaceBinding.trustedNamespace == .ownerPrivate
+  )
+
+  let explicitPathForgery = try stageableCachePlan(
+    candidateName: "com.vendor.ArbitraryData",
+    rootOrigin: .explicitRequest
+  )
+  #expect(explicitPathForgery.result.items.first?.actionID == nil)
+  let reportOnly = try firstReportOnlyProjection(explicitPathForgery)
+  #expect(reportOnly.kind == .reportOnly)
+  #expect(reportOnly.stageability == .notStageable)
+  #expect(reportOnly.disposition == .keepInformational)
+  #expect(reportOnly.recommendation == .keep)
+  #expect(reportOnly.executionPreview.mutationSupported == false)
+  #expect(reportOnly.targetIds.count == 1)
+  let forgedIdentity = try stageableCachePlan(
+    candidateName: "com.vendor.ArbitraryData",
+    scanRootObject: 999
+  )
+  #expect(forgedIdentity.result.items.first?.actionID == nil)
+  let elsewhere = try stageableCachePlan(
+    candidateName: "com.vendor.ArbitraryData",
+    scanRawRoot: Data("/fixture/elsewhere".utf8)
+  )
+  #expect(elsewhere.result.items.first?.actionID == nil)
+}
+
+@Test func reportOnlyWireCapacityReservesAnActionTargetPairWithinTheHardRecordBound() {
+  #expect(RuntimePlanDomainProjector.maximumReportOnlyItemCount(baseRecordCount: 0) == 50_000)
+  #expect(RuntimePlanDomainProjector.maximumReportOnlyItemCount(baseRecordCount: 2) == 49_999)
+  #expect(RuntimePlanDomainProjector.maximumReportOnlyItemCount(baseRecordCount: 99_999) == 0)
+  #expect(RuntimePlanDomainProjector.maximumReportOnlyItemCount(baseRecordCount: 100_000) == 0)
+}
+
+@Test func arbitraryDirectChildRetentionIsScopedToTheExactFoundationCacheRoot() throws {
+  let fixture = try stageableCachePlan()
+  let authority = try #require(fixture.authority)
+  let policy = RuntimePolicyAuthority(testingStageableActionAuthority: authority)
+  #expect(
+    policy.retainsRootDirectChildren(
+      ScanRootRequest(
+        rootID: "cache-root",
+        rawAbsolutePath: Data("/fixture/root".utf8),
+        origin: .foundationUserCache
+      )
+    )
+  )
+  #expect(
+    !policy.retainsRootDirectChildren(
+      ScanRootRequest(
+        rootID: "home",
+        rawAbsolutePath: Data("/fixture/home".utf8),
+        origin: .systemDiscoveredOther
+      )
+    )
+  )
+  #expect(
+    !policy.retainsRootDirectChildren(
+      ScanRootRequest(rootID: "forged", rawAbsolutePath: Data("/fixture/root".utf8))
+    )
+  )
+
+  let accumulator = BoundedAuthorityEvidenceAccumulator(
+    retainedRootDirectChildRootIDs: ["cache-root"]
+  )
+  let cacheChild = authorityNode(
+    rootID: "cache-root",
+    path: ["com.vendor.Cache"],
+    object: 2,
+    type: .directory
+  )
+  let homeChild = authorityNode(
+    rootID: "home",
+    path: ["Library"],
+    object: 3,
+    type: .directory
+  )
+  accumulator.receive(.observed(cacheChild))
+  accumulator.receive(.directoryClosed(cacheChild))
+  accumulator.receive(.observed(homeChild))
+  accumulator.receive(.directoryClosed(homeChild))
+  #expect(Set(accumulator.snapshot().candidatesByPath.keys) == Set([cacheChild.path]))
+
+  let standardRoots = try stageableCachePlan(includeHomeCacheRootAlias: true)
+  #expect(standardRoots.result.items.count == 1)
+  #expect(standardRoots.result.items.first?.actionID != nil)
+  #expect(standardRoots.result.items.first?.evaluation.stageability == .stageable)
+  #expect(standardRoots.result.items.first?.reasons.contains(.candidateOverlap) == false)
+}
+
+@Test func rulesAreImmutableActionInputsAndFailClosedBeforeActionConstruction() throws {
+  let missing = try stageableCachePlan(useDefaultUnconfiguredAuthority: true)
+  #expect(missing.result.items.first?.actionID == nil)
+  #expect(missing.result.items.first?.reasons.contains(.rulesConfigurationUnavailable) == true)
+
+  let malformed = try stageableCachePlan(
+    policyAuthorityOverride: RuntimePolicyAuthority(
+      bundledRulesData: Data("{".utf8),
+      userPolicyData: Data("not canonical JSON".utf8)
+    )
+  )
+  #expect(malformed.result.items.first?.actionID == nil)
+  #expect(malformed.result.items.first?.reasons.contains(.rulesConfigurationUnavailable) == true)
+
+  let disabled = try stageableCachePlan(genericRemoveEnabled: false)
+  #expect(disabled.result.items.first?.actionID == nil)
+  #expect(disabled.result.items.first?.reasons.contains(.genericRemoveDisabled) == true)
+  let disabledProjection = try firstReportOnlyProjection(disabled)
+  #expect(disabledProjection.disposition == .keepInformational)
+  #expect(disabledProjection.recommendation == .keep)
+  #expect(disabledProjection.blockers.contains { $0.code == "generic_remove_disabled" })
+
+  let baseline = try stageableCachePlan()
+  let protected = try stageableCachePlan(protectCandidate: true)
+  #expect(protected.result.items.first?.actionID == nil)
+  #expect(protected.result.items.first?.reasons.contains(.protectedByRule) == true)
+  let protectedProjection = try firstReportOnlyProjection(protected)
+  #expect(protectedProjection.disposition == .keepInformational)
+  #expect(protectedProjection.recommendation == .keep)
+  #expect(protectedProjection.blockers.contains { $0.code == "protected_by_rule" })
+  let protectedDescendant = try stageableCachePlan(protectDescendant: true)
+  #expect(protectedDescendant.result.items.first?.actionID == nil)
+  #expect(
+    protectedDescendant.result.items.first?.reasons.contains(.protectedByRule) == true
+  )
+  #expect(
+    baseline.result.plan.globalFacts.configuration
+      != protected.result.plan.globalFacts.configuration
+  )
+  #expect(baseline.result.plan.planHash != protected.result.plan.planHash)
+}
+
+@Test func everyCacheAccessAndActivityVoteFailsClosedIndependently() throws {
+  let cases: [(StageableCacheFixtureOptions, RuntimeAuthorityReason?)] = [
+    (.init(candidateUserID: 502), .subtreeAccessUnsafe),
+    (.init(candidateMode: 0o722), .subtreeAccessUnsafe),
+    (.init(candidateACLSafety: .grantsAdditionalPrincipal), .subtreeAccessUnsafe),
+    (.init(candidateFlags: 0x2), .subtreeAccessUnsafe),
+    (.init(providerBoundary: .metadataOnly(reason: "fixture")), .providerManaged),
+    (.init(preflightKnown: false), .subtreePreflightUnavailable),
+  ]
+  for (options, reason) in cases {
+    let fixture = try stageableCachePlan(options: options)
+    let item = try #require(fixture.result.items.first)
+    #expect(item.actionID == nil)
+    let projection = try firstReportOnlyProjection(fixture)
+    #expect(projection.disposition == .keepInformational)
+    #expect(projection.stageability == .notStageable)
+    if let reason {
+      #expect(item.reasons.contains(reason))
+      #expect(projection.blockers.contains { $0.code == reason.rawValue })
+    }
+  }
+
+  for descriptor in ["4", "cwd", "mmap"] {
+    let active = ProcessActivityRecord(
+      processID: 44,
+      command: "fixture",
+      fileDescriptor: descriptor,
+      rawPath: Data("/fixture/root/cache/open".utf8)
+    )
+    let fixture = try stageableCachePlan(processActivity: .known([active]))
+    let item = try #require(fixture.result.items.first)
+    #expect(item.actionID != nil)
+    #expect(item.evaluation.stageability == .blocked)
+    #expect(item.reasons.contains(.activityActive))
+  }
+  let partial = try stageableCachePlan(
+    processActivity: .unknown(reason: "partial collector")
+  )
+  #expect(partial.result.items.first?.evaluation.stageability == .blocked)
+  #expect(partial.result.items.first?.reasons.contains(.activityUnavailable) == true)
+
+  let otherMount = try stageableCachePlan(options: .init(candidateDevice: 2))
+  #expect(otherMount.result.items.first?.evaluation.stageability == .blocked)
+}
+
+@Test func boundedSubtreeForcePreflightNeverEscalatesAnUnsafeTree() throws {
+  let ordinary = try stageableCachePlan()
+  let ordinaryAction = try #require(ordinary.result.plan.actions.first)
+  guard case .genericRemove(let ordinaryContract) = ordinaryAction.prototype.adapterContract else {
+    Issue.record("expected generic remove")
+    return
+  }
+  #expect(ordinaryContract.forceRequirement == .notRequired)
+
+  let force = try stageableCachePlan(options: .init(promptStyleUnwritable: true))
+  let forceAction = try #require(force.result.plan.actions.first)
+  guard case .genericRemove(let forceContract) = forceAction.prototype.adapterContract else {
+    Issue.record("expected generic remove")
+    return
+  }
+  #expect(forceContract.forceRequirement == .requiresForceWithWarning)
+
+  for unsafe in [
+    StageableCacheFixtureOptions(parentAccessInsufficient: true),
+    StageableCacheFixtureOptions(restrictedFlagsPresent: true),
+    StageableCacheFixtureOptions(preflightKnown: false),
+  ] {
+    let fixture = try stageableCachePlan(options: unsafe)
+    #expect(fixture.result.items.first?.actionID == nil)
+  }
+}
+
+@Test func cacheTopologyAndOverlapVotesRemainOneVoteRejectsAndDeterministic() throws {
+  let hardlink = try stageableCachePlan(
+    sharedChildTopology: StorageTopologyEvidence(
+      linkCount: .known(2),
+      mayShareBlocks: .known(false),
+      sharesAllBlocks: .known(false),
+      cloneID: .absent(reason: "not cloned"),
+      cloneRefcount: .absent(reason: "not cloned"),
+      conditionalGroupReclaim: .exact(0)
+    )
+  )
+  #expect(hardlink.result.items.first?.evaluation.stageability == .blocked)
+  #expect(hardlink.result.items.first?.reasons.contains(.sharedOwnerIncomplete) == true)
+
+  let clone = try stageableCachePlan(
+    sharedChildTopology: StorageTopologyEvidence(
+      linkCount: .known(1),
+      mayShareBlocks: .known(true),
+      sharesAllBlocks: .known(true),
+      cloneID: .known(77),
+      cloneRefcount: .known(2),
+      conditionalGroupReclaim: .exact(4_096)
+    )
+  )
+  #expect(clone.result.items.first?.evaluation.stageability == .blocked)
+
+  let overlap = try stageableCachePlan(includeNestedBuildCandidate: true)
+  let cache = try #require(overlap.result.items.first(where: { $0.target.components.count == 1 }))
+  #expect(cache.evaluation.stageability == .blocked)
+  #expect(cache.reasons.contains(.candidateOverlap))
+
+  let nestedRepository = try stageableCachePlan(includeNestedRepository: true)
+  let repositoryCache = try #require(
+    nestedRepository.result.items.first(where: { $0.target.components.count == 1 })
+  )
+  #expect(repositoryCache.evaluation.stageability == .blocked)
+  #expect(repositoryCache.reasons.contains(.candidateOverlap))
+
+  let repositoryRoot = try stageableCachePlan(includeRootRepositoryMarker: true)
+  let repositoryRootCache = try #require(
+    repositoryRoot.result.items.first(where: { $0.target.components == [Data("cache".utf8)] })
+  )
+  #expect(repositoryRootCache.kind == .gitLinkedWorktree)
+  #expect(repositoryRootCache.actionID == nil)
+  #expect(repositoryRootCache.reasons.contains(.gitExecutionEvidenceUnavailable))
+
+  let repeated = try stageableCachePlan()
+  let repeatedAgain = try stageableCachePlan()
+  #expect(repeated.result.plan == repeatedAgain.result.plan)
+  #expect(repeated.result.items == repeatedAgain.result.items)
+}
+
 @Test func boundedEvidenceReplacesOnlyDirectoryProvisionalEvidence() {
-  let accumulator = BoundedAuthorityEvidenceAccumulator()
+  let accumulator = BoundedAuthorityEvidenceAccumulator(
+    budget: AuthorityRetentionBudget(
+      maximumCandidateSummaries: 250_000,
+      maximumSharedObjectKeys: 2_000_000,
+      maximumOwnerReferences: 5_000_000,
+      maximumEstimatedBytes: AuthorityRetentionBudget.maximumAcceptedBytes
+    )
+  )
   let provisional = authorityNode(
     path: ["cache"],
     object: 2,
@@ -1052,7 +1329,7 @@ func brokerLifecycleFinishInterruptsBlockedPlainEnvelopeWithoutRuntimeActivity()
   #expect(planProjection.manifest.scanSessionID.value == Data("scan-session".utf8))
   #expect(planProjection.manifest.scanCheckpointID.value == checkpointID)
   #expect(planProjection.manifest.evidenceSha256.value == finalEvidence)
-  #expect(planProjection.manifest.actionCount == 0)
+  #expect(planProjection.manifest.actionCount == 1)
 
   var preset = Diskplan_V1_ApplyBatchSelectionPresetEdit()
   preset.preset = .safeStageableWithoutWaiver
@@ -3915,6 +4192,7 @@ private func authorityScanResult(
   retainedNodes: [ScannedNode] = [],
   processActivity: DiskplanScan.Observation<[ProcessActivityRecord]> = .known([]),
   firstRootRawAbsolutePath: Data = Data("/fixture/root".utf8),
+  firstRootOrigin: ScanRootOrigin = .explicitRequest,
   includeSecondRoot: Bool = false,
   aliasSecondRawRoot: Bool = false,
   secondRootRawAbsolutePath: Data? = nil,
@@ -3924,11 +4202,18 @@ private func authorityScanResult(
   wallClockSeconds: TimeInterval = 2_000_000_000,
   entriesObserved: UInt64 = 2,
   directoriesClosed: UInt64 = 1,
-  entryBudget: UInt64 = 100
+  entryBudget: UInt64 = 100,
+  firstRootObject: UInt64 = 100,
+  rootAccessPolicy: DiskplanScan.Observation<AccessPolicyEvidence> = .unknown(
+    reason: "fixture root access policy unavailable")
 ) -> ScanResult {
   let requests =
     [
-      ScanRootRequest(rootID: "root", rawAbsolutePath: firstRootRawAbsolutePath)
+      ScanRootRequest(
+        rootID: "root",
+        rawAbsolutePath: firstRootRawAbsolutePath,
+        origin: firstRootOrigin
+      )
     ]
     + (includeSecondRoot
       ? [
@@ -3973,11 +4258,12 @@ private func authorityScanResult(
         rawAbsolutePath: request.rawAbsolutePath,
         identity: DiskplanScan.ObjectIdentity(
           device: Int64(identityIndex + 1),
-          fileID: UInt64(100 + identityIndex),
+          fileID: identityIndex == 0 ? firstRootObject : UInt64(100 + identityIndex),
           objectType: .directory
         )
       ),
       providerBoundary: .localOrUnindicated,
+      rootAccessPolicy: rootAccessPolicy,
       aggregateBytes: ItemByteEvidence(
         logical: .exact(4_096),
         nominalAllocated: .exact(4_096),
@@ -4305,7 +4591,13 @@ private func prepareRuntimePositiveReview(
     responder: fixture.responder(.prepareApplyReview(request))
   )
   let ready = await runtimeEventually {
-    fixture.controller.preparedApplyReviewIDForTesting() != nil
+    guard let installedID = fixture.controller.preparedApplyReviewIDForTesting() else {
+      return false
+    }
+    return fixture.output.runtimeEvents().contains { event in
+      guard case .applyReviewProjection(let review)? = event.body else { return false }
+      return review.applyReviewID.value == installedID
+    }
   }
   try #require(ready)
   let reviews: [Diskplan_V1_ApplyReviewProjection] = fixture.output.runtimeEvents().compactMap {
@@ -4670,6 +4962,262 @@ private func runtimePositiveEpoch() -> Diskplan_V1_ExecutionEpochProjection {
   return epoch
 }
 
+private struct StageableCacheFixtureOptions {
+  var candidateUserID: UInt32 = 501
+  var candidateMode: UInt32 = 0o700
+  var candidateACLSafety: ACLGrantSafety = .noExtendedEntries
+  var candidateFlags: UInt32 = 0
+  var candidateDevice: Int64 = 1
+  var providerBoundary: ProviderBoundary = .localOrUnindicated
+  var preflightKnown = true
+  var promptStyleUnwritable = false
+  var parentAccessInsufficient = false
+  var restrictedFlagsPresent = false
+}
+
+private struct StageableCachePlanFixture {
+  let result: RuntimePolicyAuthorityResult
+  let authority: RuntimeStageableActionAuthority?
+}
+
+private func firstReportOnlyProjection(
+  _ fixture: StageableCachePlanFixture
+) throws -> Diskplan_V1_PlanActionProjection {
+  let actions = try RuntimePlanDomainProjector.project(fixture.result).records.compactMap {
+    record -> Diskplan_V1_PlanActionProjection? in
+    guard case .action(let action)? = record.body, action.kind == .reportOnly else { return nil }
+    return action
+  }
+  return try #require(actions.first)
+}
+
+private func stageableCachePlan(
+  options: StageableCacheFixtureOptions = .init(),
+  candidateName: String = "cache",
+  genericRemoveEnabled: Bool = true,
+  protectCandidate: Bool = false,
+  protectDescendant: Bool = false,
+  useDefaultUnconfiguredAuthority: Bool = false,
+  policyAuthorityOverride: RuntimePolicyAuthority? = nil,
+  rootOrigin: ScanRootOrigin = .foundationUserCache,
+  scanRawRoot: Data = Data("/fixture/root".utf8),
+  scanRootObject: UInt64 = 100,
+  processActivity: DiskplanScan.Observation<[ProcessActivityRecord]> = .known([]),
+  sharedChildTopology: StorageTopologyEvidence? = nil,
+  includeNestedBuildCandidate: Bool = false,
+  includeNestedRepository: Bool = false,
+  includeRootRepositoryMarker: Bool = false,
+  includeHomeCacheRootAlias: Bool = false
+) throws -> StageableCachePlanFixture {
+  let authoritativeRawCacheRoot =
+    includeHomeCacheRootAlias
+    ? Data("/fixture/home/Library/Caches".utf8) : Data("/fixture/root".utf8)
+  let effectiveScanRawRoot = includeHomeCacheRootAlias ? authoritativeRawCacheRoot : scanRawRoot
+  let rootIdentity = DiskplanScan.ObjectIdentity(
+    device: 1,
+    fileID: 100,
+    objectType: .directory
+  )
+  let baseRules = try stageableRulesConfiguration(
+    genericRemoveEnabled: genericRemoveEnabled,
+    protectionRootBinding: nil
+  )
+  let baseAuthority = RuntimeStageableActionAuthority(
+    rules: baseRules,
+    rawCacheRoot: authoritativeRawCacheRoot,
+    cacheRootIdentity: rootIdentity,
+    effectiveUserID: 501
+  )
+  let rules = try stageableRulesConfiguration(
+    genericRemoveEnabled: genericRemoveEnabled,
+    protectionRootBinding: protectCandidate || protectDescendant ? baseAuthority.rootBinding : nil,
+    protectedComponents: protectDescendant
+      ? [candidateName, "keep.db"] : [candidateName]
+  )
+  let authority = RuntimeStageableActionAuthority(
+    rules: rules,
+    rawCacheRoot: authoritativeRawCacheRoot,
+    cacheRootIdentity: rootIdentity,
+    effectiveUserID: 501
+  )
+  let candidateAccess = stageableAccessPolicy(
+    userID: options.candidateUserID,
+    mode: options.candidateMode,
+    flags: options.candidateFlags,
+    aclSafety: options.candidateACLSafety
+  )
+  let preflight: DiskplanScan.Observation<SubtreeRemovalPreflightEvidence> =
+    options.preflightKnown
+    ? .known(
+      SubtreeRemovalPreflightEvidence(
+        ownerScope: .known(.uniform(options.candidateUserID)),
+        groupOrOtherWritablePresent: .known(options.candidateMode & 0o022 != 0),
+        unsafeACLGrantPresent: .known(
+          options.candidateACLSafety == .grantsAdditionalPrincipal),
+        restrictedFlagsPresent: .known(
+          options.restrictedFlagsPresent || options.candidateFlags != 0),
+        parentAccessInsufficient: .known(options.parentAccessInsufficient),
+        promptStyleUnwritableEntryPresent: .known(options.promptStyleUnwritable)
+      )
+    ) : .unknown(reason: "fixture preflight unavailable")
+  let candidate = authorityNode(
+    path: [candidateName],
+    device: options.candidateDevice,
+    object: 2,
+    type: .directory,
+    providerBoundary: options.providerBoundary,
+    accessPolicy: .known(candidateAccess),
+    removalPreflight: preflight
+  )
+  let accumulator = BoundedAuthorityEvidenceAccumulator(
+    retainedRootDirectChildRootIDs: ["root"]
+  )
+  accumulator.receive(.observed(candidate))
+  if let sharedChildTopology {
+    accumulator.receive(
+      .observed(
+        authorityNode(
+          path: [candidateName, "shared"],
+          object: 55,
+          type: .regular,
+          accessPolicy: .known(candidateAccess),
+          removalPreflight: preflight,
+          topology: sharedChildTopology
+        )
+      )
+    )
+  }
+  if includeNestedBuildCandidate {
+    let nested = authorityNode(
+      path: [candidateName, "build"],
+      object: 3,
+      type: .directory,
+      accessPolicy: .known(candidateAccess),
+      removalPreflight: preflight
+    )
+    accumulator.receive(.observed(nested))
+    accumulator.receive(.directoryClosed(nested))
+  }
+  if includeNestedRepository {
+    let repository = authorityNode(
+      path: [candidateName, "repository"],
+      object: 4,
+      type: .directory,
+      accessPolicy: .known(candidateAccess),
+      removalPreflight: preflight
+    )
+    let gitMarker = authorityNode(
+      path: [candidateName, "repository", ".git"],
+      object: 5,
+      type: .directory,
+      accessPolicy: .known(candidateAccess),
+      removalPreflight: preflight
+    )
+    accumulator.receive(.observed(repository))
+    accumulator.receive(.observed(gitMarker))
+    accumulator.receive(.directoryClosed(gitMarker))
+    accumulator.receive(.directoryClosed(repository))
+  }
+  if includeRootRepositoryMarker {
+    accumulator.receive(
+      .observed(
+        authorityNode(
+          path: [".git"],
+          object: 6,
+          type: .regular,
+          accessPolicy: .known(candidateAccess),
+          removalPreflight: preflight
+        )
+      )
+    )
+  }
+  if includeHomeCacheRootAlias {
+    let alias = authorityNode(
+      rootID: "second",
+      path: ["Library", "Caches"],
+      device: 1,
+      object: 100,
+      type: .directory,
+      accessPolicy: .known(candidateAccess),
+      removalPreflight: preflight
+    )
+    accumulator.receive(.observed(alias))
+    accumulator.receive(.directoryClosed(alias))
+  }
+  accumulator.receive(.directoryClosed(candidate))
+  let scanResult = authorityScanResult(
+    processActivity: processActivity,
+    firstRootRawAbsolutePath: effectiveScanRawRoot,
+    firstRootOrigin: rootOrigin,
+    includeSecondRoot: includeHomeCacheRootAlias,
+    secondRootRawAbsolutePath: includeHomeCacheRootAlias
+      ? Data("/fixture/home".utf8) : nil,
+    firstRootObject: scanRootObject,
+    rootAccessPolicy: .known(stageableAccessPolicy())
+  )
+  let policyAuthority =
+    policyAuthorityOverride
+    ?? (useDefaultUnconfiguredAuthority
+      ? RuntimePolicyAuthority()
+      : RuntimePolicyAuthority(testingStageableActionAuthority: authority))
+  return StageableCachePlanFixture(
+    result: try policyAuthority.makePlan(
+      scanResult: scanResult,
+      evidence: accumulator.snapshot()
+    ),
+    authority: useDefaultUnconfiguredAuthority ? nil : authority
+  )
+}
+
+private func stageableAccessPolicy(
+  userID: UInt32 = 501,
+  mode: UInt32 = 0o700,
+  flags: UInt32 = 0,
+  aclSafety: ACLGrantSafety = .noExtendedEntries
+) -> AccessPolicyEvidence {
+  AccessPolicyEvidence(
+    ownerUserID: userID,
+    ownerGroupID: 20,
+    mode: mode,
+    flags: flags,
+    aclDigest: .known(try! EvidenceDigest(bytes: Data(repeating: 0xA5, count: 32))),
+    aclGrantSafety: .known(aclSafety)
+  )
+}
+
+private func stageableRulesConfiguration(
+  genericRemoveEnabled: Bool,
+  protectionRootBinding: PolicyDigest?,
+  protectedComponents: [String] = ["cache"]
+) throws -> RulesConfiguration {
+  let adapters = genericRemoveEnabled ? "[\"generic-remove\"]" : "[]"
+  let protections: String
+  if let protectionRootBinding {
+    let protectedComponentsHex = protectedComponents.map {
+      let bytes = Data($0.utf8).map { String(format: "%02x", $0) }.joined()
+      return "\"\(bytes)\""
+    }.joined(separator: ",")
+    protections =
+      "[{\"effect\":\"protect\",\"path\":{\"components_hex\":[\(protectedComponentsHex)],"
+      + "\"root_binding\":\"\(protectionRootBinding.hex)\"}}]"
+  } else {
+    protections = "[]"
+  }
+  let bundled = "{\"rules\":[],\"schema_version\":\"diskplan.rules.v1\"}\n"
+  let user =
+    "{\"adapter_enablement\":\(adapters),\"agent\":{\"cache_enabled\":false,"
+    + "\"disclosure\":[],\"mode\":\"off\"},\"budgets\":{\"maximum_candidates\":250000,"
+    + "\"maximum_entries_per_root\":2000000,\"maximum_owner_references\":5000000,"
+    + "\"maximum_retained_bytes\":805306368,\"maximum_shared_object_keys\":2000000},"
+    + "\"profile\":\"standard\",\"protections\":\(protections),"
+    + "\"schema_version\":\"diskplan.user-policy.v1\",\"thresholds\":{"
+    + "\"minimum_inactive_seconds\":604800,\"minimum_reclaim_bytes\":1048576}}\n"
+  return RulesConfiguration(
+    bundled: try BundledRuleSetLoader.load(canonicalData: Data(bundled.utf8)),
+    user: try RestrictedUserPolicyLoader.load(canonicalData: Data(user.utf8))
+  )
+}
+
 private func authorityNode(
   rootID: String = "root",
   path: [String],
@@ -4680,6 +5228,9 @@ private func authorityNode(
   identity: DiskplanScan.Observation<DiskplanScan.ObjectIdentity>? = nil,
   coverage: Coverage = .complete,
   providerBoundary: ProviderBoundary = .localOrUnindicated,
+  accessPolicy: DiskplanScan.Observation<AccessPolicyEvidence>? = nil,
+  removalPreflight: DiskplanScan.Observation<SubtreeRemovalPreflightEvidence> = .unknown(
+    reason: "fixture removal preflight unavailable"),
   topology: StorageTopologyEvidence = StorageTopologyEvidence(
     linkCount: .known(1),
     mayShareBlocks: .known(false),
@@ -4710,12 +5261,14 @@ private func authorityNode(
         CanonicalFilesystemTime(secondsSinceEpoch: 3_000, nanoseconds: 0)),
       birthTime: .known(CanonicalFilesystemTime(secondsSinceEpoch: 500, nanoseconds: 0))
     ),
-    accessPolicy: .known(
-      AccessPolicyEvidence(ownerUserID: 501, ownerGroupID: 20, mode: 0o700, flags: 0)
-    ),
+    accessPolicy: accessPolicy
+      ?? .known(
+        AccessPolicyEvidence(ownerUserID: 501, ownerGroupID: 20, mode: 0o700, flags: 0)
+      ),
     coverage: coverage,
     providerBoundary: providerBoundary,
-    providerEvidence: .absent(reason: "local object")
+    providerEvidence: .absent(reason: "local object"),
+    removalPreflight: removalPreflight
   )
 }
 

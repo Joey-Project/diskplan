@@ -1246,6 +1246,7 @@ private func runtimeRootBindingDigest(
     appendUInt64(UInt64(root.seal.accessPolicy.mode), to: &data)
     appendUInt64(UInt64(root.seal.accessPolicy.flags), to: &data)
     appendObservation(root.seal.accessPolicy.aclDigest, to: &data)
+    appendACLGrantSafetyObservation(root.seal.accessPolicy.aclGrantSafety, to: &data)
   }
   return EvidenceDigest(unchecked: Data(SHA256.hash(data: data)))
 }
@@ -1276,6 +1277,7 @@ private func runtimeVolumeBindingDigest(
     appendUInt64(UInt64(volume.seal.accessPolicy.mode), to: &data)
     appendUInt64(UInt64(volume.seal.accessPolicy.flags), to: &data)
     appendObservation(volume.seal.accessPolicy.aclDigest, to: &data)
+    appendACLGrantSafetyObservation(volume.seal.accessPolicy.aclGrantSafety, to: &data)
   }
   return EvidenceDigest(unchecked: Data(SHA256.hash(data: data)))
 }
@@ -1295,6 +1297,31 @@ private func appendObservation(_ value: Observation<EvidenceDigest>, to data: in
   case .known(let digest):
     data.append(1)
     appendLengthPrefixed(digest.bytes, to: &data)
+  case .absent(let reason):
+    data.append(2)
+    appendLengthPrefixed(Data(reason.utf8), to: &data)
+  case .unknown(let reason):
+    data.append(3)
+    appendLengthPrefixed(Data(reason.utf8), to: &data)
+  case .unreadable(let reason, let code):
+    data.append(4)
+    appendLengthPrefixed(Data(reason.utf8), to: &data)
+    appendOptionalErrorCode(code, to: &data)
+  case .failed(let reason, let code):
+    data.append(5)
+    appendLengthPrefixed(Data(reason.utf8), to: &data)
+    appendOptionalErrorCode(code, to: &data)
+  }
+}
+
+private func appendACLGrantSafetyObservation(
+  _ value: Observation<ACLGrantSafety>,
+  to data: inout Data
+) {
+  switch value {
+  case .known(let safety):
+    data.append(1)
+    appendLengthPrefixed(Data(safety.rawValue.utf8), to: &data)
   case .absent(let reason):
     data.append(2)
     appendLengthPrefixed(Data(reason.utf8), to: &data)

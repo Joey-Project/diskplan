@@ -1271,6 +1271,7 @@ func gitMetadataSnapshotDigest(_ snapshot: GitMetadataSnapshot) -> EvidenceDiges
     appendCanonical(seal.accessPolicy.mode, to: &input)
     appendCanonical(seal.accessPolicy.flags, to: &input)
     appendCanonical(aclDigest.bytes, to: &input)
+    appendCanonicalACLGrantSafetyObservation(seal.accessPolicy.aclGrantSafety, to: &input)
     appendCanonical(contentDigest.bytes, to: &input)
   }
   return EvidenceDigest(unchecked: Data(SHA256.hash(data: input)))
@@ -1834,6 +1835,7 @@ private func configuredScopeTokenDigest(
   if let aclDigest = binding.rootAccessPolicy.aclDigest.value {
     appendCanonical(aclDigest.bytes, to: &input)
   }
+  appendCanonicalACLGrantSafetyObservation(binding.rootAccessPolicy.aclGrantSafety, to: &input)
   appendCanonical(Data(definition.helperCapability.utf8), to: &input)
   appendCanonical(Data("configured-selector".utf8), to: &input)
   appendCanonical(definition.selectorRawName ?? Data(), to: &input)
@@ -1852,6 +1854,10 @@ private func configuredScopeTokenDigest(
     if let aclDigest = selectorNamespaceAccessPolicy.aclDigest.value {
       appendCanonical(aclDigest.bytes, to: &input)
     }
+    appendCanonicalACLGrantSafetyObservation(
+      selectorNamespaceAccessPolicy.aclGrantSafety,
+      to: &input
+    )
   }
   return EvidenceDigest(unchecked: Data(SHA256.hash(data: input)))
 }
@@ -1890,6 +1896,7 @@ func descriptorSeal(
   else { return nil }
   var status = stat()
   guard fstat(fileDescriptor, &status) == 0 else { return nil }
+  let acl = descriptorACLEvidence(fileDescriptor)
   let type: ScannedObjectType
   switch rawIdentity.objectType {
   case .regular: type = .regular
@@ -1905,7 +1912,8 @@ func descriptorSeal(
       ownerGroupID: status.st_gid,
       mode: UInt32(status.st_mode),
       flags: darwinAccessControlFlags(status.st_flags),
-      aclDigest: descriptorACLDigest(fileDescriptor)
+      aclDigest: acl.digest,
+      aclGrantSafety: acl.grantSafety
     ),
     logicalBytes: UInt64(max(0, status.st_size)),
     modificationTime: status.st_mtimespec,
@@ -1922,30 +1930,85 @@ func darwinAccessControlFlags(_ rawFlags: UInt32) -> UInt32 {
 }
 
 func descriptorACLDigest(_ fileDescriptor: Int32) -> Observation<EvidenceDigest> {
+  descriptorACLEvidence(fileDescriptor).digest
+}
+
+struct DescriptorACLEvidence {
+  let digest: Observation<EvidenceDigest>
+  let grantSafety: Observation<ACLGrantSafety>
+}
+
+func descriptorACLEvidence(_ fileDescriptor: Int32) -> DescriptorACLEvidence {
   errno = 0
   guard let acl = acl_get_fd_np(fileDescriptor, ACL_TYPE_EXTENDED) else {
     let code = errno
     if code == ENOENT {
-      return .known(EvidenceDigest(unchecked: Data(SHA256.hash(data: Data()))))
+      return DescriptorACLEvidence(
+        digest: .known(EvidenceDigest(unchecked: Data(SHA256.hash(data: Data())))),
+        grantSafety: .known(.noExtendedEntries)
+      )
     }
     if code == EACCES || code == EPERM {
-      return .unreadable(reason: "descriptor ACL unreadable", errorCode: code)
+      return DescriptorACLEvidence(
+        digest: .unreadable(reason: "descriptor ACL unreadable", errorCode: code),
+        grantSafety: .unreadable(reason: "descriptor ACL grants unreadable", errorCode: code)
+      )
     }
-    return .failed(reason: "descriptor ACL unavailable", errorCode: code)
+    return DescriptorACLEvidence(
+      digest: .failed(reason: "descriptor ACL unavailable", errorCode: code),
+      grantSafety: .failed(reason: "descriptor ACL grants unavailable", errorCode: code)
+    )
   }
   defer { acl_free(UnsafeMutableRawPointer(acl)) }
   let byteCount = acl_size(acl)
   guard byteCount >= 0 else {
-    return .failed(reason: "descriptor ACL size unavailable", errorCode: errno)
+    return DescriptorACLEvidence(
+      digest: .failed(reason: "descriptor ACL size unavailable", errorCode: errno),
+      grantSafety: .failed(reason: "descriptor ACL grants unavailable", errorCode: errno)
+    )
   }
   var bytes = Data(count: Int(byteCount))
   let copied = bytes.withUnsafeMutableBytes { raw in
     acl_copy_ext(raw.baseAddress, acl, byteCount)
   }
   guard copied == byteCount else {
-    return .failed(reason: "descriptor ACL serialization failed", errorCode: errno)
+    return DescriptorACLEvidence(
+      digest: .failed(reason: "descriptor ACL serialization failed", errorCode: errno),
+      grantSafety: .failed(reason: "descriptor ACL grants unavailable", errorCode: errno)
+    )
   }
-  return .known(EvidenceDigest(unchecked: Data(SHA256.hash(data: bytes))))
+  var entry: acl_entry_t?
+  var entryID = Int32(ACL_FIRST_ENTRY.rawValue)
+  var sawEntry = false
+  var sawAllow = false
+  while true {
+    let result = acl_get_entry(acl, entryID, &entry)
+    if result == 0 { break }
+    guard result == 1, let entry else {
+      let code = errno
+      return DescriptorACLEvidence(
+        digest: .known(EvidenceDigest(unchecked: Data(SHA256.hash(data: bytes)))),
+        grantSafety: .failed(reason: "descriptor ACL entry unavailable", errorCode: code)
+      )
+    }
+    sawEntry = true
+    var tag = ACL_UNDEFINED_TAG
+    guard acl_get_tag_type(entry, &tag) == 0 else {
+      let code = errno
+      return DescriptorACLEvidence(
+        digest: .known(EvidenceDigest(unchecked: Data(SHA256.hash(data: bytes)))),
+        grantSafety: .failed(reason: "descriptor ACL tag unavailable", errorCode: code)
+      )
+    }
+    if tag == ACL_EXTENDED_ALLOW { sawAllow = true }
+    entryID = Int32(ACL_NEXT_ENTRY.rawValue)
+  }
+  let safety: ACLGrantSafety =
+    !sawEntry ? .noExtendedEntries : (sawAllow ? .grantsAdditionalPrincipal : .denyOnly)
+  return DescriptorACLEvidence(
+    digest: .known(EvidenceDigest(unchecked: Data(SHA256.hash(data: bytes)))),
+    grantSafety: .known(safety)
+  )
 }
 
 func appendAncestorAccessPolicySeal(
@@ -1992,6 +2055,7 @@ func appendAncestorAccessPolicySeal(
   appendCanonical(policy.mode, to: &input)
   appendCanonical(policy.flags, to: &input)
   appendCanonical(aclDigest.bytes, to: &input)
+  appendCanonicalACLGrantSafetyObservation(policy.aclGrantSafety, to: &input)
   return .known(
     AncestorAccessPolicySeal(
       rootIdentity: rootIdentity,
@@ -2026,6 +2090,33 @@ private func appendCanonical(_ value: Data, to target: inout Data) {
 private func appendCanonical<T: FixedWidthInteger>(_ value: T, to target: inout Data) {
   var bigEndian = value.bigEndian
   withUnsafeBytes(of: &bigEndian) { target.append(contentsOf: $0) }
+}
+
+private func appendCanonicalACLGrantSafetyObservation(
+  _ observation: Observation<ACLGrantSafety>,
+  to target: inout Data
+) {
+  switch observation {
+  case .known(let safety):
+    appendCanonical(Data("known".utf8), to: &target)
+    appendCanonical(Data(safety.rawValue.utf8), to: &target)
+  case .absent(let reason):
+    appendCanonical(Data("absent".utf8), to: &target)
+    appendCanonical(Data(reason.utf8), to: &target)
+  case .unknown(let reason):
+    appendCanonical(Data("unknown".utf8), to: &target)
+    appendCanonical(Data(reason.utf8), to: &target)
+  case .unreadable(let reason, let errorCode):
+    appendCanonical(Data("unreadable".utf8), to: &target)
+    appendCanonical(Data(reason.utf8), to: &target)
+    appendCanonical(errorCode == nil ? UInt8(0) : UInt8(1), to: &target)
+    appendCanonical(UInt32(bitPattern: errorCode ?? 0), to: &target)
+  case .failed(let reason, let errorCode):
+    appendCanonical(Data("failed".utf8), to: &target)
+    appendCanonical(Data(reason.utf8), to: &target)
+    appendCanonical(errorCode == nil ? UInt8(0) : UInt8(1), to: &target)
+    appendCanonical(UInt32(bitPattern: errorCode ?? 0), to: &target)
+  }
 }
 
 private func contentFailure(_ code: Int32, operation: String) -> ContentEvidence {

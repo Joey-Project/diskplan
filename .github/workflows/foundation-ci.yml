@@ -145,9 +145,9 @@ jobs:
           retention-days: 7
           compression-level: 9
 
-  best-effort-macos-14-arm64:
-    name: Best effort / macOS 14 deployment compatibility
-    runs-on: macos-14
+  best-effort-macos-15-arm64:
+    name: Best effort / macOS 15 deployment target
+    runs-on: macos-15
     continue-on-error: true
     timeout-minutes: 20
     env:
@@ -160,7 +160,7 @@ jobs:
           persist-credentials: false
 
       - name: Assert compatibility runner
-        run: scripts/ci/assert-macos-runner.sh exact 14 arm64
+        run: scripts/ci/assert-macos-runner.sh exact 15 arm64
 
       - name: Configure task-scoped build path
         run: echo "DISKPLAN_DEPLOYMENT_TARGET_DIR=$RUNNER_TEMP/diskplan-deployment-target" >> "$GITHUB_ENV"

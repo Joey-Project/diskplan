@@ -99,20 +99,73 @@ public struct AccessPolicyEvidence: Equatable, Sendable {
   public let mode: UInt32
   public let flags: UInt32
   public let aclDigest: Observation<EvidenceDigest>
+  public let aclGrantSafety: Observation<ACLGrantSafety>
 
   public init(
     ownerUserID: UInt32,
     ownerGroupID: UInt32,
     mode: UInt32,
     flags: UInt32,
-    aclDigest: Observation<EvidenceDigest> = .unknown(reason: "ACL not observed")
+    aclDigest: Observation<EvidenceDigest> = .unknown(reason: "ACL not observed"),
+    aclGrantSafety: Observation<ACLGrantSafety> = .unknown(
+      reason: "ACL grant safety not observed")
   ) {
     self.ownerUserID = ownerUserID
     self.ownerGroupID = ownerGroupID
     self.mode = mode
     self.flags = flags
     self.aclDigest = aclDigest
+    self.aclGrantSafety = aclGrantSafety
   }
+}
+
+public enum ACLGrantSafety: String, Equatable, Sendable {
+  case noExtendedEntries = "no_extended_entries"
+  case denyOnly = "deny_only"
+  case grantsAdditionalPrincipal = "grants_additional_principal"
+}
+
+public enum SubtreeOwnerScope: Equatable, Sendable {
+  case uniform(UInt32)
+  case multipleOwners
+}
+
+/// Complete, directory-close evidence for the exact subtree observed by the scanner. Every field
+/// is independently typed so an unreadable or failed collector result cannot be confused with a
+/// known unsafe value or with a force-warning-only condition.
+public struct SubtreeRemovalPreflightEvidence: Equatable, Sendable {
+  public let ownerScope: Observation<SubtreeOwnerScope>
+  public let groupOrOtherWritablePresent: Observation<Bool>
+  public let unsafeACLGrantPresent: Observation<Bool>
+  public let restrictedFlagsPresent: Observation<Bool>
+  public let parentAccessInsufficient: Observation<Bool>
+  public let promptStyleUnwritableEntryPresent: Observation<Bool>
+
+  public init(
+    ownerScope: Observation<SubtreeOwnerScope>,
+    groupOrOtherWritablePresent: Observation<Bool>,
+    unsafeACLGrantPresent: Observation<Bool>,
+    restrictedFlagsPresent: Observation<Bool>,
+    parentAccessInsufficient: Observation<Bool>,
+    promptStyleUnwritableEntryPresent: Observation<Bool>
+  ) {
+    self.ownerScope = ownerScope
+    self.groupOrOtherWritablePresent = groupOrOtherWritablePresent
+    self.unsafeACLGrantPresent = unsafeACLGrantPresent
+    self.restrictedFlagsPresent = restrictedFlagsPresent
+    self.parentAccessInsufficient = parentAccessInsufficient
+    self.promptStyleUnwritableEntryPresent = promptStyleUnwritableEntryPresent
+  }
+
+  public static let unavailable = Self(
+    ownerScope: .unknown(reason: "subtree ownership not observed"),
+    groupOrOtherWritablePresent: .unknown(reason: "subtree mode not observed"),
+    unsafeACLGrantPresent: .unknown(reason: "subtree ACL grants not observed"),
+    restrictedFlagsPresent: .unknown(reason: "subtree flags not observed"),
+    parentAccessInsufficient: .unknown(reason: "subtree parent access not observed"),
+    promptStyleUnwritableEntryPresent: .unknown(
+      reason: "subtree prompt-style unwritable entries not observed")
+  )
 }
 
 public struct FilesystemFlagMetadataEvidence: Equatable, Sendable {
@@ -361,6 +414,7 @@ public struct ScannedNode: Equatable, Sendable {
   public let coverage: Coverage
   public let providerBoundary: ProviderBoundary
   public let providerEvidence: Observation<ProviderScanEvidence>
+  public let removalPreflight: Observation<SubtreeRemovalPreflightEvidence>
 
   public init(
     path: RawPath,
@@ -376,7 +430,9 @@ public struct ScannedNode: Equatable, Sendable {
     content: ContentEvidence = .notRequested,
     coverage: Coverage,
     providerBoundary: ProviderBoundary,
-    providerEvidence: Observation<ProviderScanEvidence> = .unknown(reason: "not observed")
+    providerEvidence: Observation<ProviderScanEvidence> = .unknown(reason: "not observed"),
+    removalPreflight: Observation<SubtreeRemovalPreflightEvidence> = .unknown(
+      reason: "subtree removal preflight not observed")
   ) {
     self.path = path
     self.identity = identity
@@ -390,6 +446,7 @@ public struct ScannedNode: Equatable, Sendable {
     self.coverage = coverage
     self.providerBoundary = providerBoundary
     self.providerEvidence = providerEvidence
+    self.removalPreflight = removalPreflight
   }
 }
 

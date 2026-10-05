@@ -59,6 +59,7 @@ private struct DirectoryFrame {
   var aggregate: ItemByteEvidence
   let storageTopology: StorageTopologyEvidence
   var coverage: Coverage
+  var removalPreflight: Observation<SubtreeRemovalPreflightEvidence>
 }
 
 public final class DeterministicScanner {
@@ -312,6 +313,10 @@ public final class DeterministicScanner {
                   completeness: .complete,
                   reasons: coverageReasons(for: root.providerBoundary)
                 )
+              ),
+              removalPreflight: removalPreflight(
+                accessPolicy: root.accessPolicy,
+                objectType: .directory
               )
             )
           ]
@@ -396,11 +401,19 @@ public final class DeterministicScanner {
         ancestorAccessPolicy: stack[frameIndex].descendantAccessPolicy,
         coverage: retainedCoverage,
         providerBoundary: providerBoundary,
-        providerEvidence: item.providerEvidence
+        providerEvidence: item.providerEvidence,
+        removalPreflight: removalPreflight(
+          accessPolicy: item.accessPolicy,
+          objectType: item.identity.objectType
+        )
       )
       nodeSink.receive(.observed(node))
       retain(node)
       stack[frameIndex].coverage = stack[frameIndex].coverage.merging(nodeCoverage)
+      stack[frameIndex].removalPreflight = mergeRemovalPreflight(
+        stack[frameIndex].removalPreflight,
+        node.removalPreflight
+      )
       guard item.identity.objectType == .directory,
         item.identity.device == stack[0].identity.device,
         stack[frameIndex].depth < scope.budget.maximumDepth
@@ -477,7 +490,8 @@ public final class DeterministicScanner {
               nextIndex: 0,
               aggregate: item.bytes,
               storageTopology: item.storageTopology,
-              coverage: nodeCoverage.merging(enumeration.coverage)
+              coverage: nodeCoverage.merging(enumeration.coverage),
+              removalPreflight: node.removalPreflight
             )
           )
         case let failure:
@@ -519,11 +533,16 @@ public final class DeterministicScanner {
         coverage: coverage,
         providerBoundary: inheritedProvider
           ? .metadataOnly(reason: "inherited provider boundary")
-          : .unverified(reason: "item inspection did not establish provider ownership")
+          : .unverified(reason: "item inspection did not establish provider ownership"),
+        removalPreflight: failure.erasingValue()
       )
       nodeSink.receive(.observed(node))
       retain(node)
       stack[frameIndex].coverage = stack[frameIndex].coverage.merging(coverage)
+      stack[frameIndex].removalPreflight = mergeRemovalPreflight(
+        stack[frameIndex].removalPreflight,
+        node.removalPreflight
+      )
     }
   }
 
@@ -570,6 +589,10 @@ public final class DeterministicScanner {
       let parent = stack.count - 1
       stack[parent].aggregate = .adding(stack[parent].aggregate, frame.aggregate)
       stack[parent].coverage = stack[parent].coverage.merging(frame.coverage)
+      stack[parent].removalPreflight = mergeRemovalPreflight(
+        stack[parent].removalPreflight,
+        frame.removalPreflight
+      )
       let node = ScannedNode(
         path: frame.path,
         identity: closeEvidence.identity,
@@ -582,7 +605,8 @@ public final class DeterministicScanner {
         coverage: frame.coverage,
         providerBoundary: frame.inheritedProviderBoundary
           ? .metadataOnly(reason: "inherited provider boundary") : .localOrUnindicated,
-        providerEvidence: frame.providerEvidence
+        providerEvidence: frame.providerEvidence,
+        removalPreflight: frame.removalPreflight
       )
       nodeSink.receive(.directoryClosed(node))
       retain(node)
@@ -827,7 +851,8 @@ public final class DeterministicScanner {
             reasons: coverageReasons(ancestorAccessPolicy)
           )),
         providerBoundary: node.providerBoundary,
-        providerEvidence: node.providerEvidence
+        providerEvidence: node.providerEvidence,
+        removalPreflight: node.removalPreflight
       )
     }
   }
@@ -852,5 +877,89 @@ public final class DeterministicScanner {
       )
     }
     return coverage
+  }
+
+  private func removalPreflight(
+    accessPolicy: Observation<AccessPolicyEvidence>,
+    objectType: ScannedObjectType
+  ) -> Observation<SubtreeRemovalPreflightEvidence> {
+    guard case .known(let access) = accessPolicy else {
+      return accessPolicy.erasingValue()
+    }
+    let unsafeACL: Observation<Bool>
+    switch access.aclGrantSafety {
+    case .known(.noExtendedEntries), .known(.denyOnly):
+      unsafeACL = .known(false)
+    case .known(.grantsAdditionalPrincipal):
+      unsafeACL = .known(true)
+    case .absent(let reason):
+      unsafeACL = .absent(reason: reason)
+    case .unknown(let reason):
+      unsafeACL = .unknown(reason: reason)
+    case .unreadable(let reason, let code):
+      unsafeACL = .unreadable(reason: reason, errorCode: code)
+    case .failed(let reason, let code):
+      unsafeACL = .failed(reason: reason, errorCode: code)
+    }
+    let ownerWrite = access.mode & 0o200 != 0
+    let parentAccessInsufficient =
+      objectType == .directory && access.mode & 0o300 != 0o300
+    return .known(
+      SubtreeRemovalPreflightEvidence(
+        ownerScope: .known(.uniform(access.ownerUserID)),
+        groupOrOtherWritablePresent: .known(access.mode & 0o022 != 0),
+        unsafeACLGrantPresent: unsafeACL,
+        restrictedFlagsPresent: .known(access.flags != 0),
+        parentAccessInsufficient: .known(parentAccessInsufficient),
+        promptStyleUnwritableEntryPresent: .known(!ownerWrite)
+      )
+    )
+  }
+
+  private func mergeRemovalPreflight(
+    _ lhs: Observation<SubtreeRemovalPreflightEvidence>,
+    _ rhs: Observation<SubtreeRemovalPreflightEvidence>
+  ) -> Observation<SubtreeRemovalPreflightEvidence> {
+    guard case .known(let left) = lhs else { return lhs }
+    guard case .known(let right) = rhs else { return rhs }
+    return .known(
+      SubtreeRemovalPreflightEvidence(
+        ownerScope: mergeOwnerScope(left.ownerScope, right.ownerScope),
+        groupOrOtherWritablePresent: mergeBooleanOR(
+          left.groupOrOtherWritablePresent, right.groupOrOtherWritablePresent),
+        unsafeACLGrantPresent: mergeBooleanOR(
+          left.unsafeACLGrantPresent, right.unsafeACLGrantPresent),
+        restrictedFlagsPresent: mergeBooleanOR(
+          left.restrictedFlagsPresent, right.restrictedFlagsPresent),
+        parentAccessInsufficient: mergeBooleanOR(
+          left.parentAccessInsufficient, right.parentAccessInsufficient),
+        promptStyleUnwritableEntryPresent: mergeBooleanOR(
+          left.promptStyleUnwritableEntryPresent,
+          right.promptStyleUnwritableEntryPresent)
+      )
+    )
+  }
+
+  private func mergeOwnerScope(
+    _ lhs: Observation<SubtreeOwnerScope>,
+    _ rhs: Observation<SubtreeOwnerScope>
+  ) -> Observation<SubtreeOwnerScope> {
+    guard case .known(let left) = lhs else { return lhs }
+    guard case .known(let right) = rhs else { return rhs }
+    switch (left, right) {
+    case (.uniform(let first), .uniform(let second)) where first == second:
+      return .known(.uniform(first))
+    case (.uniform, .uniform), (.multipleOwners, _), (_, .multipleOwners):
+      return .known(.multipleOwners)
+    }
+  }
+
+  private func mergeBooleanOR(
+    _ lhs: Observation<Bool>,
+    _ rhs: Observation<Bool>
+  ) -> Observation<Bool> {
+    guard case .known(let left) = lhs else { return lhs }
+    guard case .known(let right) = rhs else { return rhs }
+    return .known(left || right)
   }
 }

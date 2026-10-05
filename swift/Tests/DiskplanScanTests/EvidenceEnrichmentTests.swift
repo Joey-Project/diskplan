@@ -10,6 +10,27 @@ private func evidenceDigest(_ bytes: Data) -> EvidenceDigest {
   EvidenceDigest(unchecked: Data(SHA256.hash(data: bytes)))
 }
 
+@Test func descriptorACLEvidenceClassifiesAnEmptyExtendedACLWithoutPathTraversal() throws {
+  let taskRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "diskplan-acl-evidence-\(UUID().uuidString)",
+    isDirectory: true
+  )
+  try FileManager.default.createDirectory(at: taskRoot, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: taskRoot) }
+  let descriptor = taskRoot.withUnsafeFileSystemRepresentation {
+    open($0!, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+  }
+  guard descriptor >= 0 else {
+    Issue.record("failed to open test-created ACL task root")
+    return
+  }
+  defer { close(descriptor) }
+
+  let evidence = descriptorACLEvidence(descriptor)
+  #expect(evidence.digest.value != nil)
+  #expect(evidence.grantSafety == .known(.noExtendedEntries))
+}
+
 private let rootIdentity = ObjectIdentity(device: 7, fileID: 11, objectType: .directory)
 private let rootPath = RawPath(rootID: "root")
 

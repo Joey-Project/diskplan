@@ -1,0 +1,431 @@
+---
+id: 20261004-61c9e4
+title: Full Plan Revision And Product Acceptance Recovery
+status: active
+created: 2026-10-04
+updated: 2026-10-05
+branch: wip/plan-revision-pr
+pr: https://github.com/Joey-Project/diskplan/pull/29
+supersedes: []
+superseded_by:
+---
+
+# Full Plan Revision And Product Acceptance Recovery
+
+## Summary
+
+Preserve the complete Phase 0-6 product scope while separating implementation,
+production integration, and installed-product acceptance. Incorporate the user's
+accepted residency/ownership and read-only/mutation policy decisions into the
+[accepted architecture](../../../design/accepted-plan.md), especially Sections 3,
+9, 15, 16, and 20. Joey authorized the recovery sequence and a documentation PR
+on 2026-10-04. This is not a claim that the existing code implements the revised
+contract.
+
+Joey accepted three contract refinements on 2026-10-04: a concrete ordinary
+removal-authority matrix as the first R1 gate, eviction-specific logical identity
+and state transitions, and separate invocation/post-verification/allocation
+results. Their stable specification is
+[locality and provider action contracts](../../../design/locality-and-provider-actions.md).
+
+On 2026-10-05, Joey accepted two action-effect permission tiers for ordinary
+removal. This supersedes the earlier blanket requirement that every ordinary
+removal have independent scoped non-provider/no-propagation authority. The
+immutable plan/action binding,
+consent freshness, failure behavior, and preserved safety gates are specified in
+the [accepted architecture](../../../design/accepted-plan.md) and
+[locality and provider action contracts](../../../design/locality-and-provider-actions.md).
+This is a design acceptance, not evidence that implementation or validation is
+complete.
+
+Primary authorship of this plan revision is OpenAI Codex (GPT-6.1 Sol Extra
+High). GPT-6 Luna is recorded separately for bounded inventories, API audits,
+and the current journal update; it is not the primary author attribution. Formal
+independent review still follows the adopted delivery/review gates.
+
+## Current State
+
+- The initial read-only audit found local canonical `main` at `667f555` and
+  remote `main` at `18e5106`, after runner PR #28. After delivery authorization,
+  canonical `main` was fetched and fast-forwarded to
+  `18e510655c5b2798a7c9a1c98763053fa122f5f1`. The documentation PR uses a new
+  linked worktree at this base; it does not import the closure branch's 141
+  non-main commits.
+- The initial audit's only open PR was draft [#6](https://github.com/Joey-Project/diskplan/pull/6),
+  `wip/integrate-phase0-6` at `5e12e3b`, targeting `main`. Its historical checks
+  include successful required macOS 26 gates but predate the current runner
+  update and later closure branches.
+- [#28](https://github.com/Joey-Project/diskplan/pull/28), head `e69e04e`, is merged
+  to remote `main`. Its required macOS 26 and best-effort macOS 15 checks were
+  reported successful by the live GitHub audit. The required release platform
+  remains macOS 26 on Apple Silicon.
+- The docs-only plan revision is now [#29](https://github.com/Joey-Project/diskplan/pull/29),
+  based on current main, with signed head `30c939b` at the follow-up audit.
+  Its signature and three-file scope were verified. Internal Luna document
+  review had no remaining applicable findings; this is not a formal named lane.
+  Both required macOS 26 and best-effort macOS 15 GitHub checks passed at that
+  head. These results do not transfer to a later revision automatically.
+- Runtime PR #24 was merged into the integration branch, not `main`. PRs #25-27
+  were merged into the production closure chain, not `main`. An intermediate
+  `MERGED` state is not product delivery.
+- Existing journals record substantial implementation and historical validation:
+  policy, revalidation, best-effort execution, packaging, scanner/IPC, and TUI.
+  Several production-wiring and real-host tasks remain open. Their historical
+  test records were inspected; no new builds or tests were run for this audit.
+- Earlier post-verification notes required a scoped non-provider authority contract
+  for every ordinary local-directory removal. Joey's 2026-10-05 acceptance
+  replaces that blanket prerequisite with two explicit action-effect permission
+  tiers. The exact gates and limits are in the linked design documents; this
+  journal records no implementation or validation completion.
+
+### Code Preservation Inventory
+
+| Branch / head | Observed worktree state | Role |
+| --- | --- | --- |
+| `wip/integrate-phase0-6` / `5e12e3b` | Clean | PR #6 base integration |
+| `wip/production-revalidation-closure` / `6e72478` | Clean | Committed closure chain; source of the latest architecture text, not the documentation PR base |
+| `wip/frontend-product-closure` / `653b985` | Clean | Unintegrated frontend work |
+| `wip/stageable-cache-actions` / `5ab8ee0` | Clean | Unintegrated first cache-action work |
+| `wip/revalidation-release-postverify` / `12be062` | 21 tracked modifications, 2 untracked entries | Pending release post-verification work; preserve intact |
+| `wip/runtime-revalidation-adapters` / `5d2091d` | 10 tracked modifications, 4 untracked entries | Pending runtime adapters; preserve intact |
+| `wip/india-product-acceptance` / `32caf3a` | Branch retained, no worktree | Unintegrated acceptance work |
+
+This is a point-in-time inventory, not a cleanup authorization. Do not discard
+dirty work, remove unique commits, or absorb another workstream blindly. No
+existing worktree was judged safely disposable from this inventory alone.
+
+## Accepted Contract Corrections
+
+- Keep deterministic, independent one-vote rejects; no blended safety score.
+- Measure local residency separately from provider ownership. Dataless does not
+  imply zero allocation, local volumes do not imply non-provider ownership, and
+  uncertainty does not hide otherwise useful measured allocation.
+- Metadata-only reads are permitted by default subject to non-materialization,
+  TCC, mount, and resource boundaries. Missing mutation evidence blocks the
+  affected action, not independently valid scan/reporting work.
+- Ordinary removal now uses one of two explicit action-effect permissions:
+  `local-remove-only` is the default. It permits dehydrate only when independently
+  accepted, or local-only ordinary removal with a reliable scoped
+  no-propagation basis; failed, timed-out, unknown, or partial dehydrate never
+  falls through to `rm`. `may-delete-across-devices` records the user's acceptance
+  that ordinary removal may propagate and allows its declared action subject to
+  the remaining gates; known or unknown Provider ownership alone does not veto
+  it. This does not claim confirmed-local ownership or guarantee remote deletion.
+  Exact semantics, disallowed inferences, and immutable binding are in the linked
+  design documents.
+- Provider-specific remote deletion, unpin/reset, and hidden-backing actions
+  remain outside v1. Local-copy eviction still requires its separately accepted
+  adapter and allocation-release postcondition; it is not an ordinary-removal
+  fallback.
+- Keep complete APFS owner dependencies and private-versus-conditional reclaim
+  separate. A provider eviction needs its own allocation-release postcondition.
+- Built-in policy is always present; an optional overlay may be absent. An
+  explicitly requested broken overlay permits read-only reporting but blocks
+  mutations whose protection scope cannot be verified. Bind effective policy to
+  the immutable plan and require fresh consent after relevant changes.
+- Keep best-effort execution, optional persistence, explicit force warnings,
+  current-user operation, and real-user-data scan/dry-run-only testing.
+
+## Accepted Recovery Sequence
+
+### R0: Reconcile The Delivery Graph
+
+Freeze a branch/commit/dependency map before integrating. Preserve both dirty
+worktrees, distinguish duplicated from unique work, and select a reviewable
+integration head that includes the current runner baseline. Use append-only
+topic commits/merges and the existing worktree+PR workflow; do not default to
+history rewriting or blindly merge the stale draft PR. Complete exact-head
+review and affected checks before landing each integration layer.
+
+Exit: every retained implementation has an explicit integration destination and
+owner; canonical stays clean; no required work is hidden only in an abandoned
+worktree or intermediate merged PR.
+
+### R1: Land The Revised Evidence And Policy Contract
+
+Reconcile the ordinary-removal matrix with the accepted two-tier action-effect
+permission contract: retain relevant platform evidence, scoped assumptions,
+binding/invalidation, typed failures, and India production-path counterexamples.
+Do not infer either permission from residency or uncertain provider ownership,
+or add an unrelated positive system capability merely to make a fixture pass.
+
+Split read-only collection from mutation eligibility, then integrate local
+residency/ownership and built-in/optional-overlay Rules semantics. Freeze the
+typed action/evidence/protocol changes once, update both generated languages and
+compatibility fixtures together, and project classifications only from Swift.
+
+Exit: the real engine produces useful deterministic plans with typed per-root
+and per-candidate uncertainty; ordinary scan is not globally denied by missing
+mutation authority. Validate provider metadata-only/non-materialization and both
+permission admission paths separately on India; unsupported local-only
+no-propagation capabilities remain typed report-only outcomes.
+
+### R2: Prove One Complete Production Execution Flow
+
+Use the accepted ordinary cache slice to close the actual engine/frontend seam:
+scan -> immutable plan -> explicit selection/edit -> revalidate -> dry-run ->
+apply review -> fixture-only apply -> post-verification. Include force-warning
+selection, cancellation, partial failure, independent-action continuation,
+policy/plan changes, and no-persistence operation. Fake engines remain useful
+test aids, not the production acceptance substitute.
+
+Exit: the installed product completes this flow using only test-created temporary
+roots for mutation. This is an integration checkpoint, not an MVP release or a
+reduction of the full accepted scope.
+
+### R3: Close The Full Adapter And TUI Matrix
+
+For every executable type in accepted-plan Section 15, record production
+reachability, evidence/capability gates, protected properties, preview/force
+behavior, best-effort outcomes, postconditions, and unsupported boundaries.
+Cover generic build/temp, clean linked Git worktrees, `.codex-tmp`, versioned
+artifacts, complete APFS release sets, and app-exit cache flows. Keep dirty Git
+discard and the already deferred system/package mutations report-only.
+
+For provider local copies, implement the residency-aware plan/display and guided
+fallback. Admit actual eviction only for capabilities that independently pass
+standalone, sync/activity, identity/access, allocation-release, and preservation
+acceptance. Do not promise generic third-party eviction support.
+
+Finish real-engine TUI hierarchy, columns, contextual hotkeys, partial-plan
+finalization/resume invalidation, and large-plan behavior against the same
+authoritative protocol. The plan remains primary; directory expansion stays
+inside an item.
+
+Exit: all required first-version behaviors have explicit accepted evidence, not
+merely module completion labels or one successful cache action.
+
+### R4: Validate The Frozen Installed Release
+
+Run affected checkpoint tests, required macOS 26 Apple Silicon gates, and the
+installed release flow on `India-mac-mini-m4-hoteng`. Exercise standard and
+bounded full-audit on real data only through scan/dry-run; APFS/activity/Provider
+fixtures and all actual mutations use test-created roots. Validate packaging,
+install/upgrade/rollback/uninstall, protocol compatibility, deterministic output,
+performance budgets, and optional persistence failures against the frozen
+candidate artifact. Public GitHub macOS runners provide CI evidence; older
+deployment targets remain best effort.
+
+Exit: default-branch delivery, independent review, exact-head checks, installed
+product acceptance, and release journal agree. No release-complete claim is made
+from historical or intermediate-branch evidence alone.
+
+## Parallel Work And Resource Rules
+
+- Start with at most three bounded Luna lanes: evidence/collector seams,
+  policy/Rules/adapter coverage, and frontend/IPC/acceptance matrices. Expand only
+  for genuinely independent owned work.
+- Assign explicit file/module ownership. Shared schema/binding changes have one
+  owner and a frozen contract before consumers edit in parallel. Workers must
+  preserve and accommodate others' changes.
+- Use Luna for high-volume reading, case enumeration, mechanical implementation,
+  generated binding updates, and bounded remote test execution. Escalate design
+  uncertainty or authority changes to the primary agent rather than letting each
+  lane invent a safety contract.
+- All builds and tests that would otherwise run locally run on India; use public
+  macOS CI where the accepted gate calls for it. Do not use BL as a substitute.
+- Run targeted tests by default; widen only at relevant integration/release
+  checkpoints. Evidence must name the actual head, host, command, and outcome.
+- Reclaim worktrees promptly after their work is integrated or explicitly
+  superseded, preserving unique work first. Remove unneeded, exactly identified
+  `.build`/build outputs after use; do not run broad cleanup during inventory.
+- Keep goals and this task list aligned. The full-delivery goal is currently
+  recorded as blocked. No active goal-transition API is available in this task;
+  this journal update does not claim that the goal was resumed or completed.
+- Ask uncertain product/safety choices in plain conversation, not timed input
+  tools. Block a goal only according to the goal tool's repeated-blocker contract.
+
+## Task List
+
+- [x] Audit phase scope and distinguish implementation from installed acceptance.
+- [x] Audit current branch/PR/dirty-worktree delivery state without changing it.
+- [x] Identify residency/ownership and Rules implementation seams.
+- [x] Record accepted contract corrections and the authorized recovery sequence.
+- [x] Align and record the three additional authority/eviction/result contracts.
+- [x] Record the initial R1 primary-source and production-interface matrix,
+  including the ordinary-removal authority gap as assessed before the
+  2026-10-05 product decision.
+- [x] Validate the three documentation files and journal frontmatter on India.
+- [x] Run the minimal read-only India capability probe on a test-created root.
+- [x] Submit the signed documentation commit as PR #29.
+- [ ] Complete the applicable formal delivery gate; independent internal
+  document review is not a substitute for a formal release/readiness lane.
+- [x] Freeze the retained implementation DAG and dirty-overlap map.
+- [x] Record Joey's 2026-10-05 acceptance of the two action-effect permission
+  tiers and link their stable specification.
+- [x] Revise the design-level removal matrix, plan/overlay consent, TUI warnings,
+  result semantics, and first-version scope for both permission tiers.
+- [ ] Reconcile the R1 ordinary-removal matrix, implementation seams, and India
+  fixtures with the accepted permission tiers.
+- [x] Validate the revised documentation links, permission-contract fragments,
+  Phase/platform baseline, and all seven journal entries on India.
+- [ ] Complete the R1 action/effect matrix and encode the accepted binding
+  before changing eligibility.
+- [ ] R0: reconcile and land reviewable delivery layers.
+- [ ] R1: integrate revised evidence and Rules contracts.
+- [ ] R2: pass the first complete installed production flow.
+- [ ] R3: pass the full first-version adapter and real-engine TUI matrix.
+- [ ] R4: pass frozen release acceptance and complete the full-delivery goal.
+
+## Evidence And Limits
+
+- This revision used three explicitly requested GPT-6 Luna read-only audit lanes:
+  phase/acceptance coverage, branch/PR state, and residency/Rules code seams.
+- Follow-up GPT-6 Luna audits collected primary platform sources and concrete
+  ownership interfaces. The interface audit found that `mapProviderState` promotes
+  `localOrUnindicated` to known-local, while release topology also accepts an
+  identifier-absent path in some conditions. These are implementation findings,
+  not validated non-provider capabilities; reconcile them before release.
+- Architecture source: `6e724784fee48d18a5ec110e5b2416e86ad25fea`; the committed
+  accepted-plan file matched `12be062` during comparison. The actual docs-only
+  PR base is `18e510655c5b2798a7c9a1c98763053fa122f5f1`. Its macOS 15 deployment
+  baseline is preserved. Dirty closure code is not part of this PR.
+- Related historical workstreams:
+  [runtime positive flow](https://github.com/Joey-Project/diskplan/blob/6e724784fee48d18a5ec110e5b2416e86ad25fea/docs/project_journal/2026/09/2026-09-01-runtime-positive-flow-5e9a17.md),
+  [Phase 5 apply](https://github.com/Joey-Project/diskplan/blob/6e724784fee48d18a5ec110e5b2416e86ad25fea/docs/project_journal/2026/08/2026-08-28-phase5-best-effort-apply-a5d210.md),
+  [Phase 6 packaging](https://github.com/Joey-Project/diskplan/blob/6e724784fee48d18a5ec110e5b2416e86ad25fea/docs/project_journal/2026/08/2026-08-28-phase6-release-packaging-b61c42.md).
+- The initial audit was read-only apart from its isolated documentation draft.
+  The authorized delivery follow-up fetched and fast-forwarded canonical main,
+  created a docs-only linked worktree, and ran the targeted India checks below.
+  It did not merge any implementation branch or mutate existing user data.
+- The 2026-10-05 action-effect permission decision is a product-contract
+  acceptance. It is not proof of implemented ordinary-removal gates,
+  installed-product acceptance, or completion of the full goal.
+
+### Minimal India Validation
+
+Host: `India-mac-mini-m4-hoteng`, macOS 26.5.1, arm64. Compiler:
+`/Applications/Xcode-26.6.0.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift`.
+The scratch repo and probe were scoped to one owner-private `mktemp` directory.
+Only the probe's newly created file was written and removed; no existing user
+file was opened for content, evicted, or deleted.
+
+- The bundled project-journal helper's `validate` command passed for the new
+  journal in the scratch repo. This does not claim a full-repository journal
+  validation.
+- The three-file documentation check passed: five relative file links resolve,
+  Phase 0-6 remain present, and the macOS 15 deployment line is preserved.
+  External URLs and all Markdown anchors were not validated by this check.
+- `bash -n` and `shellcheck` passed for the temporary probe runner.
+- The first Swift compilation rejected an exposed private type. After a local
+  declaration fix, the same probe compiled and completed successfully on India.
+  This was a targeted standalone probe, not a production-engine or release test.
+
+```text
+policy_process_set result=0 errno=0 read=1 read_errno=0
+policy_thread_set result=0 errno=0 read=1 read_errno=0
+file_stat result=0 errno=0 dataless=false allocated_bytes=4096
+volume result=0 errno=0 local=true
+provider_identity callback=error domain=NSCocoaErrorDomain code=4
+provider_services callback=error domain=NSFileProviderInternalErrorDomain code=0 count=unknown
+ownership=unknown authority=report_only
+cleanup=removed_task_root
+```
+
+Historical interpretation at the time: the test file occupies local space, and
+process/thread non-materialization policy setup/readback succeeded. The provider API outcomes
+do not establish non-provider ownership. No real-provider positive/dataless
+case, eviction, or ordinary-removal authority was proved. Keep R1's positive
+ordinary-removal capability gate open. The 2026-10-05 accepted permission tiers
+supersede the blanket non-provider-authority prerequisite; they do not change what this
+probe established or claim that the revised R1 matrix has been validated.
+
+Probe source SHA-256:
+`091a977d910f4a58c5f3143fc12062f5f9f93516c2bc750b0342acde6262874b`.
+Runner SHA-256:
+`5f55c4897ba5486f18dbba3fb3d7632bc11dd2a71174a707db6cde8a5d30f007`.
+The small source files remain a local R1 experiment; they are not implementation
+changes in this documentation PR. Unneeded compiler/cache outputs are disposable
+only after the process has reached a verified terminal state.
+
+### R0 Follow-Up: Frozen Integration Map
+
+The read-only follow-up compared the seven retained implementation heads. Their
+union contains 164 commit objects outside `main`; 23 belong only to one selected
+head. Treat these counts as DAG evidence, not a linear series of cherry-picks.
+
+```text
+5e12e3b  Phase 0-6 integration
+  -> 381ab8c  shared runtime baseline (+18 commits)
+       -> 6e72478  production topology (+1)
+            -> 5ab8ee0  stageable cache (+1)
+            -> 12be062  release/postverify (+11, plus dirty work)
+       -> 653b985  frontend (+2)
+       -> 32caf3a  India acceptance (+2)
+
+5d2091d  runtime-adapter side branch
+  merge-base with 5e12e3b: 76a2ebb
+  unique after Phase 0-6: 7 commits, plus dirty work
+```
+
+The main macOS 15 update and Phase 0-6 tree overlap in `.github/CI.md`,
+`.github/workflows/foundation-ci.yml`, `Package.swift`, and `accepted-plan.md`.
+Integration must retain the current runner/deployment baseline and the accepted
+revision rather than choosing either side wholesale.
+
+The two dirty worktrees overlap directly in `Package.swift`,
+`RuntimePolicyAuthority.swift`, and `RuntimeEvidenceSession.swift`. Preserve them
+intact; clean committed heads omit their pending implementation. The follow-up
+did not merge branches, modify PR #6, or absorb its work. The frozen map completes
+the R0 inventory task, not default-branch integration or release acceptance.
+
+### R1 Follow-Up: System Authority Boundary
+
+India's Xcode 26.6.0 SDK `NSFileProviderManager.h`, lines 126-138, documents two
+meanings for `NSFileNoSuchFileError`: the URL is outside the caller's
+provider/domain, or the provider has not yet assigned the item an identifier.
+The inspected header SHA-256 is
+`23805015fc243f8ce5792dca3ff44a90be5d11f3cbc7196ded5cd7cbd46752cb`.
+This is stronger evidence of ambiguity, not a successful ordinary-removal
+capability test. The registered-domains API's short SDK comment does not expand
+the documented extension-specific scope into a system-wide registry.
+
+The source audit also checked allocation/volume locality, `SF_DATALESS`,
+`EF_IS_SYNC_ROOT`, optional services, provider storage roots, and known-folder
+support. None of the collected public contracts establishes the formerly
+required cross-provider negative certificate for existing user cache/build
+roots. This does not claim that no unexamined or private platform mechanism
+exists.
+
+The source findings above remain evidence about the inspected public APIs: they
+do not prove non-provider ownership. The 2026-10-05 product decision accepts
+action-effect permission as the ordinary-removal authority boundary, replacing
+the prior requirement for scoped non-provider authority for all
+ordinary removals. Keep `localOrUnindicated` and `identifierAbsent` unknown, and
+keep read-only collection separate from mutation authorization. Implement the
+accepted binding and independent gates from the linked design documents; do not
+reinterpret these historical API findings as evidence for either permission.
+Test-created roots remain governed by test-only mutation authorization, and the
+existing object identity, content, and access-policy test constraints remain.
+
+At frozen docs head `30c939b`, the India scratch clone's adopted seven journals
+all passed the bundled journal validator. Its conclusion that a new product-risk
+decision was still pending is historical and was superseded by Joey's
+2026-10-05 acceptance above. This follow-up read SDK metadata and public source
+material; it did not compile or test product code, delete existing user data, or
+exercise eviction. Temporary clone/helper copies are disposable
+after validation; the small original R1 probe sources remain intentionally local.
+
+### Effect-Permission Revision Validation
+
+The 2026-10-05 revision changes only the three plan/journal documents. The
+bounded document checker and bundled journal helper ran on
+`India-mac-mini-m4-hoteng`, macOS 26.5.1 / arm64, using
+`/opt/homebrew/bin/python3`. Validation used an isolated clone of the existing
+documentation head with only these three updated files staged into its index.
+
+- `project_journal.py adoption-status --repo <scratch-repo>` confirmed the seven
+  valid tracked journal entries; `validate --repo <scratch-repo>` passed.
+- `validate-plan-docs.py <scratch-repo>` passed: three documents, seven relative
+  file links, Phase 0-6, the macOS 15 deployment baseline, both effect-permission
+  tiers, fresh-consent/old-overlay constraints, and no eviction/removal fallback.
+  This is a text/link consistency check, not a policy-engine or IPC test.
+- Local `git diff --check` passed. No product build, runtime permission test,
+  actual provider eviction, or existing-user-data mutation ran for this revision.
+- The small checker source is an ignored task-local artifact, not product code.
+  The remote clone/helper copies and review worktree are disposable after their
+  processes terminate; no `.build` output is needed for this documentation task.
+
+The accepted effect-permission decision resolves the prior product-choice
+frontier. Both production admission paths, binding/schema changes, and full
+installed acceptance remain implementation work, not claims of this PR.

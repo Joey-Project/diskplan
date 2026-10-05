@@ -903,14 +903,20 @@ final class ScanCoordinator: @unchecked Sendable {
       return ScanEnvironment()
     case .standard:
       var roots: [ScanRootRequest] = []
-      roots.append(root(id: "home", url: fileManager.homeDirectoryForCurrentUser))
+      roots.append(
+        root(
+          id: "home",
+          url: fileManager.homeDirectoryForCurrentUser,
+          origin: .systemDiscoveredOther
+        ))
       if let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-        roots.append(root(id: "user-cache", url: caches))
+        roots.append(root(id: "user-cache", url: caches, origin: .foundationUserCache))
       }
       roots.append(
         ScanRootRequest(
           rootID: "temporary",
-          rawAbsolutePath: Data(NSTemporaryDirectory().utf8).droppingTrailingSlash()
+          rawAbsolutePath: Data(NSTemporaryDirectory().utf8).droppingTrailingSlash(),
+          origin: .systemDiscoveredOther
         ))
       return ScanEnvironment(adapterRoots: deduplicated(roots))
     case .deep:
@@ -940,16 +946,25 @@ final class ScanCoordinator: @unchecked Sendable {
           )
         }
         guard isLocal, !isReadOnly else { return nil }
-        return root(id: "volume-\(stableRootID(url))", url: url)
+        return root(
+          id: "volume-\(stableRootID(url))",
+          url: url,
+          origin: .systemDiscoveredOther
+        )
       }
       return ScanEnvironment(visibleLocalWritableVolumes: deduplicated(roots))
     }
   }
 
-  private static func root(id: String, url: URL) -> ScanRootRequest {
+  private static func root(
+    id: String,
+    url: URL,
+    origin: ScanRootOrigin
+  ) -> ScanRootRequest {
     ScanRootRequest(
       rootID: id,
-      rawAbsolutePath: rawFileSystemPath(url).droppingTrailingSlash()
+      rawAbsolutePath: rawFileSystemPath(url).droppingTrailingSlash(),
+      origin: origin
     )
   }
 

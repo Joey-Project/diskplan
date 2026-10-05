@@ -46,7 +46,7 @@ evidence -> deterministic classification -> recommendation -> uncertainty
 
 安全决策采用 one-vote reject（任一强否决证据即可阻止清理）。以下维度分别保留，不聚合成安全分数：
 
-- Explicit protection and provider boundaries.
+- Explicit protection and action-specific provider boundaries.
 - Evidence completeness.
 - Current activity.
 - Object identity and access policy.
@@ -62,6 +62,15 @@ evidence -> deterministic classification -> recommendation -> uncertainty
 ```
 
 但该顺序不代表安全真值。
+
+Read-only admission and mutation admission are separate. Missing ownership,
+activity, policy-overlay, or required execution evidence does not by itself reject
+metadata-only scanning or planning. It produces typed uncertainty and blocks the
+affected action unless its exact accepted effect permission addresses the
+ownership/propagation uncertainty described in Section 9. No effect permission
+overrides the other hard gates. Unknown protection scope may block all mutations, but still does
+not block read-only reporting. This does not bypass TCC, mount boundaries,
+non-materialization constraints, structural budgets, or protocol/resource limits.
 
 ## 4. Activity Evidence
 
@@ -184,23 +193,151 @@ candidate/path nodes
 
 ## 9. File Provider Contract
 
-不维护 provider 名称/path 排除表。系统能力和 filesystem flags 用于发现 provider boundaries：
+不维护 provider 名称/path 排除表。Local residency and provider ownership are
+independent evidence dimensions; neither is a safety score.
 
-- `EF_IS_SYNC_ROOT`
-- `SF_DATALESS`
-- provider identifier/capability probes when available
+- Volume locality: per-volume system locality evidence, including
+  `volumeIsLocal` and a capability-checked `statfs`/`MNT_LOCAL` fallback. Locality
+  identifies storage attached to this host, not provider ownership. Remote mounts
+  do not receive local reclaim credit; an unknown volume does not invalidate
+  independently scannable local volumes.
+- Local residency: `SF_DATALESS`, measured nominal allocation, supported private
+  allocation lower bounds, and typed unknown/partial states. Dataless does not
+  mean exactly zero allocated bytes; metadata and other residual allocations must
+  not be represented as reclaimable file content without supporting evidence.
+- Ownership: confirmed provider-managed, confirmed local under a validated scoped
+  platform capability contract, or unknown. Positive sync-root, provider identity,
+  or capability evidence identifies managed boundaries. Absence of optional
+  provider services/identifiers, or a local-volume result, is not by itself proof
+  of non-provider ownership.
 
-本地 walker 使用 fd-relative `getattrlistbulk/getattrlistat`，不读取文件内容、不跟随 symlink、不跨 mount。provider root 使用 `NSFileCoordinator` immediate metadata only 和 `URLResourceValues`。
+本地 walker 使用 fd-relative `getattrlistbulk/getattrlistat`，不读取文件内容、不跟随 symlink、不跨 mount。
+The read-only collector must distinguish the evidence needed to inspect metadata
+from the stronger evidence needed to authorize mutation. It must not require an
+unavailable global non-provider oracle merely to report ordinary local objects.
+The accepted platform capability contract remains scoped, runtime-validated on
+macOS 26, and bound to the exact root/ancestry and candidate evidence; it must not
+claim a global system guarantee that its probes do not provide.
 
-可报告 user-visible materialized footprint；public API 无法获得的 hidden backing/staging 明确记录：
+The contract is not complete merely because an interface or a fixture can issue
+`confirmed-local`. Its first R1 gate is the mode-specific source/assumption/failure
+matrix in [locality and provider actions](locality-and-provider-actions.md).
+Ordinary removal under `local-remove-only` remains unavailable without an
+independent supported no-propagation contract and real-host acceptance. Explicit
+`may-delete-across-devices` consent admits the potential propagation instead of
+requiring a non-provider certificate; it does not change ownership evidence. An
+unsupported platform capability is a typed result, not permission to reinterpret
+optional API absence as a global ownership guarantee.
+
+Dataless directories are not enumerated. Materialized provider directories may
+be inspected only through a verified metadata-only, non-materializing capability;
+otherwise their children have explicit incomplete coverage. A read-only API call
+is not automatically safe from materialization. Provider coordination/resource
+value probes are enabled only under their verified runtime contract.
+
+### 9.1 Deletion Effect Permissions
+
+Accepted on 2026-10-05, action effect permission states which deletion effects
+the user permits, independently of residency and factual provider ownership:
+
+- `local-remove-only` is the default. A verified provider/iCloud adapter may
+  dehydrate local content while preserving the remote logical object. Ordinary
+  removal is allowed only with independent, reliable evidence that the exact
+  scoped removal will not propagate deletion. If neither capability is proved,
+  retain the item and report the missing capability.
+- `may-delete-across-devices` permits an explicitly declared ordinary removal
+  action to delete the selected target even when provider ownership is confirmed
+  or unknown. The warning states that deletion may propagate to cloud storage
+  and other devices and may be irreversible; it does not promise that propagation
+  occurs or completes. The action may directly use its admitted removal adapter,
+  without first attempting dehydration.
+
+The second permission addresses only the ownership/propagation barrier. It does
+not waive protection, semantic/recoverability requirements, activity, coverage,
+object/access/namespace checks, mount limits, APFS dependencies, or restrictions
+of a dedicated adapter such as Git worktree removal. An unknown ownership fact
+stays unknown; a basename/recognizer or this permission cannot manufacture
+`confirmed-local` or a stronger recommendation tier.
+
+Action selection is separate from measurement; every cell remains subject to
+the other action-specific gates:
+
+| Evidence | Default `local-remove-only` | Explicit `may-delete-across-devices` |
+| --- | --- | --- |
+| Remote volume | Informational; no local reclaim credit | No bypass of the mount boundary or local-reclaim limits |
+| Local allocation, confirmed local under a validated no-propagation contract | Ordinary removal or a dedicated adapter | The declared removal adapter may run |
+| Local resident content, confirmed provider ownership | Verified `provider-evict-local-copy`; otherwise guided/report-only | Declared ordinary removal may run with the propagation warning |
+| Dataless provider object | Show measured residual allocation; no assumed content reclaim | No assumed content reclaim; deletion still needs all remaining gates |
+| Local allocation, unknown ownership | Report allocation/uncertainty; no guessed eviction or removal | Declared ordinary removal may run; ownership stays unknown |
+
+The immutable plan declares mutually exclusive eviction/removal action variants,
+their exact targets, protected properties, and required effect permissions. The
+decision overlay selects only declared variants and records per-action effect
+consent bound to the plan/action/target evidence. It cannot invent paths, argv,
+or new operations. There is no global reusable cross-device deletion grant and
+no automatic upgrade from `local-remove-only`. Replanning or relevant binding
+changes require the existing fresh-review/credential rules; changed effect
+permission or operation requires fresh explicit consent. `requires_force` is
+separate and remains visible at selection and apply review.
+
+Dehydration failure, timeout, unsupported service, unknown completion, or partial
+success never triggers automatic removal, even if a higher permission was
+previously selected. Rescan/replan and explicit selection of a declared removal
+variant are required before a later delete. Only an independently validated
+no-propagation contract can admit local-only ordinary removal; an API error,
+local volume, absent identifier/service, or absent dataless flag cannot supply it.
+
+### 9.2 Provider Local-Copy Eviction
+
+`provider-evict-local-copy` preserves the cloud object and its local placeholder;
+it is not cloud deletion, unpinning, reset, or hidden backing cleanup. It requires
+an explicitly enabled, runtime-verified standalone capability and explicit
+selection in the current immutable plan. An iCloud eviction capability and any
+third-party capability must be admitted separately; API availability alone does
+not establish standalone applicability. Unsupported providers receive a guided
+Remove Download recommendation followed by rescan, not UI automation or an
+undocumented command fallback.
+
+Eviction must reject unsynced/non-evictable data and current activity, must not
+silently unpin, and must never fall back to `rm` or forced removal. Its protected
+properties and postcondition differ from deletion: bind provider/object identity,
+access policy, sync eligibility, and the intended content-residency transition;
+verify the cloud object/placeholder remains and report the observed local
+allocation change without equating it to exact volume free space. Benign provider
+materialization/metadata transitions are not object replacement. Unknown or failed
+revalidation remains distinct from missing or mismatched evidence. The adapter
+must account for observer-owned descriptors that could themselves prevent
+eviction, without claiming an identity guarantee its pathname-based API cannot
+maintain.
+
+Each eviction adapter declares its permitted before/after state transitions and
+provider logical-identity continuity. It must not inherit a deletion adapter's
+blanket filesystem-identity equality or permit arbitrary identity drift. Platform
+invocation outcome, object/postcondition verification, and allocation measurement
+are separate authoritative results. An accepted request with unknown completion
+or post-verification is uncertain, not verified reclaim, and does not authorize an
+automatic retry. See the same focused contract for descriptor lifecycle, retry,
+and event projection requirements.
+
+APFS release sets continue to require every relevant owner. Eviction may satisfy
+an owner prerequisite only when its verified postcondition proves that the
+relevant local allocation reference was released; preserving a namespace entry
+does not automatically prove either release or retention of content blocks.
+Snapshot and unobserved-owner blockers remain non-waivable.
+
+可报告 user-visible resident footprint；public API 无法获得的 hidden backing/staging 明确记录：
 
 ```text
 provider_hidden_footprint: unavailable-via-public-api
 ```
 
-首版不执行 provider eviction、unpin、reset 或 hidden backing cleanup。
-
-所有位于 File Provider boundary 内、带 provider ownership/capability evidence，或标记 dataless 的 path 在首版都是 non-stageable hard gate，包括已经 materialized 的普通文件。它们只能得到 `managed-by-provider`/report-only 结果；`generic-remove`、Git、release-set 和其他删除 adapter 都必须 fail closed，不能让 cache/path recognizer 绕过 provider boundary。未来任何可能传播为 cloud delete、eviction、unpin 或 materialization 的动作都需要专用 provider adapter 和独立确认。
+Under `local-remove-only`, provider-owned and ownership-unknown objects remain
+non-stageable for ordinary deletion without the independent no-propagation
+contract. Explicit `may-delete-across-devices` permits declared ordinary removal
+under Section 9.1, not arbitrary provider operations. Provider-specific remote
+delete APIs, unpin, reset, hidden backing cleanup, and implicit materialization
+remain outside the first version. The eviction adapter itself has no deletion
+fallback, and dedicated adapter restrictions still apply.
 
 ## 10. Coverage And Permissions
 
@@ -316,11 +453,17 @@ Views 包括 Summary、Targets、Evidence、Dependencies、Revalidation 和 Exec
 - `?`: hotkey list.
 - `q`: quit.
 
+Item details, staging, and Execution Preview show the selected effect permission,
+the mutually exclusive action variant, and whether deletion may propagate.
+Cross-device permission needs explicit current-plan consent; it is not enabled
+by staging an item in the default local-only mode. Force warnings are separate.
+
 ## 13. Immutable Plan And Decision Overlay
 
 scanner facts、classification 和 action definitions 属于 immutable plan。decision overlay 只包含：
 
 - Selected action IDs.
+- Per-action deletion effect permissions and their explicit consent bindings.
 - Allowed policy waivers.
 - Waiver reasons.
 - User notes.
@@ -328,7 +471,7 @@ scanner facts、classification 和 action definitions 属于 immutable plan。de
 
 overlay 不能增加 arbitrary path、argv 或 action ID。overlay 保存用户 consent core；由 engine 派生的 epoch-scoped execution credential 不可编辑。evidence/plan/action hash 变化始终使旧 execution credential 失效，但只有满足 6 节完整续签条件时才允许复用 consent core，无条件 remap 或重放都 fail closed。
 
-explicit protection/type hint 同样受这个边界约束：protection 可以直接阻止 action；type hint 只能补充 classification input。任何提升风险容忍度的用户决定必须落在下方明确允许的 waiver 集合中。
+explicit protection/type hint 同样受这个边界约束：protection 可以直接阻止 action；type hint 只能补充 classification input。Effect permission is the separate closed authorization in Section 9.1, not a factual ownership override or a general policy waiver. Other increases in risk tolerance must remain within the explicitly allowed waiver set below.
 
 不可 override：
 
@@ -372,6 +515,15 @@ ID 规范化对应 collection，再执行可观察验证；输入数组排列不
 - action lineage ID 封闭纳入 policy/schema version、adapter/action type、typed arguments、target object identity/raw path、protected-property contract、expected postcondition 和有方向的 prerequisite lineage IDs，但排除 reference time、epoch 和可重新计算的 evidence ID；action ID 再封闭纳入当前 evidence ID 与 prerequisite action IDs；plan hash 纳入 canonical ordered actions、release sets、global coverage/config/schema/policy versions；
 - waiver consent binding 封闭纳入 action lineage ID、policy version、被 waive 的 exact predicate/value bucket、其 semantic evidence subset、用户理由和 consent event ID；waiver credential 再纳入 consent hash、当前 plan/action/evidence ID、execution epoch/reference time/deadline。agent cache 另外纳入 model、prompt/schema/policy version、disclosure profile 与实际 disclosed metadata binding。
 
+Effect-permission bindings additionally include the exact permission variant,
+declared operation/action lineage, target scope, plan/evidence/policy versions,
+consent event, and current execution credential scope. New-plan UI intent defaults
+to local-only; this is not permission to accept missing required execution
+bindings or incompatible schemas. Unknown/unsupported permission values never
+grant mutation authority. Adding these fields requires a binding/schema version change,
+both generated Swift/Rust consumers, and compatibility/golden fixtures together.
+Older plans/overlays cannot be interpreted as cross-device consent.
+
 schema 未知字段、缺少 required variant 或 canonical decode/round-trip 不一致时，execution fail closed，最多 report-only。任何安全相关字段增删都必须 bump binding version，并同时更新 Swift/Rust golden vectors；不能通过忽略新字段维持旧 waiver、ID 或 cache hit。
 
 ## 14. Execution Semantics
@@ -395,6 +547,13 @@ generic remove 固定调用 `/bin/rm`，不经 shell、不展开 glob：
 | Forced directory | `/bin/rm -Rfx -- path` |
 
 `requires_force` 必须在 stage 时和 apply review 中提醒。普通失败后不能自动升级为 `-f`、提权或重试。
+
+Ordinary removal under cross-device permission uses the same command, force,
+JIT, path-slot trust, and best-effort contracts; permission does not strengthen
+the pathname API's identity guarantee. Dehydration never falls back to this
+command. Shell/TUI results distinguish the permitted effect from observed local
+deletion and any independently available remote outcome; local target absence
+does not verify remote deletion.
 
 ### 14.1 Protected Properties And Path-Race Boundary
 
@@ -443,6 +602,8 @@ point-in-time coverage 仍不足以授权 pathname-based forced removal。所有
 - Complete APFS release sets.
 - App-exit cache cleanup after the user exits the app.
 - Generic local file/tree removal when the object is understood but no specialized cleanup protocol exists.
+- Provider local-copy eviction only when the dedicated adapter passes its standalone runtime and mutation acceptance gates; unsupported capabilities remain guided/report-only.
+- Declared ordinary removal with explicit `may-delete-across-devices` consent, including confirmed/unknown provider ownership, subject to every remaining adapter and safety gate.
 
 ### 15.2 Execution Adapters
 
@@ -451,10 +612,11 @@ point-in-time coverage 仍不足以授权 pathname-based forced removal。所有
 - `codex-clean-tmp`
 - `versioned-artifact-remove`
 - `complete-release-set-remove`
+- `provider-evict-local-copy` (capability-gated; never an ordinary remove fallback)
 
 ### 15.3 Report-Only Types
 
-- File Provider eviction/unpin/reset and hidden backing cleanup.
+- Unsupported File Provider local-copy eviction; provider-specific remote-delete APIs, unpin/reset, and hidden backing cleanup. Ordinary removal that may propagate is the explicit Section 9.1 exception, not a remote-delete guarantee.
 - APFS snapshot deletion.
 - CoreSpotlight rebuild.
 - SQLite VACUUM.
@@ -474,6 +636,33 @@ point-in-time coverage 仍不足以授权 pathname-based forced removal。所有
 3. Restricted user policy for protection, adapter enablement, thresholds, profile, budget, and agent mode.
 
 declarative rules 不能执行 shell、下载、创建任意 argv 或绕过 one-vote reject。外部 executable plugins 不进入首版；内部保留 future adapter protocol/capability boundaries。
+
+### 16.1 Read-Only Default And Mutation Authorization
+
+- The engine always has its versioned built-in policy. No optional user overlay
+  is a valid configuration, represented explicitly as `none`; it is not missing
+  authoritative policy.
+- An explicitly requested overlay that is absent, unreadable, or invalid produces
+  typed `policy-unverified` state. Metadata-only scan and plan continue under the
+  built-in policy, but mutations whose protection/enablement scope cannot be
+  verified are blocked. If that scope cannot be bounded, all mutations are
+  blocked, not the scan.
+- Explicitly disabling a broken overlay creates a fresh built-in-only plan. It
+  cannot retroactively authorize the existing plan or execution review.
+- Plan and execution binding include built-in policy version, overlay `none` or
+  digest, and effective policy digest. Relevant policy changes invalidate the
+  plan/review and require replanning and explicit current consent.
+- Adapter enablement and user selection are independent requirements. Built-in
+  safe cache semantics may enable ordinary removal by default; neither built-in
+  defaults, an overlay, nor an agent can authorize arbitrary paths/argv or bypass
+  action-specific evidence gates. Provider eviction is also a mutation.
+- Deletion effect permission is explicit per-action consent, not adapter
+  enablement or a default Rules waiver. Rules may restrict it but cannot silently
+  grant cross-device deletion. The Swift engine alone evaluates it and projects
+  the decision through IPC; the Rust frontend only selects declared alternatives.
+- Optional history, audit, saved-plan, and spill destinations are not required
+  policy inputs. Their absence or write failure must not disable in-memory
+  scan/plan/execution.
 
 agent modes：
 
@@ -530,6 +719,7 @@ history、saved plan、audit 和 execution artifacts 使用同一安全 writer�
 - Scan race and identity/access-policy changes.
 - Dry-run mutation guard.
 - Force warning and generic remove isolation.
+- Default local-only and explicit cross-device permission, immutable variant/consent binding, preserved unknown ownership, and no eviction-to-removal fallback for every failure/partial/uncertain case.
 - Best-effort independent-action continuation.
 - Optional persistence failures including simulated `ENOSPC`.
 - Swift/Rust Protobuf golden frames.
@@ -541,7 +731,7 @@ history、saved plan、audit 和 execution artifacts 使用同一安全 writer�
 
 - Required release gate: Apple Silicon, macOS 26.
 - macOS 27+ remains runtime-probed best effort until promoted to the required validation set.
-- Deployment target remains macOS 14 initially; macOS 14/15 are best effort and do not block release.
+- The minimum deployment target is macOS 15; macOS 15 remains best effort and does not block the macOS 26 release gate.
 - Each new macOS release can be promoted to required validation while older releases are downgraded to best effort.
 - APFS is the complete-capability filesystem; other filesystems degrade by capability.
 
@@ -565,6 +755,15 @@ release bundle 由一个 canonical package contract 封闭：每个 payload 必�
 ## 20. Implementation Gates And Parallel Work
 
 七个 Phase（Phase 0 至 Phase 6）表示依赖与验收 gate，不要求严格串行。共享 schema 稳定后，允许独立模块同步开发和验证。
+
+The phase scope is unchanged. A completed module or historical fixture run is not
+evidence that its behavior is reachable in the shipped product. Track three
+separate facts for each required behavior: implementation exists, it is integrated
+and production-wired, and the installed product passes its acceptance gate. A PR
+merged into an intermediate feature branch establishes only that branch's state,
+not default-branch delivery. The accepted recovery sequence and current evidence
+are recorded in the
+[October plan revision journal](../project_journal/2026/10/2026-10-04-plan-revision-61c9e4.md).
 
 ### Phase 0: High-Risk Capability Slice
 
@@ -615,6 +814,17 @@ release bundle 由一个 canonical package contract 封闭：每个 payload 必�
 - `India-mac-mini-m4-hoteng` standard and bounded full-audit.
 - APFS/File Provider/activity/performance validation.
 - Real candidates remain dry-run during automated acceptance.
+- Validate the actual installed Swift engine and Rust frontend, not only fixture
+  controllers or fake-engine projections. Exercise scan, immutable plan, explicit
+  overlay selection/edit, revalidation, dry-run, apply review, and fixture-only
+  apply as one production flow.
+- Maintain an adapter acceptance matrix: production reachability, capability,
+  evidence/policy binding, force warning where applicable, best-effort outcomes,
+  post-verification, and unsupported/report-only behavior. The executable scope
+  in Section 15 must not be silently reduced to the first cache action.
+- Required release evidence must be tied to the frozen candidate head and
+  installed artifact. Historical journal runs and stale PR checks are references,
+  not substitutes for the final affected checkpoints.
 
 并行约束：
 
@@ -634,4 +844,4 @@ release bundle 由一个 canonical package contract 封闭：每个 payload 必�
 - Privileged helper.
 - External executable adapter protocol.
 - gRPC/Unix-socket transport or background daemon.
-- Provider mutation, system index rebuild, database maintenance, process control, and package/container cleanup adapters.
+- Provider-specific remote-delete APIs, unpin/reset/hidden-backing mutation, system index rebuild, database maintenance, process control, and package/container cleanup adapters. Section 9 admits verified local-copy eviction and explicitly consented ordinary removal that may propagate; no universal provider adapter or verified remote-deletion result is promised.
