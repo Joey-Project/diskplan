@@ -14,13 +14,13 @@ superseded_by:
 
 ## Summary
 
-- Install the canonical v2 verifier and controller workflows in diskplan, without changing the existing application CI gate or organization policy.
+- Install the canonical v2 verifier and controller workflows in diskplan, and document their narrow first-party floating-major exception without changing GitHub branch or organization settings.
 
 ## Current State
 
-- The verifier and controller match the canonical consumer templates byte-for-byte and call `JoeyTeng/codex-review-gate-action@v2`.
+- The verifier and controller match the canonical consumer templates at source commit `02bc718cd63724b991255ab5a8b9504aca597556` byte-for-byte and use the controlled first-party `JoeyTeng/codex-review-gate-action@v2` floating-major exception documented in `.github/CI.md`. This intentionally receives compatible v2 releases automatically. The audited v2.1.8 commit `299c0fde3cdd921e8d756f792edc056afb0f2ec9` is release provenance, not a binding runtime pin.
 - This installs the consumer workflows only. Custom-property activation remains a separate owner action; this change does not claim that the gate is active or required.
-- No CODEOWNERS file, repository ruleset, organization rule, or custom property was added or changed.
+- No CODEOWNERS file, GitHub branch-protection rule, repository ruleset, organization setting, or custom property was added or changed.
 
 ## Next Steps
 
