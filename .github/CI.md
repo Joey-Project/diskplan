@@ -24,8 +24,9 @@ in this repository.
 
 ## Immutable action pins
 
-The workflow uses full commit SHAs. Version comments are review aids, not
-authority.
+Workflow action references use full commit SHAs, except for the single
+controlled first-party floating-major exception below. Version comments are
+review aids, not authority.
 
 | Action | Version | Commit |
 | --- | --- | --- |
@@ -33,7 +34,16 @@ authority.
 | `actions/cache` | `v5.0.5` | `27d5ce7f107fe9357f9df03efb73ab90386fccae` |
 | `actions/upload-artifact` | `v7.0.1` | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
 
-To update an action, resolve its release tag from the action's official GitHub
+The consumer workflows intentionally use
+`JoeyTeng/codex-review-gate-action@v2` as a controlled first-party exception so
+they automatically receive compatible v2 releases from the action publisher.
+This exception applies only to that exact repository and major alias; every
+other action remains subject to the full-SHA pinning rule. The audited v2.1.8
+release resolved to commit `299c0fde3cdd921e8d756f792edc056afb0f2ec9` when this
+consumer was installed. That SHA is release provenance, not a binding runtime
+pin; the workflow runtime reference remains `@v2`.
+
+For any other action, resolve its release tag from the action's official GitHub
 repository, review the release and runtime requirement, replace the full SHA,
 and update the adjacent version comment plus this table in the same change.
 
