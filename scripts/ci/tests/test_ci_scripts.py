@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -18,6 +19,20 @@ EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 ZERO_SHA = "0" * 40
 BASE_SHA = "1" * 40
 HEAD_SHA = "2" * 40
+STACKED_DIAGNOSTIC = (
+    'invalid activity type "stacked" for "pull_request" Webhook event'
+)
+PROBE_WORKFLOW = """\
+name: actionlint compatibility probe
+on:
+  pull_request:
+    types: [stacked, made_up_event]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+"""
 
 
 def run_script(
@@ -37,6 +52,32 @@ def run_script(
 
 
 class CiScriptTests(unittest.TestCase):
+    def test_actionlint_ignores_only_stacked_pull_request_activity(self) -> None:
+        if shutil.which("actionlint") is None:
+            self.skipTest("actionlint is required by the repository CI gate")
+
+        validate_script = (CI_ROOT / "validate-repository.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f"-ignore '{STACKED_DIAGNOSTIC}'", validate_script)
+
+        result = subprocess.run(
+            ["actionlint", "-ignore", STACKED_DIAGNOSTIC, "-"],
+            input=PROBE_WORKFLOW,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=10,
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn(STACKED_DIAGNOSTIC, result.stdout)
+        self.assertIn(
+            'invalid activity type "made_up_event" for "pull_request" Webhook event',
+            result.stdout,
+        )
+
     def test_range_selection_for_each_event_shape(self) -> None:
         cases = {
             "pull_request": (BASE_SHA, HEAD_SHA, BASE_SHA),
