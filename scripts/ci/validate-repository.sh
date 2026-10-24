@@ -17,7 +17,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 readonly REPO_ROOT
 
 cd "${REPO_ROOT}"
-actionlint -shellcheck shellcheck
+actionlint -shellcheck shellcheck \
+    -ignore 'invalid activity type "stacked" for "pull_request" Webhook event'
 
 while IFS= read -r script; do
     bash -n "${script}"
